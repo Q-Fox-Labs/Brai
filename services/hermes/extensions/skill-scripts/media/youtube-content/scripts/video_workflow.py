@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
+# ABOUTME: Обрабатывает выбранное видео и создаёт локальные медиафайлы без модели.
+# ABOUTME: В личном worker использует native SDK и отдельный каталог загрузок.
 """Small explicit YouTube/local-media workflow. JSON stdout; errors on stderr."""
 import argparse
 import html
 import json
 import math
+import os
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -153,12 +156,19 @@ def audio(path, out):
 
 
 YTDLP = '/usr/local/bin/yt-dlp'
-YTDLP_BASE = [YTDLP, '--ignore-config', '--no-playlist', '--no-exec', '--no-live-from-start']
+PRIVATE_YTDLP = '/opt/brai-profile/instructions/bin/yt-dlp'
+YTDLP_FLAGS = ['--ignore-config', '--no-playlist', '--no-exec', '--no-live-from-start']
+
+
+def ytdlp_base():
+    """Выбрать readonly SDK wrapper worker либо прежний Docker wrapper вне worker."""
+    command = [PRIVATE_YTDLP] if os.environ.get('BRAI_IDENTITY_MODE') == 'worker' else [YTDLP]
+    return command + YTDLP_FLAGS
 
 
 def info(url):
     url = youtube_url(url)
-    raw = json.loads(run_command(YTDLP_BASE + ['--skip-download', '--dump-single-json', '--', url],
+    raw = json.loads(run_command(ytdlp_base() + ['--skip-download', '--dump-single-json', '--', url],
                                  timeout=180))
     chapters = raw.get('chapters') or []
     return {'id': str(raw.get('id') or '')[:100],
@@ -178,6 +188,17 @@ def info(url):
 DOWNLOAD_ROOT = Path('/opt/yt-dlp/downloads')
 
 
+def download_root():
+    """Разрешить worker только собственный canonical workspace/downloads."""
+    if os.environ.get('BRAI_IDENTITY_MODE') != 'worker':
+        return DOWNLOAD_ROOT
+    home = Path(os.environ.get('HERMES_HOME', ''))
+    target = home / 'workspace/downloads'
+    if not home.is_absolute() or home.resolve() != home or target.resolve() != target:
+        raise ValueError('Invalid private download root')
+    return target
+
+
 def fetch(url, kind, languages='en.*,ru.*'):
     url = youtube_url(url)
     if kind not in {'audio', 'video', 'subs', 'thumbnail'}:
@@ -185,10 +206,10 @@ def fetch(url, kind, languages='en.*,ru.*'):
     metadata = info(url)
     if metadata.get('is_live') or metadata.get('live_status') in {'is_live', 'is_upcoming', 'post_live'}:
         raise ValueError('Active/upcoming/processing live streams are not downloaded')
-    job = DOWNLOAD_ROOT / ('workflow-' + uuid.uuid4().hex)
-    job.mkdir(parents=True, exist_ok=False)
-    container_job = Path('/downloads') / job.name
-    argv = YTDLP_BASE + ['--no-overwrites', '-o', str(container_job / 'media-%(id)s.%(ext)s')]
+    job = download_root() / ('workflow-' + uuid.uuid4().hex)
+    job.mkdir(mode=0o700, parents=True, exist_ok=False)
+    output_job = job if os.environ.get('BRAI_IDENTITY_MODE') == 'worker' else Path('/downloads') / job.name
+    argv = ytdlp_base() + ['--no-overwrites', '-o', str(output_job / 'media-%(id)s.%(ext)s')]
     if kind == 'audio':
         argv += ['-f', 'bestaudio/best[height<=720]']
     elif kind == 'video':
@@ -200,7 +221,7 @@ def fetch(url, kind, languages='en.*,ru.*'):
     else:
         argv += ['--skip-download', '--write-thumbnail']
     run_command(argv + ['--', url], timeout=1800)
-    files = sorted(str(p) for p in job.iterdir() if p.is_file() and
+    files = sorted(str(p) for p in job.iterdir() if p.is_file() and not p.is_symlink() and
                    not p.name.endswith(('.part', '.ytdl', '.temp')))
     if not files:
         raise ValueError(f'No {kind} files produced (possibly unavailable); job: {job}')

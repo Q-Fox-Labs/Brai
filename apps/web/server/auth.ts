@@ -1,17 +1,20 @@
 // ABOUTME: Проверяет сессию Better Auth через NATS и передаёт cookie без раскрытия токена браузеру.
 // ABOUTME: Ошибки сервиса закрывают доступ; мутации требуют канонического Origin.
 import { isIP } from "node:net";
+import { serviceDataScope } from "../../../services/auth/contracts/service-data-scope.mjs";
 import { valid } from "./contracts";
 import { GatewayError, natsConnection } from "./gateway";
-export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string; emailVerified?: boolean } };
+export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string; emailVerified?: boolean; name?: string; role?: "admin" | "user"; status?: "provisioning" | "active" | "blocked"; telegramId?: string | null; profileId?: string | null } };
 type AuthReply = { status: number; body: unknown; setCookies: string[] };
 /** Проверяет Origin до мутации; TLS-прокси передаёт явный WEB_ORIGIN. */
 export function checkOrigin(request: Request): void {
  const expected = process.env.WEB_ORIGIN ? new URL(process.env.WEB_ORIGIN).origin : new URL(request.url).origin;
  if (request.headers.get("origin") !== expected) throw new GatewayError(403, "ORIGIN", "not-published");
 }
+/** Выбирает Telegram только при явной настройке экземпляра. */
+export function telegramIdentity(): boolean { return process.env.WEB_IDENTITY_MODE === "telegram"; }
 /** Один request-reply без автоматического повтора отправки письма или входа. */
-export async function authRequest(request: Request, operation: "send-code" | "verify-code" | "session" | "sign-out" | "sso-issue" | "sso-redeem", body: object = {}): Promise<AuthReply> {
+export async function authRequest(request: Request, operation: "send-code" | "verify-code" | "session" | "sign-out" | "sso-issue" | "sso-redeem" | "login-code-redeem", body: object = {}): Promise<AuthReply> {
  const headers: Record<string, string> = {};
  for (const name of ["cookie", "origin", "user-agent", "sec-fetch-site"]) {
   const value = request.headers.get(name); if (value) headers[name] = value;
@@ -22,11 +25,12 @@ export async function authRequest(request: Request, operation: "send-code" | "ve
   if (address && isIP(address)) headers["x-forwarded-for"] = address;
  }
  const payload = { headers, body };
- const dto = { "send-code": "SendCodeRequest", "verify-code": "VerifyCodeRequest", session: "SessionRequest", "sign-out": "SignOutRequest", "sso-issue": "SsoIssueRequest", "sso-redeem": "SsoRedeemRequest" }[operation];
- if (!valid(`auth-messages.schema.json#/definitions/${dto}`, payload)) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
+ const dto = { "send-code": "SendCodeRequest", "verify-code": "VerifyCodeRequest", session: "SessionRequest", "sign-out": "SignOutRequest", "sso-issue": "SsoIssueRequest", "sso-redeem": "SsoRedeemRequest", "login-code-redeem": null }[operation];
+ if (dto && !valid(`auth-messages.schema.json#/definitions/${dto}`, payload)) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
+ if (!dto && (typeof (body as { code?: unknown }).code !== "string" || !/^[0-9A-HJKMNP-TV-Z]{12}$/.test((body as { code: string }).code))) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
  try {
   const nc = await natsConnection();
-  const reply = await nc.request(`brai.auth.v1.${operation}`, Buffer.from(JSON.stringify(payload)), { timeout: 10000 });
+  const reply = await nc.request(`brai.auth.${operation === "login-code-redeem" ? "v2" : "v1"}.${operation}`, Buffer.from(JSON.stringify(payload)), { timeout: 10000 });
   if (reply.headers?.has("Nats-Service-Error") || reply.headers?.has("Nats-Service-Error-Code")) throw new GatewayError(503, "AUTH_UNAVAILABLE", "not-published");
   const result: unknown = JSON.parse(Buffer.from(reply.data).toString());
   if (!valid("auth-messages.schema.json#/definitions/Response", result)) throw new Error("BAD_REPLY");
@@ -36,7 +40,7 @@ export async function authRequest(request: Request, operation: "send-code" | "ve
   return data;
  } catch (error) {
   if (error instanceof GatewayError) throw error;
-  throw new GatewayError(503, operation === "verify-code" ? "AUTH_OUTCOME_UNKNOWN" : "AUTH_UNAVAILABLE", "not-published");
+  throw new GatewayError(503, operation === "verify-code" || operation === "login-code-redeem" ? "AUTH_OUTCOME_UNKNOWN" : "AUTH_UNAVAILABLE", "not-published");
  }
 }
 /** Возвращает проверенную текущую сессию; отсутствие или сбой запрещают доступ. */
@@ -48,6 +52,7 @@ export async function requireSession(request: Request): Promise<Session> {
  }
  const value = reply.body as Session | null;
  if (!value?.user?.id || !value.session?.id || value.session.userId !== value.user.id || !(Date.parse(value.session.expiresAt) > Date.now())) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
+ if (telegramIdentity() && (!["active", "provisioning"].includes(value.user.status ?? "") || !["admin", "user"].includes(value.user.role ?? ""))) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
  return value;
 }
 /** Проксирует JSON auth с отдельной обработкой всех Set-Cookie; не возвращает сессионный token. */
@@ -63,4 +68,12 @@ export async function requireTimerSession(request: Request, eventStream = false)
  const expected = eventStream ? new URL(request.url).searchParams.get("expectedUserId") : request.headers.get("x-brai-user");
  if (!expected || expected !== session.user.id) throw new GatewayError(401, "ACCOUNT_CHANGED", "not-published");
  return session;
+}
+
+/** Возвращает личный namespace только из проверенного Auth profile; старый режим сохраняет owner. */
+export function personalDataScope(session: Session): string {
+ if (!telegramIdentity()) return session.user.id;
+ if (session.user.status !== "active") throw new GatewayError(403, "PROFILE_NOT_READY");
+ try { return serviceDataScope(session.user.profileId!); }
+ catch { throw new GatewayError(401, "UNAUTHORIZED"); }
 }

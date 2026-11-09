@@ -11,6 +11,8 @@ import {verifyPublication,recheckPublication} from './publication.mjs';
 import {publicWebPreview} from './web-preview-status.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
 const publicDTO=(name,row)=>dto(Object.fromEntries(Object.keys(schema.definitions[name].properties).filter(key=>key in row).map(key=>[key,row[key]])));
+// AIDEV-NOTE: После фиксации expected или удаления ресурсов прежняя proof остаётся обязательной.
+const refreshablePublication=obligation=>!!obligation&&!!obligation.source_operation_id&&obligation.outcome==='released'&&!!obligation.evidence?.publication&&obligation.state==='waiting_decision'&&obligation.blocker==='DELIVERY_PROOF_CHANGED'&&obligation.step==='inspect'&&canonical(obligation.expected)==='{}'&&!Object.hasOwn(obligation.evidence,'manifest')&&!Object.hasOwn(obligation.evidence,'route_pending');
 const workspaceDTO=row=>publicDTO('workspace',row);
 const operationDTO=row=>publicDTO('operation',row);
 /** Принимает пять операций рабочего цикла и административную регистрацию проекта. */
@@ -88,7 +90,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         const successful=method==='cleanup'&&w?await db.successfulRelease(w.id):null;
         const obligation=method==='cleanup'&&w&&!successful?await db.cleanupObligation?.(w.id):null;
         const existingCleanup=successful||(obligation&&obligation.state!=='done');
-        return {project:dto(p),workspace:w?dto(w):null,repeated:!!old,existingCleanup:!!existingCleanup};
+        const refresh=refreshablePublication(obligation)?{obligation:dto(obligation),generation:(await db.lifecycle(w.id))?.generation}:null;
+        return {project:dto(p),workspace:w?dto(w):null,repeated:!!old,existingCleanup:!!existingCleanup,refresh};
       });
       let baseSHA,inspection,publication;
       if(!snapshot.repeated){
@@ -101,7 +104,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           if(!snapshot.workspace||snapshot.workspace.removed_at)baseSHA=await git.readBase(snapshot.project,args.kind??'feature');
         }
         if(['sync','release'].includes(method)&&snapshot.workspace&&!snapshot.workspace.removed_at&&snapshot.workspace.preparation_state==='ready')inspection=await git.inspect(snapshot.project,snapshot.workspace);
-        if(method==='cleanup'&&!snapshot.existingCleanup&&snapshot.workspace&&!snapshot.workspace.removed_at&&snapshot.workspace.preparation_state==='ready')publication=await store.read(args.project_id,db=>verifyPublication(db,snapshot.project,snapshot.workspace,{git,flowGit}));
+        if(method==='cleanup'&&(!snapshot.existingCleanup||snapshot.refresh)&&snapshot.workspace&&!snapshot.workspace.removed_at&&snapshot.workspace.preparation_state==='ready')publication=await store.read(args.project_id,db=>verifyPublication(db,snapshot.project,snapshot.workspace,{git,flowGit}));
       }
       value=await store.transaction(args.project_id,async db=>{
         const p=await project(db,args.project_id,executorId);
@@ -157,14 +160,32 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         await db.query?.('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[w.id]);
         await db.query?.('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[w.id]);
         const lifecycle=await db.lifecycle?.(w.id);
-        let cleanupClosing=false,cleanupEvidence={};
-        if(method==='cleanup'&&!(await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done' FOR UPDATE",[w.id])).rowCount){
-          const successful=await db.successfulRelease(w.id);
-          if(!successful){
-            if(!publication||!lifecycle||lifecycle.owner!=='temporal'||snapshot.workspace?.id!==w.id||['path','branch','base_sha','ownership_token'].some(key=>snapshot.workspace[key]!==w[key])||!await recheckPublication(db,p,w,publication,{lock:true}))throw new Fault('CONFLICT','Cleanup requires a saved finalization obligation or verified later delivery.');
-            cleanupEvidence={publication};
+        let cleanupClosing=false,cleanupEvidence={},refreshed=null;
+        if(method==='cleanup'){
+          const obligation=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done' FOR UPDATE",[w.id])).rows[0];
+          if(snapshot.refresh){
+            const current=await db.workspace(p.id,w.id),prior=obligation?.evidence?.publication;
+            if(!publication||!refreshablePublication(obligation)||canonical(dto(obligation))!==canonical(snapshot.refresh.obligation)||
+              !lifecycle||lifecycle.owner!=='temporal'||lifecycle.lifecycle!=='closing'||lifecycle.state!=='draining'||lifecycle.outcome!=='released'||
+              lifecycle.workflow_id!==obligation.owner_workflow_id||Number(lifecycle.generation)!==Number(snapshot.refresh.generation)||
+              !current||current.removed_at||current.preparation_state!=='ready'||
+              ['id','kind','path','branch','base_sha','ownership_token'].some(key=>snapshot.workspace[key]!==current[key])||
+              publication.original_attempt_id!==prior.original_attempt_id||publication.source_accepted_sha!==prior.source_accepted_sha||
+              canonical(publication.resources)!==canonical(prior.resources))throw new Fault('CONFLICT','Publication cleanup changed during admission; inspect status before retry.');
+            const guard=(await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:workspace:'+w.id])).rows[0];
+            if(!guard?.acquired)throw new Fault('BUSY','The previous cleanup is being reconciled.');
+            const source=await db.query("SELECT id FROM codeworks.operations WHERE id=$1 AND workspace_id=$2 AND project_id=$3 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed') FOR UPDATE",[obligation.source_operation_id,w.id,p.id]);
+            if(!source.rowCount)throw new Fault('CONFLICT','The saved cleanup operation is no longer active.');
+            if(!await recheckPublication(db,p,current,publication,{lock:true}))throw new Fault('CONFLICT','Current verified delivery changed during admission.');
+            refreshed=obligation;
+          }else if(!obligation){
+            const successful=await db.successfulRelease(w.id);
+            if(!successful){
+              if(!publication||!lifecycle||lifecycle.owner!=='temporal'||snapshot.workspace?.id!==w.id||['path','branch','base_sha','ownership_token'].some(key=>snapshot.workspace[key]!==w[key])||!await recheckPublication(db,p,w,publication,{lock:true}))throw new Fault('CONFLICT','Cleanup requires a saved finalization obligation or verified later delivery.');
+              cleanupEvidence={publication};
+            }
+            cleanupClosing=lifecycle?.owner==='temporal';
           }
-          cleanupClosing=lifecycle?.owner==='temporal';
         }
         let superseded=null;
         if(lifecycle?.lifecycle==='closing'&&['workspace.cancel','workspace.transfer'].includes(method)){
@@ -186,6 +207,13 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           // AIDEV-NOTE: Новый маршрут атомарно возвращает не начатую очистку в сверку; запись не открывается.
           if(superseded)await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',evidence=jsonb_set(evidence,'{route_pending}','true'::jsonb),updated_at=now() WHERE id=$1",[superseded.id]);
           await db.insertOperation({id,project_id:p.id,workspace_id:w.id,executor_id:executorId,kind:method,status:'pending',step:'intent',request:args,result:null});
+          if(refreshed){
+            const history=[...(refreshed.evidence.publication_history??[]),{source_operation_id:refreshed.source_operation_id,publication:refreshed.evidence.publication}];
+            const evidence={...refreshed.evidence,publication,publication_history:history};
+            await db.query("UPDATE codeworks.cleanup_obligations SET source_operation_id=$2,evidence=$3::jsonb,epoch=epoch+1,state='pending',blocker=NULL,next_attempt_at=NULL,updated_at=now() WHERE id=$1",[refreshed.id,id,JSON.stringify(evidence)]);
+            await db.query("UPDATE codeworks.operations SET status='failed',step='PUBLICATION_SUPERSEDED',updated_at=now() WHERE id=$1 AND kind='cleanup' AND status<>'succeeded'",[refreshed.source_operation_id]);
+            await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id=$1",[refreshed.source_operation_id]);
+          }
           if(cleanupClosing){
             await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,source_operation_id,outcome,step,state,evidence,owner_workflow_id,epoch) VALUES($1,$2,$3,$4,$5,'released','inspect','pending',$6::jsonb,$7,1)",[randomUUID(),p.id,w.id,'workspace:'+w.id,id,JSON.stringify(cleanupEvidence),lifecycle.workflow_id]);
             await db.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing',outcome='released',updated_at=now() WHERE workspace_id=$1",[w.id]);

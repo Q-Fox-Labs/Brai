@@ -70,6 +70,138 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_children_do_not_repeat_parent_admission(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from contextvars import copy_context
+        source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id='topic', user_id='alice', profile='dev')
+        def child(index):
+            agent = SimpleNamespace(session_id=f'child-{index}', ephemeral_system_prompt='owner policy')
+            with native.conversation(agent, 'extract'):
+                self.assertIsNone(native._inbound.get())
+                self.assertIs(native._conversation_source.get(), source)
+                self.assertIn(agent._brai_workspace, agent.ephemeral_system_prompt)
+                self.assertIn('owner policy', agent.ephemeral_system_prompt)
+                workspace = agent._brai_workspace
+            self.assertEqual(agent.ephemeral_system_prompt, 'owner policy')
+            return workspace
+        with patch.object(native, 'commit_inbound') as commit:
+            with native.inbound_handoff(source, 'voice'):
+                with native.conversation(SimpleNamespace(session_id='parent'), 'assemble'):
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        futures = [pool.submit(copy_context().run, child, i) for i in range(3)]
+                        paths = [future.result() for future in futures]
+                self.assertIsNotNone(native._inbound.get())
+            commit.assert_called_once()
+        self.assertEqual(len(set(paths)), 3)
+        self.assertIsNone(native._inbound.get())
+        self.assertIsNone(native._conversation_source.get())
+
+    def test_runtime_workspace_prompt_restores_after_failure(self):
+        agent = SimpleNamespace(session_id='prompt-failure', ephemeral_system_prompt='owner policy')
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            with native.conversation(agent, 'unchanged user text') as message:
+                self.assertEqual(message, 'unchanged user text')
+                self.assertIn(agent._brai_workspace, agent.ephemeral_system_prompt)
+                raise RuntimeError('fixture failure')
+        self.assertEqual(agent.ephemeral_system_prompt, 'owner policy')
+
+    def test_failure_footer_reports_issue_without_technical_details(self):
+        for header in (
+            '⚠️ Проверка изменений файлов: 1 правок файлов в этом ходе НЕ УДАЛИСЬ.',
+            '⚠️ File-mutation verifier: 1 file edit(s) FAILED this turn.',
+        ):
+            text = ('Создана папка.\n\n' + header +
+                    '\n  • `/private/file` — [write_file] [TOOL_ERROR] TEMPORARY_OUTPUT_REQUIRED')
+            result = native.final_text(text, 'footer-test')
+            self.assertEqual(native.result_envelope({'final_response': text})['final_response'], result)
+            self.assertIn('Создана папка.', result)
+            self.assertIn('Некоторые попытки изменить файлы не удались.', result)
+            for private in ('/private/file', 'TOOL_ERROR', 'TEMPORARY_OUTPUT_REQUIRED'):
+                self.assertNotIn(private, result)
+
+    def test_footer_does_not_rewrite_ordinary_message(self):
+        for text in ('Создана папка. Ошибок не обнаружено.', 'Команда выполнена. Код выхода: 0.'):
+            self.assertEqual(native.final_text(text, 'normal-test'), text)
+
+    def test_raw_tool_failure_is_not_sent_to_user(self):
+        for diagnostic in (
+            '[TOOL_ERROR] Error executing write_file: TEMPORARY_OUTPUT_REQUIRED /private/file',
+            'Traceback (most recent call last):\n  File "/private/file", line 4\nRuntimeError: secret',
+            'Не получилось: ARTIFACT_DIRECTORY_REQUIRED',
+        ):
+            with self.assertLogs('files.native', 'WARNING'):
+                result = native.final_text(diagnostic, 'failure-test')
+            self.assertEqual(result, 'Не удалось полностью выполнить запрос. Попробуйте ещё раз.')
+
+    def test_authenticated_conversation_workspace_survives_new_turn_and_restart(self):
+        source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id='topic', user_id='alice', profile='dev')
+        agent = SimpleNamespace(session_id='session-1')
+        with native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'create'):
+                workspace = Path(agent._brai_workspace)
+                (workspace / 'draft.txt').write_text('work in progress')
+        self.assertEqual((workspace / 'draft.txt').read_text(), 'work in progress')
+        native.configure(self.config, self.backend)
+        with native.inbound_handoff(source, '2'):
+            with native.conversation(agent, 'continue'):
+                self.assertEqual(Path(agent._brai_workspace), workspace)
+                self.assertEqual((workspace / 'draft.txt').read_text(), 'work in progress')
+        self.assertEqual(self.backend.calls, [])
+
+    def test_existing_insecure_workspace_is_rejected(self):
+        source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id='topic', user_id='alice', profile='dev')
+        agent = SimpleNamespace(session_id='session')
+        with native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'create'):
+                workspace = Path(agent._brai_workspace)
+        workspace.chmod(0o755)
+        with native.inbound_handoff(source, '2'):
+            with self.assertRaisesRegex(FileError, 'UNSAFE_WORKSPACE'):
+                with native.conversation(agent, 'continue'):
+                    self.fail('insecure workspace must not open')
+        self.assertIsNone(native._operation.get())
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM workspace_bindings').fetchone()[0], 0)
+
+    def test_conversation_workspace_separates_users_topics_and_sessions(self):
+        def workspace(user, topic, session):
+            source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id=topic, user_id=user, profile='dev')
+            agent = SimpleNamespace(session_id=session)
+            with native.inbound_handoff(source, '1'):
+                with native.conversation(agent, 'text'):
+                    return agent._brai_workspace
+        first = workspace('alice', 'one', 's1')
+        self.assertNotEqual(first, workspace('bob', 'one', 's1'))
+        self.assertNotEqual(first, workspace('alice', 'two', 's1'))
+        self.assertNotEqual(first, workspace('alice', 'one', 's2'))
+        self.assertEqual(first, workspace('alice', 'one', 's1'))
+
+    def test_file_tools_reject_other_conversation_workspace(self):
+        def source(user):
+            return SimpleNamespace(platform='telegram', chat_id='chat', thread_id='one', user_id=user, profile='dev')
+        agent = SimpleNamespace(session_id='session')
+        with native.inbound_handoff(source('alice'), '1'):
+            with native.conversation(agent, 'create'):
+                private = Path(agent._brai_workspace) / 'private.txt'
+                private.write_text('private')
+        with native.inbound_handoff(source('bob'), '2'):
+            with native.conversation(agent, 'read'):
+                with self.assertRaisesRegex(FileError, 'FILE_SCOPE_DENIED'):
+                    native.before_tool('read_file', {'path': str(private)})
+                with self.assertRaisesRegex(FileError, 'TEMPORARY_OUTPUT_REQUIRED'):
+                    native.before_tool('write_file', {'path': str(private)})
+
+    def test_published_file_stays_in_conversation_workspace_after_cleanup(self):
+        source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id='topic', user_id='alice', profile='dev')
+        agent = SimpleNamespace(session_id='session')
+        with native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'create'):
+                path = Path(agent._brai_workspace) / 'draft.txt'
+                path.write_text('still needed')
+                self.store.publish(path, ['test-publication'])
+        self.store.cleanup('another-operation')
+        self.assertEqual(path.read_text(), 'still needed')
+
     def file(self, index=0, suffix='.jpg'):
         path = self.input / ('file-' + str(index) + suffix)
         path.write_bytes(('fixture-' + str(index)).encode())
@@ -111,6 +243,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             for name in ('engine', 'profile', 'runtime/services/hermes/files', 'config'):
                 (root / name).mkdir(parents=True, exist_ok=True)
             (root / 'runtime/services/hermes/files/bootstrap.py').write_text("CONFIG = '__BRAI_FILES_CONFIG__'\\n")
+            (root / 'runtime/services/hermes/files/transport.py').write_text('# transport fixture\\n')
             publisher_path = root / 'config/publisher.json'
             publisher_path.write_text('{}')
             tools = root / 'config/tools.json'
@@ -120,7 +253,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             plan = install.configuration_plan(root / 'engine', root / 'profile', root / 'runtime',
                 root / 'config/files.json', tools, account, 'owner-' + account, 'brai-' + account,
                 str(root / 'private/node'), account == 'dev', publisher, identity)
-            config = json.loads(plan[1][1])
+            config = json.loads(next(row[1] for row in plan if row[0] == root / 'config/files.json'))
             self.assertEqual(config['engineRoot'], str(root / 'engine'))
             self.assertEqual(config['node'], str(root / 'private/node'))
             self.assertEqual(config['ownerId'], 'owner-' + account)

@@ -57,3 +57,16 @@ test("alerts derives identity, rejects stale account and browser fields, validat
   for (const value of [Buffer.from("{"), new Uint8Array([255]), Buffer.alloc(512 * 1024 + 1)]) { raw = value; await check(await summary(request()), 502, "BAD_REPLY"); }
  } finally { raw = undefined; if (previous === undefined) delete process.env.NATS_URL; else process.env.NATS_URL = previous; }
 });
+
+test("Telegram Alerts binds every operation to the profile scope without canonical admin exception",async()=>{
+ const {serviceDataScope}=await import("../../../services/auth/contracts/service-data-scope.mjs");
+ const mode=process.env.WEB_IDENTITY_MODE,nats=process.env.NATS_URL;process.env.WEB_IDENTITY_MODE="telegram";process.env.NATS_URL="nats://fixture.invalid:4222";
+ try{
+  authBody={...session("a"),user:{id:"a",profileId:"profile-1",role:"admin",status:"active"}};
+  ownerHeaders=new Headers();ownerBody={unread_count:0,category:null};raw=undefined;
+  for(const operation of [summary,all]){
+   await check(await operation(operation===all?request("","{}"):request()),200);
+   assert.equal((calls.at(-1)?.body as {user_id:string}).user_id,serviceDataScope("profile-1"));
+  }
+ }finally{if(mode===undefined)delete process.env.WEB_IDENTITY_MODE;else process.env.WEB_IDENTITY_MODE=mode;if(nats===undefined)delete process.env.NATS_URL;else process.env.NATS_URL=nats;}
+});

@@ -65,6 +65,49 @@ def evidence_context(messages, facts, budget=80000):
     return selected
 
 
+def responses_result(response, budget):
+    """Прочитать завершённый Responses SSE; частичный вывод не является результатом."""
+    data, size = [], 0
+    for raw in response:
+        remaining_timeout(budget)
+        size += len(raw)
+        if size > 16 * 1024 * 1024:
+            raise MemOSError('Semantic router response too large')
+        line = raw.decode('utf-8').rstrip('\r\n')
+        if line.startswith('data:'):
+            data.append(line[5:].lstrip(' '))
+        elif not line and data:
+            event = json.loads('\n'.join(data))
+            data = []
+            if not isinstance(event, dict):
+                raise ValueError('Invalid response event')
+            kind = event.get('type')
+            if kind in ('error', 'response.failed', 'response.incomplete'):
+                raise MemOSError('Semantic router response failed or incomplete')
+            if kind == 'response.completed':
+                result = event.get('response', {})
+                if not isinstance(result, dict) or result.get('status') != 'completed' or result.get('error'):
+                    raise MemOSError('Semantic router response failed or incomplete')
+                return result
+    raise MemOSError('Semantic router response stream ended before completion')
+
+
+def responses_text(result):
+    """Взять только итоговый текст assistant, отклонив отказ модели."""
+    texts = []
+    for item in result.get('output', []):
+        if item.get('type') != 'message' or item.get('role') != 'assistant':
+            continue
+        for part in item.get('content', []):
+            if part.get('type') == 'refusal':
+                raise MemOSError('Semantic router response refused')
+            if part.get('type') == 'output_text':
+                texts.append(part['text'])
+    if not texts:
+        raise MemOSError('Semantic router returned no output text')
+    return ''.join(texts)
+
+
 class Catalog:
     def __init__(self, home):
         self.home = Path(home)
@@ -239,6 +282,9 @@ class SemanticRouter:
         if key:
             headers['Authorization'] = 'Bearer ' + key
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        transport = self.config.get('transport', 'chat_completions')
+        if transport not in ('chat_completions', 'codex_responses'):
+            raise MemOSError('Unsupported semantic router transport')
         data = json.loads(payload[-1]['content'])
         stage = ('plan' if 'recall_goal_query' in data else 'rank' if 'recall_candidates' in data
                  else 'review' if 'candidates' in data else 'extract')
@@ -251,11 +297,12 @@ class SemanticRouter:
             outcome = 'ok'
             try:
                 with opener.open(req, timeout=budget) as response:
-                    result = json.load(response)
+                    result = (responses_result(response, budget) if transport == 'codex_responses'
+                              else json.load(response))
                 remaining_timeout(budget)
                 return result
-            except MemOSError:
-                outcome = 'deadline'
+            except MemOSError as exc:
+                outcome = 'deadline' if 'deadline' in str(exc).lower() else 'response_error'
                 raise
             except urllib.error.HTTPError as exc:
                 outcome = 'http_' + str(exc.code)
@@ -270,17 +317,31 @@ class SemanticRouter:
                 logger.info('MemOS model request: stage=%s outcome=%s elapsed=%.3fs',
                             stage, outcome, time.monotonic() - started)
         model = self.config.get('model')
+        if not model and transport == 'codex_responses':
+            raise MemOSError('Explicit semantic router model required')
         if not model:
             models = request('/v1/models').get('data', [])
             if not models or not models[0].get('id'):
                 raise MemOSError('Semantic router did not advertise a model')
             model = models[0]['id']
-        result = request('/v1/chat/completions', {'model': model, 'messages': payload,
-                         'temperature': 0, 'stream': False,
-                         'response_format': {'type': 'json_schema', 'json_schema': {
-                             'name': 'memory_router', 'strict': True, 'schema': self._response_schema(payload)}}})
+        schema = self._response_schema(payload)
+        if transport == 'codex_responses':
+            # AIDEV-NOTE: Подписочный egress принимает только Responses, без общего ключа в профиле.
+            instructions = '\n\n'.join(row['content'] for row in payload if row['role'] == 'system')
+            messages = [{'role': row['role'], 'content': [{'type': 'input_text', 'text': row['content']}]}
+                        for row in payload if row['role'] != 'system']
+            result = request('/v1/responses', {'model': model, 'instructions': instructions,
+                             'input': messages, 'store': False, 'stream': True,
+                             'text': {'format': {'type': 'json_schema', 'name': 'memory_router',
+                                                'strict': True, 'schema': schema}}})
+        else:
+            result = request('/v1/chat/completions', {'model': model, 'messages': payload,
+                             'temperature': 0, 'stream': False,
+                             'response_format': {'type': 'json_schema', 'json_schema': {
+                                 'name': 'memory_router', 'strict': True, 'schema': schema}}})
         try:
-            content = result['choices'][0]['message']['content'].strip()
+            content = (responses_text(result) if transport == 'codex_responses'
+                       else result['choices'][0]['message']['content']).strip()
             if content.startswith('```'):
                 content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content)
             return json.loads(content)

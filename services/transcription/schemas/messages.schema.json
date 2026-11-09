@@ -63,6 +63,16 @@
         "HISTORY_DELIVERY_FAILED"
       ]
     },
+    "IdentityDelegateParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "params", "principal"],
+      "properties": {
+        "method": {"type": "string", "enum": ["request.submit", "request.get", "request.cancel", "models.list", "settings.get", "settings.set", "result.get"]},
+        "params": {"type": "object"},
+        "principal": {"$ref": "#/definitions/TrustedPrincipal"}
+      }
+    },
     "TrustedPrincipal": {
       "type": "object",
       "additionalProperties": false,

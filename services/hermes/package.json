@@ -6,7 +6,8 @@
   "scripts": {
     "mcp": "node tools.mjs",
     "trusted": "node trusted.mjs",
-    "test": "node --test --test-isolation=none tests/*.test.mjs"
+    "test": "node --test --test-isolation=none tests/*.test.mjs",
+    "test:identity": "node --test --test-isolation=none identity/tests/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

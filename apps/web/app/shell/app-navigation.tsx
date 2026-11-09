@@ -6,7 +6,7 @@ import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
-import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, BookOpen, Timer, ShieldCheck, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -16,7 +16,7 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals" | "/admin" | "/diary"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" | "diary" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
@@ -25,14 +25,17 @@ const routes: Route[] = [
   { href: "/game-core", label: "Элементы", icon: "game-core" },
   { href: "/focus", label: "Фокус", icon: "focus" },
   { href: "/goals", label: "Цели", icon: "goals" },
+  { href: "/diary", label: "Дневник", icon: "diary" },
 ];
 const mobileQuery = "(max-width: 860px)";
 const historyMarker = "__braiNavigationPanel";
 
 /** Отображает desktop rail и мобильный dock с независимыми панелями. */
-export default function AppNavigation({ email, timerElapsed, onLogout }: {
+export default function AppNavigation({ email, timerElapsed, admin = false, showAgent = true, onLogout }: {
   email: string;
   timerElapsed: string | null;
+  admin?: boolean;
+  showAgent?: boolean;
   onLogout: () => void;
 }) {
   const pathname = usePathname();
@@ -43,9 +46,10 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   const opener = useRef<HTMLElement | null>(null);
   const dock = useRef<HTMLElement>(null);
   const keyboardOpen = useSoftwareKeyboardOpen(isMobile);
+  const visibleRoutes = showAgent ? routes : routes.filter(route => route.href !== "/agent");
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
-  const selectSection = useCallback((section: "agent" | "timer" | "do") => navigateWorkspace(section === "timer" ? "/" : `/${section}`), []);
-  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core" && pathname !== "/focus" && pathname !== "/goals");
+  const selectSection = useCallback((section: "agent" | "timer" | "do") => { if (showAgent || section !== "agent") navigateWorkspace(section === "timer" ? "/" : `/${section}`); }, [showAgent]);
+  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core" && pathname !== "/focus" && pathname !== "/goals" && pathname !== "/diary");
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
     opener.current = source;
@@ -114,9 +118,10 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
 
   return <>
     <aside className="brai-navigation-rail" aria-label="Навигация Brai">
-      <Link className="brai-rail-brand" href="/agent" aria-label="Brai — Агент"><BraiBrandIcon /></Link>
+      <Link className="brai-rail-brand" href={showAgent ? "/agent" : "/"} aria-label={showAgent ? "Brai — Агент" : "Brai"}><BraiBrandIcon /></Link>
       <nav className="brai-rail-links" aria-label="Разделы Brai">
-        {routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact timerElapsed={timerElapsed} />)}
+        {visibleRoutes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact timerElapsed={timerElapsed} />)}
+        {admin && <Link className={"brai-navigation-link is-compact" + (pathname === "/admin" ? " is-current" : "")} href="/admin" aria-label="Админка" aria-current={pathname === "/admin" ? "page" : undefined}><span className="brai-navigation-icon" aria-hidden="true"><ShieldCheck /></span><span className="brai-navigation-label">Админка</span></Link>}
       </nav>
       <div className="brai-rail-footer"><AlertsBell /><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
     </aside>
@@ -130,18 +135,18 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
         onTouchStart={dockSwipe.handlers.onTouchStart} onTouchMove={dockSwipe.handlers.onTouchMove}
         onTouchEnd={dockSwipe.handlers.onTouchEnd} onTouchCancel={dockSwipe.handlers.onTouchCancel}>
         <button className="brai-mobile-dock-action" type="button" aria-label="Профиль и разделы" aria-expanded={panel === "profile"} onClick={event => openPanel("profile", event.currentTarget)}><Ellipsis /></button>
-        {routes.filter(route => route.href !== "/goals").map(route => <MobileDockLink key={route.href} route={route} current={pathname === route.href || route.href === "/focus" && pathname === "/goals"} timerElapsed={timerElapsed} />)}
+        {visibleRoutes.filter(route => route.href !== "/goals").map(route => <MobileDockLink key={route.href} route={route} current={pathname === route.href || route.href === "/focus" && pathname === "/goals"} timerElapsed={timerElapsed} />)}
         <button className="brai-mobile-dock-action" type="button" aria-label={panel === "shortcuts" ? "Закрыть быстрые настройки" : "Быстрые настройки"} aria-expanded={panel === "shortcuts"}
           onClick={event => panel === "shortcuts" ? setPanel(null) : openPanel("shortcuts", event.currentTarget)}>{panel === "shortcuts" ? <ChevronDown /> : <ChevronUp />}</button>
       </motion.nav>
     </div>
-    {panel && <MobilePanel panel={panel} email={email} onClose={closePanel} onLogout={onLogout}
+    {panel && <MobilePanel panel={panel} email={email} admin={admin} routes={visibleRoutes} onClose={closePanel} onLogout={onLogout}
       onNavigate={navigateWorkspace} />}
   </>;
 }
 
-function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
-  panel: MobilePanel; email: string; onClose: () => void; onLogout: () => void;
+function MobilePanel({ panel, email, admin, routes, onClose, onLogout, onNavigate }: {
+  panel: MobilePanel; email: string; admin: boolean; routes: Route[]; onClose: () => void; onLogout: () => void;
   onNavigate: (href: Route["href"]) => void;
 }) {
   const pathname = usePathname();
@@ -230,7 +235,7 @@ function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
       <div className="brai-mobile-panel-grip" aria-hidden="true" />
       <header className="brai-mobile-panel-heading"><span>Brai</span><button type="button" aria-label="Закрыть панель" onClick={() => closeSheet()}><X /></button></header>
       <nav className="brai-mobile-panel-routes" aria-label="Разделы Brai">{routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} mobile
-        onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}</nav>
+        onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}{admin && <Link href="/admin" className="brai-navigation-link is-mobile" onClick={event => navigateFromPanel(event, "/admin", closeSheet, onNavigate)}><span className="brai-navigation-icon" aria-hidden="true"><ShieldCheck /></span><span className="brai-navigation-label">Админка</span></Link>}</nav>
       <div className="brai-mobile-panel-account"><Avatar className="brai-profile-avatar"><AvatarFallback className="bg-primary text-xs font-semibold text-primary-foreground">{email.trim().slice(0, 1).toLocaleUpperCase("ru-RU") || "?"}</AvatarFallback></Avatar><span>{email}</span></div>
       <div className="brai-mobile-panel-actions"><AlertsBell onClick={event => navigateFromPanel(event, "/alerts", closeSheet, onNavigate)} /><ThemeButton /><button className="brai-mobile-logout" type="button" onClick={() => closeSheet(() => onLogoutRef.current())}>Выйти</button></div>
     </aside> : <aside ref={sheet.sheetRef} className="brai-mobile-shortcut-sheet" style={sheet.sheetStyle} role="dialog" aria-modal="true" aria-label="Быстрые настройки" tabIndex={-1}
@@ -328,6 +333,7 @@ function RouteIcon({ name }: { name: Route["icon"] }) {
   if (name === "agent") return <BraiBrandIcon />;
   if (name === "game-core") return <Network aria-hidden="true" />;
   if (name === "focus") return <Target aria-hidden="true" />;
+  if (name === "diary") return <BookOpen aria-hidden="true" />;
   if (name === "goals") return <ListChecks aria-hidden="true" />;
   if (name === "timer") return <Timer aria-hidden="true" />;
   return <SquareTerminal aria-hidden="true" />;

@@ -34,7 +34,9 @@
       "services/artifacts/src/migrate.ts",
       "services/artifacts/src/nats.ts",
       "services/artifacts/src/ports.ts",
-      "services/artifacts/src/postgres.ts"
+      "services/artifacts/src/postgres.ts",
+      "services/artifacts/OWNERSHIP_MIGRATION.md",
+      "services/artifacts/ownership_migration.py"
     ],
     "checks": [
       "services/artifacts/tests/config.test.mjs",
@@ -48,7 +50,12 @@
       "services/artifacts/tests/integration/transport-runtime.test.mjs",
       "services/artifacts/tests/mcp.test.mjs",
       "services/artifacts/tests/runtime-cli.test.mjs",
-      "services/artifacts/tests/transport-runtime.test.mjs"
+      "services/artifacts/tests/transport-runtime.test.mjs",
+      "services/artifacts/ownership_migration.py",
+      "services/artifacts/tests/ownership.test.mjs",
+      "services/artifacts/tests/test_ownership.py",
+      "services/artifacts/tests/ownership-delivery.test.mjs",
+      "services/artifacts/tests/resumable.test.mjs"
     ]
   },
   "dependencies": [],
@@ -63,7 +70,9 @@
       "services/artifacts/dist",
       "services/artifacts/migrations",
       "services/artifacts/package.json",
-      "services/artifacts/schemas"
+      "services/artifacts/schemas",
+      "services/artifacts/ownership_migration.py",
+      "services/artifacts/OWNERSHIP_MIGRATION.md"
     ],
     "entrypoints": [
       "services/artifacts/dist/main.js",
@@ -75,7 +84,8 @@
       "services/artifacts/contracts/index.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.22.1"
+      "Node.js 24.22.1",
+      "Operator Python 3.12 (standard library); existing Docker/psql owner port, no Python packages installed by component delivery"
     ]
   },
   "deploy": {

@@ -291,6 +291,7 @@ async def complete_with_budget(request, instructions, dialogue, schema):
     started = time.monotonic()
     queue_seconds = None
     outcome = "cancelled"
+    stop_monitor = asyncio.Event()
 
     async def execute():
         nonlocal queue_seconds
@@ -299,8 +300,13 @@ async def complete_with_budget(request, instructions, dialogue, schema):
             return await run_codex(instructions, dialogue, schema)
 
     async def disconnected():
-        while not await request.is_disconnected():
-            await asyncio.sleep(0.1)
+        while not stop_monitor.is_set():
+            if await request.is_disconnected():
+                return
+            try:
+                await asyncio.wait_for(stop_monitor.wait(), 0.1)
+            except TimeoutError:
+                pass
 
     work = asyncio.create_task(execute())
     monitor = asyncio.create_task(disconnected())
@@ -322,9 +328,11 @@ async def complete_with_budget(request, instructions, dialogue, schema):
     finally:
         # AIDEV-NOTE: run_codex finally завершает дочерний процесс до освобождения слота.
         # Отменённый ожидающий запрос не должен позднее запустить модель.
-        for task in (work, monitor):
-            if not task.done():
-                task.cancel()
+        # Starlette is_disconnected() может поглотить cancel внутри AnyIO scope.
+        # Завершение monitor передаётся событием, которое не теряется в таком scope.
+        stop_monitor.set()
+        if not work.done():
+            work.cancel()
         await asyncio.gather(work, monitor, return_exceptions=True)
         logger.info("MemOS completion: stage=%s outcome=%s queue=%.3fs elapsed=%.3fs",
                     stage, outcome, queue_seconds if queue_seconds is not None else time.monotonic() - started,

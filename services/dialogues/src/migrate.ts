@@ -23,12 +23,15 @@ export async function migrate(pool:Pool,owner:string,app:string) {
     await db.query("REVOKE ALL ON SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
     await db.query("REVOKE ALL ON ALL TABLES IN SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
     await db.query("REVOKE ALL ON ALL SEQUENCES IN SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
+    const isolated=Boolean((await db.query("SELECT 1 FROM dialogues_live.migrations WHERE version=6")).rowCount);
+    if(!isolated){
     await db.query("GRANT USAGE ON SCHEMA dialogues_live TO "+quote(app));
     await db.query("GRANT SELECT ON dialogues_live.migrations TO "+quote(app));
     await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.dialogues,dialogues_live.turns TO "+quote(app));
     await db.query("GRANT SELECT,INSERT ON dialogues_live.messages,dialogues_live.message_summaries,dialogues_live.dialogue_summaries,dialogues_live.requests,dialogues_live.exchange_events TO "+quote(app));
     await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.context_consumers,dialogues_live.context_deliveries,dialogues_live.summary_jobs,dialogues_live.turn_results,dialogues_live.message_backfill TO "+quote(app));
     await db.query("GRANT USAGE,SELECT ON SEQUENCE dialogues_live.change_seq TO "+quote(app));
+    }
     await db.query("COMMIT");
   } catch(e){await db.query("ROLLBACK").catch(()=>{});throw e;}
   finally{db.release();}

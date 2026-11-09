@@ -1,5 +1,7 @@
 # Контракт сервиса истории
 
+Системный каталог доступен для чтения через NATS subjects `brai.history.v1.query.categories-list`, `brai.history.v1.query.types-list` и `brai.history.v1.query.type-get`. Они принимают и возвращают соответствующие DTO `categoriesList`, `typesList` и `typeGet` из `schemas/tools.schema.json`; проверка, ошибки и курсоры совпадают с MCP. Запросы не содержат область пользователя, не читают события и не изменяют данные. Доступ ограничивается NATS ACL; безопасен повтор запроса чтения.
+
 Сервис service_history владеет неизменяемыми событиями и системными справочниками категорий и типов. Контракты данных находятся в [schemas](schemas/); маршруты NATS описаны в [AsyncAPI](asyncapi.yaml). JSON-схемы используют Draft-07. Сервис не зависит от admin и не копирует начальные строки справочников в документацию: актуальные категории и типы возвращают MCP-инструменты.
 
 ## Модель события
@@ -42,7 +44,9 @@ data не имеет фиксированной предметной схемы.
 
 ## Чтение web
 
-Web сначала проверяет сессию BetterAuth и передаёт user_id только из серверного контекста. NATS endpoint brai.history.v1.query.list принимает listRequest: user_id, необязательные filters, limit и cursor. brai.history.v1.query.get принимает getRequest: user_id, source и id. Схемы расположены в schemas/messages.schema.json (listRequest, listResponse, getRequest, getResponse). Веб-контракт не принимает scope_type или scope_id; сервис всегда задаёт scope_type=user и scope_id=user_id.
+Web сначала проверяет активную серверную сессию и передаёт user_id только из серверного контекста. В Telegram identity это личный service-data scope проверенного профиля. NATS endpoint brai.history.v1.query.list принимает listRequest: user_id, необязательные filters, limit и cursor. brai.history.v1.query.get принимает getRequest: user_id, source и id. Схемы расположены в schemas/messages.schema.json (listRequest, listResponse, getRequest, getResponse). Веб-контракт не принимает scope_type или scope_id; RLS открывает собственную область либо исходное событие с подтверждённой операторской привязкой к этой области.
+
+Операторский перенос описан в [PERSONAL_TRANSFER.md](PERSONAL_TRANSFER.md). Он сохраняет исходный DTO из 11 полей и добавляет отдельную защищённую привязку чтения. Неоднозначные события остаются в закрытом архиве; app/web не назначают владельцев. Перенос не воспроизводит команды, outbox или JetStream и не публикует события повторно.
 
 Фильтры списка — только source, category_id, type_id, actor_id, object_type, object_id, occurred_from и occurred_to. Нельзя передавать произвольные JSON-фильтры или SQL. Даты фильтра — RFC 3339 с временной зоной и точностью не выше микросекунд. Сервис возвращает только пользовательскую область; отсутствующее и чужое событие для get одинаково дают NOT_FOUND. Категория и тип разрешаются через справочник; сортировка по recorded_at, source и id убывает.
 

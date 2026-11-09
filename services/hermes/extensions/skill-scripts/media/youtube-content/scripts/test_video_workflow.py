@@ -1,7 +1,10 @@
+# ABOUTME: Проверяет обработку видео на реальном временном файле FFmpeg.
+# ABOUTME: Выполняется при установленном media runtime; сеть и пользовательские файлы не используются.
 """Stdlib CLI tests; real local FFmpeg fixture, no network by default."""
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +14,8 @@ from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name('video_workflow.py')
 
+@unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'),
+                     'Media integration requires operator-provided ffmpeg and ffprobe')
 class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

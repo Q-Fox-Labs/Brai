@@ -13,7 +13,7 @@ const filename = new URL("../app/account.tsx", import.meta.url);
 const source = readFileSync(filename, "utf8");
 const require = createRequire(filename);
 const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const module = { exports: {} as { default: ComponentType<{ initialSession: AccountSession; agentMode?: "dev_agent" | "hermes_telegram"; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean }> } };
+const module = { exports: {} as { default: ComponentType<{ initialSession: AccountSession; agentMode?: "dev_agent" | "hermes_telegram"; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean; adminChatsEnabled?: boolean }> } };
 const control = ({ children }: { children?: ReactNode }) => createElement("div", null, children);
 const screen = () => createElement("main", null, "workspace content");
 new Function("require", "module", "exports", output)((name: string) => {
@@ -22,7 +22,9 @@ new Function("require", "module", "exports", output)((name: string) => {
   if (name === "./alerts/provider") return { AlertsProvider: control };
   if (name === "./auth/screen") return { AuthScreen: () => createElement("main", null, "Вход в Brai"), AuthRequestError: Error };
   if (name === "./shell/login-galaxy") return { LoginGalaxy: control };
+  if (name === "./navigation") return { default: ({ showAgent }: { showAgent?: boolean }) => createElement("nav", null, showAgent ? "Agent visible" : "Agent hidden") };
   if (name.startsWith("@/components/ui/")) return new Proxy({}, { get: () => control });
+  if (name === "./agent/admin-chats") return { default: () => createElement("main", null, "All user chats") };
   if (name === "./agent/screen") return { default: () => createElement("main", null, "DEV Agent client") };
   if (name === "./agent/telegram-entry") return { default: ({ enabled }: { enabled: boolean }) => createElement("main", null, enabled ? "Telegram observer" : "Telegram entry") };
   if (name.startsWith("./")) return { default: screen };
@@ -65,4 +67,30 @@ test("enabled DEV observer opens without mounting the Codex client", () => {
   }));
   assert.ok(html.includes("Telegram observer"));
   assert.ok(!html.includes("DEV Agent client"));
+});
+test("Telegram members never mount the global Agent; active admins and email mode keep it", () => {
+  const render = (user: { id: string; role?: "user" | "admin"; status?: "active"; agentOwnerId?: string | null; email?: string }) => renderToStaticMarkup(createElement(module.exports.default, { initialSession: { status: "authenticated", user } }));
+  const member = render({ id: "member", role: "user", status: "active", agentOwnerId: null });
+  assert.ok(member.includes("Agent hidden"));
+  assert.ok(!member.includes("DEV Agent client"));
+  for (const user of [{ id: "member", role: "user" as const, status: "active" as const }, { id: "demoted", role: "user" as const, status: "active" as const, agentOwnerId: "demoted" }]) {
+    const html = render(user);
+    assert.ok(html.includes("Agent hidden")); assert.ok(!html.includes("DEV Agent client"));
+  }
+  const admin = render({ id: "admin", role: "admin", status: "active", agentOwnerId: "admin" });
+  assert.ok(admin.includes("Agent visible")); assert.ok(admin.includes("DEV Agent client"));
+  const legacy = render({ id: "legacy", email: "legacy@example.test" });
+  assert.ok(legacy.includes("Agent visible")); assert.ok(legacy.includes("DEV Agent client"));
+});
+
+test("DEV Hermes admins see all chats in Agent; members keep the Telegram entry", () => {
+  for (const [role, status, expected] of [["admin", "active", true], ["user", "active", false], ["admin", "blocked", false]] as const) {
+    const html = renderToStaticMarkup(createElement(module.exports.default, {
+      initialSession: { status: "authenticated", user: { id: "a", role, status } },
+      agentMode: "hermes_telegram", telegramObserverEnabled: true,
+    }));
+    assert.equal(html.includes("All user chats"), expected);
+    assert.equal(html.includes("Telegram observer"), false);
+    if (!expected) assert.ok(html.includes("Telegram entry"));
+  }
 });

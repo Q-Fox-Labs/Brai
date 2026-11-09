@@ -24,3 +24,6 @@ apps/web/next-env.d.ts
 
 # Личные дополнения пользовательского агента не входят в исходники и поставки.
 /docs/user-agent/usercustom/
+
+# Python verification caches are generated locally.
+__pycache__/

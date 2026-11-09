@@ -9,6 +9,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
     docs_url="https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin/",
     fields=(
         ProviderField("base_url", "Local MemOS API", default="http://127.0.0.1:8001", inline=True),
+        ProviderField("socket_path", "Local MemOS Unix socket (optional)", default="", inline=True),
         ProviderField("user_id", "Existing owner ID", default="root", inline=True),
         ProviderField("cube_id", "Existing MemCube", default="main", inline=True),
         ProviderField("prefetch_timeout_seconds", "Recall wait, seconds", kind=KIND_NUMBER, default="60"),

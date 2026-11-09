@@ -73,6 +73,39 @@ test('потеря PubAck или LocalAI ответа даёт неизвест�
   assert.equal(publishes, 1); assert.equal(requests, 1);
 });
 
+test('личный STT доступен в настоящем каталоге и передаёт Local AI только доверенного owner', async () => {
+  const args = { requestId: ids[0], operationId: ids[1], model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'pinned', profileId: 'gigaam_pytorch' },
+    audioArtifactId: ids[4], deadlineAt: '2026-11-07T12:00:00.000Z' };
+  const result = { requestId: args.requestId, operationId: args.operationId, model: args.model,
+    text: 'Контрольное голосовое.', segments: null, durationMs: 12 };
+  let requested = 0;
+  const { ports } = fixture({ request: async (subject, payload, signal, timeout) => {
+    requested++;
+    assert.equal(subject, 'brai.local_ai.v1.invoke.transcribe');
+    assert.deepEqual(payload, { ...args, ownerId: owner });
+    assert.equal(payload.deadlineAt, args.deadlineAt);
+    assert.ok(timeout > 0 && timeout <= 300_000);
+    return result;
+  } });
+  const runtime = await createBraiTools(config, ports);
+  assert.ok(runtime.tools.some(tool => tool.name === 'local_ai_invoke_transcribe'));
+  assert.deepEqual(await runtime.call('local_ai_invoke_transcribe', args), result);
+  await assert.rejects(runtime.call('local_ai_invoke_transcribe', { ...args, ownerId: 'foreign' }), /INVALID_ARGUMENT/);
+  await assert.rejects(runtime.call('local_ai_invoke_transcribe', { ...args, audioArtifactId: '/tmp/local.ogg' }), /INVALID_ARGUMENT/);
+  assert.equal(requested, 1);
+});
+
+test('потерянный ответ личного STT не запускает повтор распознавания', async () => {
+  let requests = 0;
+  const { ports } = fixture({ request: async () => { requests++; throw fault('TIMEOUT'); } });
+  const runtime = await createBraiTools(config, ports);
+  await assert.rejects(runtime.call('local_ai_invoke_transcribe', { requestId: ids[0], operationId: ids[1],
+    model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'pinned', profileId: 'gigaam_pytorch' },
+    audioArtifactId: ids[4], deadlineAt: '2026-11-07T12:00:00.000Z' }),
+    error => error.code === 'OUTCOME_UNKNOWN' && error.requestId === ids[0]);
+  assert.equal(requests, 1);
+});
+
 test('History читает user scope, не выставляет административные MCP операции', async () => {
   const { ports, calls } = fixture({ request: async (subject, payload) => { calls.push({ subject, payload }); return { items: [], next_cursor: null }; } });
   const runtime = await createBraiTools(config, ports);
@@ -888,4 +921,26 @@ test('disabled Game Core never discovers or calls its endpoint while publisher a
   assert.equal((await runtime.call('fetch_file', { artifactId: ids[4] })).artifactId, ids[4]);
   await runtime.call('timer_start', { commandId: ids[0], timerId: ids[1], startedAt: '2026-10-19T12:00:00.000Z' });
   assert.equal(calls.some(call => call.endpoint === 'gameCore'), false);
+});
+
+test('identity personal ports use fresh scope while LocalAI and publisher retain canonical Artifact owner', async()=>{
+ const { serviceDataScope }=await import('../../auth/contracts/service-data-scope.mjs');
+ const scope=serviceDataScope('profile-1'), seen=[];
+ let wrong=false;
+ const {ports}=fixture({request:async(subject,payload)=>{
+  seen.push({subject,payload});
+  if(subject.includes('timer'))return {userId:wrong?owner:scope,items:[],nextCursor:null};
+  if(subject.includes('history'))return {items:[],next_cursor:null};
+  if(subject.includes('alerts'))return {unread_count:0,category:null};
+  return {operationId:ids[0],ownerId:owner,modelId:'m',revision:'r',profileId:'p',status:'completed',phase:'completed',progressPercent:100,errorCode:null,createdAt:'2026-10-19T12:00:00Z',updatedAt:'2026-10-19T12:00:00Z'};
+ }});
+ const runtime=await createBraiTools({...config,serviceDataScope:scope},ports);
+ await runtime.call('timer_history_get',{limit:50});
+ await runtime.call('history_list',{});
+ await runtime.call('alerts_summary',{});
+ await runtime.call('local_ai_operations_get',{operationId:ids[0]});
+ assert.deepEqual(seen.map(row=>row.payload.userId??row.payload.user_id??row.payload.ownerId),[scope,scope,scope,owner]);
+ for(const args of [{user_id:owner},{ownerId:owner},{serviceDataScope:owner},{profileId:'profile-2'}])await assert.rejects(runtime.call('history_list',args),/INVALID_ARGUMENT/);
+ wrong=true;await assert.rejects(runtime.call('timer_history_get',{limit:50}),/OWNER_MISMATCH/);
+ await runtime.close();
 });

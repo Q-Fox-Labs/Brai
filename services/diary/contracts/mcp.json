@@ -1,0 +1,55 @@
+{
+  "service": "diary",
+  "version": "1.0.0",
+  "description": "Только собственный дневник; owner определяется проверенной привязкой, не аргументами. Стандартный stateless Streamable HTTP /mcp или stdio-proxy. Гарантии ../CONTRACT.md.",
+  "tools": [
+    {
+      "name": "diary_list",
+      "description": "Читает собственные записи дневника, 50 на страницу.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": []
+      },
+      "outputSchema": {
+        "$ref": "http.openapi.json#/components/schemas/ListResult"
+      }
+    },
+    {
+      "name": "diary_get",
+      "description": "Читает собственную запись, raw, исправленный текст и происхождение даты.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "outputSchema": {
+        "$ref": "http.openapi.json#/components/schemas/EntryResult"
+      }
+    },
+    {
+      "name": "diary_create_text",
+      "description": "Сохраняет точный текст в собственный дневник. Неизвестная дата остаётся null; requestId повторяется точно.",
+      "inputSchema": {
+        "$ref": "http.openapi.json#/components/schemas/TextInput"
+      },
+      "outputSchema": {
+        "$ref": "http.openapi.json#/components/schemas/EntryResult"
+      }
+    }
+  ]
+}

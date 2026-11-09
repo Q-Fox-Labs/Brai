@@ -5,7 +5,7 @@ import { methodMap, validateDto } from '#transcription-contracts';
 
 /** Прикладной порт получает только DTO и principal, удостоверенный транспортом. */
 export type PublicInvoke = (method: string, params: any, principal: any) => Promise<unknown>;
-export type AuthBinding = { token: string; principal: Record<string, unknown> };
+export type AuthBinding = { token: string; principal: Record<string, unknown>; permissions?: readonly 'identity:delegate'[] };
 export type PublicGateway = ReturnType<typeof createPublicGateway>;
 
 /** Нормализует исключение к закрытому ErrorResponse; детали соседей и payload не возвращаются. */
@@ -43,26 +43,41 @@ export function createPublicGateway(options: { invoke: PublicInvoke; bindings: r
   const tokens = new Set<string>();
   const bindings = options.bindings.map((binding) => {
     if (!binding || typeof binding.token !== 'string' || !binding.token || /\s/.test(binding.token) ||
-      !validateDto('TrustedPrincipal', binding.principal) || tokens.has(binding.token)) {
+      !validateDto('TrustedPrincipal', binding.principal) || tokens.has(binding.token) ||
+      binding.permissions !== undefined && (!Array.isArray(binding.permissions) || binding.permissions.some(value => value !== 'identity:delegate'))) {
       throw new Error('Invalid transcription transport configuration');
     }
     tokens.add(binding.token);
     const principal = Object.freeze({ ...binding.principal, permissions: Object.freeze([...(binding.principal.permissions as string[])]) });
-    return { digest: createHash('sha256').update(binding.token).digest(), principal };
+    return { digest: createHash('sha256').update(binding.token).digest(), principal, delegate: binding.permissions?.includes('identity:delegate') === true };
   });
   tokens.clear();
   const { invoke, maxConcurrent } = options;
   let active = 0;
-  return {
-    authenticate(authorization: string | undefined): Record<string, unknown> {
+  function authenticateBinding(authorization: string | undefined) {
       if (!authorization?.startsWith('Bearer ') || /\s/.test(authorization.slice(7)) || authorization.length === 7) {
         throw { errorCode: 'UNAUTHENTICATED' };
       }
       const digest = createHash('sha256').update(authorization.slice(7)).digest();
-      let principal: Record<string, unknown> | undefined;
-      for (const binding of bindings) if (timingSafeEqual(digest, binding.digest)) principal = binding.principal;
-      if (!principal) throw { errorCode: 'UNAUTHENTICATED' };
-      return principal;
+      let selected: typeof bindings[number] | undefined;
+      for (const binding of bindings) if (timingSafeEqual(digest, binding.digest)) selected = binding;
+      if (!selected) throw { errorCode: 'UNAUTHENTICATED' };
+      return selected;
+  }
+  return {
+    authenticate(authorization: string | undefined): Record<string, unknown> {
+      return authenticateBinding(authorization).principal;
+    },
+    /** Root binding разрешает только делегирование личного principal; публичные DTO не меняются. */
+    delegate(authorization: string | undefined, principal: unknown): Record<string, unknown> {
+      const binding = authenticateBinding(authorization);
+      if (!binding.delegate) throw { errorCode: 'FORBIDDEN' };
+      if (!validateDto('TrustedPrincipal', principal)) throw { errorCode: 'INVALID_ARGUMENT' };
+      const value = principal as Record<string, unknown>;
+      if (value.scopeType !== 'user' || !(value.permissions as string[]).includes('transcription:use')) throw { errorCode: 'FORBIDDEN' };
+      if ((value.permissions as string[]).includes('transcription:settings:write') &&
+          !(binding.principal.permissions as readonly string[]).includes('transcription:settings:write')) throw { errorCode: 'FORBIDDEN' };
+      return Object.freeze({ ...value, permissions: Object.freeze([...(value.permissions as string[])]) });
     },
     async withCapacity<T>(operation: () => Promise<T>): Promise<T> {
       if (active >= maxConcurrent) throw { errorCode: 'OVERLOADED' };

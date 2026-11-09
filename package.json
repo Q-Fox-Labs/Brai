@@ -14,7 +14,7 @@
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
     "typecheck:agent": "npm run typecheck --workspace=@brai/agent",
     "build": "node services/codeworks/components/cli.mjs build",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts && npm run typecheck:history && npm run typecheck:transcription && npm run typecheck:alerts && npm run typecheck:game-core",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts && npm run typecheck:history && npm run typecheck:transcription && npm run typecheck:alerts && npm run typecheck:game-core && npm run typecheck:diary",
     "lint": "npm run lint --workspaces --if-present",
     "test:web": "npm test --workspace=@brai/web",
     "build:auth": "npm run build --workspace=@brai/auth",
@@ -63,7 +63,10 @@
     "components:validate": "node services/codeworks/components/cli.mjs validate",
     "components:plan": "node services/codeworks/components/cli.mjs plan",
     "components:run": "node services/codeworks/components/cli.mjs run",
-    "package:runtime": "node services/codeworks/components/cli.mjs package"
+    "package:runtime": "node services/codeworks/components/cli.mjs package",
+    "build:diary": "npm run build --workspace=@brai/diary",
+    "typecheck:diary": "npm run typecheck --workspace=@brai/diary",
+    "test:diary": "npm test --workspace=@brai/diary"
   },
   "engines": {
     "node": "24.22.1",

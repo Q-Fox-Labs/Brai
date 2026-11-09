@@ -10,10 +10,12 @@ import logging
 import shutil
 import shlex
 import json
+import os
 import mimetypes
 from pathlib import Path
 import re
 import uuid
+import time
 from urllib.parse import unquote, urlparse
 from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
 
@@ -23,13 +25,24 @@ _recovery_targets = {}
 _operation = ContextVar('brai_file_operation', default=None)
 _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
+_conversation_source = ContextVar('brai_file_conversation_source', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
+_MUTATION_FOOTER = re.compile(
+    r'(?m)^⚠️?\s*(?:Проверка изменений файлов:|File-mutation verifier:)[^\n]*'
+    r'(?:\n[ \t]+•[^\n]*)*\s*\Z'
+)
 
+_TECHNICAL_FAILURE = re.compile(
+    r'(?im)(?:\[TOOL_ERROR\]|^\s*Traceback \(most recent call last\):|'
+    r'\bError executing [\w.-]+:|\b(?:TEMPORARY_OUTPUT_REQUIRED|'
+    r'TEMPORARY_WORKDIR_REQUIRED|ARTIFACT_DIRECTORY_REQUIRED|FILE_SCOPE_DENIED)\b|'
+    r'\b(?:exit[_ ]code|код выхода)\s*[:=—-]?\s*[1-9]\d*\b)'
+)
 
 def register_telegram_observer(observer):
     """Подключить наблюдателя Telegram к общей файловой границе текущего gateway."""
@@ -149,6 +162,27 @@ async def accept_event(event, admit=True):
     files = store()
     event.metadata = dict(getattr(event, 'metadata', None) or {})
     refs = event.metadata.get('_brai_artifacts')
+    inputs = getattr(event, '_brai_identity_inputs', None)
+    if refs is None and inputs:
+        # AIDEV-NOTE: Ingress сохранил исходные message/attachment IDs до native album merge.
+        # Прежние fixed-owner aliases и artifact metadata через эту границу не принимаются.
+        if (not isinstance(inputs, list) or len(inputs) != len(paths)
+                or any(not isinstance(item, dict) or item.get('path') != path
+                       or not isinstance(item.get('itemId'), str) or not item['itemId']
+                       for item, path in zip(inputs, paths))):
+            raise FileError('INVALID_SOURCE')
+        source, refs = source_of(event), []
+        for position, item in enumerate(inputs):
+            message_id, _, attachment_id = item['itemId'].rpartition(':')
+            if message_id.isdecimal() and attachment_id.isdecimal():
+                position = int(message_id) * 1000 + int(attachment_id)
+            refs.append(await asyncio.to_thread(files.ingest, source, item['itemId'], item['path'],
+                position, item.get('caption') or '', item.get('groupId') or str(event.message_id)))
+        event.metadata['_brai_artifacts'] = refs
+        with files.db() as db:
+            route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
+            for gid in {item['groupId'] for item in refs}:
+                db.execute('INSERT OR REPLACE INTO routes VALUES (?,?)', (gid, canonical(route)))
     if refs is None:
         source, msg = source_of(event), str(event.message_id or '')
         if not msg:
@@ -304,16 +338,31 @@ def _steer_lock(turn):
     return turn._brai_steer_lock
 
 
+def active_steer_turn(runner, session_key):
+    """Включить подготовку входа под guard адаптера в тот же пользовательский ход."""
+    state = runner._peek_session_state(session_key)
+    if state is None:
+        return None
+    turn = state.turn
+    if turn.started_ts:
+        return turn
+    admission = getattr(turn, '_brai_adapter_admission', None)
+    if admission is not None:
+        adapter, guard = admission
+        if getattr(adapter, '_active_sessions', {}).get(session_key) is guard:
+            return turn
+    return None
+
+
 def reserve_steer_input(runner, event):
     """Удержать финал, пока уже принятый файл публикуется или собирается настоящий альбом."""
     import threading
     key_for_source = getattr(runner, '_session_key_for_source', None)
     if not callable(key_for_source) or not runner._is_user_authorized_for_source(event.source):
         return None
-    state = runner._peek_session_state(key_for_source(event.source))
-    if state is None or not state.turn.started_ts:
+    turn = active_steer_turn(runner, key_for_source(event.source))
+    if turn is None:
         return None
-    turn = state.turn
     with _steer_lock(turn):
         agent = getattr(turn, '_brai_steer_agent', None)
         with agent._pending_steer_lock if agent is not None else nullcontext():
@@ -391,6 +440,8 @@ def clear_steer_turn(turn):
         turn._brai_pending_steers = []
         turn._brai_input_ids = set()
         turn._brai_steer_agent = None
+        turn._brai_adapter_admission = None
+        turn._brai_adapter_event = None
 
 
 async def steer_active_input(runner, event, session_key):
@@ -400,13 +451,16 @@ async def steer_active_input(runner, event, session_key):
         return False
     if not runner._is_user_authorized_for_source(event.source):
         return False
-    state = runner._peek_session_state(session_key)
-    if state is None or not state.turn.started_ts:
+    turn = active_steer_turn(runner, session_key)
+    reserved = getattr(event, '_brai_preparation', None)
+    if turn is None:
+        if reserved is not None:
+            finish_steer_preparation(event)
+            release_event(event)
+            return True  # Отменённая подготовка не создаёт новый ход после поздней публикации.
         return False
-    turn = state.turn
     with _steer_lock(turn):
         generation = turn._brai_steer_generation
-    reserved = getattr(event, '_brai_preparation', None)
     if reserved is not None and (reserved[0] is not turn or reserved[1] is not generation):
         release_event(event)
         return True  # Завершённый/остановленный ход не передаёт свой отложенный вход новому.
@@ -427,9 +481,9 @@ async def steer_active_input(runner, event, session_key):
         text = await runner._prepare_busy_steer_text(event)
     images = []
     if event.media_urls:
-        from agent.image_routing import build_native_content_parts
         paths = [path for path, mime in zip(event.media_urls, event.media_types) if mime.startswith('image/')]
         if paths:
+            from agent.image_routing import build_native_content_parts
             parts, skipped = build_native_content_parts('', paths)
             if skipped:
                 raise FileError('NATIVE_IMAGE_INPUT_UNAVAILABLE')
@@ -437,6 +491,8 @@ async def steer_active_input(runner, event, session_key):
         # Документы остаются доступными модели по owner-bound artifactId.
     if not text.strip() and not images:
         return False
+    if getattr(getattr(event, 'raw_message', None), 'edit_date', None):
+        text = '[Правка сообщения ' + str(event.message_id) + ': новая редакция заменяет прежнюю.]\n' + text
     origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(event), str(event.message_id)) else None
@@ -472,17 +528,18 @@ def active_telegram_edit(adapter, message):
     runner = getattr(adapter, 'gateway_runner', None)
     if runner is None:
         return False
-    source = adapter._source_from_message_for_auth(message)
-    state = runner._peek_session_state(runner._session_key_for_source(source))
-    if state is None or not state.turn.started_ts:
+    from gateway.platforms.event import MessageType
+    # AIDEV-NOTE: Auth source называет форум forum, native input — group; ключ обязан совпасть с dispatch.
+    source = adapter._build_message_event(message, MessageType.TEXT).source
+    turn = active_steer_turn(runner, runner._session_key_for_source(source))
+    if turn is None:
         return False
-    turn = state.turn
     with _steer_lock(turn):
         agent = getattr(turn, '_brai_steer_agent', None)
         if agent is not None and getattr(agent, '_brai_steer_closed', False):
             return False
         identity = _steer_identity(source, message.message_id)
-        initial = getattr(turn, 'event', None)
+        initial = getattr(turn, 'event', None) or getattr(turn, '_brai_adapter_event', None)
         return (identity in getattr(turn, '_brai_input_ids', set()) or
                 (initial is not None and identity == _steer_identity(initial.source, initial.message_id)))
 
@@ -666,18 +723,52 @@ def input_text(value, operation):
 def conversation(agent, user_message, task_id=None):
     """Общая временная область CLI/API, gateway, cron и дочернего агента."""
     operation = str(getattr(agent, 'session_id', '') or task_id or uuid.uuid4()) + ':' + str(uuid.uuid4())
-    token = _operation.set(operation)
-    agent._brai_workspace = str(store().workspace(operation))
-    task = str(task_id or getattr(agent, 'session_id', '') or operation)
-    with store().db() as db:
-        db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (task, operation))
+    inbound = _inbound.get()
+    session = str(getattr(agent, 'session_id', '') or '')
+    source = inbound[0] if inbound is not None else _conversation_source.get()
+    if source is not None and session and getattr(source, 'user_id', None):
+        # The gateway supplies this identity after authentication; model arguments cannot select it.
+        event = type('ConversationSource', (), {'source': source})()
+        store().bind_workspace(operation, ['conversation', source_of(event), session])
     try:
+        agent._brai_workspace = str(store().workspace(operation))
+        task = str(task_id or getattr(agent, 'session_id', '') or operation)
+        with store().db() as db:
+            db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (task, operation))
+    except BaseException:
+        with store().db() as db:
+            db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
+        raise
+    token = _operation.set(operation)
+    admission_token = source_token = None
+    previous_prompt = getattr(agent, 'ephemeral_system_prompt', None)
+    try:
+        shared_context = ''
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from identity.instructions import system_context
+            shared_context = system_context()
+        # API-only context: keep the user's persisted text and the shared process environment unchanged.
+        agent.ephemeral_system_prompt = shared_context + (previous_prompt or '') + (
+            '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
+            + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
+            'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '
+            'This turn-specific directory supersedes generic working/scratch paths in older context. '
+            'Publish finished files through the file tools. Do not read another agent workspace.')
         prepared = input_text(user_message, operation)
         inbound = _inbound.get()
         if inbound is not None:
             commit_inbound(*inbound)
+        # AIDEV-NOTE: Worker наследует владельца, но не право повторного приёма.
+        admission_token = _inbound.set(None)
+        source_token = _conversation_source.set(source)
+        agent._brai_delegation_turn_started = time.time()
         yield prepared
     finally:
+        agent.ephemeral_system_prompt = previous_prompt
+        if source_token is not None:
+            _conversation_source.reset(source_token)
+        if admission_token is not None:
+            _inbound.reset(admission_token)
         release_steer_inputs(agent)
         _operation.reset(token)
         if not workspace_in_use(Path(agent._brai_workspace)):
@@ -692,6 +783,9 @@ def conversation(agent, user_message, task_id=None):
         with store().db() as db:
             db.execute('DELETE FROM tasks WHERE identity=? AND operation=?', (task, operation))
         store().cleanup(operation, cache=False)
+        with store().db() as db:
+            if not db.execute('SELECT 1 FROM jobs WHERE operation=?', (operation,)).fetchone():
+                db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
 
 
 def before_tool(name, args, **ids):
@@ -701,7 +795,7 @@ def before_tool(name, args, **ids):
     workspace = store().workspace(operation)
     if name == 'terminal':
         requested = Path(args.get('workdir') or workspace).absolute()
-        if not requested.is_relative_to(store().work) and not any(requested.is_relative_to(p) for p in store().service_roots):
+        if not requested.resolve().is_relative_to(workspace) and not any(requested.resolve().is_relative_to(p) for p in store().service_roots):
             raise FileError('TEMPORARY_WORKDIR_REQUIRED')
         args['workdir'] = str(requested)
         if isinstance(args.get('command'), str):
@@ -719,10 +813,12 @@ def before_tool(name, args, **ids):
         if any(resolved.is_relative_to(root) for root in store().service_roots):
             continue
         if name in {'write_file', 'patch'}:
-            if not resolved.is_relative_to(store().work):
+            if not resolved.is_relative_to(workspace):
                 raise FileError('TEMPORARY_OUTPUT_REQUIRED')
             args[field] = str(resolved)
         elif resolved.is_relative_to(store().work):
+            if not resolved.is_relative_to(workspace):
+                raise FileError('FILE_SCOPE_DENIED')
             args[field] = str(path)  # Промежуточные материалы не публикуются автоматически.
         elif path.is_file() or known_alias(path):
             with store().lock('cache'):
@@ -802,10 +898,24 @@ def paths_key(paths):
     return canonical(sorted(set(paths)))
 
 
+def _public_response_text(text):
+    """Сохранить последствия отказа без внутренних путей и технических кодов."""
+    if not isinstance(text, str):
+        return text
+    # Runtime verifier keeps the failure visible without exposing local paths or tool diagnostics.
+    text = _MUTATION_FOOTER.sub(
+        'Некоторые попытки изменить файлы не удались. Проверьте нужный результат.', text)
+    if _TECHNICAL_FAILURE.search(text):
+        logging.getLogger(__name__).warning('BRAI_USER_RESPONSE_TECHNICAL_FAILURE')
+        text = 'Не удалось полностью выполнить запрос. Попробуйте ещё раз.'
+    return text
+
+
 def final_text(text, operation):
     """Подготовить отдельные временные копии всего исходящего набора до выдачи."""
     if not isinstance(text, str):
         return text
+    text = _public_response_text(text)
     files, replacements, items = store(), [], []
     explicit = []
     active_sub(_SET, lambda match: explicit.append(match) or match.group(0), text)
@@ -914,14 +1024,20 @@ def telegram_format(adapter, text):
     return formatter(text)
 
 
-async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback):
+async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None):
     """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
     from contextlib import ExitStack
     bot, target = adapter._bot, {'chat_id': int(chat_id)}
-    thread = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id')
-    if thread is not None:
-        target['message_thread_id'] = int(thread)
+    routing = getattr(adapter, '_media_send_kwargs', None)
+    if callable(routing):
+        _, target = routing(chat_id, reply_to, metadata)
+    else:
+        thread = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id')
+        if thread is not None:
+            target['message_thread_id'] = int(thread)
+        if reply_to:
+            target['reply_to_message_id'] = int(reply_to)
     if fallback:
         notice = await bot.send_message(**target, text='Этот набор нельзя отправить одним альбомом. Файлы идут отдельно в исходном порядке.')
         if not getattr(notice, 'message_id', None):
@@ -989,6 +1105,8 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
         explain = (fallback or platform != 'telegram' and kind == 'album') and not announced
         announced = announced or explain
         if platform == 'telegram':
+            if getattr(adapter, 'file_delivery_via_ipc', False):
+                return await adapter.send_file_set(chat_id, prepared, kind, explain, metadata)
             return await telegram_sender(adapter, chat_id, metadata, kind, prepared, explain)
         if explain:
             notice = await adapter.send(chat_id, 'Файлы набора будут отправлены отдельно в исходном порядке.', metadata=metadata)
@@ -1001,6 +1119,8 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
                                  'audio': ('send_voice', 'audio_path'), 'voice': ('send_voice', 'audio_path'), 'animation': ('send_animation', 'animation_url'), 'document': ('send_document', 'file_path')}[item['presentation']]
                 target = getattr(adapter, method)
                 arguments = {'chat_id': chat_id, field: item['localPath'], 'metadata': metadata}
+                if item['presentation'] == 'voice':
+                    arguments['is_voice'] = True
                 if 'caption' in inspect.signature(target).parameters:
                     arguments['caption'] = item.get('caption') or None
                 elif item.get('caption'):
@@ -1060,7 +1180,39 @@ async def deliver_attachments(adapter, event, media_files, local_files, metadata
 
 
 def install_adapter(adapter):
-    """Охватить прямые отправки cron/send_message вне final response."""
+    """Связать ранний вход с ходом и охватить прямые отправки вне final response."""
+    start = getattr(adapter, '_start_session_processing', None)
+    release_guard = getattr(adapter, '_release_session_guard', None)
+    if start is not None and release_guard is not None:
+        @wraps(start)
+        def start_admitted_turn(event, session_key, **kwargs):
+            started = start(event, session_key, **kwargs)
+            runner = getattr(adapter, 'gateway_runner', None)
+            platform = str(getattr(event.source.platform, 'value', event.source.platform))
+            if (started and runner is not None and platform == 'telegram'
+                    and not getattr(event, 'internal', False) and not event.get_command()
+                    and runner._is_user_authorized_for_source(event.source)):
+                turn = runner._session_state(session_key).turn
+                if not turn.started_ts:
+                    # AIDEV-NOTE: Guard уже занят, а _hm_admit_event ещё может ждать файлы/плагины.
+                    # Отметка ставится синхронно, до первого шага фоновой задачи.
+                    clear_steer_turn(turn)
+                    turn._brai_adapter_admission = (adapter, adapter._active_sessions[session_key])
+                    turn._brai_adapter_event = event
+            return started
+        adapter._start_session_processing = start_admitted_turn
+
+        @wraps(release_guard)
+        def release_admitted_turn(session_key, **kwargs):
+            guard = getattr(adapter, '_active_sessions', {}).get(session_key)
+            release_guard(session_key, **kwargs)
+            runner = getattr(adapter, 'gateway_runner', None)
+            state = runner._peek_session_state(session_key) if runner is not None else None
+            if (state is not None and not state.turn.started_ts
+                    and getattr(state.turn, '_brai_adapter_admission', None) == (adapter, guard)
+                    and getattr(adapter, '_active_sessions', {}).get(session_key) is not guard):
+                clear_steer_turn(state.turn)
+        adapter._release_session_guard = release_admitted_turn
     while_active = getattr(adapter, '_handle_message_while_active', None)
     if while_active is not None:
         @wraps(while_active)
@@ -1116,6 +1268,10 @@ def install_adapter(adapter):
                     data.get('content') or '', result, identity=str(identity or uuid.uuid4()))
             return result
         adapter.send = observe_text
+    # AIDEV-NOTE: Личный адаптер публикует файлы и передаёт descriptor в ingress.
+    # Повторная Telegram-обёртка здесь потребовала бы отсутствующий bot/token.
+    if getattr(adapter, 'file_delivery_via_ipc', False):
+        return
     for name, field in [('send_image_file', 'image_path'), ('send_image', 'image_url'), ('send_video', 'video_path'),
                         ('send_document', 'file_path'), ('send_voice', 'audio_path'), ('send_animation', 'animation_url'),
                         ('send_multiple_images', 'images')]:
@@ -1333,6 +1489,11 @@ def result_envelope(result, agent=None):
     response = result.get('final_response', '')
     if not isinstance(response, str):
         return result
+    # The engine appends its verifier footer after the earlier output transform.
+    cleaned = _public_response_text(response)
+    if cleaned != response:
+        response = cleaned
+        result = {**result, 'final_response': response}
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))

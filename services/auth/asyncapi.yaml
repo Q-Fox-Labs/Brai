@@ -3,10 +3,10 @@
 asyncapi: '3.1.0'
 info:
   title: Brai authentication
-  version: '1.0.0'
+  version: '2.0.0'
   description: >-
-    brai_auth NATS Services v1.0.0; queue brai_auth; PING, INFO and STATS.
-    Only trusted web calls these nonpersistent endpoints. Native HTTP errors are
+    brai_auth NATS Services v2.0.0; queue brai_auth; PING, INFO and STATS.
+    Trusted ingress and web use separate ACLs on these nonpersistent endpoints. Native HTTP errors are
     encoded in Response; transport errors use Nats-Service-Error and
     Nats-Service-Error-Code (400 INVALID_ARGUMENT; 503 AUTH_BUSY/AUTH_UNAVAILABLE).
     Timeout 10s. Never automatically retry sendCode/verifyCode; after uncertain
@@ -72,6 +72,261 @@ channels:
     messages:
       request:
         $ref: "#/components/messages/SsoRedeemRequest"
+  telegramLinkIssue:
+    address: brai.auth.v2.telegram-link-issue
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkIssueRequest"
+  telegramLinkRedeem:
+    address: brai.auth.v2.telegram-link-redeem
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkRedeemRequest"
+  identityGet:
+    address: brai.auth.v2.identity-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/IdentityGetRequest"
+  telegramUnlink:
+    address: brai.auth.v2.telegram-unlink
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramUnlinkRequest"
+  telegramResolve:
+    address: brai.auth.v2.telegram-resolve
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramResolveRequest"
+  telegramCodeIssue:
+    address: brai.auth.v2.telegram-code-issue
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramCodeIssueRequest"
+  identityProvision:
+    address: brai.auth.v2.identity-provision
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/IdentityProvisionRequest"
+  profileReady:
+    address: brai.auth.v2.profile-ready
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/ProfileReadyRequest"
+  inviteRedeem:
+    address: brai.auth.v2.invite-redeem
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/InviteRedeemRequest"
+  loginCodeRedeem:
+    address: brai.auth.v2.login-code-redeem
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LoginCodeRedeemRequest"
+  usersList:
+    address: brai.auth.v2.users-list
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminEmptyRequest"
+  usersGet:
+    address: brai.auth.v2.users-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminUserRequest"
+  roleSet:
+    address: brai.auth.v2.role-set
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminRoleRequest"
+  statusSet:
+    address: brai.auth.v2.status-set
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminStatusRequest"
+  sessionsRevoke:
+    address: brai.auth.v2.sessions-revoke
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminUserRequest"
+  inviteCreate:
+    address: brai.auth.v2.invite-create
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminEmptyRequest"
+  inviteList:
+    address: brai.auth.v2.invite-list
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminEmptyRequest"
+  inviteRevoke:
+    address: brai.auth.v2.invite-revoke
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminInviteRequest"
+  adminAudit:
+    address: brai.auth.v2.admin-audit
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminAuditRequest"
+  usersAdd:
+    address: brai.auth.v2.users-add
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminAddRequest"
+  usersRevoke:
+    address: brai.auth.v2.users-revoke
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminRevokeRequest"
+  usersOperationGet:
+    address: brai.auth.v2.users-operation-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminOperationRequest"
+  lifecycleClaim:
+    address: brai.auth.v2.lifecycle-claim
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleClaimRequest"
+  lifecycleRenew:
+    address: brai.auth.v2.lifecycle-renew
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleRenewRequest"
+  lifecycleComplete:
+    address: brai.auth.v2.lifecycle-complete
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleCompleteRequest"
+  v2Replies:
+    address: null
+    messages:
+      identityDetails:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/IdentityGetResponse"
+      linkIssued:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkIssueResponse"
+      unlinked:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramUnlinkResponse"
+      lifecycleClaim:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleClaimResponse"
+      lifecycleRenew:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleAcceptedResponse"
+      lifecycleComplete:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleCompleteResponse"
+      identity:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+      issued:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramCodeIssueResponse"
+      web:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/Response"
   replies:
     address: null
     description: Transient replyTo inbox supplied by each NATS requester.
@@ -79,6 +334,19 @@ channels:
       response:
         $ref: "#/components/messages/Response"
 operations:
+  identityGet:
+    action: receive
+    channel:
+      $ref: "#/channels/identityGet"
+    messages:
+      - $ref: "#/channels/identityGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identityDetails"
   sendCode:
     action: receive
     channel:
@@ -157,6 +425,318 @@ operations:
         $ref: "#/channels/replies"
       messages:
         - $ref: "#/channels/replies/messages/response"
+  telegramLinkIssue:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramLinkIssue"
+    messages:
+      - $ref: "#/channels/telegramLinkIssue/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/linkIssued"
+  telegramLinkRedeem:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramLinkRedeem"
+    messages:
+      - $ref: "#/channels/telegramLinkRedeem/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  telegramUnlink:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramUnlink"
+    messages:
+      - $ref: "#/channels/telegramUnlink/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/unlinked"
+  telegramResolve:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramResolve"
+    messages:
+      - $ref: "#/channels/telegramResolve/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  telegramCodeIssue:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramCodeIssue"
+    messages:
+      - $ref: "#/channels/telegramCodeIssue/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/issued"
+  identityProvision:
+    action: receive
+    channel:
+      $ref: "#/channels/identityProvision"
+    messages:
+      - $ref: "#/channels/identityProvision/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  profileReady:
+    action: receive
+    channel:
+      $ref: "#/channels/profileReady"
+    messages:
+      - $ref: "#/channels/profileReady/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  inviteRedeem:
+    action: receive
+    channel:
+      $ref: "#/channels/inviteRedeem"
+    messages:
+      - $ref: "#/channels/inviteRedeem/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  loginCodeRedeem:
+    action: receive
+    channel:
+      $ref: "#/channels/loginCodeRedeem"
+    messages:
+      - $ref: "#/channels/loginCodeRedeem/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersList:
+    action: receive
+    channel:
+      $ref: "#/channels/usersList"
+    messages:
+      - $ref: "#/channels/usersList/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersGet:
+    action: receive
+    channel:
+      $ref: "#/channels/usersGet"
+    messages:
+      - $ref: "#/channels/usersGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  roleSet:
+    action: receive
+    channel:
+      $ref: "#/channels/roleSet"
+    messages:
+      - $ref: "#/channels/roleSet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  statusSet:
+    action: receive
+    channel:
+      $ref: "#/channels/statusSet"
+    messages:
+      - $ref: "#/channels/statusSet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  sessionsRevoke:
+    action: receive
+    channel:
+      $ref: "#/channels/sessionsRevoke"
+    messages:
+      - $ref: "#/channels/sessionsRevoke/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  inviteCreate:
+    action: receive
+    channel:
+      $ref: "#/channels/inviteCreate"
+    messages:
+      - $ref: "#/channels/inviteCreate/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  inviteList:
+    action: receive
+    channel:
+      $ref: "#/channels/inviteList"
+    messages:
+      - $ref: "#/channels/inviteList/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  inviteRevoke:
+    action: receive
+    channel:
+      $ref: "#/channels/inviteRevoke"
+    messages:
+      - $ref: "#/channels/inviteRevoke/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  adminAudit:
+    action: receive
+    channel:
+      $ref: "#/channels/adminAudit"
+    messages:
+      - $ref: "#/channels/adminAudit/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersAdd:
+    action: receive
+    channel:
+      $ref: "#/channels/usersAdd"
+    messages:
+      - $ref: "#/channels/usersAdd/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersRevoke:
+    action: receive
+    channel:
+      $ref: "#/channels/usersRevoke"
+    messages:
+      - $ref: "#/channels/usersRevoke/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersOperationGet:
+    action: receive
+    channel:
+      $ref: "#/channels/usersOperationGet"
+    messages:
+      - $ref: "#/channels/usersOperationGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  lifecycleClaim:
+    action: receive
+    channel:
+      $ref: "#/channels/lifecycleClaim"
+    messages:
+      - $ref: "#/channels/lifecycleClaim/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/lifecycleClaim"
+  lifecycleRenew:
+    action: receive
+    channel:
+      $ref: "#/channels/lifecycleRenew"
+    messages:
+      - $ref: "#/channels/lifecycleRenew/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/lifecycleRenew"
+  lifecycleComplete:
+    action: receive
+    channel:
+      $ref: "#/channels/lifecycleComplete"
+    messages:
+      - $ref: "#/channels/lifecycleComplete/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/lifecycleComplete"
 components:
   messages:
     SendCodeRequest:

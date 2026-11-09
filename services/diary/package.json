@@ -1,0 +1,19 @@
+{
+  "name": "@brai/diary",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node --check src/main.mjs && node --check src/http.mjs && node --check src/adapters.mjs && node --check src/store.mjs && node --check src/luna.mjs && node --check src/domain.mjs && node --check src/migrate.mjs",
+    "typecheck": "npm run build",
+    "test": "node --test tests/*.test.mjs",
+    "start": "node src/main.mjs",
+    "migrate": "node src/migrate.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "nats": "2.29.3",
+    "pg": "8.16.3",
+    "ws": "8.22.0"
+  }
+}

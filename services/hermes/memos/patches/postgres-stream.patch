@@ -1,7 +1,21 @@
 diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 --- a/src/memos/graph_dbs/postgres.py
 +++ b/src/memos/graph_dbs/postgres.py
-@@ -178,6 +178,7 @@
+@@ -116,6 +116,13 @@
+     def _init_schema(self):
+         """Create schema and tables if they don't exist."""
+         conn = self._get_conn()
+         try:
+             with conn.cursor() as cur:
++                import os
++                managed = os.environ.get('MEMOS_SCHEMA_MANAGED', '0')
++                if managed not in ('0', '1'):
++                    raise ValueError('Invalid MEMOS_SCHEMA_MANAGED')
++                if managed == '1':
++                    self._validate_managed_schema(cur)
++                    return
+                 # A pre-provisioned schema must work without database CREATE privileges.
+@@ -178,6 +185,7 @@
                      ON {self.schema}.edges(target_id)
                  """)
 
@@ -9,10 +23,92 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
                  logger.info(f"Schema {self.schema} initialized successfully")
          except Exception as e:
              logger.error(f"Failed to init schema: {e}")
-@@ -1106,6 +1107,269 @@
+@@ -1106,6 +1114,351 @@
          finally:
              self._put_conn(conn)
 
++
++    def _validate_managed_schema(self, cur):
++        """Проверить управляемую владельцем схему без DDL runtime."""
++        cur.execute("SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ('vector','pg_trgm')")
++        if {row[0] for row in cur.fetchall()} != {'vector', 'pg_trgm'}:
++            raise RuntimeError('Managed MemOS extensions unavailable')
++        cur.execute("""SELECT c.relname,a.attname,t.typname,a.atttypmod,a.attnotnull
++            FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
++            JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
++            JOIN pg_catalog.pg_type t ON t.oid=a.atttypid
++            WHERE n.nspname=%s AND c.relname IN ('memories','edges')
++              AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped""", (self.schema,))
++        columns = {(table, name): (kind, modifier, required) for table,name,kind,modifier,required in cur.fetchall()}
++        expected = {
++            ('memories','id'):'text', ('memories','memory'):'text', ('memories','properties'):'jsonb',
++            ('memories','embedding'):'vector', ('memories','user_name'):'text',
++            ('memories','created_at'):'timestamptz', ('memories','updated_at'):'timestamptz',
++            ('edges','id'):'int4', ('edges','source_id'):'text', ('edges','target_id'):'text',
++            ('edges','edge_type'):'text', ('edges','created_at'):'timestamptz'}
++        if (set(columns) != set(expected) or any(columns[key][0] != kind for key,kind in expected.items())
++                or columns[('memories','embedding')][1] != self.config.embedding_dimension
++                or any(not columns[key][2] for key in (('memories','id'),('memories','memory'),
++                    ('memories','properties'),('edges','id'),('edges','source_id'),('edges','target_id'),('edges','edge_type')))):
++            raise RuntimeError('Managed MemOS columns invalid')
++        cur.execute("""SELECT i.relname,t.relname,pg_catalog.pg_get_indexdef(i.oid),x.indisunique,x.indisprimary
++            FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid=x.indexrelid
++            JOIN pg_catalog.pg_class t ON t.oid=x.indrelid
++            JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
++            WHERE n.nspname=%s AND t.relname IN ('memories','edges') AND x.indisvalid AND x.indisready""", (self.schema,))
++        indexes = {name:(table, definition, unique, primary) for name,table,definition,unique,primary in cur.fetchall()}
++        required = {
++            'idx_memories_user':('memories',('USING btree (user_name)',)),
++            'idx_memories_props':('memories',('USING gin (properties)',)),
++            'idx_memories_embedding':('memories',('USING ivfflat (embedding vector_cosine_ops)',)),
++            'idx_edges_source':('edges',('USING btree (source_id)',)),
++            'idx_edges_target':('edges',('USING btree (target_id)',)),
++            'idx_brai_recall_text_v1':('memories',('USING gin', 'brai_recall_text_v1(memory, properties) gin_trgm_ops',
++                'WHERE', 'hermes_chunk_index', 'IS NULL', "= '0'::jsonb")),
++            'idx_brai_recall_source_date_v1':('memories',('USING btree (user_name,', 'md5(',
++                'hermes_author_id', 'hermes_event_id', 'created_at)'))}
++        if (any(name not in indexes or indexes[name][0] != table or any(part not in indexes[name][1] for part in parts)
++                for name,(table,parts) in required.items())
++                or not any(t == 'memories' and primary and '(id)' in definition for t,definition,unique,primary in indexes.values())
++                or not any(t == 'edges' and primary and '(id)' in definition for t,definition,unique,primary in indexes.values())
++                or not any(t == 'edges' and unique and all(k in definition for k in ('source_id','target_id','edge_type'))
++                           for t,definition,unique,primary in indexes.values())):
++            raise RuntimeError('Managed MemOS indexes invalid')
++        cur.execute("""SELECT p.prosrc,p.provolatile,p.proparallel,p.prosecdef,l.lanname,
++                    pg_catalog.has_function_privilege(current_user,p.oid,'EXECUTE')
++            FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
++            JOIN pg_catalog.pg_language l ON l.oid=p.prolang
++            WHERE n.nspname=%s AND p.proname='brai_recall_text_v1'
++              AND pg_catalog.pg_get_function_identity_arguments(p.oid)='text, jsonb'""", (self.schema,))
++        functions = cur.fetchall()
++        expected_source = """
++              SELECT CASE WHEN $2->'info'->>'hermes_kind' = 'fact'
++                THEN COALESCE($2->'info'->>'hermes_fact_text', $1)
++                ELSE COALESCE((SELECT string_agg(
++                  COALESCE(m->>'role', 'source') || ': ' || COALESCE(m->>'content', ''),
++                  E'\\n\\n' ORDER BY n)
++                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(
++                    $2->'info'->'hermes_messages') = 'array'
++                    THEN $2->'info'->'hermes_messages' ELSE '[]'::jsonb END)
++                    WITH ORDINALITY AS message(m,n)), $1) END
++            """
++        normalize = lambda value: '\n'.join(line.strip() for line in value.strip().splitlines())
++        if (len(functions) != 1 or normalize(functions[0][0]) != normalize(expected_source)
++                or functions[0][1:] != ('i','s',False,'sql',True)):
++            raise RuntimeError('Managed MemOS function invalid')
++        cur.execute("""SELECT pg_catalog.has_schema_privilege(current_user,n.oid,'USAGE'),
++            c.relname,pg_catalog.has_table_privilege(current_user,c.oid,'SELECT'),
++            pg_catalog.has_table_privilege(current_user,c.oid,'INSERT'),
++            pg_catalog.has_table_privilege(current_user,c.oid,'UPDATE'),
++            pg_catalog.has_table_privilege(current_user,c.oid,'DELETE')
++            FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
++            WHERE n.nspname=%s AND c.relname IN ('memories','edges') AND c.relkind='r'""", (self.schema,))
++        grants = cur.fetchall()
++        if len(grants) != 2 or any(not all((row[0], *row[2:])) for row in grants):
++            raise RuntimeError('Managed MemOS runtime grants invalid')
++        cur.execute("SELECT pg_catalog.has_sequence_privilege(current_user, pg_catalog.pg_get_serial_sequence(format('%%I.%%I',%s,'edges'),'id'), 'USAGE')", (self.schema,))
++        if cur.fetchone() != (True,):
++            raise RuntimeError('Managed MemOS sequence grants invalid')
 +
 +    memory_index_version = 1
 +
@@ -282,7 +378,7 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 diff --git a/src/memos/api/routers/server_router.py b/src/memos/api/routers/server_router.py
 --- a/src/memos/api/routers/server_router.py
 +++ b/src/memos/api/routers/server_router.py
-@@ -368,6 +368,95 @@
+@@ -368,6 +368,122 @@
          )
 
 
@@ -375,6 +471,692 @@ diff --git a/src/memos/api/routers/server_router.py b/src/memos/api/routers/serv
 +    return StreamingResponse(records(), media_type='application/x-ndjson')
 +
 +
++
++from memos.api.product_models import ScopedFeedbackRequest
++from memos.graph_dbs.brai_feedback_scope import run_scoped_feedback, FeedbackScopeError
++from threading import BoundedSemaphore as _FeedbackSemaphore
++_feedback_scope_gate = _FeedbackSemaphore(2)
++
++
++@router.post("/feedback_scoped", summary="Owner-projected synchronous feedback")
++def feedback_scoped(feedback_req: ScopedFeedbackRequest):
++    # Existing internal API network boundary; only Identity Root constructs the projection.
++    if not _feedback_scope_gate.acquire(blocking=False):
++        raise HTTPException(429, "FEEDBACK_BUSY")
++    try:
++        return run_scoped_feedback(feedback_handler.feedback_server, feedback_req.model_dump())
++    except FeedbackScopeError as error:
++        status = 503 if error.code in {
++            "FEEDBACK_OUTCOME_UNKNOWN", "FEEDBACK_STORAGE_FAILED",
++            "FEEDBACK_DEADLINE_EXCEEDED", "FEEDBACK_READBACK_FAILED"} else 409
++        raise HTTPException(status, error.code) from None
++    except Exception:
++        raise HTTPException(503, "FEEDBACK_UNAVAILABLE") from None
++    finally:
++        _feedback_scope_gate.release()
++
++
++
++
  @router.post("/get_memory", summary="Get memories for user", response_model=GetMemoryResponse)
  def get_memories(memory_req: GetMemoryRequest):
      return handlers.memory_handler.handle_get_memories(
+
+diff --git a/src/memos/api/handlers/add_handler.py b/src/memos/api/handlers/add_handler.py
+--- a/src/memos/api/handlers/add_handler.py
++++ b/src/memos/api/handlers/add_handler.py
+@@ -55,5 +55,1 @@
+-        self.logger.info(
+-            f"[DIAGNOSTIC] server_router -> add_handler.handle_add_memories called (Modified at 2025-11-29 18:46). Full request: {add_req.model_dump_json(indent=2)}"
+-        )
+-
+         if add_req.info:
+diff --git a/src/memos/multi_mem_cube/single_cube.py b/src/memos/multi_mem_cube/single_cube.py
+--- a/src/memos/multi_mem_cube/single_cube.py
++++ b/src/memos/multi_mem_cube/single_cube.py
+@@ -64,5 +64,2 @@
+         sync_mode = add_req.async_mode or self._get_sync_mode()
+-        self.logger.info(
+-            f"[DIAGNOSTIC] single_cube.add_memories called for cube_id: {self.cube_id}. sync_mode: {sync_mode}. Request: {add_req.model_dump_json(indent=2)}"
+-        )
+         user_context = UserContext(
+diff --git a/src/memos/graph_dbs/brai_feedback_scope.py b/src/memos/graph_dbs/brai_feedback_scope.py
+new file mode 100644
+--- /dev/null
++++ b/src/memos/graph_dbs/brai_feedback_scope.py
+@@ -0,0 +1,564 @@
++# ABOUTME: Runs the original feedback algorithm through a mandatory request-bound SQL store.
++# ABOUTME: DML only; private transaction, explicit targets, no shared mutation or optional thread context.
++from __future__ import annotations
++import copy
++from dataclasses import dataclass
++import json
++import hashlib
++import math
++import re
++import threading
++import time
++import types
++
++class FeedbackScopeError(RuntimeError):
++    def __init__(self, code='FEEDBACK_SCOPE_DENIED'):
++        super().__init__(code)
++        self.code = code
++
++def require(value, code='FEEDBACK_SCOPE_DENIED'):
++    if not value:
++        raise FeedbackScopeError(code)
++
++def content(value, limit=16000):
++    require(isinstance(value, str) and 0 < len(value) <= limit and
++            not any(ord(c) < 32 and c not in '\n\r\t' for c in value))
++    return value
++
++def text(value, limit=255):
++    require(isinstance(value, str) and 0 < len(value) <= limit and
++            not any(ord(c) < 32 for c in value))
++    return value
++
++@dataclass(frozen=True)
++class FeedbackScope:
++    user: str
++    cube: str
++    home: str
++    epoch: str
++    author: str
++    targets: tuple[str, ...]
++
++    @classmethod
++    def parse(cls, value):
++        require(isinstance(value, dict) and set(value) ==
++                {'user_id','cube_id','home_scope','memory_epoch','author_id','target_ids'})
++        ids=value['target_ids']
++        require(isinstance(ids,list) and 1 <= len(ids) <= 32 and all(isinstance(i,str) for i in ids) and len(set(ids)) == len(ids))
++        return cls(text(value['user_id']),text(value['cube_id'],512),text(value['home_scope']),
++                   text(value['memory_epoch']),text(value['author_id']),tuple(text(i,128) for i in ids))
++
++    def metadata(self, supplied, memory=None, *, existing=None):
++        require(isinstance(supplied,dict))
++        value=copy.deepcopy(supplied)
++        require(value.get('user_id',self.user) == self.user)
++        info=value.get('info') or {}
++        require(isinstance(info,dict))
++        fixed={'hermes_home_scope':self.home,'hermes_memory_epoch':self.epoch,
++               'hermes_author_id':self.author,'hermes_cube':self.cube}
++        require(all(info.get(key,want)==want for key,want in fixed.items()))
++        require(info.get('hermes_visibility') != 'business_private' and
++                info.get('hermes_business_scope') is None)
++        if existing is not None:
++            previous=existing.get('info') or {}
++            # Native updates may add ordinary metadata, but cannot rewrite any existing
++            # provenance, membership, ownership, canonical identity or source attributes.
++            require(all(key not in info or info[key] == old for key,old in previous.items()
++                        if key.startswith('hermes_')))
++            info={**info,**copy.deepcopy(previous)}
++        else:
++            require(info.get('hermes_memberships',[self.cube]) == [self.cube])
++            require(info.get('hermes_primary_cube',self.cube) == self.cube)
++            info.update(hermes_memberships=[self.cube],hermes_primary_cube=self.cube)
++            info.setdefault('hermes_kind','fact')
++        info.update(fixed)
++        if info.get('hermes_kind') == 'fact' and memory is not None:
++            canonical=re.sub(r'^(?:user|assistant): \[[^\]\n]+\]:[ \t]*','',content(memory)).rstrip('\n')
++            require(bool(canonical))
++            info['hermes_fact_text']=canonical
++            info['hermes_fact_sha256']=hashlib.sha256(canonical.encode('utf-8')).hexdigest()
++            # Chunked inputs are rejected before effects. A native output that no longer
++            # fits its single-part identity is also rejected, never partially re-chunked.
++            if 'hermes_chunk_index' in info:
++                require(info['hermes_chunk_index'] == 0 and info.get('hermes_chunk_count') == 1
++                        and len(canonical.encode('utf-8')) <= 768,'FEEDBACK_CHUNKED_FACT_UNSUPPORTED')
++        value.update(user_id=self.user,info=info)
++        return value
++
++    def check(self, node):
++        require(isinstance(node,dict) and isinstance(node.get('metadata'),dict))
++        md=node['metadata']; info=md.get('info') or {}
++        require(md.get('user_id') == self.user and
++                all(info.get(k)==v for k,v in
++                    {'hermes_home_scope':self.home,'hermes_memory_epoch':self.epoch,
++                     'hermes_author_id':self.author,'hermes_cube':self.cube}.items()) and
++                info.get('hermes_visibility') != 'business_private' and
++                info.get('hermes_business_scope') is None and
++                isinstance(info.get('hermes_memberships'),list) and self.cube in info['hermes_memberships'] and
++                all(isinstance(v,str) for v in info['hermes_memberships']) and
++                info.get('hermes_primary_cube',self.cube) in info['hermes_memberships'])
++        if info.get('hermes_kind') == 'fact' and 'hermes_fact_text' in info:
++            canonical=info['hermes_fact_text']
++            require(isinstance(canonical,str) and hashlib.sha256(canonical.encode('utf-8')).hexdigest() == info.get('hermes_fact_sha256'),'FEEDBACK_FACT_INTEGRITY')
++            stored=re.sub(r'^(?:user|assistant): \[[^\]\n]+\]:[ \t]*','',node['memory']).rstrip('\n')
++            require(stored == canonical.rstrip('\n'),'FEEDBACK_FACT_INTEGRITY')
++        return node
++
++class BoundFeedbackStore:
++    """Only this object and its one private connection reach the algorithm's storage graph."""
++    def __init__(self, native, scope, *, deadline_seconds=120):
++        require(type(native).__name__ == 'PostgresGraphDB','FEEDBACK_BACKEND_UNSUPPORTED')
++        require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',native.schema))
++        self._native=native; self._scope=scope; self._schema=native.schema
++        self._lock=threading.RLock(); self._deadline=time.monotonic()+deadline_seconds
++        self._new=set(); self._deleted=set(); self._touched=set(); self._original_info=[]; self._original_memory={}
++        self._fault=None; self._closed=False; self._conn=None; self._lease=None
++        try:
++            self._conn=native._get_conn()
++            self._lease=self._conn
++            self._conn.autocommit=False
++            self._run("SELECT set_config('statement_timeout','10000',true), set_config('lock_timeout','3000',true)")
++            # Lock exact targets, including their ownership metadata, before any LLM call.
++            rows=self._nodes("id = ANY(%s)",[list(scope.targets)],lock=True)
++            require({r['id'] for r in rows} == set(scope.targets),'FEEDBACK_TARGET_NOT_FOUND')
++            for row in rows:
++                info=row['metadata'].get('info') or {}
++                require(info.get('hermes_chunk_count',1) == 1,'FEEDBACK_CHUNKED_FACT_UNSUPPORTED')
++                self._original_info.append(copy.deepcopy(info))
++                self._original_memory[row['id']]=row['memory']
++            # Cross-target edges would make native cleanup/versioning reach outside consent.
++            self._check_edges()
++        except BaseException:
++            self.abort()
++            raise
++
++    def __getattribute__(self,name):
++        value=object.__getattribute__(self,name)
++        if name.startswith('_') or name in ('deny','abort','finish') or not callable(value):
++            return value
++        def guarded(*args,**kwargs):
++            try: return value(*args,**kwargs)
++            except BaseException as error:
++                self._fault=self._fault or getattr(error,'code','FEEDBACK_BRANCH_FAILED')
++                raise
++        return guarded
++
++    def deny(self, code='FEEDBACK_SCOPE_DENIED'):
++        self._fault=self._fault or code
++        raise FeedbackScopeError(code)
++
++    def _ready(self):
++        if self._fault: raise FeedbackScopeError(self._fault)
++        if self._closed or time.monotonic() >= self._deadline:
++            self.deny('FEEDBACK_DEADLINE_EXCEEDED')
++
++    def _run(self, sql, params=(), *, rows=False):
++        with self._lock:
++            self._ready()
++            try:
++                with self._conn.cursor() as cur:
++                    cur.execute(sql,params)
++                    return cur.fetchall() if rows else cur.rowcount
++            except BaseException:
++                self._fault=self._fault or 'FEEDBACK_STORAGE_FAILED'
++                raise
++
++    def _where(self):
++        s=self._scope
++        return ("""user_name=%s AND properties->>'user_id'=%s
++            AND properties->'info'->>'hermes_home_scope'=%s
++            AND properties->'info'->>'hermes_memory_epoch'=%s
++            AND properties->'info'->>'hermes_author_id'=%s
++            AND properties->'info'->>'hermes_cube'=%s
++            AND properties->'info'->>'hermes_visibility' IS DISTINCT FROM 'business_private'
++            AND properties->'info'->>'hermes_business_scope' IS NULL
++            AND id=ANY(%s)""",
++            [s.cube,s.user,s.home,s.epoch,s.author,s.cube,list(s.targets)+list(self._new)])
++
++    def _nodes(self, extra='TRUE', params=(), *, embedding=False, lock=False):
++        where,fixed=self._where()
++        columns="id,memory,properties,created_at,updated_at"+(",embedding" if embedding else "")
++        values=self._run(f"SELECT {columns} FROM {self._schema}.memories WHERE ({where}) AND ({extra})"+
++                         (" FOR UPDATE" if lock else ""),[*fixed,*params],rows=True)
++        result=[]
++        for value in values:
++            node=self._scope.check(self._native._parse_row(value,embedding))
++            require(node['id'] in self._scope.targets or node['id'] in self._new)
++            result.append(node)
++        return result
++
++    def _user(self, user_name):
++        if user_name not in (None,self._scope.cube): self.deny()
++
++    def _ids(self, ids):
++        if not isinstance(ids,(list,tuple)) or any(i not in self._scope.targets and i not in self._new for i in ids):
++            self.deny()
++        return list(ids)
++
++    def _check_edges(self):
++        ids=list(self._scope.targets)+list(self._new)
++        rows=self._run(f"""SELECT source_id,target_id FROM {self._schema}.edges
++              WHERE source_id=ANY(%s) OR target_id=ANY(%s)""",[ids,ids],rows=True)
++        if any(a not in ids or b not in ids for a,b in rows):
++            self.deny('FEEDBACK_EXTERNAL_EDGE_UNSUPPORTED')
++
++    def allow_fast_target(self,node):
++        self._ready()
++        self._scope.check(node)
++        return node['id'] in self._scope.targets and node['metadata']['info'].get('hermes_kind') == 'fact'
++
++    def get_node(self,id,include_embedding=False,**kwargs):
++        self._user(kwargs.pop('user_name',None)); self._ids([id])
++        if kwargs: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        found=self._nodes('id=%s',[id],embedding=include_embedding)
++        return found[0] if found else None
++
++    def get_nodes(self,ids,include_embedding=False,**kwargs):
++        self._user(kwargs.pop('user_name',None)); self._ids(ids)
++        if kwargs: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        return self._nodes('id=ANY(%s)',[list(ids)],embedding=include_embedding)
++
++    def search_by_embedding(self,vector,top_k=5,scope=None,status=None,threshold=None,
++                            search_filter=None,user_name=None,filter=None,knowledgebase_ids=None,**kwargs):
++        self._user(user_name)
++        if kwargs or knowledgebase_ids or filter: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        require(isinstance(vector,list) and vector and all(type(v) in (float,int) and math.isfinite(v) for v in vector))
++        require(type(top_k) is int and 1 <= top_k <= 100)
++        require(threshold is None or type(threshold) in (int,float) and math.isfinite(threshold))
++        where,params=self._where(); conditions=[where,"embedding IS NOT NULL"]
++        if scope is not None: conditions.append("properties->>'memory_type'=%s"); params.append(text(scope,64))
++        conditions.append("properties->>'status'=%s" if status else "(properties->>'status'='activated' OR properties->>'status' IS NULL)")
++        if status: params.append(text(status,64))
++        for key,value in (search_filter or {}).items():
++            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',key): self.deny()
++            conditions.append(f"properties->>'{key}'=%s"); params.append(str(value))
++        v=json.dumps(vector)
++        rows=self._run(f"""SELECT id,1-(embedding <=> %s::vector) AS score FROM {self._schema}.memories
++             WHERE {' AND '.join('('+c+')' for c in conditions)}
++             ORDER BY embedding <=> %s::vector LIMIT %s""",[v,*params,v,top_k],rows=True)
++        return [{'id':i,'score':float(score)} for i,score in rows if threshold is None or float(score)>=threshold]
++
++    def get_by_metadata(self,filters,status=None,user_name=None,filter=None,knowledgebase_ids=None,user_name_flag=True):
++        self._user(user_name)
++        if filter or knowledgebase_ids or user_name_flag is not True: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        conditions=[]; params=[]
++        if status: conditions.append("properties->>'status'=%s"); params.append(text(status,64))
++        require(isinstance(filters,list))
++        for item in filters:
++            require(isinstance(item,dict) and set(item) <= {'field','op','value'} and 'field' in item and 'value' in item)
++            key=item['field']; op=item.get('op','=')
++            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',key): self.deny()
++            if op == '=': conditions.append(f"properties->>'{key}'=%s"); params.append(str(item['value']))
++            elif op == 'contains':
++                conditions.append(f"properties->'{key}' @> %s::jsonb"); params.append(json.dumps([item['value']]))
++            else: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        return [n['id'] for n in self._nodes(' AND '.join(conditions) or 'TRUE',params)]
++
++    def get_all_memory_items(self,scope=None,include_embedding=False,user_name=None,**kwargs):
++        self._user(user_name)
++        if kwargs: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        return self._nodes("properties->>'memory_type'=%s" if scope else 'TRUE',
++                           [text(scope,64)] if scope else [],embedding=include_embedding)
++
++    def search_by_keywords_like(self,query_word,scope=None,status=None,search_filter=None,
++                                user_name=None,filter=None,knowledgebase_ids=None,return_fields=None,**kwargs):
++        self._user(user_name)
++        if kwargs or knowledgebase_ids or search_filter or return_fields:
++            self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        conditions=['memory LIKE %s']; params=[content(query_word)]
++        if scope: conditions.append("properties->>'memory_type'=%s"); params.append(text(scope,64))
++        conditions.append("properties->>'status'=%s" if status else
++                          "(properties->>'status'='activated' OR properties->>'status' IS NULL)")
++        if status: params.append(text(status,64))
++        for key,value in (filter or {}).items():
++            if not re.fullmatch(r'info\.[A-Za-z_][A-Za-z0-9_]*',key): self.deny()
++            conditions.append("properties->'info'->>%s=%s"); params.extend([key[5:],str(value)])
++        return [{'id':node['id']} for node in self._nodes(' AND '.join(conditions),params)]
++
++    def add_node(self,id,memory,metadata,user_name=None):
++        self._user(user_name); text(id,128); require(isinstance(memory,str))
++        with self._lock:
++            self._ready()
++            if id in self._scope.targets: self.deny('FEEDBACK_DUPLICATE_NEW_ID')
++            if id in self._new:
++                # Native MemoryManager writes WorkingMemory and long/user projections
++                # under the same generated ID. Permit replacement only of this request's
++                # own already-inserted ID, never PostgreSQL's global upsert target.
++                require(self.get_node(id)['memory'] == memory,'FEEDBACK_NEW_ID_REUSE')
++                supplied=metadata.get('info') or {}
++                origin=next((info for info in self._original_info if info == supplied),None)
++                normalized=self._scope.metadata(metadata,memory,existing={'info':origin} if origin is not None else None)
++                self.update_node(id,{'memory':memory,**normalized},user_name)
++                return
++            if len(self._new)>=64: self.deny('FEEDBACK_RESULT_TOO_LARGE')
++            supplied_info=metadata.get('info') or {}
++            provenance=next((info for info in self._original_info if info == supplied_info),None)
++            props=self._scope.metadata(metadata,memory,existing={'info':provenance} if provenance is not None else None)
++            embedding=props.pop('embedding',None)
++            # No upsert and no retry. A collision aborts the transaction.
++            self._new.add(id); self._touched.add(id); self._original_memory[id]=memory
++            self._run(f"""INSERT INTO {self._schema}.memories(id,memory,properties,embedding,user_name)
++                       VALUES(%s,%s,%s::jsonb,%s::vector,%s)""",
++                      [id,memory,json.dumps(props),json.dumps(embedding) if embedding is not None else None,self._scope.cube])
++
++    def add_nodes_batch(self,nodes,user_name=None):
++        for node in nodes:
++            self.add_node(node['id'],node['memory'],node['metadata'],user_name)
++
++    def update_node(self,id,fields,user_name=None):
++        self._user(user_name); self._ids([id])
++        with self._lock:
++            current=self.get_node(id,include_embedding=True)
++            if current is None: self.deny('FEEDBACK_TARGET_NOT_FOUND')
++            require(isinstance(fields,dict))
++            fields=copy.deepcopy(fields)
++            memory=fields.pop('memory',current['memory'])
++            embedding=fields.pop('embedding',current['metadata'].pop('embedding',None))
++            old=current['metadata']
++            supplied_info=fields.pop('info',{})
++            require(isinstance(supplied_info,dict))
++            props=self._scope.metadata({**old,**fields,'info':supplied_info},memory,existing=old)
++            where,params=self._where()
++            count=self._run(f"""UPDATE {self._schema}.memories SET memory=%s,properties=%s::jsonb,
++                       embedding=%s::vector,updated_at=NOW() WHERE ({where}) AND id=%s""",
++                       [memory,json.dumps(props),json.dumps(embedding) if embedding is not None else None,*params,id])
++            if count != 1: self.deny('FEEDBACK_TARGET_CHANGED')
++            self._touched.add(id)
++
++    def delete_node(self,id,user_name=None):
++        self._user(user_name); self._ids([id])
++        with self._lock:
++            self._check_edges()
++            # All edge endpoints must be in the approved set, checked before any deletion.
++            self._run(f"DELETE FROM {self._schema}.edges WHERE source_id=%s OR target_id=%s",[id,id])
++            where,params=self._where()
++            count=self._run(f"DELETE FROM {self._schema}.memories WHERE ({where}) AND id=%s",[*params,id])
++            if count != 1: self.deny('FEEDBACK_TARGET_CHANGED')
++            self._deleted.add(id); self._touched.add(id)
++
++    def remove_oldest_memory(self,memory_type,keep_latest,user_name=None):
++        self._user(user_name); require(type(keep_latest) is int and keep_latest>=0)
++        nodes=self._nodes("properties->>'memory_type'=%s",[text(memory_type,64)])
++        for node in sorted(nodes,key=lambda n:n['metadata'].get('updated_at') or '',reverse=True)[keep_latest:]:
++            self.delete_node(node['id'],self._scope.cube)
++
++    def get_grouped_counts(self,group_fields,where_clause='',params=None,user_name=None):
++        self._user(user_name)
++        if where_clause or params or group_fields != ['memory_type']: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        counts={}
++        for node in self._nodes():
++            key=node['metadata'].get('memory_type'); counts[key]=counts.get(key,0)+1
++        return [{'memory_type':key,'count':value} for key,value in counts.items()]
++
++    def get_edges(self,id,**kwargs):
++        self._user(kwargs.pop('user_name',None)); self._ids([id])
++        edge_type=kwargs.pop('type','ANY'); direction=kwargs.pop('direction','ANY')
++        if kwargs or edge_type != 'ANY' or direction != 'ANY': self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        self._check_edges()
++        rows=self._run(f"SELECT source_id,target_id,edge_type FROM {self._schema}.edges WHERE source_id=%s OR target_id=%s",[id,id],rows=True)
++        return [{'from':a,'to':b,'type':kind} for a,b,kind in rows]
++
++    def edge_exists(self,source_id,target_id,type):
++        self._ids([source_id,target_id])
++        return bool(self._run(f"SELECT 1 FROM {self._schema}.edges WHERE source_id=%s AND target_id=%s AND edge_type=%s",[source_id,target_id,type],rows=True))
++
++    def add_edge(self,source_id,target_id,type,user_name=None):
++        self._user(user_name); self._ids([source_id,target_id])
++        require(self.get_node(source_id) is not None and self.get_node(target_id) is not None)
++        self._run(f"INSERT INTO {self._schema}.edges(source_id,target_id,edge_type) VALUES(%s,%s,%s)",[source_id,target_id,text(type,64)])
++
++    def delete_edge(self,source_id,target_id,type=None,user_name=None):
++        self._user(user_name); self._ids([source_id,target_id])
++        if type is None: self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++        self._run(f"DELETE FROM {self._schema}.edges WHERE source_id=%s AND target_id=%s AND edge_type=%s",[source_id,target_id,text(type,64)])
++
++    def __getattr__(self,name):
++        # Never expose the unbound store, pool, raw connection, config or an unguarded method.
++        self.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++
++    def finish(self, records=()):
++        with self._lock:
++            self._ready(); self._check_edges()
++            found={n['id']:n for n in self._nodes(embedding=True)}
++            expected=(set(self._scope.targets)|self._new)-self._deleted
++            if set(found) != expected: self.deny('FEEDBACK_READBACK_FAILED')
++            for item in records:
++                if item['id'] not in found or not isinstance(item.get('text'),str) or found[item['id']]['memory'] != item['text']:
++                    self.deny('FEEDBACK_READBACK_FAILED')
++            connection=self._conn; lease=self._lease
++            self._conn=None; self._lease=None; self._closed=True
++            try:
++                # No retry even if the server committed before a lost response.
++                connection.commit()
++                lease.autocommit=True
++            except BaseException:
++                self._fault='FEEDBACK_OUTCOME_UNKNOWN'
++                self._discard(lease)
++                raise FeedbackScopeError(self._fault) from None
++            try:
++                # Exactly one return attempt; a failed return is never replayed.
++                self._native._put_conn(lease)
++            except BaseException:
++                self._fault='FEEDBACK_OUTCOME_UNKNOWN'
++                try: lease.close()
++                except BaseException: pass
++                raise FeedbackScopeError(self._fault) from None
++            return {'checked_ids':sorted(expected),'deleted_ids':sorted(self._deleted)}
++
++    def _discard(self, lease):
++        # Closing a psycopg connection does not remove its pool lease. Native put
++        # removes a closed connection from the pool; no transaction is replayed.
++        try: lease.close()
++        except BaseException: pass
++        try: self._native._put_conn(lease)
++        except BaseException: pass
++
++    def abort(self):
++        # Detach exactly once; cleanup cannot mask a primary typed exception.
++        with self._lock:
++            connection=self._conn; lease=self._lease
++            self._conn=None; self._lease=None; self._closed=True
++            if lease is None: return
++            try:
++                connection.rollback()
++                lease.autocommit=True
++            except BaseException:
++                self._discard(lease)
++                return
++            try: self._native._put_conn(lease)
++            except BaseException:
++                try: lease.close()
++                except BaseException: pass
++
++def bind_feedback(native,view):
++    """Clone every storage-capable native component; unknown objects never pass through."""
++    require(getattr(native,'is_reorganize',False) is False,'FEEDBACK_BRANCH_UNSUPPORTED')
++    require(getattr(native.mem_reader,'memory_version_switch','off') == 'off','FEEDBACK_BRANCH_UNSUPPORTED')
++    require(getattr(native.mem_reader,'save_rawfile',False) is False,'FEEDBACK_BRANCH_UNSUPPORTED')
++    memo={}
++    providers=('memos.llms.','memos.embedders.','memos.rerankers.','memos.reranker.')
++    components=('memos.mem_feedback.','memos.mem_reader.',
++                'memos.memories.textual.tree_text_memory.','memos.chunkers.')
++    def config_plain(obj):
++        # Config graph_db is a DTO, not a live storage reference. JSON mode must
++        # fully reduce it to inert data; arbitrary handles cannot pass as config.
++        def plain(value):
++            if value is None or type(value) in (str,int,bool): return True
++            if type(value) is float: return math.isfinite(value)
++            if isinstance(value,list): return all(plain(item) for item in value)
++            if isinstance(value,dict): return all(type(key) is str and plain(item) for key,item in value.items())
++            return False
++        try: value=obj.model_dump(mode='json')
++        except BaseException: raise FeedbackScopeError('FEEDBACK_UNBOUND_RESOURCE') from None
++        require(isinstance(value,dict) and plain(value),'FEEDBACK_UNBOUND_RESOURCE')
++    def provider_has_storage(obj,seen=None):
++        # Providers/configs are explicit trusted leaves, but cannot hide a store/pool.
++        seen=seen or set()
++        if id(obj) in seen: return False
++        require(len(seen)<4096,'FEEDBACK_UNBOUND_RESOURCE')
++        seen.add(id(obj))
++        if type(obj).__module__.startswith(('openai.','httpx.','httpcore.','requests.','urllib3.','ollama.','azure.','aiohttp.','anthropic.')):
++            return False
++        if type(obj).__module__.startswith('memos.configs.'):
++            config_plain(obj); return False
++        if type(obj).__module__.startswith('memos.graph_dbs.'): return True
++        if isinstance(obj,dict): return any(provider_has_storage(v,seen) for v in obj.values())
++        if isinstance(obj,(list,tuple,set)): return any(provider_has_storage(v,seen) for v in obj)
++        if hasattr(obj,'__dict__'):
++            for key,value in vars(obj).items():
++                if key in ('graph_store','graph_db','pool','_pool','connection','storage','store') and value is not None:
++                    return True
++                if provider_has_storage(value,seen): return True
++        return False
++    def project(obj,depth=0):
++        require(depth<24,'FEEDBACK_BRANCH_UNSUPPORTED')
++        if id(obj) in memo: return memo[id(obj)]
++        module=type(obj).__module__
++        if obj is None or type(obj) in (str,int,float,bool,bytes): return obj
++        if module.startswith('memos.graph_dbs.'):
++            require(type(obj) is type(native.graph_store) and obj.config == native.graph_store.config and
++                    obj.schema == native.graph_store.schema,'FEEDBACK_BACKEND_UNSUPPORTED')
++            memo[id(obj)]=view; return view
++        if isinstance(obj,dict):
++            value={}; memo[id(obj)]=value
++            value.update({k:project(v,depth+1) for k,v in obj.items()}); return value
++        if isinstance(obj,(list,tuple,set)):
++            value=[project(v,depth+1) for v in obj]
++            return tuple(value) if isinstance(obj,tuple) else set(value) if isinstance(obj,set) else value
++        if module.startswith('memos.configs.'):
++            config_plain(obj); return obj
++        if module.startswith(providers+('chonkie.','langchain_text_splitters.','tokenizers.','tiktoken.')):
++            require(not provider_has_storage(obj),'FEEDBACK_UNBOUND_RESOURCE')
++            return obj
++        if isinstance(obj,type) and obj.__module__ == 'memos.memories.textual.tree_text_memory.retrieve.retrieve_utils' and obj.__name__ == 'StopwordManager':
++            return obj
++        if isinstance(obj,types.FunctionType) and obj.__module__ == 'memos.mem_reader.utils' and obj.__name__ == 'count_tokens_text':
++            return obj
++        if module.startswith(components):
++            if getattr(obj,'bm25_retriever',None) is not None or getattr(obj,'internet_retriever',None) is not None:
++                raise FeedbackScopeError('FEEDBACK_BRANCH_UNSUPPORTED')
++            value=copy.copy(obj); memo[id(obj)]=value
++            for key,item in vars(obj).items():
++                if key == 'queue' and type(obj).__name__ == 'GraphStructureReorganizer':
++                    require(obj.is_reorganize is False,'FEEDBACK_BRANCH_UNSUPPORTED')
++                    from queue import PriorityQueue
++                    projected=PriorityQueue()
++                elif key == '_usage_executor':
++                    # Searcher's executor sends usage telemetry. Scoped feedback never
++                    # submits telemetry or shares callbacks that can retain unbound self.
++                    projected=DeniedExecutor(view)
++                else: projected=project(item,depth+1)
++                setattr(value,key,projected)
++            return value
++        raise FeedbackScopeError('FEEDBACK_UNBOUND_RESOURCE')
++    value=project(native)
++    require(value is not native and value.graph_store is view,'FEEDBACK_BRANCH_UNSUPPORTED')
++    value._retry_db_operation=lambda operation:operation()
++    return value
++
++class DeniedExecutor:
++    def __init__(self,view): self._view=view
++    def submit(self,*args,**kwargs): self._view.deny('FEEDBACK_BRANCH_UNSUPPORTED')
++
++def run_scoped_feedback(native,body):
++    require(isinstance(body,dict) and set(body) == {'scope','feedback_content','history','session_id'})
++    scope=FeedbackScope.parse(body['scope'])
++    feedback_content=content(body['feedback_content'])
++    history=body['history']; require(isinstance(history,list) and len(history)<=16)
++    for message in history:
++        require(isinstance(message,dict) and set(message)=={'role','content'} and
++                message['role'] in ('user','assistant') and isinstance(message['content'],str) and
++                len(message['content'])<=16000)
++    session=text(body['session_id'],255)
++    view=BoundFeedbackStore(native.graph_store,scope)
++    try:
++        bound=bind_feedback(native,view)
++        if not history:
++            history=[{'role':'user','content':content(node['memory'])}
++                     for node in view._nodes('id=ANY(%s)',[list(scope.targets)])]
++        result=bound.process_feedback(user_id=scope.user,user_name=scope.cube,chat_history=history,
++            feedback_content=feedback_content,info=scope.metadata({})['info'],session_id=session,
++            retrieved_memory_ids=list(scope.targets),async_mode='sync',corrected_answer=False)
++        # Guard errors cannot be hidden by native broad exception handlers.
++        view._ready()
++        require(isinstance(result,dict) and set(result)=={'answer','record'},'FEEDBACK_INVALID_RESULT')
++        require(result.get('answer') in ('',None),'FEEDBACK_INVALID_RESULT')
++        record=result['record']
++        require(isinstance(record,dict) and set(record)=={'add','update'},'FEEDBACK_INVALID_RESULT')
++        require(all(isinstance(record[k],list) for k in record),'FEEDBACK_INVALID_RESULT')
++        allowed=set(scope.targets)|view._new
++        for kind,items in record.items():
++            fields={'id','text','source_doc_id'} | ({'archived_id','origin_memory'} if kind=='update' else set())
++            for item in items:
++                require(isinstance(item,dict) and set(item)==fields and item.get('id') in allowed,'FEEDBACK_INVALID_RESULT')
++                content(item['text'])
++                for key in ('archived_id','source_doc_id'):
++                    require(item.get(key) is None or item[key] in allowed,'FEEDBACK_INVALID_RESULT')
++                if kind=='update':
++                    require(item['archived_id'] in view._original_memory and
++                            item['origin_memory']==view._original_memory[item['archived_id']],'FEEDBACK_INVALID_RESULT')
++        proof=view.finish(record['add']+record['update'])
++        return {'code':200,'message':'Scoped feedback evaluated','data':{'record':record,'readback':proof}}
++    except BaseException:
++        view.abort()
++        raise
+diff --git a/src/memos/api/product_models.py b/src/memos/api/product_models.py
+--- a/src/memos/api/product_models.py
++++ b/src/memos/api/product_models.py
+@@ -831,6 +831,33 @@
+         return self
+ 
+ 
++
++class ScopedFeedbackScope(BaseRequest):
++    """Internal owner projection; public worker never supplies this object."""
++    model_config = {"extra": "forbid"}
++    user_id: str = Field(..., min_length=1, max_length=255)
++    cube_id: str = Field(..., min_length=1, max_length=512)
++    home_scope: str = Field(..., min_length=1, max_length=255)
++    memory_epoch: str = Field(..., min_length=1, max_length=255)
++    author_id: str = Field(..., min_length=1, max_length=255)
++    target_ids: list[str] = Field(..., min_length=1, max_length=32)
++
++
++class ScopedFeedbackMessage(BaseRequest):
++    model_config = {"extra": "forbid"}
++    role: Literal["user", "assistant"]
++    content: str = Field(..., max_length=16000)
++
++
++class ScopedFeedbackRequest(BaseRequest):
++    """Sync, text-only, target-bound correction; no caller-controlled metadata."""
++    model_config = {"extra": "forbid"}
++    scope: ScopedFeedbackScope
++    feedback_content: str = Field(..., min_length=1, max_length=16000)
++    history: list[ScopedFeedbackMessage] = Field(..., max_length=16)
++    session_id: str = Field(..., min_length=1, max_length=255)
++
++
+ class APIFeedbackRequest(BaseRequest):
+     """Request model for processing feedback info."""
+ 
+diff --git a/src/memos/mem_feedback/feedback.py b/src/memos/mem_feedback/feedback.py
+--- a/src/memos/mem_feedback/feedback.py
++++ b/src/memos/mem_feedback/feedback.py
+@@ -593,19 +593,21 @@
+         retrieved_memories = [
+             self.graph_store.get_node(_id, user_name=user_name) for _id in retrieved_memory_ids
+         ]
+-        filterd_ids = [
+-            item["id"] for item in retrieved_memories if "mode:fast" in item["metadata"]["tags"]
+-        ]
++        # Only the mandatory request-bound store may admit an explicitly owned
++        # canonical fast fact. Legacy/global feedback retains its fast exclusion.
++        from memos.graph_dbs.brai_feedback_scope import BoundFeedbackStore
++
++        def eligible(item):
++            return ("mode:fast" not in item["metadata"]["tags"] or
++                    isinstance(self.graph_store, BoundFeedbackStore) and
++                    self.graph_store.allow_fast_target(item))
++
++        filterd_ids = [item["id"] for item in retrieved_memories if not eligible(item)]
+         if filterd_ids:
+             logger.warning(
+                 f"[0107 Feedback Core: _feedback_memory] Since the tags mode is fast, no modifications are made to the following memory {filterd_ids}."
+             )
+-
+-        current_memories = [
+-            TextualMemoryItem(**item)
+-            for item in retrieved_memories
+-            if "mode:fast" not in item["metadata"]["tags"]
+-        ]
++        current_memories = [TextualMemoryItem(**item) for item in retrieved_memories if eligible(item)]
+ 
+         with ContextThreadPoolExecutor(max_workers=3) as ex:
+             futures = {

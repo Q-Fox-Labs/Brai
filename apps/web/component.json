@@ -22,6 +22,8 @@
       "apps/web/app/(workspace)/layout.tsx",
       "apps/web/app/(workspace)/page.tsx",
       "apps/web/app/account.tsx",
+      "apps/web/app/admin/personal.tsx",
+      "apps/web/server/admin-personal.ts",
       "apps/web/app/agent/activities.css",
       "apps/web/app/agent/activities.tsx",
       "apps/web/app/agent/agent.css",
@@ -257,10 +259,27 @@
       "apps/web/app/agent/telegram-observer.css",
       "apps/web/app/api/telegram-observer/[...path]/route.ts",
       "apps/web/app/api/telegram-observer/file-auth/route.ts",
-      "apps/web/server/telegram-observer.ts"
+      "apps/web/server/telegram-observer.ts",
+      "apps/web/app/api/diary/entry/route.ts",
+      "apps/web/app/api/diary/file/route.ts",
+      "apps/web/app/api/diary/materials/route.ts",
+      "apps/web/app/api/diary/route.ts",
+      "apps/web/app/api/diary/upload/route.ts",
+      "apps/web/app/diary/CONTRACT.md",
+      "apps/web/app/diary/page.tsx",
+      "apps/web/app/diary/screen.tsx",
+      "apps/web/app/diary/styles.css",
+      "apps/web/app/diary/types.ts",
+      "apps/web/server/diary-http.ts",
+      "apps/web/app/agent/admin-chats.tsx",
+      "apps/web/app/agent/admin-chat-client.ts",
+      "apps/web/app/api/admin/route.ts",
+      "apps/web/server/admin-download.ts",
+      "apps/web/app/diary/upload.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
+      "apps/web/tests/admin-personal.test.ts",
       "apps/web/tests/agent-activity-presentation.test.ts",
       "apps/web/tests/agent-boundary.test.ts",
       "apps/web/tests/agent-catalog.test.ts",
@@ -310,7 +329,14 @@
       "apps/web/tests/timer-http.test.ts",
       "apps/web/tests/workspace-link.test.ts",
       "apps/web/tests/telegram-display.test.ts",
-      "apps/web/tests/telegram-observer.test.ts"
+      "apps/web/tests/telegram-observer.test.ts",
+      "apps/web/tests/game-core-identity.test.ts",
+      "apps/web/tests/admin-chat-client.test.ts",
+      "apps/web/tests/admin-auth.test.ts",
+      "apps/web/tests/admin-download.test.ts",
+      "apps/web/tests/admin-chats-render.test.ts",
+      "apps/web/tests/diary-render.test.ts",
+      "apps/web/tests/diary-upload.test.ts"
     ]
   },
   "dependencies": [
@@ -348,10 +374,12 @@
     {
       "id": "auth",
       "inputs": [
-        "services/auth/schemas/**"
+        "services/auth/schemas/**",
+        "services/auth/contracts/**"
       ],
       "delivery": [
-        "services/auth/schemas"
+        "services/auth/schemas",
+        "services/auth/contracts"
       ]
     },
     {
@@ -371,6 +399,13 @@
       "delivery": [
         "services/alerts/schemas"
       ]
+    },
+    {
+      "id": "diary",
+      "inputs": [
+        "services/diary/contracts/**"
+      ],
+      "delivery": []
     }
   ],
   "commands": {

@@ -1,6 +1,6 @@
 // ABOUTME: Передаёт HTTP авторизации отдельному NATS сервису Better Auth.
 // ABOUTME: Cookie передаются сервером; JSON входа не раскрывает сессионные токены.
-import { authRequest, authResponse, checkOrigin } from "@/server/auth";
+import { authRequest, authResponse, checkOrigin, telegramIdentity } from "@/server/auth";
 import { GatewayError } from "@/server/gateway";
 import { failure } from "@/server/http";
 export const runtime = "nodejs";
@@ -16,7 +16,13 @@ export async function POST(request: Request) {
    if (bytes > 2048) { await reader.cancel(); throw new GatewayError(413, "TOO_LARGE"); } chunks.push(chunk.value); }
   let body: unknown; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { throw new GatewayError(400, "INVALID_ARGUMENT"); }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new GatewayError(400, "INVALID_ARGUMENT");
-  const reply = await authRequest(request, "verify-code", body);
+  let reply;
+  if (telegramIdentity()) {
+   const value = body as Record<string, unknown>;
+   if (typeof value.code !== "string" || Object.keys(value).length !== 1) throw new GatewayError(400, "INVALID_ARGUMENT");
+   const code = value.code.toUpperCase().replace(/[ -]/g, "");
+   reply = await authRequest(request, "login-code-redeem", { code });
+  } else reply = await authRequest(request, "verify-code", body);
   return authResponse(reply, reply.status < 300 ? { success: true } : reply.body);
  } catch (error) { return failure(error); }
 }

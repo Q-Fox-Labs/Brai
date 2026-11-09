@@ -18,6 +18,8 @@ const core = createArtifactsCore({store, files, config});
 | --- | --- |
 | `execute(operation, request)` | Локальные имена `prepare`, `get`, `update`, `list`, `stats`, `delete`, `relationAdd`, `relationRemove`, `relationList`, `referenceReserve`, `referenceGet`, `referenceConfirm`, `referenceList`, `referenceUpdateState`, `outputBind`, `outputList`, `linkCreate`, `linkRevoke`; запросы и ответы из внешнего контракта |
 | `upload(token, source, signal?)` | `AsyncIterable<Uint8Array>`; после сохранения возвращает ready `Artifact` |
+| `uploadStatus(token)` | Подтверждённая позиция; [дозагрузка](CONTRACT.md#дозагрузка) |
+| `uploadChunk(token,{offset,totalBytes,chain},source,signal?)` | Добавляет одну проверенную часть |
 | `downloadable(artifactId)` | Проверяет готовность, возвращает `Artifact`; содержимое читает входной адаптер |
 | `shared(token)` | Проверяет разрешение, срок, отзыв и готовность; возвращает `Artifact` |
 | `reconcile()` | Возвращает счётчики `{ready, failed, deleted, temps}`; занятую загрузкой запись пропускает |
@@ -51,6 +53,10 @@ Runtime передаёт `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` как `maxResultBy
 Удаление фиксирует `deleting`, закрывая внешние разрешения, затем unlink и fsync, затем `deleted`. После перезапуска сверка продолжает `deleting`. Размер, SHA-256, связи, references и output bindings остаются. Успех удаления означает отсутствие байтов и сохранённый `deleted`; связанный оригинал или копия автоматически не удаляется. Внутренний Caddy до unlink может отдавать файл, как указано в контракте.
 
 Output bindings хранятся отдельно от входящих references. `outputBind` проверяет owner и ready только при первой записи, сериализуется с удалением и повторяется безопасно после lost ACK. `outputList` отдаёт прежние связи даже после удаления байтов; внешний доступ всё равно проверяет состояние Artifact. Миграция 002 добавляет эту таблицу к существующей версии 001 без изменений incoming ledger.
+
+## Перенос владельцев legacy данных
+
+Отдельный [owner lifecycle](OWNERSHIP_MIGRATION.md) сохраняет Artifact IDs, байты и ссылки при разделении прежнего общего owner. Его запускает только оператор после аттестации источников и freeze; обычный runtime не получает возможность смены владельца.
 
 ## Мигратор
 

@@ -48,3 +48,9 @@ test('universal file lifecycle, albums, failures and migration pass without live
   const result = spawnSync('python3', ['-B', script], { encoding: 'utf8', timeout: 55000, maxBuffer: 1024 * 1024 });
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
+
+ test('delegation results are persisted, scoped and consumed once', () => {
+  const script = fileURLToPath(new URL('../files/tests/test_delegation.py', import.meta.url));
+  const result = spawnSync('python3', ['-B', script], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});

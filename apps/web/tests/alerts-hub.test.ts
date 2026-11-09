@@ -37,3 +37,11 @@ test("heartbeat rechecks authorization while the transport is stalled", async co
  assert.match(new TextDecoder().decode((await reader.read()).value), /event: ready/);
  assert.equal((await reader.read()).done, true);
 });
+
+test("new personal epoch never subscribes to legacy global or canonical owner signals",async()=>{
+ const {serviceDataScope}=await import("../../../services/auth/contracts/service-data-scope.mjs");
+ const hub=new AlertsHub();let received=0;
+ hub.attach(serviceDataScope("profile-1"),"s",()=>received++,()=>{});
+ hub.broadcast(null);hub.broadcast("canonical-owner");hub.broadcast(serviceDataScope("profile-2"));
+ assert.equal(received,0);hub.broadcast(serviceDataScope("profile-1"));assert.equal(received,1);
+});

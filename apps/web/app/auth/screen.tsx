@@ -38,14 +38,34 @@ export const authDarkThemeStyle = {
 } as CSSProperties;
 
 /** Показывает самостоятельную тёмную страницу входа без рабочей оболочки. */
-export function AuthScreen(props: { busy: boolean; onRequestOtp: (email: string) => Promise<OtpSendResult>; onVerifyOtp: (email: string, otp: string) => Promise<void> }) {
+export function AuthScreen(props: { telegramIdentity?: boolean; busy: boolean; onRequestOtp: (email: string) => Promise<OtpSendResult>; onVerifyOtp: (email: string, otp: string) => Promise<void> }) {
  return <main className="brai-auth-page dark relative isolate grid min-h-dvh place-items-center overflow-hidden bg-background px-4 py-10 text-foreground" style={authDarkThemeStyle} data-auth-page data-theme="dark">
   <LoginGalaxy />
   <div className="relative z-10 grid w-full max-w-md justify-items-center gap-4">
-   <AuthPanel {...props} />
+   {props.telegramIdentity ? <TelegramLogin busy={props.busy} onVerifyOtp={props.onVerifyOtp} /> : <AuthPanel {...props} />}
    <a className="text-sm font-medium text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:underline" href="https://brai.one/">На главную</a>
   </div>
  </main>;
+}
+function TelegramLogin({ busy, onVerifyOtp }: { busy: boolean; onVerifyOtp: (email: string, otp: string) => Promise<void> }) {
+ const [code, setCode] = useState("");
+ const [error, setError] = useState("");
+ const [checking, setChecking] = useState(false);
+ const [pending, setPending] = useState(false);
+ async function submit(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+  if (pending || busy) return;
+  setPending(true); setError("");
+  try { await onVerifyOtp("", code); }
+  catch (value) { const check = value instanceof AuthRequestError && value.checkSession; setChecking(check); setError(check ? "Результат входа уточняется. Нажмите «Проверить вход». Чтобы использовать новый код, обновите страницу." : value instanceof Error ? value.message : "Не удалось проверить код"); }
+  finally { setPending(false); }
+ }
+ const normalized = code.toUpperCase().replace(/[ -]/g, "");
+ return <Card className="m-0 w-full backdrop-blur-md sm:max-w-md" style={authDarkThemeStyle} render={<form onSubmit={submit} />}>
+  <CardHeader><CardTitle>Вход в Brai</CardTitle><CardDescription>Попросите Брая прислать код входа</CardDescription></CardHeader>
+  <CardContent><Field data-invalid={Boolean(error)}><FieldLabel htmlFor="telegram-login-code">Код</FieldLabel><Input id="telegram-login-code" autoComplete="one-time-code" value={code} disabled={busy || pending} onChange={event => setCode(event.target.value)} aria-invalid={Boolean(error)} />{error && <FieldError>{error}</FieldError>}</Field><p className="mt-4 text-xs leading-relaxed text-muted-foreground">Администраторы этой установки могут просматривать ваши чаты, память и файлы.</p></CardContent>
+  <CardFooter><Button className="w-full" disabled={busy || pending || (!checking && !/^[0-9A-HJKMNP-TV-Z]{12}$/.test(normalized))}>{checking ? "Проверить вход" : "Войти"}</Button></CardFooter>
+ </Card>;
 }
 /** Отображает исходную OTP форму; сетевые операции и сессия принадлежат Account. */
 export function AuthPanel({
