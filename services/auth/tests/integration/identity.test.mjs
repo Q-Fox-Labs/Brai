@@ -84,6 +84,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal(await unlinkTelegram(runtime,'10005','10002'),false);
   await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'alias-session-fixture',multi.id]);
   assert.equal(await unlinkTelegram(runtime,alias,alias),true);
+  multi.generation+=1;
   assert.equal(await resolveTelegram(pool,alias),null);
   assert.equal(await redeemTelegramLink(runtime,secret,alias,link.code),null);
   assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE "userId"=$1',[multi.id])).rows[0].count,'0');

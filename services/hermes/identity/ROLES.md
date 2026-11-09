@@ -33,4 +33,6 @@ Guest health не требует brai_login. Bootstrap возвращает role
 
 `read_text_file({artifactId})` читает только собственный UTF-8 артефакт до 1 МиБ. Прямой private files.publish у guest допускает лишь точные байты вложения с root-owned квитанцией ingress, привязанной к профилю, пути и хешу. Произвольный путь, подмена файла/ссылки или владельца отклоняются до Artifacts. Это сохраняет штатный ingest FileStore и его восстановление без общего файлового инструмента.
 
+Полный перечень имён и ролей: [матрица инструментов](TOOL_MATRIX.md).
+
 Контракты private-портов: broker.openrpc.json и control.openrpc.json. Файловой политикой владеет [Files](../files/CONTRACT.md).

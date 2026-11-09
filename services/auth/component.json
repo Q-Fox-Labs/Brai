@@ -73,7 +73,7 @@
       "services/auth/tests/integration/invite-lifecycle.test.mjs",
       "services/auth/tests/integration/telegram-lifecycle.test.mjs",
       "services/auth/tests/email.roles.sol.test.mjs",
-      "services/auth/tests/integration/roles-regression.test.mjs",
+      "services/auth/tests/integration/00-roles-regression.test.mjs",
       "services/auth/tests/integration/roles-revocation.test.mjs"
     ]
   },
