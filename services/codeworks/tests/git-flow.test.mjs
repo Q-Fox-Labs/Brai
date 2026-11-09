@@ -35,7 +35,7 @@ async function fixture(t,kind='feature') {
   let release={requested_sha:head,details:{}};const saved=[],proofs=new Map([['prod',{id:randomUUID(),commit_sha:base}]]),checks=new Map();
   const git=createFlowGit({localRemote:true,requireLock:()=>{}});
   const prs=[],bindings=new Map();let creations=0;
-  const pullRequests={get:async(_,__,leg)=>bindings.get(leg.target)??null,bind:async(_,__,leg,pr)=>{assert.ok(!bindings.has(leg.target)||bindings.get(leg.target)===pr.number);bindings.set(leg.target,pr.number);}};
+  const pullRequests={get:async(_,__,leg)=>bindings.get(leg.target+':'+leg.head)??null,bind:async(_,__,leg,pr)=>{assert.ok(!bindings.has(leg.target+':'+leg.head)||bindings.get(leg.target+':'+leg.head)===pr.number);bindings.set(leg.target+':'+leg.head,pr.number);}};
   const gh={
     async find(_,leg,{state='open',head}={}){const matches=prs.filter(p=>p.head.ref===leg.branch&&p.base.ref===leg.target&&(state==='all'||p.state==='open')&&(!head||p.head.sha===head));if(matches.length>1)throw Object.assign(Error('ambiguous'),{code:'PR_AMBIGUOUS'});return matches[0]??null;},
     async create(_,leg,body){creations++;const pr={number:prs.length+1,html_url:'https://github.com/fixture/repository/pull/'+(prs.length+1),state:'open',merged:false,body,head:{sha:leg.head,ref:leg.branch,repo:{full_name:project.github.repository}},base:{ref:leg.target,repo:{full_name:project.github.repository}}};prs.push(pr);return pr;},
@@ -378,7 +378,7 @@ for(const kind of ['feature','hotfix'])test(kind+' keeps one bound PR across bod
   // Поиск возвращает чужой PR, но закреплённый номер читается напрямую.
   const github={...f.gh,find:async()=>assert.fail('bound PR must be read by number')};
   f.good(f.head);assert.equal((await f.advance({github})).reason,'MERGE_CHECKS_REQUIRED');
-  assert.equal(f.release.details.primary.pr_number,pr.number);assert.equal(f.bindings.get(target),pr.number);assert.equal(f.creations,1);
+  assert.equal(f.release.details.primary.pr_number,pr.number);assert.equal(f.bindings.get(target+':'+f.head),pr.number);assert.equal(f.creations,1);
 });
 test('bound PR cannot be replaced when the original disappears',async t=>{
   const f=await fixture(t);await f.advance();
@@ -391,4 +391,15 @@ test('unbound stale head read cannot switch PR number during reconciliation',asy
   const github={...f.gh,create:async(...args)=>{const pr=await f.gh.create(...args);return {...pr,head:{...pr.head,sha:'f'.repeat(40)}};},get:async(_,number)=>({...f.prs[number-1],number:number+1})};
   await assert.rejects(f.advance({github}),{code:'PR_IDENTITY_CONFLICT'});
   assert.equal(f.bindings.size,0);assert.equal(await f.git.remote(f.project,'dev'),f.dev);
+});
+
+test('a new commit can bind a successor PR while the old commit keeps its original PR',async t=>{
+  const f=await fixture(t);
+  const sync=head=>advanceSync({project:f.project,workspace:f.workspace,operation:{request:{commit_sha:head}},details:{}},{git:f.git,github:f.gh,pullRequests:f.pullRequests,inspect:async()=>({head,dirty:false}),save:async()=>{}});
+  await sync(f.head);f.prs[0].state='closed';
+  await writeFile(path.join(f.repo,'next'),'follow-up');await f.g('add','next');await f.g('commit','-m','Follow-up');
+  const next=(await f.g('rev-parse','HEAD')).stdout;
+  await sync(next);
+  assert.equal(f.bindings.get('dev:'+f.head),1);assert.equal(f.bindings.get('dev:'+next),2);assert.equal(f.creations,2);
+  f.prs[1].body='Полностью заменённое описание';await sync(next);assert.equal(f.creations,2);
 });

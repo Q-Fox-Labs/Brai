@@ -192,7 +192,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     assert.equal((await op(p,release.operation_id)).step,'HEAD_CHECKS_REQUIRED');
     const releaseDetails=(await f.app.query('SELECT details FROM codeworks.releases WHERE operation_id=$1',[release.operation_id])).rows[0].details;
     assert.equal(releaseDetails.primary.pr_number,1);assert.equal(creates,1);
-    const binding=createPullRequests(f.app),leg={branch:w.branch,target:'dev',pr_number:1};
+    const binding=createPullRequests(f.app),leg={branch:w.branch,target:'dev',head,pr_number:1};
     await binding.bind(p,w,leg,prs[0]);
     await assert.rejects(binding.bind(p,w,leg,{number:2}),{code:'PR_IDENTITY_CONFLICT'});
     await assert.rejects(binding.get({...p,github:{...p.github,repository:'foreign/repository'}},w,leg),{code:'PR_IDENTITY_CONFLICT'});
@@ -204,6 +204,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
       for(const conflicting of [false,true]){
         await owner.query('BEGIN');
         try {
+          await owner.query('DROP TABLE codeworks.pull_request_heads');
           await owner.query('DROP TABLE codeworks.pull_requests');
           if(conflicting)await owner.query("UPDATE codeworks.operations SET result=jsonb_set(result,'{primary,pr_number}','2') WHERE id=$1",[next.operation_id]);
           if(conflicting)await assert.rejects(owner.query(migration),{code:'23505'});
