@@ -1,3 +1,89 @@
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -216,6 +216,9 @@
+ def get_default_hermes_root(*, home: str | Path | None = None) -> Path:
+     """Root of an explicit home, or the process home when none is supplied."""
+     global _default_hermes_root_memo
++    # One Brai OS user owns one HOME, including when its parent is named profiles.
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        return get_process_hermes_home()
+     native_home = _get_platform_default_hermes_home()
+     env_home = str(home).strip() if home is not None else os.environ.get("HERMES_HOME", "").strip()
+     env_path = _expand_hermes_home(env_home) if env_home else None
+
+--- a/hermes_cli/profiles.py
++++ b/hermes_cli/profiles.py
+@@ -2545,6 +2545,9 @@
+     if not env_home:
+         return default_root
+     env_path = Path(env_home)
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from hermes_constants import get_default_hermes_root
++        return get_default_hermes_root(home=env_path)
+     return env_path.parent.parent if env_path.parent.name == "profiles" else env_path
+
+
+
+--- a/hermes_cli/service_manager.py
++++ b/hermes_cli/service_manager.py
+@@ -243,7 +243,8 @@
+     profile = _profile_from_service(name)
+     validate_profile_name(profile)
+     hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+-    root = hermes_home.parent.parent if hermes_home.parent.name == "profiles" else hermes_home
++    from hermes_constants import get_default_hermes_root
++    root = get_default_hermes_root(home=hermes_home)
+     return root if profile == "default" else root / "profiles" / profile
+
+
+
+--- a/tui_gateway/change_watcher.py
++++ b/tui_gateway/change_watcher.py
+@@ -270,7 +270,8 @@
+     """
+     global _bot_relay_outbox_seen
+     home = _watcher_home()
+-    root = home.parent.parent if home.parent.name == "profiles" else home
++    from hermes_constants import get_default_hermes_root
++    root = get_default_hermes_root(home=home)
+     with contextlib.suppress(OSError):
+         for entry in (root / "bot_relay" / "outbox").iterdir():
+             if entry.name.endswith(".json"):
+
+--- a/tools/bot_mode_probe.py
++++ b/tools/bot_mode_probe.py
+@@ -57,11 +57,13 @@
+
+ def _hermes_root(home: Path) -> Path:
+     """Root ~/.hermes for both the default profile and named profiles."""
+-    return home.parent.parent if home.parent.name == "profiles" else home
++    from hermes_constants import get_default_hermes_root
++    return get_default_hermes_root(home=home)
+
+
+ def _profile_name(home: Path) -> str:
+-    return home.name if home.parent.name == "profiles" else "default"
++    from hermes_constants import profile_name_for_home
++    return profile_name_for_home(home) or "default"
+
+
+ def _handle(name: str) -> str:
+
+--- a/gateway/hosted_rooms.py
++++ b/gateway/hosted_rooms.py
+@@ -408,6 +408,11 @@
+     tables in a dedicated file means profile gateways never open the master
+     session store writable.
+     """
++    import os
+     from hermes_constants import get_hermes_home
+     home = get_hermes_home()
++    # Brai profiles are independent OS users, not native profiles of one user.
++    # Keep coordination state inside the same personal writable HOME boundary.
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        return home / "shared-state.db"
+     return (home.parent.parent if home.parent.name == "profiles" else home) / "shared-state.db"
+
 --- a/agent/conversation_loop.py
 +++ b/agent/conversation_loop.py
 @@ -1738,7 +1738,8 @@

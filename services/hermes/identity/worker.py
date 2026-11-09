@@ -40,6 +40,8 @@ class Worker:
         self.exited = asyncio.Event()
         self.exit_code = None
         self.lifecycle_error = None
+        self.peer_released = asyncio.Event()
+        self.peer_released.set()
 
     async def serve_connection(self, reader, writer):
         """Читать duplex RPC до startup sends; не допускать второй native runtime."""
@@ -47,6 +49,14 @@ class Worker:
             writer.close()
             await writer.wait_closed()
             return
+        if self.peer is not None and self.peer.closed:
+            # EOF уже получен, но native drain ещё удерживает прежний канал.
+            try:
+                await asyncio.wait_for(self.peer_released.wait(), 30)
+            except TimeoutError:
+                writer.close()
+                await writer.wait_closed()
+                return
         if self.peer is not None:
             # Операторская health-проверка не забирает основной duplex канал
             # и не останавливает работающий native lifecycle при своём EOF.
@@ -62,6 +72,7 @@ class Worker:
         peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel,
                     'health': self.health, 'interactive': self.interactive})
         self.peer = peer
+        self.peer_released.clear()
         reading = asyncio.create_task(peer.run())
         try:
             await self.start(peer)
@@ -86,6 +97,7 @@ class Worker:
                 self.turn_scopes.clear()
                 self.operational.clear()
                 self.adapter = self.runner = self.peer = None
+                self.peer_released.set()
 
     async def start(self, peer):
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
@@ -126,8 +138,8 @@ class Worker:
     def _install_telegram_profile(self):
         """Установить несекретный профиль до любого native plugin discovery."""
         os.environ['BRAI_IDENTITY_TELEGRAM_ID'] = self.telegram_id
-        sys.modules['_brai_identity_human'] = SimpleNamespace(
-            telegram_id=self.telegram_id, game_core_enabled=False, attach=None)
+        sys.modules.setdefault('_brai_identity_human', SimpleNamespace(
+            telegram_id=self.telegram_id, game_core_enabled=False, attach=None))
 
     async def _startup_gate(self, runner):
         """Provisioning даёт только bootstrap; tools и recovery требуют active."""
@@ -466,7 +478,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
-    asyncio.run(run(args.config))
+    try:
+        asyncio.run(run(args.config))
+    except SystemExit as error:
+        exit_code = 0 if error.code is None else error.code if type(error.code) is int else 1
+    else:
+        exit_code = 0
+    if 'gateway.run' in sys.modules:
+        sys.modules['gateway.run']._exit_after_graceful_shutdown(exit_code)
+    raise SystemExit(exit_code)
 
 
 if __name__ == '__main__':

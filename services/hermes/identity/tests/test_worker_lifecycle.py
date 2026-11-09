@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from identity.worker import Worker
+from identity.worker import Worker, main
 from identity.ipc import Peer, RpcError
 
 
@@ -94,6 +94,29 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.calls.append('active_auth')
         return active
 
+    def test_native_exit_funnel_preserves_stop_failure_and_restart_codes(self):
+        for outcome, expected in [(None, 0), (SystemExit(None), 0),
+                                  (SystemExit(1), 1), (SystemExit(75), 75)]:
+            with self.subTest(code=expected), patch.object(sys, 'argv',
+                    ['worker', '--config', '/unused/worker.json']), patch(
+                    'identity.worker.run', lambda _: None), patch(
+                    'identity.worker.asyncio.run', side_effect=outcome), patch.object(
+                    sys.modules['gateway.run'], '_exit_after_graceful_shutdown', create=True) as finish:
+                with self.assertRaises(SystemExit) as stopped:
+                    main()
+                self.assertEqual(stopped.exception.code, expected)
+                finish.assert_called_once_with(expected)
+
+    def test_bootstrap_exit_without_native_import_preserves_failure(self):
+        with patch.dict(sys.modules), patch.object(sys, 'argv',
+                ['worker', '--config', '/unused/worker.json']), patch(
+                'identity.worker.run', lambda _: None), patch(
+                'identity.worker.asyncio.run', side_effect=SystemExit(1)):
+            sys.modules.pop('gateway.run', None)
+            with self.assertRaises(SystemExit) as stopped:
+                main()
+            self.assertEqual(stopped.exception.code, 1)
+
     async def test_bootstrap_probe_eof_keeps_worker_available_for_ingress(self):
         worker = await self.worker()
         await asyncio.sleep(0)
@@ -101,6 +124,23 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(worker.exited.is_set())
         self.assertIsNone(worker.exit_code)
         self.assertNotIn('gate', self.calls)
+
+    async def test_reconnect_keeps_cached_plugin_attachment_for_new_adapter(self):
+        worker = await self.worker()
+        try:
+            with patch.dict(sys.modules), patch.dict(os.environ, {
+                    'BRAI_IDENTITY_MODE': 'worker', 'BRAI_DIALOGUES_REQUIRED': '0'}):
+                sys.modules.pop('_brai_identity_human', None)
+                worker._install_telegram_profile()
+                attach = AsyncMock()
+                sys.modules['_brai_identity_human'].attach = attach
+                worker.adapter = NS()
+                worker._install_telegram_profile()
+                await worker._operational_ready(worker.runner)
+                attach.assert_awaited_once_with(worker.adapter)
+                self.assertTrue(worker.operational.is_set())
+        finally:
+            await worker.stop_runtime()
 
     async def test_bootstrap_does_not_start_tools_or_recovery(self):
         worker = await self.worker()
@@ -128,6 +168,37 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.calls.count('native_start'), 1)
         finally:
             await worker.stop_runtime()
+
+    async def test_reconnect_waits_for_closed_bootstrap_peer_drain(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        worker.peer = NS(closed=True)
+        worker.peer_released.clear()
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            client = Peer(reader, writer, {})
+            reading = asyncio.create_task(client.run())
+            call = asyncio.create_task(client.call('health', {'require_tools': True}, timeout=2))
+            try:
+                await asyncio.sleep(.02)
+                self.assertFalse(call.done())
+                self.assertIsNone(worker.runner)
+                worker.peer = None
+                worker.peer_released.set()
+                receipt = await call
+                self.assertTrue(receipt['operational'])
+                self.assertEqual(self.calls.count('native_start'), 1)
+            finally:
+                writer.close()
+                await reading
+                await asyncio.gather(call, return_exceptions=True)
+                if worker.peer is not None:
+                    await asyncio.wait_for(worker.peer_released.wait(), 2)
+                server.close()
+                await server.wait_closed()
 
     async def test_secondary_operator_health_preserves_the_active_ingress_and_runtime(self):
         worker = await self.worker()
@@ -323,6 +394,88 @@ def patch_hunks(text, wanted):
 
 @unittest.skipUnless(os.environ.get('HERMES_TEST_ENGINE'), 'Pinned public engine required')
 class NativeHooksTest(unittest.TestCase):
+    def test_independent_os_profile_uses_one_root_for_all_native_helpers(self):
+        engine = Path(os.environ['HERMES_TEST_ENGINE'])
+        text = (Path(__file__).resolve().parents[2] / 'files/native.patch').read_text()
+        selected = {
+            'hermes_constants.py': {'get_default_hermes_root', 'profile_name_for_home'},
+            'hermes_cli/profiles.py': {'profile_root_for_env_home', '_get_default_hermes_home', '_get_profiles_root'},
+            'hermes_cli/service_manager.py': {'_profile_dir_for_gateway_service'},
+            'tools/bot_mode_probe.py': {'_hermes_root', '_profile_name'},
+            'tui_gateway/change_watcher.py': {'_bot_relay_outbox_sig'},
+        }
+        scope = {'os': os, 'Path': Path, '_default_hermes_root_memo': None,
+                 '_expand_hermes_home': Path,
+                 '_get_platform_default_hermes_home': lambda: Path('/tmp/native-default/.hermes'),
+                 '_profile_from_service': lambda name: name.removeprefix('gateway-'),
+                 'validate_profile_name': lambda name: None}
+        constants = ModuleType('hermes_constants')
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / 'profiles/personal'
+            home.mkdir(parents=True)
+            scope['get_process_hermes_home'] = lambda: home
+            scope['_watcher_home'] = lambda: home
+            scope['_bot_relay_outbox_seen'] = 0
+            import contextlib
+            scope['contextlib'] = contextlib
+            for name, wanted in selected.items():
+                source = (engine / name).read_text()
+                for target, old, new in patch_hunks(text, {name}):
+                    old, new = old.rstrip('\n') + '\n', new.rstrip('\n') + '\n'
+                    self.assertEqual(source.count(old), 1, name)
+                    source = source.replace(old, new, 1)
+                functions = [node for node in ast.parse(source).body
+                             if isinstance(node, ast.FunctionDef) and node.name in wanted]
+                self.assertEqual({node.name for node in functions}, wanted)
+                module = ast.Module(body=[ast.ImportFrom(module='__future__',
+                    names=[ast.alias(name='annotations')], level=0), *functions], type_ignores=[])
+                exec(compile(ast.fix_missing_locations(module), name, 'exec'), scope)
+            constants.get_default_hermes_root = scope['get_default_hermes_root']
+            constants.profile_name_for_home = scope['profile_name_for_home']
+            with patch.dict(sys.modules, {'hermes_constants': constants}), patch.dict(
+                    os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': str(home)}):
+                self.assertEqual(scope['get_default_hermes_root'](), home)
+                self.assertEqual(scope['get_default_hermes_root'](home='/foreign/profiles/other'), home)
+                self.assertEqual(scope['_get_profiles_root'](), home / 'profiles')
+                self.assertEqual(scope['profile_root_for_env_home'](str(home), Path('/foreign')), home)
+                self.assertEqual(scope['_profile_dir_for_gateway_service']('gateway-default'), home)
+                self.assertEqual(scope['_hermes_root'](home), home)
+                self.assertEqual(scope['_profile_name'](home), 'default')
+                def inside_only(path):
+                    self.assertEqual(path, home / 'bot_relay/outbox')
+                    return iter(())
+                with patch.object(Path, 'iterdir', inside_only):
+                    self.assertIsNone(scope['_bot_relay_outbox_sig']())
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'ordinary', 'HERMES_HOME': str(home)}):
+                self.assertEqual(scope['get_default_hermes_root'](), home.parent.parent)
+                self.assertEqual(scope['profile_root_for_env_home'](str(home), Path('/foreign')), home.parent.parent)
+
+    def test_hosted_room_database_stays_inside_independent_os_home(self):
+        engine = Path(os.environ['HERMES_TEST_ENGINE'])
+        source = (engine / 'gateway/hosted_rooms.py').read_text()
+        text = (Path(__file__).resolve().parents[2] / 'files/native.patch').read_text()
+        for name, old, new in patch_hunks(text, {'gateway/hosted_rooms.py'}):
+            self.assertEqual(source.count(old), 1)
+            source = source.replace(old, new, 1)
+        tree = ast.parse(source)
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == 'default_db_path')
+        module = ast.Module(body=[function], type_ignores=[])
+        scope = {'Path': Path}
+        exec(compile(ast.fix_missing_locations(module), 'hosted room path', 'exec'), scope)
+        constants = ModuleType('hermes_constants')
+        home = Path('/var/lib/brai-identity/dev/profiles/personal')
+        constants.get_hermes_home = lambda: home
+        with patch.dict(sys.modules, {'hermes_constants': constants}):
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}):
+                self.assertEqual(scope['default_db_path'](), home / 'shared-state.db')
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                self.assertEqual(scope['default_db_path'](), home.parent.parent / 'shared-state.db')
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(scope['default_db_path'](), home.parent.parent / 'shared-state.db')
+                home = Path('/tmp/standalone-hermes')
+                self.assertEqual(scope['default_db_path'](), home / 'shared-state.db')
+
     def test_native_patch_reconstructs_base_and_preserves_owner_scope(self):
         engine = Path(os.environ['HERMES_TEST_ENGINE'])
         native_patch = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()

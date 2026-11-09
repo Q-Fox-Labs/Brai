@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,7 @@ from .scope import UNSCOPED, request_scope
 MAX_FRAME = 2 * 1024 * 1024
 _resolvers = {}
 _notices = {}
+_logger = logging.getLogger(__name__)
 
 
 async def broker_call(method, params, timeout=15):
@@ -51,15 +53,50 @@ async def broker_call(method, params, timeout=15):
         await writer.wait_closed()
 
 
-async def _notice(adapter, chat, text):
+async def _control_reply(adapter, chat, message, text):
+    """Ответить в исходную тему; сообщить исход без содержимого, кодов и повтора."""
+    thread = getattr(message, 'message_thread_id', None)
+    if thread is not None and (type(thread) is not int or thread < 1):
+        _logger.warning('telegram_control_reply status=invalid_route')
+        return False
+    options = {'metadata': {'message_thread_id': thread}} if thread is not None else {}
+    try:
+        result = _receipt(await adapter.send(str(chat), text, **options))
+    except Exception as error:
+        # AIDEV-NOTE: Текст исключения может содержать Bot API token или команду.
+        _logger.warning('telegram_control_reply status=unknown error=%s', type(error).__name__)
+        return False
+    if result.get('success') is not True:
+        _logger.warning('telegram_control_reply status=unconfirmed')
+        return False
+    _logger.info('telegram_control_reply status=sent')
+    return True
+
+
+async def _notice(adapter, chat, message, text):
+    """Ограничить подтверждённые уведомления отдельно для каждой темы личного чата."""
     now = time.monotonic()
-    key = str(chat)
+    key = (str(chat), str(getattr(message, 'message_thread_id', None) or ''))
     if now - _notices.get(key, -100) < 30:
         return
     if len(_notices) > 1000:
         _notices.clear()
-    _notices[key] = now
-    await adapter.send(str(chat), text)
+    if await _control_reply(adapter, chat, message, text):
+        _notices[key] = now
+
+
+def _linked_accounts_text(accounts):
+    """Показать только имена и usernames из Telegram, без внутренних идентификаторов."""
+    if not isinstance(accounts, list) or not accounts:
+        return 'Имена подключённых аккаунтов сейчас недоступны.'
+    labels = []
+    for account in accounts[:2]:
+        if not isinstance(account, dict):
+            continue
+        name = account.get('name') or 'Имя аккаунта недоступно'
+        username = account.get('username')
+        labels.append('• ' + name + (' (@' + username + ')' if username else ''))
+    return 'Сейчас подключены:\n' + '\n'.join(labels)
 
 
 async def admit_update(update, adapter):
@@ -78,18 +115,28 @@ async def admit_update(update, adapter):
     link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
     if link:
         if not re.fullmatch(r'[A-Za-z0-9_-]{43}', link[1]):
-            await adapter.send(telegram, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
+            await _control_reply(adapter, telegram, message, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
             return False
         try:
-            result = await broker_call('identity.link-redeem', {'telegramId': telegram, 'code': link[1]})
-            text = ('Аккаунт подключён к вашему профилю. Память и файлы общие, беседа отдельная.'
-                    if result.get('user') else 'Не удалось привязать аккаунт. Код истёк, использован или аккаунт уже принадлежит другому профилю.')
+            result = await broker_call('identity.link-redeem', {'telegramId': telegram, 'code': link[1]}, timeout=40)
+            text = ('Аккаунт привязан.\n\n' + _linked_accounts_text(result.get('accounts')) +
+                    '\n\nОба аккаунта имеют доступ к общей памяти, файлам и другим данным. '
+                    'Вы можете отвязать любой из них, в том числе подключённый первым: просто попросите об этом агента. '
+                    'Можно продолжать общение.'
+                    if result.get('user') else 'Не удалось привязать аккаунт. Команда истекла, уже использована или этот аккаунт подключён отдельно. Попросите агента проверить подключение.')
+            if result.get('user') and len(result.get('accounts') or []) == 1:
+                text = ('Второй аккаунт не добавлен: команда отправлена с уже подключённого аккаунта.\n\n' +
+                        _linked_accounts_text(result['accounts']) +
+                        '\n\nПопросите агента выдать новую команду и отправьте её со второго личного аккаунта.')
+            elif result.get('user') and not result.get('accounts'):
+                text = ('Команда обработана, но проверить список подключённых аккаунтов сейчас не удалось. '
+                        'Попросите агента проверить подключение. Повторять команду не нужно.')
         except Exception:
             text = 'Результат привязки не подтверждён. Напишите обычное сообщение, чтобы проверить доступ.'
-        await adapter.send(telegram, text)
+        await _control_reply(adapter, telegram, message, text)
         return False
     if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
-        await adapter.send(telegram, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
+        await _control_reply(adapter, telegram, message, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
         await broker_call('identity.resolve', {'telegramId': telegram})
@@ -103,12 +150,12 @@ async def admit_update(update, adapter):
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
-            await _notice(adapter, telegram, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
+            await _notice(adapter, telegram, message, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
         except Exception:
-            await _notice(adapter, telegram, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
+            await _notice(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False
     if str(getattr(chat, 'id', '')) == telegram:
-        await _notice(adapter, telegram, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
+        await _notice(adapter, telegram, message, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
 
 def _receipt(value):
@@ -117,8 +164,17 @@ def _receipt(value):
     elif is_dataclass(value):
         data = asdict(value)
     else:
-        data = {key: getattr(value, key) for key in ('success', 'message_id', 'error', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind') if hasattr(value, key)}
-    return {key: data[key] for key in ('success', 'message_id', 'error', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind') if key in data}
+        data = {key: getattr(value, key) for key in ('success', 'message_id', 'error', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind', 'raw_response') if hasattr(value, key)}
+    receipt = {key: data[key] for key in ('success', 'message_id', 'error', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind') if key in data}
+    # Native Telegram _send_chunks хранит все части в raw_response; наружу передаём только ID.
+    raw = data.get('raw_response')
+    parts = raw.get('message_ids') if isinstance(raw, dict) else None
+    if isinstance(parts, list):
+        existing = receipt.get('continuation_message_ids', [])
+        ids = [*(existing if isinstance(existing, list) else []), *parts]
+        receipt['continuation_message_ids'] = [str(value) for value in ids
+            if re.fullmatch(r'[1-9][0-9]{0,19}', str(value or ''))]
+    return receipt
 
 
 class Resolver:
@@ -265,13 +321,15 @@ class Resolver:
                              for item in inputs]}
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
-        unlink = re.fullmatch(r'подтверждаю отвязку telegram-аккаунта ([1-9][0-9]{0,19})',
-                              (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!'))
+        answer = getattr(event, 'text', '') or ''
+        turn['inputId'] = input_id
+        turn.pop('questionReceipt', None)
+        turn.pop('accountOfferId', None)
         await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
-            'unlinkConsent': unlink[1] if unlink else '',
-            'linkConsent': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
-                ('подтверждаю привязку моего второго аккаунта',),
+            'accountAnswer': answer if isinstance(answer, str) and len(answer) <= 8192 else '',
+            'accountRefused': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
+                ('нет', 'отмена', 'не подтверждаю', 'не разрешаю', 'не подключай', 'не отвязывай'),
             **({'threadId': int(route[1])} if route[1] else {})})
         self.ledger.admit(profile, route, turn['metadata'], str(event.message_id))
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
@@ -329,12 +387,18 @@ class Resolver:
                  str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
         if route != self.turns[uid]['route']:
             raise PermissionError('Delivery outside current conversation')
-        state = await broker_call('ingress.status', {'uid': uid, 'turnId': self.turns[uid]['id']})
-        metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
+        input_id = turn.get('inputId')
         def current():
-            if self.turns.get(uid) is not turn:
+            if self.turns.get(uid) is not turn or turn.get('inputId') != input_id:
                 raise PermissionError('Owner turn changed')
+        state = await broker_call('ingress.status', {'uid': uid, 'turnId': turn['id'],
+            **({'inputId': input_id} if input_id else {})})
         current()
+        turn['accountOfferId'] = state.get('accountOfferId') if state.get('needsAccountConsent') is True else None
+        interim = metadata.get('_interim_send') is True
+        metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
+        if interim:
+            metadata['_interim_send'] = True
         return route, metadata, turn, current, bool(state.get('suppressFinal'))
 
     async def _background_delivery_context(self, profile, owner, payload, scope_id):
@@ -368,6 +432,8 @@ class Resolver:
             if not callable(supports) or not supports('dm', metadata):
                 return {'success': False, 'error': 'Draft transport unavailable'}
         uid = profile['uid']
+        input_id = turn.get('inputId') if turn else None
+        offer_id = turn.get('accountOfferId') if turn else None
         file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
         if action == 'send_file_set' or action in file_actions:
             from files.native import telegram_sender, validate_telegram, presentation
@@ -432,6 +498,36 @@ class Resolver:
         if action == 'send_typing' and result is None:
             return {'success': True}
         receipt = _receipt(result)
+        final = (action == 'send' and not metadata.get('_interim_send') or
+                 action == 'edit_message' and payload.get('finalize') is True)
+        if final and turn is not None and input_id and offer_id:
+            ids = [receipt.get('message_id') or payload.get('message_id')]
+            continuations = receipt.get('continuation_message_ids', [])
+            if isinstance(continuations, list):
+                ids.extend(continuations)
+            valid = [int(value) for value in ids if re.fullmatch(r'[1-9][0-9]{0,19}', str(value or ''))]
+            if self.turns.get(uid) is turn and turn.get('inputId') == input_id:
+                if receipt.get('success') is True and valid:
+                    try:
+                        fresh = await broker_call('ingress.status', {'uid': uid, 'turnId': turn['id'], 'inputId': input_id})
+                    except Exception:
+                        fresh = {}
+                    if (self.turns.get(uid) is turn and turn.get('inputId') == input_id
+                            and fresh.get('accountOfferId') == offer_id and fresh.get('needsAccountConsent') is True):
+                        previous = turn.get('questionReceipt') or {}
+                        if previous.get('inputId') == input_id and previous.get('accountOfferId') == offer_id:
+                            valid.append(int(previous['questionMessageId']))
+                        turn['questionReceipt'] = {'inputId': input_id, 'accountOfferId': offer_id,
+                                                   'questionMessageId': str(max(valid))}
+                    else:
+                        previous = turn.get('questionReceipt') or {}
+                        if previous.get('inputId') == input_id and previous.get('accountOfferId') == offer_id:
+                            turn.pop('questionReceipt', None)
+                else:
+                    previous = turn.get('questionReceipt') or {}
+                    if previous.get('inputId') == input_id and previous.get('accountOfferId') == offer_id:
+                        turn.pop('questionReceipt', None)
+
         if receipt.get('success'):
             for message_id in [receipt.get('message_id'), *(receipt.get('continuation_message_ids') or [])]:
                 if message_id:
@@ -598,7 +694,10 @@ class Resolver:
         turn = self.turns.get(uid)
         if turn and turn.get('workerTurnId') == worker_turn:
             self.turns.pop(uid, None)
-            await broker_call('ingress.close', {'uid': uid, 'turnId': turn['id']})
+            receipt = turn.get('questionReceipt') or {}
+            await broker_call('ingress.close', {'uid': uid, 'turnId': turn['id'],
+                **({'inputId': turn['inputId']} if turn.get('inputId') else {}),
+                **(receipt if receipt.get('inputId') == turn.get('inputId') else {})})
 
 
 def create_resolver(adapter, runner):

@@ -38,9 +38,9 @@ const permittedTool = (tool, role) => object(tool) && text(tool.name) && !['publ
 
 /** Политика control с явно переданными доверенными портами. */
 export class Control {
-  constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, toolCatalog, perUserRuntime, historyCall, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
+  constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
     if (!text(origin) || new URL(origin).origin !== origin || !text(cursorKey) || Buffer.byteLength(cursorKey) < 32 || typeof registry !== 'function' || typeof authCall !== 'function') throw new TypeError('Invalid control configuration');
-    Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, toolCatalog, perUserRuntime, historyCall, archiveProfile, quarantineArtifactsOwnerId });
+    Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, archiveProfile, quarantineArtifactsOwnerId });
     this.memorySnapshots = new Map();
     this.memoryReads = 0;
   }
@@ -188,56 +188,104 @@ export class Control {
     return runtime.callTool(name, args, signal);
   }
 
-  /** Доставить неизменяемое предупреждение либо подтверждённую команду, не возвращая секрет модели. */
-  async sendAccountLink({ uid, telegramId, phase, threadId }) {
+  /** Проверить текущие аккаунты владельца по Auth, не по автору памяти. */
+  async accountIdentity(uid, telegramId) {
+    const data = await this.registry(), profile = data?.version === 1 && data.profiles?.[String(uid)];
+    const resolved = await this.authCall('telegram-resolve', { telegramId }), user = resolved?.user;
+    if (!profile || profile.status !== 'active' || user?.status !== 'active' ||
+        user.id !== profile.userId || user.profileId !== profile.profileId) return null;
+    const identity = await this.authCall('identity-get', { userId: profile.userId });
+    const ids = identity?.telegramIds;
+    if (identity?.user?.status !== 'active' || identity.user.id !== user.id || identity.user.profileId !== profile.profileId ||
+        !Array.isArray(ids) || ids.length < 1 || ids.length > 2 || new Set(ids).size !== ids.length ||
+        ids.some(id => !/^[1-9][0-9]{0,19}$/.test(id)) || !ids.includes(telegramId)) return null;
+    return { user, ids };
+  }
+
+  /** Прочитать имена только уже проверенных аккаунтов; ошибки метаданных не меняют доступ. */
+  async accountNames(ids) {
+    return Promise.all(ids.map(async id => {
+      try {
+        const value = await this.telegramInfo('getChat', id);
+        if (String(value?.id) !== id || value.type !== 'private') throw new Error('INVALID_ACCOUNT');
+        const clean = value => typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 128) : '';
+        const name = clean([value.first_name, value.last_name].filter(part => typeof part === 'string').join(' '));
+        return { name: name || null, username: /^[A-Za-z0-9_]{1,32}$/.test(value.username ?? '') ? value.username : null };
+      } catch { return { name: null, username: null }; }
+    }));
+  }
+
+  /** Получить публичную ссылку именно на текущего бота. */
+  async botURL() {
+    const value = await this.telegramInfo('getMe');
+    if (value?.is_bot !== true || !/^[A-Za-z0-9_]{1,32}$/.test(value.username ?? '')) throw new Error('BOT_UNAVAILABLE');
+    return 'https://t.me/' + value.username;
+  }
+
+  /** Подготовить сведения для вопроса агента либо отправить его вступление и отдельную команду. */
+  async sendAccountLink({ uid, telegramId, phase, threadId, message }) {
     if (!Number.isSafeInteger(uid) || uid <= 0 || !/^[1-9][0-9]{0,19}$/.test(telegramId ?? '') ||
         !['offer','command'].includes(phase) || typeof this.telegramSend !== 'function' ||
         threadId !== undefined && (!Number.isSafeInteger(threadId) || threadId <= 0)) return { status: 'denied' };
     try {
-      const data = await this.registry(), profile = data?.version === 1 && data.profiles?.[String(uid)];
-      const resolved = await this.authCall('telegram-resolve', { telegramId });
-      const user = resolved?.user;
-      if (!profile || profile.status !== 'active' || user?.status !== 'active' || user.id !== profile.userId ||
-          user.profileId !== profile.profileId || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
-      let message = 'Можно подключить ваш второй личный Telegram-аккаунт к этому профилю. Он получит доступ ко всей вашей памяти, файлам и другим данным. Если передать команду другому человеку, он получит такой же доступ. Беседы останутся отдельными. Подтверждаете привязку своего личного второго аккаунта? Для подтверждения ответьте «Подтверждаю привязку моего второго аккаунта». Для отказа — «Нет».';
-      if (phase === 'command') {
-        const issued = await this.authCall('telegram-link-issue', { telegramId });
-        if (!/^[A-Za-z0-9_-]{43}$/.test(issued?.code ?? '')) return { status: 'unavailable' };
-        message = 'Отправьте эту команду этому же боту из своего второго личного Telegram-аккаунта:\n/start link_' + issued.code +
-          '\nКоманда действует 10 минут. Не передавайте её другим людям: выполнивший её получит доступ ко всей вашей памяти, файлам и данным.';
+      const identity = await this.accountIdentity(uid, telegramId);
+      if (!identity) return { status: 'denied' };
+      if (phase === 'offer') {
+        const accounts = await this.accountNames(identity.ids);
+        if (identity.ids.length >= 2) return { status: 'limit_reached', accounts };
+        return { status: 'needs_consent', botUrl: await this.botURL(), accounts };
       }
-      const receipt = await this.telegramSend({ telegramId, message, ...(threadId === undefined ? {} : { threadId }) });
+      if (typeof message !== 'string' || !message.trim() || message.length > 2000 || /(?:https?:|t\.me\/|@[A-Za-z0-9_]|\/start\b)/i.test(message)) return { status: 'needs_instruction' };
+      const route = { telegramId, ...(threadId === undefined ? {} : { threadId }) };
+      const intro = await this.telegramSend({ ...route, message: message + '\n' + await this.botURL() });
+      if (intro?.ok !== true) return { status: intro?.ok === false ? 'failed' : 'unknown' };
+      // AIDEV-NOTE: При неизвестной доставке вступления секрет ещё не выпускается.
+      const issued = await this.authCall('telegram-link-issue', { telegramId });
+      if (!/^[A-Za-z0-9_-]{43}$/.test(issued?.code ?? '')) return { status: 'unavailable' };
+      const command = '/start link_' + issued.code;
+      const receipt = await this.telegramSend({ ...route, message: command,
+        entities: [{ type: 'pre', offset: 0, length: command.length }],
+        replyMarkup: { inline_keyboard: [[{ text: 'Скопировать', copy_text: { text: command } }]] } });
       return { status: receipt?.ok === true ? 'sent' : receipt?.ok === false ? 'failed' : 'unknown' };
     } catch { return { status: 'unknown' }; }
   }
 
-  /** Предупредить об отзыве выбранного аккаунта либо выполнить подтверждённую отвязку. */
+  /** Погасить команду до модели и отдельно прочитать имена актуальных связанных аккаунтов. */
+  async redeemAccountLink(params) {
+    const linked = await this.authCall('telegram-link-redeem', params);
+    if (!linked?.user) return { user: null, accounts: [] };
+    try {
+      const current = await this.authCall('identity-get', { userId: linked.user.id });
+      const ids = current?.telegramIds;
+      if (current?.user?.status !== 'active' || current.user.id !== linked.user.id || current.user.profileId !== linked.user.profileId ||
+          !Array.isArray(ids) || ids.length > 2 || new Set(ids).size !== ids.length || !ids.includes(params.telegramId) ||
+          ids.some(id => !/^[1-9][0-9]{0,19}$/.test(id))) return { user: null, accounts: [] };
+      return { user: current.user, accounts: await this.accountNames(ids) };
+    } catch {
+      // Успешную привязку нельзя повторять из-за временного отказа чтения имени.
+      return { user: linked.user, accounts: [] };
+    }
+  }
+
+  /** Подготовить цель для вопроса агента либо выполнить подтверждённую отвязку. */
   async sendAccountUnlink({ uid, telegramId, phase, target, targetTelegramId, threadId }) {
     if (!Number.isSafeInteger(uid) || uid <= 0 || !/^[1-9][0-9]{0,19}$/.test(telegramId ?? '') ||
         !['offer','confirm'].includes(phase) || !['current','other'].includes(target) || typeof this.telegramSend !== 'function' ||
         threadId !== undefined && (!Number.isSafeInteger(threadId) || threadId <= 0) ||
         phase === 'confirm' && !/^[1-9][0-9]{0,19}$/.test(targetTelegramId ?? '')) return { status: 'denied' };
     try {
-      const data = await this.registry(), profile = data?.version === 1 && data.profiles?.[String(uid)];
-      const resolved = await this.authCall('telegram-resolve', { telegramId }), user = resolved?.user;
-      if (!profile || profile.status !== 'active' || user?.status !== 'active' || user.id !== profile.userId ||
-          user.profileId !== profile.profileId || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
-      const identity = await this.authCall('identity-get', { userId: profile.userId });
-      if (identity?.user?.status !== 'active' || identity.user.profileId !== profile.profileId ||
-          !Array.isArray(identity.telegramIds) || !identity.telegramIds.includes(telegramId)) return { status: 'denied' };
-      const selected = phase === 'offer' ? (target === 'current' ? telegramId : identity.telegramIds.find(id => id !== telegramId)) : targetTelegramId;
-      if (!selected || !identity.telegramIds.includes(selected) ||
-          (target === 'current') !== (selected === telegramId)) return { status: 'denied', reason: 'account-unavailable' };
-      if (user.role === 'admin' && identity.telegramIds.length <= 1) return { status: 'denied', reason: 'admin-last-channel' };
-      let message = 'Отключить Telegram-аккаунт ' + selected + ' от вашего профиля? Он потеряет доступ ко всей общей памяти, файлам и данным. Данные профиля сохранятся; входы на сайт будут отозваны.' +
-        (identity.telegramIds.length === 1 ? ' Это последний подключённый канал: после отключения доступ через Telegram пропадёт.' : '') +
-        ' Для подтверждения ответьте «Подтверждаю отвязку Telegram-аккаунта ' + selected + '». Для отказа — «Нет».';
-      if (phase === 'confirm') {
-        const result = await this.authCall('telegram-unlink', { telegramId, targetTelegramId: selected });
-        if (result?.unlinked !== true) return { status: 'denied', reason: 'account-unavailable' };
-        message = 'Telegram-аккаунт ' + selected + ' отключён от профиля. Память и файлы сохранены; входы на сайт отозваны.' +
-          (identity.telegramIds.length === 1 ? ' Подключённых каналов Telegram больше нет.' : '');
-      }
+      const identity = await this.accountIdentity(uid, telegramId);
+      if (!identity) return { status: 'denied' };
+      const selected = phase === 'offer' ? (target === 'current' ? telegramId : identity.ids.find(id => id !== telegramId)) : targetTelegramId;
+      if (!selected || !identity.ids.includes(selected) || (target === 'current') !== (selected === telegramId)) return { status: 'denied', reason: 'account-unavailable' };
+      if (identity.user.role === 'admin' && identity.ids.length <= 1) return { status: 'denied', reason: 'admin-last-channel' };
+      const [account] = await this.accountNames([selected]);
+      if (phase === 'offer') return { status: 'needs_consent', targetTelegramId: selected, account, lastChannel: identity.ids.length === 1 };
+      const result = await this.authCall('telegram-unlink', { telegramId, targetTelegramId: selected });
+      if (result?.unlinked !== true) return { status: 'denied', reason: 'account-unavailable' };
+      const label = (account.name ?? 'Имя аккаунта недоступно') + (account.username ? ' (@' + account.username + ')' : '');
+      const message = 'Аккаунт ' + label + ' отключён. Память, файлы и другие данные сохранены.' +
+        (identity.ids.length === 1 ? ' Подключённых Telegram-аккаунтов больше нет.' : ' Вы можете продолжить общение с другого подключённого аккаунта.');
       const receipt = await this.telegramSend({ telegramId, message, ...(threadId === undefined ? {} : { threadId }) });
       return { status: receipt?.ok === true ? 'sent' : receipt?.ok === false ? 'failed' : 'unknown', targetTelegramId: selected };
     } catch { return { status: 'unknown' }; }
@@ -520,17 +568,27 @@ export async function startControl(config, adapters = {}) {
   const registry = () => readProtectedJSON(config.registryPath);
   const memoryRead = createMemoryReader(config.memorySocket);
   const artifactsCall = createArtifactReader({ wire, internalBaseURL: config.artifactsInternalBaseURL });
-  const telegramSend = async ({ telegramId, message, threadId }) => {
+  const telegramSend = async ({ telegramId, message, threadId, entities, replyMarkup }) => {
     const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: telegramId, text: message, ...(threadId === undefined ? {} : { message_thread_id: threadId }) }), signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({ chat_id: telegramId, text: message, ...(threadId === undefined ? {} : { message_thread_id: threadId }), ...(entities === undefined ? {} : { entities }), ...(replyMarkup === undefined ? {} : { reply_markup: replyMarkup }) }), signal: AbortSignal.timeout(10000),
     });
     if (response.status >= 500 || response.status === 429) return {};
     const value = await response.json();
     return { ok: value?.ok === true ? true : value?.ok === false ? false : undefined };
   };
+  const telegramInfo = async (method, telegramId) => {
+    if (!['getMe', 'getChat'].includes(method)) throw new Error('INVALID_ARGUMENT');
+    const response = await fetch('https://api.telegram.org/bot' + config.telegramToken + '/' + method, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(method === 'getChat' ? { chat_id: telegramId } : {}), signal: AbortSignal.timeout(3000),
+    });
+    const value = await response.json();
+    if (value?.ok !== true) throw new Error('TELEGRAM_METADATA_UNAVAILABLE');
+    return value.result;
+  };
   const control = new Control({ origin: config.origin, cursorKey: config.cursorKey, registry, authCall,
-    memoryRead, telegramSend: adapters.telegramSend ?? telegramSend, chatRead: adapters.chatRead ?? createChatRead(), artifactsCall: adapters.artifactsCall ?? artifactsCall,
+    memoryRead, telegramSend: adapters.telegramSend ?? telegramSend, telegramInfo: adapters.telegramInfo ?? telegramInfo, chatRead: adapters.chatRead ?? createChatRead(), artifactsCall: adapters.artifactsCall ?? artifactsCall,
     toolCatalog: adapters.toolCatalog, perUserRuntime: adapters.perUserRuntime, historyCall: adapters.historyCall,
     quarantineProfile: config.quarantineProfile, quarantineArtifactsOwnerId: config.quarantineArtifactsOwnerId });
   control.onIdentityChanged = adapters.onIdentityChanged;
@@ -560,7 +618,7 @@ export async function privateCall(runtime, method, params) {
   if (method === 'identity.link-redeem') {
     if (Object.keys(params).some(key=>!['telegramId','code'].includes(key)) ||
         !/^[1-9][0-9]{0,19}$/.test(params.telegramId ?? '') || !/^[A-Za-z0-9_-]{43}$/.test(params.code ?? '')) throw new Error('INVALID_ARGUMENT');
-    return authCall('telegram-link-redeem',params);
+    return control.redeemAccountLink(params);
   }
   if (['identity.lifecycle-claim', 'identity.lifecycle-renew', 'identity.lifecycle-complete'].includes(method)) {
     // AIDEV-NOTE: Эти методы доступны только stdin root broker, не Unix API worker.
@@ -575,7 +633,7 @@ export async function privateCall(runtime, method, params) {
   }
   if (method === 'login.send') return control.sendLogin(params);
   if (method === 'telegram.link') {
-    if (Object.keys(params).some(key=>!['uid','telegramId','phase','threadId'].includes(key))) throw new Error('INVALID_ARGUMENT');
+    if (Object.keys(params).some(key=>!['uid','telegramId','phase','threadId','message'].includes(key))) throw new Error('INVALID_ARGUMENT');
     return control.sendAccountLink(params);
   }
   if (method === 'telegram.unlink') {

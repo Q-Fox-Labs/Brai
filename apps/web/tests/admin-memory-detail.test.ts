@@ -67,7 +67,7 @@ test("full chain assembles real Unix HTTP through NATS-sized Control replies", a
   const c=new Control({origin:"https://example.test",cursorKey:"x".repeat(32),
    registry:async()=>({version:1,profiles:{"1001":{userId:"u",profileId:"p",memoryEpoch:"e",status:"active"}}}),
    authCall:async(name:string)=>name==="session"?{status:200,body:{user:{id:"actor",role:"admin",status:"active"},session:{}}}:(audits++,{status:200}),
-   memoryRead:createMemoryReader(socket), chatRead:undefined, artifactsCall:undefined, telegramSend:undefined,
+   memoryRead:createMemoryReader(socket), chatRead:undefined, artifactsCall:undefined, telegramSend:undefined, telegramInfo:undefined,
    toolCatalog:undefined, perUserRuntime:undefined, historyCall:undefined,
    quarantineProfile:undefined, quarantineArtifactsOwnerId:undefined});
   const result=await mod.exports.loadMemoryDetail("u","m",async cursor=>{

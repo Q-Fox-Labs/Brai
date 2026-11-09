@@ -2,6 +2,7 @@
 // ABOUTME: Показывает управление пользователями и приглашениями администратора.
 // ABOUTME: Данные памяти и чатов запрашиваются только после выбора пользователя.
 import { useEffect, useRef, useState } from "react";
+import WorkspaceFrame from "../shell/workspace-frame";
 import { AdminDetail } from "./detail";
 import { AdminPersonalSection } from "./personal";
 import { ArchiveTarget, ARCHIVE_TARGET } from "./archive-target";
@@ -29,8 +30,9 @@ async function call(operation: string, input: Record<string, string> = {}, write
  return body;
 }
 /** Управляет аккаунтами; выбранная цель всегда передаётся явно. */
-export default function AdminScreen() {
+export default function AdminScreen({ userId }: { userId: string }) {
  const [users, setUsers] = useState<User[]>([]), [invites, setInvites] = useState<Invite[]>([]), [selected, setSelected] = useState<string | null>(null);
+ const [section, setSection] = useState<"users" | "data" | "invites">("users");
  const [userFilter, setUserFilter] = useState<"all" | "available" | "revoked">("available");
  const [detail, setDetail] = useState<unknown>(null), [error, setError] = useState(""), [code, setCode] = useState("");
  const [telegramId, setTelegramId] = useState(""), [requests, setRequests] = useState<RequestRecord[]>([]), [busy, setBusy] = useState(false);
@@ -109,30 +111,33 @@ export default function AdminScreen() {
  const chatCursor = view === "admin-chats-get" && detail && typeof detail === "object" && "nextCursor" in detail && typeof detail.nextCursor === "string" ? detail.nextCursor : null;
  const page = rawPage?.items ? { nextCursor: rawPage.nextCursor, items: rawPage.items.map(item => ({ ...item, id: item.id || item.artifactId || "", title: item.title || item.filename })) } : null;
  const visibleUsers = users.filter(user => user.id !== ARCHIVE_TARGET);
- function userCard(user: User) { const contacts = user.telegramIds ?? (user.telegramId ? [user.telegramId] : []); return <article key={user.id} className="rounded-lg border p-4 space-y-2">
+ function userCard(user: User) { const contacts = user.telegramIds ?? (user.telegramId ? [user.telegramId] : []); return <article key={user.id} className="admin-user-card">
   <p><strong>{user.name || "Пользователь"}</strong> · Telegram: {contacts.length ? contacts.join(", ") : "нет подключённых аккаунтов"} · Профиль: {user.profileId ?? "—"}</p><p>Роль: {user.role === "admin" ? "администратор" : "пользователь"} · Статус: {userStatus(user)}</p>
-  <div className="flex flex-wrap gap-3"><button type="button" aria-pressed={selected === user.id} onClick={() => { selection.current++; setSelected(user.id); setDetail(null); }}>{selected === user.id ? "Выбран" : "Выбрать"}</button>
+  <div className="flex flex-wrap gap-3"><button type="button" onClick={() => { selection.current++; setSelected(user.id); setDetail(null); setSection("data"); }}>Открыть данные</button>
    <button type="button" onClick={() => void mutate("role-set", { userId: user.id, role: user.role === "admin" ? "user" : "admin" })}>{user.role === "admin" ? "Сделать пользователем" : "Сделать администратором"}</button>
    {user.status === "blocked" ? <button type="button" disabled={busy || inProgress(user.lifecycle)} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Восстановить доступ</button> : <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Отозвать доступ</button>}
    {user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Повторить подготовку</button>}
    {user.lifecycle?.kind === "stop" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Повторить отзыв</button>}
    <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button></div></article>; }
- return <main className="admin-screen"><a className="admin-back" href="/">← Назад в Brai</a><header className="admin-heading"><div><h1>Админка</h1><p>Пользователи, приглашения и доступ к данным</p></div></header>
+ return <WorkspaceFrame section="admin" userId={userId} title={{ users: "Пользователи", data: "Данные", invites: "Приглашения" }[section]} railTitle="Админка" rail={<nav className="admin-section-nav" aria-label="Разделы админки"><button type="button" data-frame-close-rail aria-current={section === "users" ? "page" : undefined} onClick={() => setSection("users")}>Пользователи</button><button type="button" data-frame-close-rail aria-current={section === "data" ? "page" : undefined} onClick={() => setSection("data")}>Данные</button><button type="button" data-frame-close-rail aria-current={section === "invites" ? "page" : undefined} onClick={() => setSection("invites")}>Приглашения</button></nav>}><main className="admin-screen">
   {error && <p role="alert">{error}</p>}
   {loadError && <p role="alert">{loadError}</p>}
   {accessError && <p role="alert">{accessError.message}</p>}
-  <section className="space-y-3"><h2>Пользователи</h2>
+  {section === "users" && <div className="admin-section"><section className="space-y-3"><div className="admin-section-heading"><div><h2>Пользователи</h2><p>Управление доступом и ролями</p></div><span>{visibleUsers.length}</span></div>
    <form className="admin-add-user" onSubmit={event => { event.preventDefault(); void access("users-add", { telegramId }); }}><label htmlFor="telegram-id">Telegram ID</label><div><input id="telegram-id" inputMode="numeric" value={telegramId} onChange={event => setTelegramId(event.target.value)} maxLength={20} autoComplete="off" /><button type="submit" disabled={busy}>Дать доступ</button></div></form>
    <div className="admin-user-filters" role="group" aria-label="Фильтр пользователей"><button type="button" aria-pressed={userFilter === "all"} onClick={() => setUserFilter("all")}>Все</button><button type="button" aria-pressed={userFilter === "available"} onClick={() => setUserFilter("available")}>С доступом</button><button type="button" aria-pressed={userFilter === "revoked"} onClick={() => setUserFilter("revoked")}>Доступ отозван</button></div>
    {requests.map(record => <div key={record.requestId} className="admin-request"><p role="status">Проверяем результат запроса {record.telegramId || record.userId}. Если проверка не находит операцию, можно повторить запрос.</p><button type="button" disabled={busy} onClick={() => void retryRequest(record)}>Проверить и повторить</button></div>)}
    {userFilter !== "revoked" && visibleUsers.filter(user => user.status !== "blocked").map(userCard)}
   </section>
   {userFilter !== "available" && <section className="space-y-3"><h2>Доступ отозван</h2>{visibleUsers.filter(user => user.status === "blocked").map(userCard)}</section>}
+  </div>}
+  {section === "data" && <div className="admin-section"><div className="admin-section-heading"><div><h2>Данные</h2><p>Выберите пользователя или архив для просмотра</p></div></div><div className="admin-source-list">{visibleUsers.map(user => <button key={user.id} type="button" aria-pressed={selected === user.id} onClick={() => { selection.current++; setSelected(user.id); setDetail(null); }}>{user.name || "Пользователь"}</button>)}</div>
   {selected && selected !== ARCHIVE_TARGET && <AdminPersonalSection key={selected} userId={selected} />}
   <ArchiveTarget selected={selected === ARCHIVE_TARGET} onSelect={() => { selection.current++; setSelected(ARCHIVE_TARGET); setDetail(null); }} />
   {selected && <section className="admin-data"><h2>Данные: {selected === ARCHIVE_TARGET ? "Архив до разделения" : users.find(user => user.id === selected)?.name || "Пользователь"}</h2><nav className="admin-tabs" aria-label="Данные выбранного источника"><button type="button" aria-pressed={view.startsWith("admin-memory")} onClick={() => void inspect("admin-memory-list")}>Память</button><button type="button" aria-pressed={view.startsWith("admin-chat")} onClick={() => void inspect("admin-chats-list")}>Чаты</button><button type="button" aria-pressed={view.startsWith("admin-artifacts")} onClick={() => void inspect("admin-artifacts-list")}>Файлы</button></nav>{page?.items ? <><ul className="admin-items">{page.items.map(item => <li key={item.id}><button type="button" onClick={() => void inspect(view === "admin-memory-list" ? "admin-memory-get" : view === "admin-chats-list" ? "admin-chat-get" : "admin-artifacts-get", { [view === "admin-memory-list" ? "memoryId" : view === "admin-chats-list" ? "chatId" : "artifactId"]: item.id })}>{item.title || item.text || item.id}</button></li>)}</ul>{!page.items.length && <p className="admin-empty">Здесь пока нет записей.</p>}{page.nextCursor && <button type="button" onClick={() => void inspect(view, { cursor: page.nextCursor! })}>Следующая страница</button>}</> : detail !== null ? <AdminDetail value={detail} view={view} userId={selected} /> : <p className="admin-empty">Выберите раздел, чтобы открыть данные.</p>}</section>}
   {selected && chatId && chatCursor && <button type="button" onClick={() => void inspect("admin-chat-get", { chatId, cursor: chatCursor })}>Загрузить ещё сообщения</button>}
-  <section className="space-y-3"><h2 className="text-xl font-semibold">Приглашения</h2><button type="button" onClick={() => void mutate("invite-create")}>Создать приглашение</button>{code && <InviteCommand key={code} code={code} />}
-   {invites.map(invite => <p key={invite.id}>{invite.id} · до {invite.expiresAt} · {invite.revokedAt ? "отозвано" : invite.consumedAt ? "использовано" : "действует"} {!invite.revokedAt && !invite.consumedAt && <button type="button" onClick={() => void mutate("invite-revoke", { inviteId: invite.id })}>Отозвать</button>}</p>)}</section>
- </main>;
+  </div>}
+  {section === "invites" && <section className="admin-section"><div className="admin-section-heading"><div><h2>Приглашения</h2><p>Создание и отзыв приглашений</p></div></div><button type="button" onClick={() => void mutate("invite-create")}>Создать приглашение</button>{code && <InviteCommand key={code} code={code} />}
+   {invites.map(invite => <p key={invite.id}>{invite.id} · до {invite.expiresAt} · {invite.revokedAt ? "отозвано" : invite.consumedAt ? "использовано" : "действует"} {!invite.revokedAt && !invite.consumedAt && <button type="button" onClick={() => void mutate("invite-revoke", { inviteId: invite.id })}>Отозвать</button>}</p>)}</section>}
+ </main></WorkspaceFrame>;
 }

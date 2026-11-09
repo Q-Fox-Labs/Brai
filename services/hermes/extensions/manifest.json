@@ -18,6 +18,7 @@
     "apps/desktop/src/plugins/kanban/i18n.ts",
     "apps/desktop/src/plugins/radio/plugin.js",
     "apps/shared/src/i18n.ts",
+    "gateway/hosted_rooms.py",
     "gateway/platforms/base.py",
     "gateway/run.py",
     "gateway/run_inbound.py",
@@ -209,7 +210,11 @@
     "web/src/pages/McpPage.tsx",
     "web/src/pages/PluginsPage.tsx",
     "web/src/pages/SkillsPage.tsx",
-    "web/src/pages/SystemPage.tsx"
+    "web/src/pages/SystemPage.tsx",
+    "hermes_constants.py",
+    "hermes_cli/service_manager.py",
+    "tui_gateway/change_watcher.py",
+    "tools/bot_mode_probe.py"
   ],
   "core_added_files": [
     "apps/desktop/src/i18n/ru_complete.json",

@@ -826,11 +826,15 @@ class TelegramPlugin:
         return known is not None or str(chat_id) == self.config.chat or self.config.allows(chat_id)
 
     def _route_matches(self, chat_id, chat_type, user_id):
-        """Разрешить заданную группу либо личный чат самого разрешённого отправителя."""
+        """Проверить разрешённого отправителя и точный личный либо групповой маршрут."""
         chat_id, user_id = str(chat_id), str(user_id)
         if not self.config.allows(user_id):
             return False
         if chat_type in {"private", "dm"}:
+            if self.config.identity_worker:
+                # AIDEV-NOTE: Root сохраняет chat_id аккаунта, но user_id внутри worker канонический.
+                known = getattr(self.adapter, '_brai_chats', {}).get(chat_id)
+                return isinstance(known, dict) and known.get('type') in {"private", "dm"}
             return chat_id == user_id
         if self.config.identity_worker:
             # AIDEV-NOTE: IpcAdapter запоминает этот exact маршрут только из Root-admitted source.
