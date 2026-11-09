@@ -38,12 +38,12 @@ export async function correctWithLuna(cfg,entry){
    features:{shell_tool:false,code_mode:false,code_mode_host:false,multi_agent:false,multi_agent_v2:false,apps:false,memories:false,view_image:false,image_generation:false,browser_use:false,computer_use:false,skill_search:false,tool_suggest:false,goals:false,sleep_tool:false}};
   for(const name of Object.keys(base?.mcp_servers??{}))overrides['mcp_servers.'+name+'.enabled']=false;
   for(const name of Object.keys(base?.plugins??{}))if(name!=='_default')overrides['plugins.'+name+'.enabled']=false;
-  const started=await call('thread/start',{model:'gpt-6-luna',allowProviderModelFallback:false,cwd:cfg.cwd,ephemeral:true,historyMode:'legacy',threadSource:'dialogues_summary',serviceName:'brai_diary',environments:[],dynamicTools:[],approvalPolicy:'never',sandbox:'read-only',baseInstructions:instructions,developerInstructions:'Только редактура текущего дневника и извлечение даты в строгий JSON. Никаких инструментов.',config:overrides});
+  const started=await call('thread/start',{model:'gpt-6-luna',allowProviderModelFallback:false,cwd:cfg.cwd,ephemeral:true,historyMode:'legacy',threadSource:'dialogues_summary',serviceName:'brai_diary',environments:[],dynamicTools:[],approvalPolicy:'never',sandbox:'read-only',baseInstructions:instructions+(entry.audioPart?' Это часть одной длинной записи. Не восстанавливай отсутствующие соседние слова догадкой. Если дата в этой части не указана, eventDate=null и dateEvidence=""; если явно неоднозначна, eventDate=null и объясни неоднозначность в dateEvidence.':' '),developerInstructions:'Только редактура текущего дневника и извлечение даты в строгий JSON. Никаких инструментов.',config:overrides});
   thread=started.thread.id;
   if(started.model!=='gpt-6-luna'||started.thread.ephemeral!==true)throw fail('LUNA_ISOLATION_VIOLATION');
   const done=new Promise((resolve,reject)=>{active={resolve,reject,items:new Map()};timer=setTimeout(()=>reject(fail('LUNA_TIMEOUT')),180000);});
   void done.catch(()=>{});
-  const input=JSON.stringify({rawText:text(entry.rawText),recordedAt:entry.audioInput.recordedAt,timezone:entry.audioInput.timezone,uploadedAt:entry.createdAt});
+  const input=JSON.stringify({rawText:text(entry.rawText),recordedAt:entry.audioInput.recordedAt,timezone:entry.audioInput.timezone,uploadedAt:entry.createdAt,...(entry.audioPart?{audioPart:entry.audioPart}:{})});
   const launched=await call('turn/start',{threadId:thread,model:'gpt-6-luna',effort:'medium',environments:[],clientUserMessageId:randomUUID(),input:[{type:'text',text:input}]});
   turn=launched.turn.id;const result=await done;
   if(result.id!==turn||result.status!=='completed')throw fail('LUNA_EXECUTION_FAILED');
