@@ -123,6 +123,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.ok(await issueCode(runtime,secret,'30002'));
   const detachedLink=await issueTelegramLink(runtime,secret,'30002');
   assert.equal(await unlinkTelegram(runtime,'30002','30002'),true);
+  equal.generation+=1;
   assert.deepEqual(await getIdentity(runtime,equal.id),{user:equal,telegramIds:[]});
   assert.equal(await resolveTelegram(runtime,'30002'),null);
   assert.equal(await redeemTelegramLink(runtime,secret,'30003',detachedLink.code),null);
