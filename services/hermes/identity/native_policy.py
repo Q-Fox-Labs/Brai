@@ -136,6 +136,7 @@ def install_executor_guard():
         pass
     common = tool_executor._dispatch_authorized_once
     invoke = agent_runtime_helpers.invoke_tool
+    repair = agent_runtime_helpers.repair_tool_call
     denied = json.dumps({'error': 'Это действие недоступно для вашей роли.'}, ensure_ascii=False)
     changed = json.dumps({'error': 'Права доступа изменились. Результат не выдан.'}, ensure_ascii=False)
     def guarded_common(agent, state, ref, *, execute, scope_block, display_index,
@@ -200,6 +201,8 @@ def install_executor_guard():
             return result
         return guarded_inline
     inline_tool_executors.resolve_invoke_tool_executor = guarded_resolve
+    # Не превращать неизвестный/запрещённый guest вызов в похожую разрешённую операцию.
+    agent_runtime_helpers.repair_tool_call = lambda agent, name: None if guest_mode() else repair(agent, name)
     guarded_common.__wrapped__ = common
     guarded_invoke.__wrapped__ = invoke
     tool_executor._dispatch_authorized_once = guarded_common

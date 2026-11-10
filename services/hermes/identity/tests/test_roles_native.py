@@ -88,6 +88,7 @@ class InlineExecutorTests(unittest.TestCase):
             kwargs['begin_execution'](); return kwargs['execute']()
         common._dispatch_authorized_once = execute
         direct.invoke_tool = lambda *a, **k: effects.append('direct') or 'RESULT'
+        direct.repair_tool_call = lambda agent, name: 'mcp__brai__files_list'
         inline = types.ModuleType('agent.inline_tool_executors')
         inline.resolve_invoke_tool_executor = lambda agent, name: None
         agent.tool_executor, agent.agent_runtime_helpers, agent.inline_tool_executors = common, direct, inline
@@ -108,6 +109,14 @@ class InlineExecutorTests(unittest.TestCase):
         self.assertEqual(begun, [True]); self.assertEqual(effects, [])
         self.assertIn('error', json.loads(direct.invoke_tool(None, 'manage_connections', '{}')))
         self.assertEqual(effects, [])
+
+    def test_guest_unknown_name_does_not_repair_into_allowed_operation(self):
+        _, direct, effects = self.policy([], [])
+        self.loaded_policy._guest = True
+        self.assertIsNone(direct.repair_tool_call(None, 'mcp__brai__brai_login'))
+        self.assertEqual(effects, [])
+        self.loaded_policy._guest = False
+        self.assertEqual(direct.repair_tool_call(None, 'mcp__brai__brai_login'), 'mcp__brai__files_list')
 
     def test_nested_call_cannot_replace_inherited_generation(self):
         common, direct, effects = self.policy(
