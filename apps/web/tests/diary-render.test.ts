@@ -10,7 +10,7 @@ import ts from "typescript";
 import type {DiaryEntry} from "../app/diary/types";
 const file = new URL("../app/diary/screen.tsx", import.meta.url), require = createRequire(file);
 const output = ts.transpileModule(readFileSync(file, "utf8"), {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX}}).outputText;
-const mod = {exports: {} as {DiaryRecord: ComponentType<{entry: DiaryEntry; userId: string}>; default: ComponentType<{userId: string; onUnauthorized: () => void}>}};
+const mod = {exports: {} as {DiaryRecord: ComponentType<{entry: DiaryEntry; userId: string; onRetry?: () => void}>; default: ComponentType<{userId: string; onUnauthorized: () => void}>}};
 new Function("require", "module", "exports", output)((name: string) => {
   if (name === "./upload") return {};
   if (name.endsWith(".css")) return {};
@@ -51,4 +51,16 @@ test("the initial interface starts with audio upload instead of a manual diary f
   assert.match(html, /type="file"/);
   assert.ok(!html.includes("<textarea"));
   assert.ok(!html.includes('type="date"'));
+});
+
+test("a new ASR failure offers explicit retry even after a previous retry", () => {
+ let clicks=0;
+ for (const transcriptionRetry of [undefined,{key:"33333333-3333-4333-8333-333333333333"}]) {
+  const entry={...base,state:"needs_attention" as const,errorCode:"TRANSCRIPTION_FAILED",rawText:null,correctedText:null,transcriptionRetry};
+  const html=renderToStaticMarkup(createElement(mod.exports.DiaryRecord,{entry,userId:"owner-a",onRetry:()=>{clicks++;}}));
+  assert.match(html,/Повторить расшифровку/);
+ }
+ assert.equal(clicks,0);
+ const html=renderToStaticMarkup(createElement(mod.exports.DiaryRecord,{entry:{...base,state:"transcribing",rawText:null,correctedText:null},userId:"owner-a",onRetry:()=>{clicks++;}}));
+ assert.ok(!html.includes("Повторить расшифровку"));
 });

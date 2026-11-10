@@ -63,3 +63,40 @@ for(const [name,change,expected] of [
 ]){
  test('refuse '+name+' without mutation',async()=>{const f=fixture();change(f);await assert.rejects(retryTranscription(f.c,f.ports,f.args),new RegExp(expected));assert.ok(f.queries.includes('ROLLBACK'));assert.ok(!f.queries.some(q=>q.startsWith('UPDATE')));});
 }
+
+test('another explicit retry after a new terminal failure retains parts and all prior keys',async()=>{
+ const f=fixture();await retryTranscription(f.c,f.ports,f.args);
+ const first=structuredClone(f.entry.transcriptionRetry),firstKey=f.args.retryId;
+ const completed={index:0,rawText:'saved raw',transcription:{requestId:randomUUID()},lunaStartedAt:'2026-11-10T00:00:00Z',correction:{correctedText:'saved corrected'}};
+ const incomplete={index:1,frames:16000};
+ const failedRequest=randomUUID();
+ f.entry.state='needs_attention';f.entry.errorCode='TRANSCRIPTION_FAILED';
+ f.entry.audioProcessing={parts:[completed,incomplete],pendingRequestId:failedRequest};
+ f.entry.audioProgress={transcribedFrames:16000,correctedFrames:16000};
+ f.args.previousRequestId=failedRequest;f.args.retryId=randomUUID();
+ assert.equal((await retryTranscription(f.c,f.ports,f.args)).state,'scheduled');
+ assert.deepEqual(f.entry.audioProcessing,{parts:[completed,incomplete]});
+ assert.deepEqual(f.entry.audioProgress,{transcribedFrames:16000,correctedFrames:16000});
+ const {history:ignored,...flat}=first;
+ assert.deepEqual(f.entry.transcriptionRetry.history,[flat]);
+ assert.equal(f.entry.transcriptionRetry.previousRequestId,failedRequest);
+ const scheduled=structuredClone(f.entry),writes=f.queries.filter(q=>q.startsWith('UPDATE')).length;
+ f.entry.state='needs_attention';f.entry.errorCode='TRANSCRIPTION_FAILED';
+ for(const key of [firstKey,scheduled.transcriptionRetry.key]){
+  f.args.retryId=key;
+  assert.equal((await retryTranscription(f.c,f.ports,f.args)).state,'already_scheduled');
+ }
+ assert.equal(f.queries.filter(q=>q.startsWith('UPDATE')).length,writes);
+ assert.equal(f.entry.state,'needs_attention');
+});
+test('a repeated old terminal request cannot authorize another compute',async()=>{
+ const f=fixture();await retryTranscription(f.c,f.ports,f.args);
+ f.entry.state='needs_attention';f.entry.errorCode='TRANSCRIPTION_FAILED';f.args.retryId=randomUUID();
+ await assert.rejects(retryTranscription(f.c,f.ports,f.args),/PREVIOUS_NOT_TERMINAL/);
+ assert.equal(f.queries.filter(q=>q.startsWith('UPDATE')).length,1);
+});
+test('an unfinished per-part Luna attempt cannot be retried as ASR',async()=>{
+ const f=fixture();f.entry.audioProcessing={parts:[{lunaStartedAt:'2026-11-10T00:00:00Z'}]};
+ await assert.rejects(retryTranscription(f.c,f.ports,f.args),/RETRY_NOT_ALLOWED/);
+ assert.equal(f.calls,0);assert.ok(!f.queries.some(q=>q.startsWith('UPDATE')));
+});

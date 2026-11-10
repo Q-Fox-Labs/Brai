@@ -673,7 +673,7 @@
           },
           "transcriptionRetry": {
             "type": "object",
-            "description": "Прежний исход сохраняется при одном явном повторе.",
+            "description": "Текущее явное разрешение повтора и история прежних ключей; повтор любого ключа идемпотентен.",
             "required": [
               "key",
               "previousRequestId",
@@ -705,6 +705,46 @@
               "authorizedAt": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "history": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "key",
+                    "previousRequestId",
+                    "previousState",
+                    "authorizedAt"
+                  ],
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "previousRequestId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "previousState": {
+                      "enum": [
+                        "failed",
+                        "outcome_unknown",
+                        "cancelled"
+                      ]
+                    },
+                    "previousErrorCode": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "authorizedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
               }
             }
           },

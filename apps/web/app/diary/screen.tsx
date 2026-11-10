@@ -42,7 +42,7 @@ export function DiaryRecord({entry, userId, onRetry, retrying = false}: {entry: 
     </section>}
     {entry.state === "transcribing" && !entry.audioProgress && <p className="diary-muted">Подготавливаем аудио к расшифровке…</p>}
     {entry.state === "needs_attention" && <p className="diary-message diary-error" role="alert">{message(entry.errorCode ?? undefined)}</p>}
-    {onRetry && entry.state === "needs_attention" && entry.errorCode === "TRANSCRIPTION_FAILED" && entry.rawText === null && !entry.transcriptionRetry && <Button variant="outline" disabled={retrying} onClick={onRetry}>{retrying ? "Возобновляем…" : "Повторить расшифровку"}</Button>}
+    {onRetry && entry.state === "needs_attention" && entry.errorCode === "TRANSCRIPTION_FAILED" && entry.rawText === null && <Button variant="outline" disabled={retrying} onClick={onRetry}>{retrying ? "Возобновляем…" : "Повторить расшифровку"}</Button>}
     {entry.state === "ready" && entry.eventDate === null && <p className="diary-processing">В записи не удалось однозначно определить дату события.</p>}
     {entry.correctedText !== null && <div className="diary-text">{entry.correctedText}</div>}
     {entry.rawText !== null && <details className="diary-original"><summary>Исходная расшифровка</summary><div className="diary-text">{entry.rawText}</div></details>}
@@ -157,13 +157,13 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
   }
   async function retry() {
     if (locked.current || !entry) return;
-    const id = entry.id, storageKey = "brai.diary.retry:" + userId + ":" + id;
+    const id = entry.id, storageKey = "brai.diary.retry:" + userId + ":" + id + ":" + (entry.transcriptionRetry?.key ?? "initial");
     locked.current = true; setBusy(true); setError(""); setNotice("");
     try {
       let requestId: string | null = null;
       try {requestId = localStorage.getItem(storageKey);} catch { /* Ключ текущего действия сохранится до ответа. */ }
       if (!requestId || !/^[0-9a-f-]{36}$/i.test(requestId)) requestId = crypto.randomUUID();
-      try {localStorage.setItem(storageKey, requestId);} catch { /* Сервер всё равно не допускает второго повтора. */ }
+      try {localStorage.setItem(storageKey, requestId);} catch { /* Сервер сверяет ключ и терминальный исход прежней попытки. */ }
       await api("/retry?id=" + encodeURIComponent(id), {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({requestId})});
       if (alive.current) setNotice("Расшифровка возобновлена. Обработка продолжится на сервере.");
       await refresh(); await open(id, true);
