@@ -30,7 +30,8 @@
     "services/hermes/identity/synthesize.py",
     "services/hermes/identity/media.py",
     "services/hermes/identity/network.py",
-    "services/hermes/identity/search.py"
+    "services/hermes/identity/search.py",
+    "services/hermes/identity/pause_preseed.py"
   ],
   "inputs": {
     "build": [],
@@ -148,6 +149,7 @@
       "services/hermes/extensions/LICENSE.hermes",
       "services/hermes/extensions/README.md",
       "services/hermes/extensions/config/server-defaults.json",
+      "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/extensions/locales/ru.desktop.yaml",
       "services/hermes/extensions/locales/ru.yaml",
       "services/hermes/extensions/patches/codex-cli-single-owner.patch",
@@ -291,9 +293,12 @@
       "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
       "services/hermes/identity/telegram-chat-read.mjs",
-      "services/hermes/identity/ingress.openrpc.json"
+      "services/hermes/identity/ingress.openrpc.json",
+      "services/hermes/identity/pause_preseed.py",
+      "services/hermes/identity/schemas/pause-preseed.schema.json"
     ],
     "checks": [
+      "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/memos/embedding/adapter.test.mjs",
       "services/hermes/memos/tests/**",
       "services/hermes/telegram/tests/test_plugin.py",
@@ -369,7 +374,9 @@
       "services/hermes/identity/tests/control_pause.test.mjs",
       "services/hermes/identity/tests/memory_checkpoint.test.mjs",
       "services/hermes/identity/tests/test_memory_checkpoint_integration.py",
-      "services/hermes/identity/tests/test_relay_lifetime.py"
+      "services/hermes/identity/tests/test_relay_lifetime.py",
+      "services/hermes/identity/tests/test_pause_preseed.py",
+      "services/hermes/identity/tests/pause_preseed.test.mjs"
     ]
   },
   "dependencies": [
@@ -588,6 +595,7 @@
       "services/hermes/extensions/LICENSE.hermes",
       "services/hermes/extensions/README.md",
       "services/hermes/extensions/config/server-defaults.json",
+      "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/extensions/locales/ru.desktop.yaml",
       "services/hermes/extensions/locales/ru.yaml",
       "services/hermes/extensions/patches/codex-cli-single-owner.patch",
@@ -730,7 +738,9 @@
       "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
       "services/hermes/identity/telegram-chat-read.mjs",
-      "services/hermes/identity/ingress.openrpc.json"
+      "services/hermes/identity/ingress.openrpc.json",
+      "services/hermes/identity/pause_preseed.py",
+      "services/hermes/identity/schemas/pause-preseed.schema.json"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
@@ -751,7 +761,8 @@
       "services/hermes/identity/synthesize.py",
       "services/hermes/identity/media.py",
       "services/hermes/identity/network.py",
-      "services/hermes/identity/search.py"
+      "services/hermes/identity/search.py",
+      "services/hermes/identity/pause_preseed.py"
     ],
     "smokeImports": [
       "services/hermes/catalog.mjs",

@@ -253,6 +253,7 @@
   "runtimeFiles": [
     "LICENSE.hermes",
     "README.md",
+    "config/network-timeouts.json",
     "config/server-defaults.json",
     "locales/ru.desktop.yaml",
     "locales/ru.yaml",

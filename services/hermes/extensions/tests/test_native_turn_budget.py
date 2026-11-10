@@ -10,6 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import inspect
+import socket
 import importlib.util
 import logging
 import os
@@ -27,6 +28,7 @@ EXTENSIONS = Path(__file__).resolve().parents[1]
 SOURCE = os.environ.get("BRAI_NATIVE_SOURCE", "/opt/brai-identity/dev/software/release-fb5e7fb91bee427182e4da0f56466b3a/engine")
 SOURCE = SOURCE if Path(SOURCE).is_dir() else None
 HASHES = {
+    "agent/auxiliary_client.py": "a91d1922271172fb884d3f3c27f927c27f49c6e924d9f0e1d5049bcd866cbc16",
     "agent/turn_api_call.py": "2897575995d8dcbe94bba666ef66043a64c52a6c99e72c45e7da64a5fbdf576b",
     "agent/turn_recovery.py": "693236ce4d7d1a5785f00e6614aad3b3afbbc3cc7f1ec8d9794c31968e8ac067",
     "agent/turn_finalizer.py": "856c43abf03f7e0b24b3682f27ce1da373d896a16e2c91e2a55be84ec90de36c",
@@ -59,16 +61,19 @@ class PortableTurnBudgetTests(unittest.TestCase):
 
     def setUp(self):
         section = (EXTENSIONS / "patches/turn-request-budget.patch").read_text().split(
-            "diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py", 1)[1]
+            "diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py", 1)[1].split("diff --git ", 1)[0]
         source = "\n".join(line[1:] for line in section.splitlines()
                            if line.startswith("+") and not line.startswith("+++")) + "\n"
         self.budget = types.ModuleType("portable_brai_budget")
         exec(compile(source, "agent/brai_turn_budget.py", "exec"), self.budget.__dict__)
         self.state = self.budget.TurnRequestBudget()
         self.token = self.budget._current.set(self.state)
+        self.policy_env = patch.dict(os.environ, {"HERMESCUSTOM_ROOT": str(EXTENSIONS)})
+        self.policy_env.start()
 
     def tearDown(self):
         self.budget._current.reset(self.token)
+        self.policy_env.stop()
 
     def test_shared_extra_limit_without_native_dependency(self):
         physical = Mock(side_effect=ConnectionError("synthetic"))
@@ -141,6 +146,38 @@ class PortableTurnBudgetTests(unittest.TestCase):
             self.assertTrue(any("turn_id=" + state.turn_id in line for line in captured.output))
 
 
+
+    def test_policy_allows_existing_1800_wire_and_1200_overrides(self):
+        self.assertEqual(self.budget.transport_timeout_policy(), (1800.0, 1860.0))
+        self.budget.validate_client_timeouts(
+            1800.0, {"first_event": 1200.0, "idle": 1200.0, "wall": float("inf")},
+            operation="primary")
+        # Отключённые watchdogs оставляют SDK read1800; wall deadline не урезается.
+        self.budget.validate_client_timeouts(1800.0, {"disabled": float("inf")}, operation="primary")
+
+    def test_policy_rejects_unsupported_wire_override(self):
+        with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+            self.budget.validate_client_timeouts(
+                1801.0, {"first_event": 3600.0, "idle": float("inf")}, operation="primary")
+
+    def test_policy_requires_absolute_root(self):
+        with patch.dict(os.environ, {"HERMESCUSTOM_ROOT": "relative"}):
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                self.budget.transport_timeout_policy()
+
+
+
+    def test_native_policy_schema_matches_network_integer_contract(self):
+        with tempfile.TemporaryDirectory(prefix="brai-policy-fixture-") as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config/network-timeouts.json").write_text(
+                '{"version":1,"max_client_silence_seconds":1800.5,"transport_idle_grace_seconds":60}')
+            with patch.dict(os.environ, {"HERMESCUSTOM_ROOT": str(root)}):
+                with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                    self.budget.transport_timeout_policy()
+
+
 @unittest.skipUnless(SOURCE, "BRAI_NATIVE_SOURCE points to the exact read-only pinned engine")
 class NativeTurnBudgetTests(unittest.TestCase):
     @classmethod
@@ -174,9 +211,12 @@ class NativeTurnBudgetTests(unittest.TestCase):
     def setUp(self):
         self.state = self.budget.TurnRequestBudget()
         self.token = self.budget._current.set(self.state)
+        self.policy_env = patch.dict(os.environ, {"HERMESCUSTOM_ROOT": str(EXTENSIONS)})
+        self.policy_env.start()
 
     def tearDown(self):
         self.budget._current.reset(self.token)
+        self.policy_env.stop()
 
     def metadata(self, request="api:1", role="primary"):
         return {"api_request_id": request, "call_role": role, "api_mode": "codex_responses"}
@@ -449,6 +489,7 @@ class NativeTurnBudgetTests(unittest.TestCase):
         mod._raise_if_stale_attempt = lambda compressor: None
         budget_module = types.ModuleType("agent.brai_turn_budget")
         budget_module.TurnRequestBudgetExhausted = self.budget.TurnRequestBudgetExhausted
+        budget_module.validate_client_timeouts = self.budget.validate_client_timeouts
         agent_module = types.ModuleType("agent")
         with patch.dict("sys.modules", {"agent": agent_module,
                                       "agent.conversation_compression": mod,
@@ -500,16 +541,19 @@ class NativeTurnBudgetTests(unittest.TestCase):
         budget_module = types.ModuleType("agent.brai_turn_budget")
         budget_module.logical_deadline = self.budget.logical_deadline
         budget_module.TurnRequestBudgetExhausted = self.budget.TurnRequestBudgetExhausted
+        budget_module.validate_client_timeouts = self.budget.validate_client_timeouts
         ticks = [0.0]
         h = types.SimpleNamespace(
             time=types.SimpleNamespace(time=lambda: ticks[0], monotonic=lambda: ticks[0]),
             _RequestClientRegistry=lambda agent: object(),
             _resolve_nonstream_watchdogs=lambda agent, kwargs: types.SimpleNamespace(
                 stale_timeout=10.0, codex=False, idle_requires_progress=False,
-                ttfb_enabled=False, idle_enabled=False, progress_timeout=0.0),
+                ttfb_enabled=False, idle_enabled=False, progress_timeout=0.0,
+                idle_timeout=300.0, ttfb_timeout=900.0),
             _context_thread_target=lambda target: target,
         )
         agent = types.SimpleNamespace(api_mode="chat_completions", _current_api_request_id="api:1",
+                                      _resolved_api_call_timeout=lambda: 1800.0,
                                       _touch_activity=Mock(), _interrupt_requested=False)
         modules = {"agent": types.ModuleType("agent"), "agent.brai_turn_budget": budget_module}
         with patch.dict("sys.modules", modules), patch.object(self.budget.time, "monotonic", lambda: ticks[0]):
@@ -682,6 +726,106 @@ class NativeTurnBudgetTests(unittest.TestCase):
         self.assertNotEqual(result["final_response"], result["error"])
         self.assertEqual(result["brai_delivered_partial"], "visible")
         downstream.assert_not_called()
+
+    @contextlib.contextmanager
+    def native_policy_modules(self):
+        module = types.ModuleType("agent.brai_turn_budget")
+        module.validate_client_timeouts = self.budget.validate_client_timeouts
+        module.logical_deadline = self.budget.logical_deadline
+        module.TurnRequestBudgetExhausted = self.budget.TurnRequestBudgetExhausted
+        providers = types.ModuleType("hermes_cli.providers")
+        providers.is_actual_route = lambda *args: False
+        helpers = types.ModuleType("agent.agent_runtime_helpers")
+        with patch.dict("sys.modules", {"agent": types.ModuleType("agent"),
+                                       "agent.brai_turn_budget": module,
+                                       "agent.agent_runtime_helpers": helpers,
+                                       "hermes_cli": types.ModuleType("hermes_cli"),
+                                       "hermes_cli.providers": providers}):
+            yield helpers
+
+    def auxiliary_guard(self):
+        return native_nodes(
+            self.engine, "agent/auxiliary_client.py",
+            {"_CodexStreamGuard", "_aux_stream_total_ceiling", "_CodexCompletionsAdapter"},
+            time=__import__("time"), threading=threading,
+            _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS=60.0,
+            _AUX_STREAM_CEILING_FLOOR_SECONDS=600.0, _AUX_STREAM_CEILING_MULTIPLIER=4.0,
+            _current_aux_stream_deadline=lambda: None,
+            _aux_interrupt_protected=lambda: False,
+            _evict_cached_client_instance=Mock(),
+            _close_quietly=lambda client, note: client.close() if client else None,
+            logger=logging.getLogger("guard-fixture"),
+        )
+
+    def test_primary_policy_is_checked_before_starting_provider_worker(self):
+        sdk = Mock()
+        wd = types.SimpleNamespace(
+            stale_timeout=float("inf"), codex=False, idle_requires_progress=False,
+            idle_enabled=True, idle_timeout=1200.0, ttfb_enabled=True, ttfb_timeout=1200.0,
+            progress_timeout=0.0,
+        )
+        h = types.SimpleNamespace(
+            _RequestClientRegistry=lambda agent: object(), _resolve_nonstream_watchdogs=lambda *args: wd,
+            time=__import__("time"), _dispatch_nonstreaming_api_request=sdk,
+        )
+        native = native_nodes(self.engine, "agent/chat_completion_nonstream.py", {"_NonStreamRequest"},
+                              h=h, wn=types.SimpleNamespace(WaitNoticeState=object))
+        agent = types.SimpleNamespace(api_mode="chat_completions", _current_api_request_id="api:policy",
+                                      _resolved_api_call_timeout=lambda: 1800.0)
+        with self.native_policy_modules():
+            allowed = native._NonStreamRequest(agent, {})
+            self.assertEqual(allowed.wd.idle_timeout, 1200.0)
+            self.assertEqual(allowed.wd.stale_timeout, float("inf"))
+            agent._resolved_api_call_timeout = lambda: 1801.0
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                native._NonStreamRequest(agent, {}).run()
+        sdk.assert_not_called()
+
+    def test_compression_policy_rejects_override_before_sdk_create(self):
+        native = self.auxiliary_guard()
+        sdk = types.SimpleNamespace(responses=types.SimpleNamespace(create=Mock()), base_url="fixture")
+        adapter = native._CodexCompletionsAdapter(sdk, "fixture")
+        adapter._build_responses_kwargs = Mock(return_value=({"timeout": 1801}, "fixture", 1801))
+        with self.native_policy_modules():
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                adapter.create(timeout=1801, no_progress_timeout=3600)
+            allowed = native._CodexStreamGuard(sdk, 1200, no_progress_timeout=1200)
+        self.assertEqual(allowed.no_progress_timeout, 1200)
+        sdk.responses.create.assert_not_called()
+
+    def test_genuinely_hung_auxiliary_socket_is_shutdown_by_native_guard(self):
+        native = self.auxiliary_guard()
+        ready, finished = threading.Event(), threading.Event()
+        pair = socket.socketpair()
+        closed, errors = [], []
+        class Client:
+            def close(self):
+                pair[0].close()
+                closed.append(True)
+        def owner():
+            guard = native._CodexStreamGuard(Client(), 1.0, no_progress_timeout=0.02)
+            try:
+                guard.start()
+                ready.set()
+                pair[0].recv(1)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                guard.finish()
+                finished.set()
+        with self.native_policy_modules() as helpers:
+            def shutdown(client):
+                pair[0].shutdown(socket.SHUT_RDWR)
+                return 1
+            helpers.force_close_tcp_sockets = shutdown
+            worker = threading.Thread(target=owner, daemon=True)
+            worker.start()
+            self.assertTrue(ready.wait(1))
+            self.assertTrue(finished.wait(2))
+            worker.join(1)
+        pair[1].close()
+        self.assertEqual(errors, [])
+        self.assertEqual(closed, [True])
 
 
 if __name__ == "__main__":

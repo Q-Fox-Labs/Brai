@@ -203,7 +203,27 @@ diff --git a/agent/context_compressor.py b/agent/context_compressor.py
 diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstream.py
 --- a/agent/chat_completion_nonstream.py
 +++ b/agent/chat_completion_nonstream.py
-@@ -39,6 +39,9 @@
+@@ -27,6 +27,19 @@
+         self.codex_token = object() if agent.api_mode == "codex_responses" else None
+         self.codex_retired = False
+         self.wd = h._resolve_nonstream_watchdogs(agent, api_kwargs)
++        from agent.brai_turn_budget import validate_client_timeouts
++        wire_timeout = api_kwargs.get("timeout")
++        if wire_timeout is None:
++            wire_timeout = agent._resolved_api_call_timeout()
++        idle = self.wd.idle_timeout if self.wd.idle_enabled else float("inf")
++        pre_progress = (self.wd.progress_timeout
++                        if self.wd.idle_requires_progress and self.wd.progress_timeout > 0 else idle)
++        validate_client_timeouts(wire_timeout, {
++            "first_event": min(self.wd.stale_timeout,
++                               self.wd.ttfb_timeout if self.wd.ttfb_enabled else float("inf")),
++            "first_progress": min(self.wd.stale_timeout, pre_progress),
++            "idle": min(self.wd.stale_timeout, idle),
++        }, operation="primary", request_id=str(getattr(agent, "_current_api_request_id", "") or ""))
+         self.codex_watchdog_state = (
+             h.SimpleNamespace(
+                 token=self.codex_token,
+@@ -39,6 +52,9 @@
              if self.codex_token is not None
              else None
          )
@@ -213,7 +233,7 @@ diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstrea
          self.call_start = h.time.time()
          self.wait_notice_started_ts = None
          self.wait_notice = wn.WaitNoticeState()
-@@ -270,6 +273,11 @@
+@@ -270,6 +286,11 @@
          raise InterruptedError("Agent interrupted during API call")
  
      def run(self):
@@ -225,7 +245,7 @@ diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstrea
          agent, wd = self.agent, self.wd
          if wd.codex:
              # Reset before the worker starts so a marker left over from a previous
-@@ -306,7 +314,7 @@
+@@ -306,7 +327,7 @@
                      and idle_elapsed > wd.idle_timeout):
                  self._idle_kill(idle_elapsed)
                  break
@@ -252,7 +272,7 @@ diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,315 @@
 +# ABOUTME: Ограничивает дополнительные физические запросы одним пользовательским ходом.
 +# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
 +"""Общий бюджет Hermes: две дополнительные попытки, включая сжатие истории."""
@@ -262,7 +282,11 @@ new file mode 100644
 +from contextvars import ContextVar
 +from functools import wraps
 +from threading import RLock
++import json
 +import logging
++import math
++import os
++from pathlib import Path
 +import time
 +import uuid
 +
@@ -485,6 +509,49 @@ new file mode 100644
 +    return invoke
 +
 +
++def transport_timeout_policy():
++    """Прочитать единую политику silent phases из закреплённого корня расширений."""
++    try:
++        root = Path(os.environ["HERMESCUSTOM_ROOT"])
++        if not root.is_absolute():
++            raise ValueError("absolute root required")
++        policy = json.loads((root / "config/network-timeouts.json").read_text())
++        if set(policy) != {"version", "max_client_silence_seconds", "transport_idle_grace_seconds"}:
++            raise ValueError("invalid policy fields")
++        if type(policy["version"]) is not int or policy["version"] != 1:
++            raise ValueError("invalid policy version")
++        values = [policy["max_client_silence_seconds"], policy["transport_idle_grace_seconds"]]
++        if any(type(value) is not int or value <= 0 for value in values):
++            raise ValueError("invalid policy bounds")
++        return float(values[0]), float(values[0] + values[1])
++    except (KeyError, OSError, TypeError, ValueError):
++        raise TurnRequestBudgetExhausted(
++            "Не удалось проверить политику ожидания транспорта.", reason="timeout_policy") from None
++
++
++def validate_client_timeouts(wire_timeout, silent_windows, *, operation, request_id=""):
++    """Отклонить неподдерживаемые overrides до SDK запроса, сохранив native wall semantics.
++
++    SDK read ограничивает тишину независимо от общего wall deadline. Lifecycle-события
++    не становятся substantive progress; окно каждой native фазы проверяется отдельно.
++    """
++    limit, transport_idle = transport_timeout_policy()
++    wire = getattr(wire_timeout, "read", wire_timeout)
++    if (isinstance(wire, bool) or not isinstance(wire, (int, float))
++            or not math.isfinite(wire) or wire <= 0 or wire > limit):
++        raise TurnRequestBudgetExhausted(
++            "Клиентское ожидание превышает разрешённый предел транспорта.",
++            reason="timeout_policy:wire", request_id=request_id)
++    for stage, window in silent_windows.items():
++        if (isinstance(window, bool) or not isinstance(window, (int, float))
++                or math.isnan(window) or min(float(wire), max(0.0, window)) > limit
++                or min(float(wire), max(0.0, window)) >= transport_idle):
++            raise TurnRequestBudgetExhausted(
++                "Клиентское ожидание превышает разрешённый предел транспорта.",
++                reason="timeout_policy:" + operation + ":" + stage, request_id=request_id)
++
++
++
 +def logical_deadline(seconds, *, lane="primary", request_id=""):
 +    """Закрепить исходный native timeout; повтор получает прежний absolute monotonic deadline."""
 +    budget = _current.get()
@@ -521,3 +588,18 @@ new file mode 100644
 +        finally:
 +            _current.reset(token)
 +    return invoke
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -1196,6 +1196,11 @@
+         host_deadline = _current_aux_stream_deadline()
+         if isinstance(host_deadline, (int, float)) and host_deadline < self.hard_deadline:
+             self.hard_deadline = float(host_deadline)
++        from agent.brai_turn_budget import validate_client_timeouts
++        validate_client_timeouts(total_timeout, {
++            "first_progress": min(self.no_progress_timeout, self.hard_deadline - self._start),
++            "idle": min(self.no_progress_timeout, self.hard_deadline - self._start),
++        }, operation="compression")
+         self._deadline_lock = threading.Lock()
+         self._progress_deadline = self._start + self.no_progress_timeout
+         self.saw_content = threading.Event()

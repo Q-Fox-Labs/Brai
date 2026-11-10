@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
 import inspect
+import hashlib
 import json
 import logging
 import os
@@ -76,6 +77,7 @@ class IdentityJournal:
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA journal_mode=WAL')
         db.execute('PRAGMA busy_timeout=1000')
+        db.execute('PRAGMA synchronous=FULL')
         db.executescript("""
             CREATE TABLE IF NOT EXISTS messages(
               id INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT NOT NULL, thread TEXT NOT NULL,
@@ -96,6 +98,9 @@ class IdentityJournal:
             CREATE TABLE IF NOT EXISTS chat_presentations(
               chat TEXT NOT NULL, thread TEXT NOT NULL, message_id TEXT NOT NULL,
               generation INTEGER NOT NULL, PRIMARY KEY(chat,thread,message_id));
+            CREATE TABLE IF NOT EXISTS operator_pause_audit(
+              operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
+              receipt TEXT NOT NULL, occurred_at TEXT NOT NULL);
         """)
         if 'rich' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
             db.execute("ALTER TABLE messages ADD COLUMN rich TEXT NOT NULL DEFAULT 'null'")
@@ -154,6 +159,20 @@ class IdentityJournal:
         finally:
             db.close()
 
+    def _set_chat_pause_in_transaction(self, db, route, paused):
+        """Изменить pause внутри уже открытого BEGIN IMMEDIATE."""
+        row = db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?', route).fetchone()
+        state = self._chat_state(row)
+        if row is not None and state['paused'] == paused:
+            return state
+        cutoff = db.execute("SELECT COALESCE(MAX(CAST(telegram_id AS INTEGER)),0) FROM messages WHERE chat=? AND thread=? AND direction='in'", route).fetchone()[0]
+        state.update(paused=paused, generation=state['generation'] + 1, recoveryBlocked=True,
+                     discardThrough=max(cutoff, state['discardThrough']),
+                     resumeAfter=state['resumeAfter'] if paused else int(time.time()) + 1)
+        db.execute('INSERT OR REPLACE INTO chat_pauses VALUES(?,?,?,?,?,?,?)',
+                   (*route, int(paused), state['generation'], 1, state['discardThrough'], state['resumeAfter']))
+        return state
+
     def set_chat_pause(self, profile, route, paused):
         """Commit запрет до отмены worker; повтор не меняет generation."""
         if type(paused) is not bool:
@@ -162,19 +181,74 @@ class IdentityJournal:
         try:
             with db:
                 db.execute('BEGIN IMMEDIATE')
-                row = db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?', route).fetchone()
-                state = self._chat_state(row)
-                if row is not None and state['paused'] == paused:
-                    return state
-                cutoff = db.execute("SELECT COALESCE(MAX(CAST(telegram_id AS INTEGER)),0) FROM messages WHERE chat=? AND thread=? AND direction='in'", route).fetchone()[0]
-                state.update(paused=paused, generation=state['generation'] + 1, recoveryBlocked=True,
-                             discardThrough=max(cutoff, state['discardThrough']),
-                             resumeAfter=state['resumeAfter'] if paused else int(time.time()) + 1)
-                db.execute('INSERT OR REPLACE INTO chat_pauses VALUES(?,?,?,?,?,?,?)',
-                           (*route, int(paused), state['generation'], 1, state['discardThrough'], state['resumeAfter']))
-                return state
+                return self._set_chat_pause_in_transaction(db, route, paused)
         finally:
             db.close()
+
+    def _operator_pause_readback(self, db, profile, operation_id, fingerprint):
+        row = db.execute('SELECT * FROM operator_pause_audit WHERE operation_id=?', (operation_id,)).fetchone()
+        if row is None or row['fingerprint'] != fingerprint:
+            raise ValueError('OPERATOR_READBACK_MISMATCH')
+        payload, receipt = json.loads(row['payload']), json.loads(row['receipt'])
+        if (payload['actor'] != 'os:root' or receipt['actor'] != 'os:root'
+                or receipt['auditId'] != operation_id or receipt['operationId'] != operation_id
+                or receipt['userId'] != profile['userId'] or receipt['profileId'] != profile['profileId']
+                or payload['binding']['userId'] != profile['userId'] or payload['binding']['profileId'] != profile['profileId']
+                or receipt['workerUid'] != payload['binding']['workerUid']
+                or (receipt['chat'], receipt['thread']) != (payload['chat'], payload['thread'])
+                or type(receipt['generation']) is not int or receipt['generation'] < 1):
+            raise ValueError('OPERATOR_READBACK_MISMATCH')
+        state = self._chat_state(db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?',
+                                           (receipt['chat'], receipt['thread'])).fetchone())
+        if not state['paused'] or state['generation'] != receipt['generation']:
+            # AIDEV-NOTE: Replay старого operationId не отменяет последующий явный resume.
+            raise ValueError('OPERATOR_READBACK_MISMATCH')
+        return {**receipt, 'verified': True}
+
+    def verify_operator_pause(self, profile, operation_id, fingerprint):
+        """Проверить commit новым соединением; ошибка не подтверждает отсутствие записи."""
+        db = self.database(profile)
+        try:
+            return self._operator_pause_readback(db, profile, operation_id, fingerprint)
+        finally:
+            db.close()
+
+    def seed_operator_pause(self, profile, route, operation_id, fingerprint, payload):
+        """Helper-only: атомарно записать pause и отдельный Root audit после strict checks/drop UID.
+
+        Сетевого порта нет. Root authority проверяет pause_preseed до сброса UID;
+        ingress владеет только записью в своём журнале, без Auth impersonation.
+        """
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+        if (payload.get('actor') != 'os:root' or payload.get('operationId') != operation_id
+                or payload.get('binding', {}).get('userId') != profile['userId']
+                or payload.get('binding', {}).get('profileId') != profile['profileId']
+                or (payload.get('chat'), payload.get('thread')) != tuple(route)
+                or hashlib.sha256(encoded.encode('utf-8')).hexdigest() != fingerprint):
+            raise ValueError('INVALID_OPERATOR_PAUSE')
+        db = self.database(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                previous = db.execute('SELECT fingerprint,payload FROM operator_pause_audit WHERE operation_id=?',
+                                      (operation_id,)).fetchone()
+                if previous is not None:
+                    if previous['fingerprint'] != fingerprint or previous['payload'] != encoded:
+                        raise ValueError('OPERATOR_OPERATION_CONFLICT')
+                    self._operator_pause_readback(db, profile, operation_id, fingerprint)
+                else:
+                    state = self._set_chat_pause_in_transaction(db, route, True)
+                    receipt = {'status': 'paused', 'actor': 'os:root', 'auditId': operation_id,
+                               'operationId': operation_id, 'userId': profile['userId'],
+                               'profileId': profile['profileId'], 'workerUid': payload['binding']['workerUid'],
+                               'chat': route[0], 'thread': route[1], 'generation': state['generation']}
+                    db.execute('INSERT INTO operator_pause_audit VALUES(?,?,?,?,?)',
+                               (operation_id, fingerprint, encoded,
+                                json.dumps(receipt, sort_keys=True, separators=(',', ':')),
+                                datetime.now(timezone.utc).isoformat()))
+        finally:
+            db.close()
+        return self.verify_operator_pause(profile, operation_id, fingerprint)
 
     def chat_admission(self, profile, route, message_id):
         """Не допустить старый input после pause/resume, включая подготовку."""

@@ -23,12 +23,12 @@ from . import network
 
 HEADER_LIMIT = 32768
 BODY_LIMIT = 8 * 1024 * 1024
-IDLE_TIMEOUT = 960
-DRAIN_TIMEOUT = 120
+IDLE_TIMEOUT = network.IDLE_TIMEOUT
+DRAIN_TIMEOUT = network.DRAIN_TIMEOUT
 CONNECT_TIMEOUT = 10
 CREDENTIAL_TIMEOUT = 20
 SEARCH_CONCURRENCY = 2
-MAX_CONNECTIONS = 128
+MAX_CONNECTIONS = network.MAX_CONNECTIONS
 LOGGER = logging.getLogger(__name__)
 TOKEN = re.compile(rb"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 MODEL_PATHS = {"/v1/chat/completions", "/v1/responses", "/v1/embeddings",

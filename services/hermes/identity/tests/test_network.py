@@ -18,6 +18,30 @@ from unittest.mock import AsyncMock, patch
 from identity import egress, network
 
 
+class TimeoutPolicyTests(unittest.TestCase):
+    """Нативный клиент и два сетевых слоя используют один предел тишины."""
+    def test_transport_outlives_every_supported_client_silent_phase(self):
+        policy = network._timeout_policy()
+        self.assertEqual(network.MAX_NATIVE_SILENCE_SECONDS, policy['max_client_silence_seconds'])
+        self.assertGreater(network.TRANSPORT_IDLE_GRACE_SECONDS, 0)
+        self.assertEqual(network.IDLE_TIMEOUT, policy['max_client_silence_seconds']
+                         + policy['transport_idle_grace_seconds'])
+        self.assertEqual(egress.IDLE_TIMEOUT, network.IDLE_TIMEOUT)
+        self.assertEqual(egress.DRAIN_TIMEOUT, network.DRAIN_TIMEOUT)
+        self.assertEqual(egress.MAX_CONNECTIONS, network.MAX_CONNECTIONS)
+
+    def test_invalid_policy_fails_closed_before_any_connection(self):
+        valid = network._timeout_policy()
+        invalid = [[], {}, {**valid, 'unknown': 1}, {**valid, 'version': True},
+                   {**valid, 'version': 2}, {**valid, 'max_client_silence_seconds': 0},
+                   {**valid, 'max_client_silence_seconds': True},
+                   {**valid, 'transport_idle_grace_seconds': 1.5}]
+        for value in invalid:
+            with self.subTest(value=value), patch.object(Path, 'read_bytes', return_value=json.dumps(value).encode()):
+                with self.assertRaisesRegex(ValueError, 'INVALID_NETWORK_TIMEOUT_POLICY'):
+                    network._timeout_policy()
+
+
 class NetworkTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()

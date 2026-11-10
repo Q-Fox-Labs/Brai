@@ -2,12 +2,32 @@
 # ABOUTME: Запускается под UID профиля внутри его отдельного сетевого пространства.
 import argparse
 import asyncio
+import json
 import logging
+from pathlib import Path
 import time
 import uuid
 
-IDLE_TIMEOUT = 960
+
+def _timeout_policy():
+    """Прочитать тот же контракт, который проверяет личный модельный клиент."""
+    path = Path(__file__).resolve().parents[1] / 'extensions/config/network-timeouts.json'
+    value = json.loads(path.read_bytes())
+    fields = {'version', 'max_client_silence_seconds', 'transport_idle_grace_seconds'}
+    if (not isinstance(value, dict) or set(value) != fields
+            or type(value['version']) is not int or value['version'] != 1
+            or any(type(value[key]) is not int or value[key] <= 0 for key in fields - {'version'})):
+        raise ValueError('INVALID_NETWORK_TIMEOUT_POLICY')
+    return value
+
+
+TIMEOUT_POLICY = _timeout_policy()
+MAX_NATIVE_SILENCE_SECONDS = TIMEOUT_POLICY['max_client_silence_seconds']
+TRANSPORT_IDLE_GRACE_SECONDS = TIMEOUT_POLICY['transport_idle_grace_seconds']
+IDLE_TIMEOUT = MAX_NATIVE_SILENCE_SECONDS + TRANSPORT_IDLE_GRACE_SECONDS
 DRAIN_TIMEOUT = 120
+CONNECT_TIMEOUT = 5
+MAX_CONNECTIONS = 128
 BUFFER_SIZE = 65536
 LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +89,7 @@ async def _relay(reader, writer, socket_path):
     started = time.monotonic()
     stage, reason = 'connect', 'complete'
     try:
-        source, upstream = await asyncio.wait_for(asyncio.open_unix_connection(socket_path), 5)
+        source, upstream = await asyncio.wait_for(asyncio.open_unix_connection(socket_path), CONNECT_TIMEOUT)
         stage = 'transfer'
         await _duplex(reader, writer, source, upstream)
     except IdleTimeout:
@@ -99,7 +119,7 @@ async def _relay(reader, writer, socket_path):
 
 async def start_relay(socket_path, port=18080):
     """Открыть loopback-прокси; вызывающий закрывает возвращённый сервер."""
-    semaphore = asyncio.Semaphore(128)
+    semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
     async def handle(reader, writer):
         if semaphore.locked():
             writer.close()

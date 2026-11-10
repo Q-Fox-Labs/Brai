@@ -180,3 +180,63 @@ ID, поэтому два личных аккаунта сохраняют ра�
 административный просмотр заполняет кэш. Перезапуск control не сбрасывает его.
 Если кэш не настроен или фото закрыто, остаётся подпись сессии и инициалы.
 Кэш не участвует в авторизации и не переносится в личную память агента.
+
+## Root preseed до первого запуска
+
+Одноразовый pause-only helper `identity.pause_preseed` предназначен для
+остановленной операторской lifecycle границы. Он не запускает ingress, worker
+или native gateway. Оператор останавливает процессы и удерживает границу до
+успешной записи и проверки паузы; затем допускает reconcile новой поставки.
+Ошибка helper блокирует дальнейший запуск, включая автоматический rollback
+на старый runtime, который ещё не умеет проверять паузу.
+
+Машинные DTO: [pause-preseed.schema.json](schemas/pause-preseed.schema.json).
+CLI принимает только `--config PATH --request PATH`. Реальный и effective UID
+должны быть 0. Оба файла имеют root ownership, режим ровно 0600, один hardlink,
+размер до 8192 байт и root-owned ancestors без group/other write. Symlink,
+повторные JSON-ключи и неизвестные поля запрещены.
+
+Config содержит только `version:1`, `registryPath`, `telegramJournalRoot`,
+`ingressUid`, `ingressGid`. Request содержит только `version:1`,
+`operationId`, `expectedUserId`, `expectedProfileId`, `expectedWorkerUid`,
+`expectedAuthorTelegramId`, `chat`, `thread`, `reason`. UUID канонические;
+`chat` обязан совпадать с canonical author Telegram ID реестра. Alias не
+угадывается. Topic 1 записывается как пустая тема. Reason — непустая строка
+до 512 символов без секретов или содержимого переписки.
+
+До записи helper читает защищённый registry штатным `load_registry` и сверяет
+единственное точное соответствие user/profile/worker UID/author Telegram ID.
+Ingress UID не может совпадать с UID любого worker. Все входные FD закрываются,
+затем процесс очищает дополнительные группы, устанавливает ingress GID/UID и
+проверяет real/effective/saved IDs. Возврат Root-привилегий не сохраняется.
+Только после этого открывается trusted ingress journal; его каталоги не могут
+принадлежать worker или быть доступны на запись посторонним.
+
+Одна SQLite transaction с FULL synchronous commit записывает `paused=true`
+и отдельный append-only `operator_pause_audit` с actor `os:root`, точным
+binding, маршрутом, operation ID, reason, временем и fingerprint. Это
+операторский аудит, а не действие вымышленного человеческого администратора.
+Обычный admin API сохраняет все прежние Auth/session/Origin/audit guards.
+Текст сообщений, native session ID, архив и история не изменяются.
+
+После commit helper проверяет паузу и аудит новым SQLite соединением. Только
+затем stdout содержит receipt: `status:"paused"`, `actor:"os:root"`,
+`auditId`, `operationId`, `userId`, `profileId`, `workerUid`, `chat`,
+`thread`, `generation`, `verified:true`. Audit ID равен operation ID.
+Ошибка выдаёт только `OPERATOR_PAUSE_PRESEED_FAILED` в stderr и ненулевой
+exit code. Receipt не утверждает, что worker остановлен: это предусловие
+оператора.
+
+Тот же operation ID с тем же fingerprint повторяет только readback и не
+создаёт аудит заново. Конфликт payload запрещён. Если после успешного seed
+прошёл явный resume или другое поколение, старый operation ID завершается
+отказом и не устанавливает паузу повторно. Новое операторское намерение
+требует нового operation ID. Resume helper отсутствует.
+
+Для изолированного запуска из content-pinned Root sealed package нужны
+ровно `identity/__init__.py`, `pause_preseed.py`, `chat_journal.py` и
+`memory_registry.py`; внешние Python пакеты не требуются. Операторский
+launcher использует Python `-I -S -B`, добавляет только проверенный sealed
+package root и выполняет `runpy.run_module("identity.pause_preseed",
+run_name="__main__")`. Произвольные пользовательские import paths и HOME
+в запуск не добавляются.
