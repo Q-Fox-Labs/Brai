@@ -153,6 +153,7 @@
       "services/hermes/extensions/patches/codex-cli-single-owner.patch",
       "services/hermes/extensions/patches/hermes-core.patch",
       "services/hermes/extensions/patches/memory-recall.patch",
+      "services/hermes/extensions/patches/turn-request-budget.patch",
       "services/hermes/extensions/patches/runtime-isolation.patch",
       "services/hermes/extensions/patches/russian-failure-notice.patch",
       "services/hermes/extensions/patches/telegram-media-display.patch",
@@ -289,7 +290,8 @@
       "services/bug-hunt/schemas/messages.schema.json",
       "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
-      "services/hermes/identity/telegram-chat-read.mjs"
+      "services/hermes/identity/telegram-chat-read.mjs",
+      "services/hermes/identity/ingress.openrpc.json"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -361,7 +363,13 @@
       "services/hermes/tests/identity-bug-hunt.test.mjs",
       "services/hermes/identity/tests/test_chat_journal.py",
       "services/hermes/identity/tests/telegram-chat-read.test.mjs",
-      "services/hermes/identity/tests/test_worker_artifact_read.py"
+      "services/hermes/identity/tests/test_worker_artifact_read.py",
+      "services/hermes/identity/tests/test_chat_pause.py",
+      "services/hermes/identity/tests/chat_pause.test.mjs",
+      "services/hermes/identity/tests/control_pause.test.mjs",
+      "services/hermes/identity/tests/memory_checkpoint.test.mjs",
+      "services/hermes/identity/tests/test_memory_checkpoint_integration.py",
+      "services/hermes/identity/tests/test_relay_lifetime.py"
     ]
   },
   "dependencies": [
@@ -585,6 +593,7 @@
       "services/hermes/extensions/patches/codex-cli-single-owner.patch",
       "services/hermes/extensions/patches/hermes-core.patch",
       "services/hermes/extensions/patches/memory-recall.patch",
+      "services/hermes/extensions/patches/turn-request-budget.patch",
       "services/hermes/extensions/patches/runtime-isolation.patch",
       "services/hermes/extensions/patches/russian-failure-notice.patch",
       "services/hermes/extensions/patches/telegram-media-display.patch",
@@ -720,7 +729,8 @@
       "services/bug-hunt/schemas/messages.schema.json",
       "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
-      "services/hermes/identity/telegram-chat-read.mjs"
+      "services/hermes/identity/telegram-chat-read.mjs",
+      "services/hermes/identity/ingress.openrpc.json"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

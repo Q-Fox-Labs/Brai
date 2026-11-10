@@ -10,7 +10,7 @@ import { ssoConfig } from "@/server/sso";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const reads = new Set(["users-list", "users-get", "users-operation-get", "invite-list", "admin-memory-list", "admin-memory-get", "admin-chats-list", "admin-chats-get", "admin-artifacts-list", "admin-artifacts-get", "admin-artifacts-download", "admin-personal-get"]);
-const writes = new Set(["users-add", "users-revoke", "role-set", "status-set", "sessions-revoke", "invite-create", "invite-revoke"]);
+const writes = new Set(["users-add", "users-revoke", "role-set", "status-set", "sessions-revoke", "invite-create", "invite-revoke", "admin-chats-pause", "admin-chats-resume"]);
 /** Выполняет операцию активного администратора без автоматического повтора. */
 async function handle(request: Request) {
  try {

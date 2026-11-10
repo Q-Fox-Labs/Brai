@@ -1,0 +1,523 @@
+diff --git a/agent/relay_llm.py b/agent/relay_llm.py
+--- a/agent/relay_llm.py
++++ b/agent/relay_llm.py
+@@ -14,6 +14,7 @@
+ from typing import Any
+ 
+ from agent import relay_runtime
++from agent.brai_turn_budget import physical_callback, physical_async_callback
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -184,6 +185,10 @@
+ ) -> Any:
+     """Run one non-streaming physical provider attempt through Relay.
+     ``session_id`` defaults to the inherited Hermes turn's session (unmanaged when there is none)."""
++    # Codex primary delegates to run_codex_stream, whose inner seam owns the physical request.
++    if not ((metadata or {}).get("api_mode") == "codex_responses"
++            and not str((metadata or {}).get("call_role") or "").startswith("auxiliary:")):
++        callback = physical_callback(callback, metadata)
+     attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
+     if attempt is None:
+         return callback(request)
+@@ -201,6 +206,7 @@
+     session_id: str | None = None, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
+ ) -> Any:
+     """Async ``execute``."""
++    callback = physical_async_callback(callback, metadata)
+     attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
+     if attempt is None:
+         return await callback(request)
+@@ -243,7 +249,7 @@
+     # Inside a managed callback (on the Relay session's loop) a nested ManagedLlmStream would be
+     # iterated synchronously on that loop, which asyncio forbids; the outer stream tracks this attempt.
+     if session_id is None or _has_running_event_loop():
+-        return stream_factory(request)
++        return physical_callback(stream_factory, metadata, streaming=True)(request)
+     managed = stream(
+         request, stream_factory, session_id=session_id, name=name, model_name=model_name,
+         finalizer=finalizer, metadata=metadata, defer_logical_completion=defer_logical_completion,
+@@ -322,7 +328,8 @@
+         auxiliary = str((metadata or {}).get("call_role") or "").startswith("auxiliary:")
+         self._logical_model_name, self._logical_provider_name = (model_name, name) if auxiliary else (None, None)
+         self._on_chunk, self._chunk_adapter, self._accept_chunk = on_chunk, chunk_adapter or _namespace, accept_chunk
+-        self._stream_factory, self._on_stream_created, self._finalizer = stream_factory, on_stream_created, finalizer
++        self._stream_factory = physical_callback(stream_factory, metadata, streaming=True)
++        self._on_stream_created, self._finalizer = on_stream_created, finalizer
+         self._completed_response_predicate = completed_response_predicate
+         self._raw_chunks: list[tuple[Any, Any]] = []
+         self._prefetched_chunks: list[Any] = []
+@@ -490,6 +497,8 @@
+             if chunk is self or (self._accept_chunk is not None and not self._accept_chunk(chunk)):
+                 self._close(logical_outcome="cancelled")
+                 raise StopIteration
++            if self._on_chunk is not None:
++                self._on_chunk(_jsonable(chunk))
+             return chunk
+ 
+         async def next_chunk() -> Any:
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -37,6 +37,7 @@
+ from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
+ from hermes_cli.observability.shared_metrics_efficiency import record_cache_break, record_prompt_rebuild
+ from agent.turn_retry_state import TurnRetryState
++from agent.brai_turn_budget import turn_budget, TurnRequestBudgetExhausted
+ from agent.turn_scripted_prelude import Prelude, play_prelude
+ # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
+ # skewed phase mid-turn.
+@@ -1517,6 +1518,16 @@
+         except InterruptedError:
+             if _run_phase(handle_api_interrupt, agent, s).action == "break":
+                 return None
++        except TurnRequestBudgetExhausted as api_error:
++            from agent.turn_api_call import stop_thinking_spinner
++            from agent.turn_recovery import settle_delivered_partial, _with_delivered_partial
++            s.thinking_spinner = stop_thinking_spinner(agent, s.thinking_spinner)
++            s._request_budget_error = str(api_error)
++            s._request_budget_delivered = settle_delivered_partial(agent, s.messages, s.current_turn_user_idx)
++            s.final_response, _ = _with_delivered_partial(
++                s._request_budget_error, s._request_budget_error, s._request_budget_delivered)
++            s.failed, s.response, s._turn_exit_reason = True, None, "request_budget_exhausted"
++            return None
+         except Exception as api_error:
+             _ae = _run_phase(handle_api_error, agent, s, api_error=api_error)
+             if _ae.action == "return":
+@@ -1668,6 +1679,8 @@
+         early_result = _run_api_retry_loop(agent, s)
+         if early_result is not None:
+             return early_result
++        if getattr(s, "_request_budget_error", None):
++            break
+ 
+         _rs = _run_phase(apply_retry_restarts, agent, s)
+         if _rs.action == "break":
+@@ -1699,6 +1712,10 @@
+         name: getattr(s, name)
+         for name in inspect.signature(finalize_turn).parameters if name != "agent"
+     })
++    if getattr(s, "_request_budget_error", None):
++        result.update(error=s._request_budget_error, completed=False, failed=True, partial=True)
++        if s._request_budget_delivered:
++            result["brai_delivered_partial"] = s._request_budget_delivered
+     if s._compression_timeout_exhausted:
+         # Reuse the gateway's context-recovery contract: transcript stays intact while
+         # future input can move to a clean session (#98722).
+@@ -1706,6 +1723,7 @@
+     return result
+ 
+ 
++@turn_budget
+ def run_conversation(
+     agent,
+     user_message: Any,
+diff --git a/agent/codex_runtime.py b/agent/codex_runtime.py
+--- a/agent/codex_runtime.py
++++ b/agent/codex_runtime.py
+@@ -955,6 +955,8 @@
+         done_item = _event_field(event, "item")
+         if done_item is None:
+             return
++        if "function_call" in str(_event_field(done_item, "type", "")):
++            self.has_tool_calls = True
+         self.output_items.append(done_item)
+         # Reuse the announced position when known (fresh tail sequence for unannounced items); the .done
+         # event's own output_index wins over the announced one.
+@@ -1039,9 +1041,11 @@
+         # per-item done events on a successful completion.
+         if self.pending_function_calls and self.saw_response_completed:
+             output = self._settled_output()
+-        # No terminal frame AND no usable content = truncated / rejected stream.
+-        if not self.saw_terminal and not output:
++        # Без terminal нельзя объявлять текст завершённым или запускать tool calls.
++        if not self.saw_terminal:
+             raise RuntimeError("Codex Responses stream did not emit a terminal response")
++        if self.has_tool_calls and not self.saw_response_completed:
++            raise RuntimeError("Codex Responses tool calls require a completed response")
+         return SimpleNamespace(
+             output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
+             id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
+@@ -1053,8 +1057,8 @@
+     on_first_delta=None, on_event=None, interrupt_check=None,
+ ) -> SimpleNamespace:
+     """Consume a Codex Responses SSE stream into a Response-shaped ``SimpleNamespace`` (see
+-    :class:`_CodexResponseAssembler`; ``status`` is ``completed`` when the stream ended with content but no
+-    terminal frame; ``model`` comes from kwargs).
++    :class:`_CodexResponseAssembler`; terminal frame is required, and partial tool calls are rejected;
++    ``model`` comes from kwargs).
+ 
+     Callbacks: ``on_text_delta`` per output_text delta, suppressed once a function_call is seen;
+     ``on_reasoning_delta`` for reasoning and ``phase=analysis`` deltas (also commentary without a commentary
+@@ -1072,7 +1076,9 @@
+                 raise  # watchdog / cancellation control flow must propagate
+             except Exception:
+                 logger.debug("Codex stream on_event hook raised", exc_info=True)
+-        if (interrupt_check is not None and interrupt_check()) or assembler.feed(event):
++        if interrupt_check is not None and interrupt_check():
++            raise InterruptedError("Agent interrupted before Codex stream completion")
++        if assembler.feed(event):
+             break
+     return assembler.result()
+ 
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -757,7 +757,7 @@
+         # APIResponseValidationError "expecting value"; treat as transient.
+         json_decode=isinstance(e, json.JSONDecodeError) or "expecting value" in err,
+         # httpx premature-close errors are transient; treat like a timeout, not a 60s cooldown.
+-        streaming_closed=_is_connection_error(e) and not stall,
++        streaming_closed=(_is_connection_error(e) or isinstance(e, (ConnectionError, TimeoutError))) and not stall,
+         # HTTP 200 with empty body from a degraded provider, plus the sibling "no usable response"
+         # shapes from _validate_llm_response.
+         empty_content=isinstance(e, RuntimeError) and any(
+@@ -4281,6 +4281,11 @@
+         from agent.conversation_compression import _raise_if_stale_attempt
+ 
+         _raise_if_stale_attempt(self)
++        from agent.brai_turn_budget import TurnRequestBudgetExhausted
++        if isinstance(e, TurnRequestBudgetExhausted):
++            self._last_summary_network_failure = True
++            self._last_summary_error = "Бюджет повторов исчерпан; история сохранена."
++            return None
+         # Only a genuine no-provider RuntimeError gets the long cooldown; empty/invalid-response
+         # RuntimeErrors are transient and must get the main-model retry below first.
+         # ``call_llm`` raises ``RuntimeError`` for two very different cases: 1. 2. An empty/invalid response
+@@ -5481,6 +5486,7 @@
+         self._last_summary_dropped_count = n_dropped
+         self._last_summary_fallback_used = True
+         telemetry["fallback_used"] = True
++        telemetry["degraded"] = True
+         # Feasibility skip is deliberate, not aux-model breakage — keep the telemetry class distinct.
+         # An escalated overload outranks the aux->main retry's earlier aux_model_fallback label.
+         telemetry["failure_class"] = "summary_overload_degraded" if self._last_summary_overload_degraded else (
+@@ -5491,6 +5497,7 @@
+             # A stale error from an earlier failure must not be embedded in a feasibility-skip fallback.
+             reason=None if feasibility_skip else self._last_summary_error,
+         )
++        summary = "[DEGRADED CONTEXT: deterministic recovery anchors, not a model summary.]\n" + summary
+         # The fallback row replaces the older handoff in the transcript, and the next compaction drops
+         # handoff rows from its window as "already folded into _previous_summary". Publish it like a
+         # real summary so its anchors reach the next summarizer instead of the stale in-memory one.
+diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstream.py
+--- a/agent/chat_completion_nonstream.py
++++ b/agent/chat_completion_nonstream.py
+@@ -39,6 +39,9 @@
+             if self.codex_token is not None
+             else None
+         )
++        from agent.brai_turn_budget import logical_deadline
++        self.logical_deadline = logical_deadline(
++            self.wd.stale_timeout, request_id=str(getattr(agent, "_current_api_request_id", "") or ""))
+         self.call_start = h.time.time()
+         self.wait_notice_started_ts = None
+         self.wait_notice = wn.WaitNoticeState()
+@@ -270,6 +273,11 @@
+         raise InterruptedError("Agent interrupted during API call")
+ 
+     def run(self):
++        from agent.brai_turn_budget import TurnRequestBudgetExhausted
++        if h.time.monotonic() >= self.logical_deadline:
++            raise TurnRequestBudgetExhausted(
++                "Истёк срок исходного запроса; история сохранена.", reason="deadline",
++                request_id=str(getattr(self.agent, "_current_api_request_id", "") or ""))
+         agent, wd = self.agent, self.wd
+         if wd.codex:
+             # Reset before the worker starts so a marker left over from a previous
+@@ -306,7 +314,7 @@
+                     and idle_elapsed > wd.idle_timeout):
+                 self._idle_kill(idle_elapsed)
+                 break
+-            if elapsed > wd.stale_timeout:
++            if h.time.monotonic() >= self.logical_deadline or elapsed > wd.stale_timeout:
+                 self._stale_kill(elapsed)
+                 break
+             if agent._interrupt_requested:
+diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
+--- a/agent/conversation_compression.py
++++ b/agent/conversation_compression.py
+@@ -495,7 +495,9 @@
+         seconds = float(seconds)
+         if seconds <= 0:
+             raise ValueError("total compression ceiling must be positive")
+-        self._deadline = time.monotonic() + seconds
++        from agent.brai_turn_budget import logical_deadline
++        deadline = logical_deadline(seconds, lane="auxiliary:compression")
++        self._deadline = deadline if self._deadline is None else min(self._deadline, deadline)
+ 
+     def touch_progress(self) -> None:
+         """Record forward progress (a streamed token); a bare float store is atomic, so no lock."""
+diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
+new file mode 100644
+--- /dev/null
++++ b/agent/brai_turn_budget.py
+@@ -0,0 +1,268 @@
++# ABOUTME: Ограничивает дополнительные физические запросы одним пользовательским ходом.
++# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
++"""Общий бюджет Hermes: две дополнительные попытки, включая сжатие истории."""
++
++from __future__ import annotations
++
++from contextvars import ContextVar
++from functools import wraps
++from threading import RLock
++import logging
++import time
++import uuid
++
++logger = logging.getLogger(__name__)
++_current = ContextVar("brai_turn_request_budget", default=None)
++
++
++class TurnRequestBudgetExhausted(RuntimeError):
++    """Остановить ход до повтора уже доставленного ответа или перерасхода бюджета."""
++
++    def __init__(self, message, *, reason="retry_budget", request_id="", budget=None):
++        super().__init__(message)
++        budget = budget or _current.get()
++        logger.warning(
++            "Hermes request budget exhausted turn_id=%s request_id=%s stage=exhausted "
++            "reason=%s attempt=%d extra=%d",
++            budget.turn_id if budget is not None else "unscoped", request_id or "unavailable",
++            reason, budget.physical if budget is not None else 0,
++            budget.spent if budget is not None else 0,
++        )
++
++
++class TurnRequestBudget:
++    """Владеть двумя дополнительными запросами на весь ход, включая worker threads."""
++
++    def __init__(self):
++        self.turn_id = uuid.uuid4().hex
++        self.lock = RLock()
++        self.spent = 0
++        self.physical = 0
++        self.lanes = {}
++        self.deadlines = {}
++
++    def start(self, metadata):
++        """Учесть физический вызов до обращения к провайдеру."""
++        metadata = metadata or {}
++        role = str(metadata.get("call_role") or "primary")
++        # AIDEV-NOTE: Новые request_id после recovery не создают новый бюджет.
++        lane = role if role.startswith("auxiliary:") else "primary"
++        with self.lock:
++            previous = self.lanes.get(lane)
++            request_id = str(metadata.get("api_request_id") or "")
++            retry = previous is not None and (
++                previous.failed or not previous.finished or (bool(request_id) and previous.request_id == request_id)
++            )
++            deadline = self.deadlines.get(lane)
++            if deadline is not None and retry and time.monotonic() >= deadline[1]:
++                raise TurnRequestBudgetExhausted(
++                    "Истёк срок исходного запроса; история сохранена.",
++                    reason="deadline", request_id=request_id, budget=self)
++            if retry and (previous.emitted or self.spent >= 2):
++                raise TurnRequestBudgetExhausted(
++                    "Ответ провайдера прерван. Продолжите новым сообщением; история сохранена.",
++                    reason="partial_emitted" if previous.emitted else "retry_limit",
++                    request_id=request_id, budget=self,
++                )
++            if retry:
++                self.spent += 1
++            self.physical += 1
++            attempt = PhysicalAttempt(self, lane, request_id, self.physical,
++                                      previous.origin if retry else time.monotonic(),
++                                      str(metadata.get("api_mode") or ""))
++            attempt.is_retry = retry
++            self.lanes[lane] = attempt
++            attempt.record("connect")
++            return attempt
++
++
++class PhysicalAttempt:
++    """Учесть стадии одного запроса без хранения содержимого потока."""
++
++    def __init__(self, budget, lane, request_id, number, origin, api_mode):
++        self.budget, self.lane, self.request_id = budget, lane, request_id
++        self.number, self.origin, self.api_mode = number, origin, api_mode
++        self.finished = self.failed = self.emitted = False
++        self.events = 0
++        self.terminal = False
++        self.stage = "connect"
++
++    def record(self, stage):
++        """Записать переход стадии и время от исходного запроса."""
++        self.stage = stage
++        logger.info("Hermes physical request turn_id=%s request_id=%s attempt=%d extra=%d "
++                    "stage=%s elapsed=%.3f events=%d",
++                    self.budget.turn_id, self.request_id or "unavailable",
++                    self.number, self.budget.spent, stage,
++                    time.monotonic() - self.origin, self.events)
++
++    def observe(self, event):
++        """Отличить событие, прогресс и подтверждённое завершение Responses."""
++        with self.budget.lock:
++            self.events += 1
++            kind = _field(event, "type", "")
++            delta = _field(event, "delta", "")
++            if self.events == 1:
++                self.record("first_event")
++            if kind in {"response.output_text.delta", "response.text.delta",
++                        "response.refusal.delta", "response.reasoning_summary_text.delta",
++                        "response.reasoning_text.delta"} and delta:
++                self.emitted = True
++            if kind == "response.output_item.done":
++                item = _field(event, "item", {})
++                if _field(item, "type") == "message" and _field(item, "phase") == "commentary":
++                    if any(_field(part, "type") == "output_text" and _field(part, "text")
++                           for part in (_field(item, "content", []) or [])):
++                        self.emitted = True
++            choices = _field(event, "choices", []) or []
++            if any(_field(_field(choice, "delta", {}), "content") for choice in choices):
++                self.emitted = True
++            if isinstance(delta, dict) and (delta.get("text") or delta.get("thinking")):
++                self.emitted = True
++            if delta and self.stage != "progress":
++                self.record("progress")
++            if kind in {"response.completed", "response.failed", "response.incomplete"}:
++                self.terminal = True
++                self.finish(failed=kind != "response.completed")
++
++    def finish(self, failed=False):
++        """Завершить учёт один раз; ошибка не стирается последующим закрытием."""
++        with self.budget.lock:
++            if self.finished:
++                return
++            self.finished, self.failed = True, failed
++            self.record("failed" if failed else "finish")
++
++    def check_retry(self):
++        """Остановить восстановление немедленно, когда безопасного повтора уже нет."""
++        with self.budget.lock:
++            if self.emitted or self.budget.spent >= 2:
++                raise TurnRequestBudgetExhausted(
++                    "Ответ провайдера прерван. Продолжите новым сообщением; история сохранена.",
++                    reason="partial_emitted" if self.emitted else "retry_limit",
++                    request_id=self.request_id, budget=self.budget,
++                )
++
++
++def _field(value, name, default=None):
++    """Прочитать техническое поле SDK object или JSON event."""
++    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
++
++
++class _PhysicalStream:
++    """Наблюдать один provider stream независимо от наличия Relay."""
++
++    def __init__(self, raw, attempt):
++        self.raw, self.iterator, self.attempt = raw, iter(raw), attempt
++
++    def __iter__(self):
++        return self
++
++    def __next__(self):
++        try:
++            chunk = next(self.iterator)
++        except StopIteration:
++            self.attempt.finish(failed=self.attempt.api_mode == "codex_responses" and not self.attempt.terminal)
++            if self.attempt.failed:
++                self.attempt.check_retry()
++            raise
++        except BaseException as error:
++            self.attempt.finish(failed=True)
++            if isinstance(error, Exception) and not isinstance(error, InterruptedError):
++                self.attempt.check_retry()
++            raise
++        self.attempt.observe(chunk)
++        return chunk
++
++    def close(self):
++        """Закрыть исходный ресурс на владельце без повторного сетевого вызова."""
++        self.attempt.finish(failed=not self.attempt.terminal and self.attempt.api_mode == "codex_responses")
++        close = getattr(self.raw, "close", None)
++        if callable(close):
++            close()
++
++    def __getattr__(self, name):
++        return getattr(self.raw, name)
++
++
++def physical_callback(callback, metadata, *, streaming=False):
++    """Обвязать именно provider callback, чтобы Relay retries тоже учитывались."""
++    budget = _current.get()
++    if budget is None:
++        return callback
++
++    @wraps(callback)
++    def invoke(request):
++        attempt = budget.start(metadata)
++        try:
++            raw = callback(request)
++        except BaseException as error:
++            attempt.finish(failed=True)
++            if isinstance(error, Exception) and not isinstance(error, InterruptedError):
++                attempt.check_retry()
++            raise
++        if streaming and hasattr(raw, "__iter__") and not hasattr(raw, "output"):
++            attempt.record("stream_open")
++            return _PhysicalStream(raw, attempt)
++        attempt.finish()
++        return raw
++    return invoke
++
++
++def physical_async_callback(callback, metadata):
++    """Учесть асинхронную попытку в том же бюджете без блокирования event loop."""
++    budget = _current.get()
++    if budget is None:
++        return callback
++
++    @wraps(callback)
++    async def invoke(request):
++        attempt = budget.start(metadata)
++        try:
++            result = await callback(request)
++        except BaseException as error:
++            attempt.finish(failed=True)
++            if isinstance(error, Exception) and not isinstance(error, InterruptedError):
++                attempt.check_retry()
++            raise
++        attempt.finish()
++        return result
++    return invoke
++
++
++def logical_deadline(seconds, *, lane="primary", request_id=""):
++    """Закрепить исходный native timeout; повтор получает прежний absolute monotonic deadline."""
++    budget = _current.get()
++    now = time.monotonic()
++    if budget is None:
++        return now + seconds
++    with budget.lock:
++        previous = budget.lanes.get(lane)
++        window = budget.deadlines.get(lane)
++        baseline = previous is not None and previous.finished and not previous.failed and (
++            not request_id or previous.request_id != request_id
++        )
++        # При nonstream execute текущая попытка начинается до создания watchdog.
++        baseline = baseline or (
++            lane == "primary" and window is not None and bool(request_id)
++            and window[0] != request_id and previous is not None and not previous.finished
++            and not getattr(previous, "is_retry", False)
++        )
++        if window is None or baseline:
++            window = (request_id, now + seconds)
++            budget.deadlines[lane] = window
++        return window[1]
++
++
++def turn_budget(function):
++    """Создать новый бюджет только на самостоятельный вход пользовательского хода."""
++    @wraps(function)
++    def invoke(*args, **kwargs):
++        if _current.get() is not None:
++            return function(*args, **kwargs)
++        token = _current.set(TurnRequestBudget())
++        try:
++            return function(*args, **kwargs)
++        finally:
++            _current.reset(token)
++    return invoke

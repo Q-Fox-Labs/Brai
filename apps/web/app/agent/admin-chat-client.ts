@@ -20,6 +20,8 @@ export class AdminChatError extends Error {
 }
 /** Составной ключ не смешивает одинаковые ID чатов разных пользователей. */
 export function adminChatKey(chat: AdminChat): string { return JSON.stringify([chat.owner.id, chat.id]); }
+/** Связывает ошибку источника только с выбранным профилем. */
+export function selectedChatUnavailable(chat: AdminChat | null, owners: ChatOwner[]): boolean { return !!chat && owners.some(owner => owner.id === chat.owner.id); }
 /** Выполняет только чтение; сессия проверяется сервером на каждом запросе. */
 export async function chatQuery<T>(operation: string, input: Record<string, string>, signal: AbortSignal): Promise<T> {
   const response = await fetch("/api/admin?" + new URLSearchParams({ operation, ...input }), { cache: "no-store", signal });
@@ -29,10 +31,10 @@ export async function chatQuery<T>(operation: string, input: Record<string, stri
   return value;
 }
 /** Загружает все страницы профилей, сохраняя доступные чаты при отказе одного источника. */
-export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal): Promise<{ chats: AdminChat[]; unavailable: string[] }> {
+export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal): Promise<{ chats: AdminChat[]; unavailable: ChatOwner[] }> {
   const { users } = await chatQuery<{ users: ChatOwner[] }>("users-list", {}, signal);
   const owners: ChatOwner[] = users.filter(user => user.profileId);
-  const chats: AdminChat[] = [], unavailable: string[] = [];
+  const chats: AdminChat[] = [], unavailable: ChatOwner[] = [];
   // AIDEV-NOTE: Ограничиваем число одновременно создаваемых снимков на стороне Hermes.
   for (let offset = 0; offset < owners.length; offset += 3) {
     await Promise.all(owners.slice(offset, offset + 3).map(async owner => {
@@ -52,7 +54,7 @@ export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal)
         chats.push(...unique.values());
       } catch (error) {
         if (signal.aborted || error instanceof AdminChatError && [401, 403].includes(error.status)) throw error;
-        unavailable.push(owner.name || owner.telegramId || "Пользователь");
+        unavailable.push(owner);
         chats.push(...previous.filter(chat => chat.owner.id === owner.id).map(chat => ({ ...chat, owner })));
       }
     }));

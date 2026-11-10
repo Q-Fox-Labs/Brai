@@ -19,7 +19,13 @@ MAX_MEMORY_PART_BYTES = 768
 
 
 class MemOSError(RuntimeError):
-    pass
+    """Ошибка доставки; только структурированный HTTP/API status задаёт постоянный отказ."""
+
+    def __init__(self, message, *, status=None):
+        super().__init__(message)
+        self.status = status
+        self.permanent = (type(status) is int and 400 <= status < 500
+                          and status not in (408, 409, 425, 429))
 
 
 # AIDEV-NOTE: Срок принадлежит одному поиску, а не общему экземпляру provider.
@@ -254,14 +260,14 @@ class Client:
             exc.close()
             if allow_missing and exc.code == 404:
                 return None
-            raise MemOSError(f"MemOS {path}: HTTP {exc.code}") from None
+            raise MemOSError(f"MemOS {path}: HTTP {exc.code}", status=exc.code) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
             raise MemOSError(f"MemOS {path}: connection failed ({type(exc).__name__})") from None
         except (ValueError, UnicodeError):
             raise MemOSError(f"MemOS {path}: invalid JSON response") from None
         if not isinstance(result, dict) or result.get("code", 200) != 200:
             code = result.get("code", "unknown") if isinstance(result, dict) else "invalid"
-            raise MemOSError(f"MemOS {path}: API error {code}")
+            raise MemOSError(f"MemOS {path}: API error {code}", status=code)
         return result
 
     def _memory_read(self, body, timeout):
@@ -332,7 +338,7 @@ class Client:
                         raise MemOSError('MemOS memory stream has invalid record')
         except urllib.error.HTTPError as exc:
             exc.close()
-            raise MemOSError(f'MemOS memory stream: HTTP {exc.code}') from None
+            raise MemOSError(f'MemOS memory stream: HTTP {exc.code}', status=exc.code) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
             raise MemOSError(f'MemOS memory stream: connection failed ({type(exc).__name__})') from None
         except (ValueError, UnicodeError):

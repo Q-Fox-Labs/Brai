@@ -219,8 +219,12 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"data: first", await asyncio.wait_for(reader.readuntil(b"data: first\n\n"), 2))
         self.assertEqual(self.auth_requests[0]["method"], "authorize")
         self.assertEqual(self.auth_requests[0]["params"], {"uid": os.getuid()})
-        self.allowed = False
-        self.assertEqual(await asyncio.wait_for(reader.read(), 1.0), b"")
+        with self.assertLogs(egress.LOGGER, level='INFO') as captured:
+            self.allowed = False
+            self.assertEqual(await asyncio.wait_for(reader.read(), 1.0), b"")
+        self.assertIn('stage=access', captured.output[0])
+        self.assertIn('reason=revoke', captured.output[0])
+        self.assertNotIn('8.8.8.8', captured.output[0])
         self.assertGreaterEqual(len(self.auth_requests), 2)
         writer.close()
 
@@ -407,6 +411,35 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         self.release.set()
         self.assertIn(b"data: last", await asyncio.wait_for(reader.read(), 2))
         writer.close()
+
+    @unittest.skipUnless(os.environ.get('BRAI_LONG_RELAY_TEST') == '1', '130 second local acceptance')
+    async def test_long_stream_through_relay_and_egress(self):
+        async def long_provider(reader, writer):
+            try:
+                await reader.readuntil(b'\r\n\r\n')
+                writer.write(b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n')
+                await writer.drain()
+                for _ in range(260):
+                    writer.write(b'data: frame\n\n')
+                    await writer.drain()
+                    await asyncio.sleep(0.5)
+                writer.write(b'data: DONE\n\n')
+                await writer.drain()
+            finally:
+                writer.close()
+
+        self.remote.close()
+        await self.remote.wait_closed()
+        self.remote = await asyncio.start_server(long_provider, '127.0.0.1', 0)
+        self.remote_port = self.remote.sockets[0].getsockname()[1]
+        reader, writer = await self.request(b'GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n')
+        try:
+            result = await asyncio.wait_for(reader.read(), 145)
+            self.assertEqual(result.count(b'data: frame\n\n'), 260)
+            self.assertIn(b'data: DONE\n\n', result)
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def test_denied_requests(self):
         requests = [

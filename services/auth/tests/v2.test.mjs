@@ -9,8 +9,8 @@ const good={headers:{origin:cfg.origin,cookie:"session=fixture"},body:{}};
 const handler=async()=>Response.json({user:{id:"u1"},session:{id:"s1"}});
 function fixture({role="admin",session=true}={}){
  let calls=0;
- const client={async query(sql){calls++;if(sql.includes('FROM "session"'))return {rowCount:session?1:0,rows:[]};if(sql.includes("role='admin'"))return {rowCount:role==="admin"?1:0,rows:[]};if(sql.startsWith("SELECT u.id"))return {rowCount:1,rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};return {rowCount:0,rows:[]};},release(){}};
- return {pool:{async query(){calls++;return {rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};},async connect(){return client;}},get calls(){return calls;}};
+ const audit=[];const client={async query(sql,params){calls++;if(sql.includes('FROM "session"'))return {rowCount:session?1:0,rows:[]};if(sql.includes("role='admin'"))return {rowCount:role==="admin"?1:0,rows:[]};if(sql.startsWith("SELECT 1 FROM brai_identity"))return {rowCount:1,rows:[]};if(sql.startsWith("INSERT INTO brai_identity_audit"))audit.push(params);if(sql.startsWith("SELECT u.id"))return {rowCount:1,rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};return {rowCount:0,rows:[]};},release(){}};
+ return {pool:{async query(){calls++;return {rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};},async connect(){return client;}},audit,get calls(){return calls;}};
 }
 test("web admin requires allowed origin, current session and admin role",async()=>{
  const f=fixture();
@@ -33,6 +33,21 @@ test("quarantine is an audit-only target for an active administrator",async()=>{
  assert.equal(role.status,404);
  const ordinary=fixture({role:'user'});
  assert.equal((await v2('admin-audit',request,cfg,ordinary.pool,handler)).status,403);
+});
+
+test("chat pause and resume audits require an allowed origin and administrator",async()=>{
+ for(const action of ["chats.pause","chats.resume"]){
+  const request={headers:good.headers,body:{userId:"u1",action}};
+  validate("AdminAuditRequest",request);
+  const admin=fixture();
+  const result=await v2("admin-audit",request,cfg,admin.pool,handler);
+  assert.equal(result.status,200);assert.ok(result.body.auditId);
+  assert.deepEqual(admin.audit[0],[result.body.auditId,"u1","u1",action]);
+  assert.equal((await v2("admin-audit",request,cfg,fixture({role:"user"}).pool,handler)).status,403);
+  const bad=fixture();
+  assert.equal((await v2("admin-audit",{...request,headers:{...good.headers,origin:"https://evil.example"}},cfg,bad.pool,handler)).status,403);
+  assert.equal(bad.calls,0);
+ }
 });
 
 test("published DTO schemas accept valid requests and reject extra fields",()=>{

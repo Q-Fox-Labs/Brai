@@ -586,6 +586,9 @@
         "updatesCursor": {
           "type": "string",
           "maxLength": 4096
+        },
+        "control": {
+          "$ref": "#/definitions/ChatControlBody"
         }
       }
     },
@@ -888,6 +891,103 @@
         },
         "height": {
           "type": "integer"
+        }
+      }
+    },
+    "ChatControlBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paused",
+        "state"
+      ],
+      "properties": {
+        "paused": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "stopped",
+            "stopping",
+            "resumed"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "paused": {
+              "const": true
+            },
+            "state": {
+              "enum": [
+                "stopped",
+                "stopping"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "paused": {
+              "const": false
+            },
+            "state": {
+              "const": "resumed"
+            }
+          }
+        }
+      ]
+    },
+    "ChatControlRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId",
+        "chatId",
+        "source"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "not": {
+            "const": "__quarantine__"
+          }
+        },
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source": {
+          "const": "telegram"
+        }
+      }
+    },
+    "ChatControlResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/ChatControlBody"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
         }
       }
     }

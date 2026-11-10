@@ -16,7 +16,8 @@ import struct
 import time
 import uuid
 
-from .ingress import Bridge
+from .ingress import Bridge, serve_chat_control
+from .ipc import RpcError
 from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
@@ -147,8 +148,14 @@ async def admit_update(update, adapter):
         if resolver is not None and resolver.journal is not None:
             try:
                 await asyncio.to_thread(resolver.journal.incoming, profile, message, chat, user)
+                route = (str(chat.id), str(getattr(message, 'message_thread_id', None) or ''))
+                if route[1] == '1':
+                    route = (route[0], '')
+                if not resolver.journal.chat_admission(profile, route, str(message.message_id)):
+                    return False
             except Exception:
                 _logger.warning('BRAI_TELEGRAM_JOURNAL_WRITE_FAILED')
+                return False
         return True
     except Exception:
         pass
@@ -201,6 +208,8 @@ class Resolver:
         self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None
+        self.control_server = None
+        self.control_locks = {}
         self.closed = False
         self.retired = False
 
@@ -212,8 +221,40 @@ class Resolver:
 
     def start(self):
         """Держать native lifetime всех active профилей без нового сообщения."""
+        path = os.environ.get('BRAI_IDENTITY_INGRESS_CONTROL_SOCKET')
+        if path and not self.closed and self.control_server is None:
+            self.control_server = asyncio.create_task(serve_chat_control(path, self.chat_control))
         if not self.closed and self.supervisor is None:
             self.supervisor = asyncio.create_task(self._supervise())
+
+    async def chat_control(self, userId, profileId, chat, thread, paused=None):
+        """Применить root-selected owner/route; commit запрета предшествует отмене duplex."""
+        if (not isinstance(userId, str) or not userId or not isinstance(profileId, str)
+                or not isinstance(chat, str) or re.fullmatch(r'[1-9][0-9]{0,19}', chat) is None
+                or not isinstance(thread, str) or thread == '1'
+                or thread and re.fullmatch(r'[1-9][0-9]{0,15}', thread) is None
+                or paused is not None and type(paused) is not bool or self.journal is None):
+            raise RpcError(-32602, 'Invalid chat control')
+        profile, route = {'userId': userId, 'profileId': profileId}, (chat, thread)
+        key = (profileId, *route)
+        async with self.control_locks.setdefault(key, asyncio.Lock()):
+            state = (self.journal.chat_state(profile, route) if paused is None
+                     else self.journal.set_chat_pause(profile, route, paused))
+            bridge = next((value for value in self.bridges.values()
+                           if value.profile_id == profileId and value.owner == userId), None)
+            stopping = state['paused']
+            if (paused is not None or state['paused']) and bridge is not None and bridge.peer is not None and not bridge.peer.closed:
+                try:
+                    receipt = await bridge.peer.call('chat_pause', {'owner': userId, 'chat': chat, 'thread': thread,
+                        'paused': state['paused'], 'generation': state['generation']}, timeout=8)
+                    stopping = receipt.get('state') != 'stopped' or bridge.dispatch_inflight > 0
+                except (ConnectionError, TimeoutError, RpcError):
+                    stopping = True
+            if paused is False:
+                # AIDEV-NOTE: Telegram date имеет секундную точность. Receipt ждёт границу,
+                # чтобы новый input после ответа не был принят за накопленный backlog.
+                await asyncio.sleep(max(0, state['resumeAfter'] - time.time()))
+            return {'paused': state['paused'], 'state': ('stopping' if stopping else 'stopped') if state['paused'] else 'resumed'}
 
     async def close(self):
         """Закрыть только каналы этого ingress instance."""
@@ -224,6 +265,10 @@ class Resolver:
             self.journal.restore()
         if _resolvers.get(id(self.adapter)) is self:
             _resolvers.pop(id(self.adapter))
+        if self.control_server is not None:
+            self.control_server.cancel()
+            await asyncio.gather(self.control_server, return_exceptions=True)
+            self.control_server = None
         if self.supervisor is not None:
             self.supervisor.cancel()
             await asyncio.gather(self.supervisor, return_exceptions=True)
@@ -270,6 +315,11 @@ class Resolver:
         if self.journal is not None:
             self.journal.routes[str(profile['telegramId'])] = profile
         bridge = self._account_bridge(profile)
+        if self.journal is not None:
+            bridge.chat_state = lambda route: self.journal.chat_state(profile, route)
+            bridge.chat_admission = lambda route, mid: self.journal.chat_admission(profile, route, mid)
+            bridge.chat_started = lambda route, generation: self.journal.chat_started(profile, route, generation)
+            bridge.chat_states = lambda: self.journal.chat_states(profile)
         if not bridge.require_scope:
             author = str(profile.get('authorTelegramId', profile['telegramId']))
             binding = {**profile, 'telegramId': author, 'authorTelegramId': author}
@@ -332,6 +382,7 @@ class Resolver:
         if not turn:
             turn = {'id': uuid.uuid4().hex, 'route': route}
             self.turns[uid] = turn
+        turn['chatGeneration'] = self._chat_generation(profile, route)
         route_metadata = getattr(self.runner, '_thread_metadata_for_source', None)
         turn['metadata'] = (dict(route_metadata(event.source, event.message_id) or {}) if callable(route_metadata)
                             else ({'thread_id': route[1]} if route[1] else {}))
@@ -384,6 +435,8 @@ class Resolver:
             raise ValueError('Invalid metadata')
         route = (str(payload.get('chat_id') or ''),
                  str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
+        if self.journal is not None and self.journal.chat_state(profile, (route[0], '' if route[1] == '1' else route[1]))['paused']:
+            raise PermissionError('Conversation paused')
         known = self.ledger.metadata(profile, route)
         if known is None and (route[1] or not re.fullmatch(r'[1-9][0-9]{0,19}', route[0])):
             raise PermissionError('Unknown owner conversation')
@@ -410,9 +463,12 @@ class Resolver:
         if route != self.turns[uid]['route']:
             raise PermissionError('Delivery outside current conversation')
         input_id = turn.get('inputId')
+        generation = self._chat_generation(profile, route, turn.get('chatGeneration'))
         def current():
             if self.turns.get(uid) is not turn or turn.get('inputId') != input_id:
                 raise PermissionError('Owner turn changed')
+            self._chat_generation(profile, route, generation)
+        current.generation = generation
         state = await broker_call('ingress.status', {'uid': uid, 'turnId': turn['id'],
             **({'inputId': input_id} if input_id else {})})
         current()
@@ -434,12 +490,16 @@ class Resolver:
         if scope_id is not None and (not grant or grant['owner'] != self.ledger.owner(profile)
                 or grant['expires'] <= time.monotonic() or grant['route'] != route):
             raise PermissionError('Expired or foreign delivery scope')
+        generation = self._chat_generation(profile, route, grant.get('generation') if grant is not None else UNSCOPED)
         checked_route, metadata = self.authorize_delivery(profile, 'send', payload)
         await self._account(profile, route[0])
         def current():
+            self._chat_generation(profile, route, generation)
             if grant is not None and (self.interactive_scopes.get(scope_id) is not grant
                     or grant['expires'] <= time.monotonic()):
                 raise PermissionError('Interactive delivery expired')
+        current.generation = generation
+        current()
         return checked_route, metadata, None, current, False
 
     async def deliver(self, profile, owner, action, payload):
@@ -461,9 +521,16 @@ class Resolver:
                         'send_video', 'send_voice', 'send_animation'}):
                 raise PermissionError('Invalid notification delivery')
             async def send_notification(target, options):
+                generation = self._chat_generation(profile, target)
                 await self._account(profile, target[0])
+                self._chat_generation(profile, target, generation)
+                def target_current():
+                    current()
+                    self._chat_generation(profile, target, generation)
+                target_current.generation = generation
+                target_current()
                 return await self._deliver_route(profile, action, payload, target, options,
-                                                 None, current)
+                                                 None, target_current)
             return await self.notifications.deliver(profile, route[0], send_notification,
                                                     text=action == 'send')
         return await self._deliver_route(profile, action, payload, route, metadata, turn, current)
@@ -517,7 +584,7 @@ class Resolver:
                     raise ValueError('Incomplete file delivery receipt')
                 ids = [str(value) for value in ids]
                 for message_id in ids:
-                    self.ledger.record(profile, route, message_id)
+                    self._record_delivery(profile, route, message_id, current.generation, created=action != 'edit_message')
                 return {'success': True, 'message_id': ids[-1], 'continuation_message_ids': ids[:-1],
                         'raw_response': {'message_ids': ids}}
             finally:
@@ -568,8 +635,23 @@ class Resolver:
         if receipt.get('success'):
             for message_id in [receipt.get('message_id'), *(receipt.get('continuation_message_ids') or [])]:
                 if message_id:
-                    self.ledger.record(profile, route, message_id)
+                    self._record_delivery(profile, route, message_id, current.generation, created=action != 'edit_message')
         return receipt
+
+    def _chat_generation(self, profile, route, expected=UNSCOPED):
+        """Проверить pause/generation; неизвестная legacy provenance допустима только до первой паузы."""
+        canonical = (route[0], '' if route[1] == '1' else route[1])
+        state = self.journal.chat_state(profile, canonical) if self.journal is not None else {'paused': False, 'generation': 0}
+        if state['paused'] or expected is not UNSCOPED and state['generation'] != (0 if expected is None else expected):
+            raise PermissionError('Paused or stale conversation action')
+        return state['generation']
+
+    def _record_delivery(self, profile, route, message_id, generation, *, created):
+        """Запомнить принадлежность receipt; поколение рождения пишется только для нового сообщения."""
+        self.ledger.record(profile, route, message_id)
+        if created and self.journal is not None:
+            canonical = (route[0], '' if route[1] == '1' else route[1])
+            self.journal.record_presentation(profile, canonical, message_id, generation)
 
     async def interactive_binding(self, update):
         """Проверить настоящего clicker и точное сообщение его личного worker."""
@@ -592,20 +674,28 @@ class Resolver:
             resolve_thread = getattr(self.adapter, '_effective_message_thread_id', None)
             thread = resolve_thread(message) if callable(resolve_thread) else getattr(message, 'message_thread_id', None)
             route = (chat, str(thread or ''))
+            canonical = (route[0], '' if route[1] == '1' else route[1])
+            presentation = self.journal.presentation_generation(profile, canonical, str(getattr(message, 'message_id', ''))) if self.journal is not None else None
+            generation = self._chat_generation(profile, route, presentation)
             if not self.ledger.owns(profile, route, str(getattr(message, 'message_id', '')), outgoing=True):
                 raise PermissionError('Callback belongs to another owner')
             query_id = str(getattr(query, 'id', '') or '')
             kind = 'callback'
         elif inline is not None and query is None:
+            bound = self.journal.routes.get(telegram) if self.journal is not None else None
+            observed = self._chat_generation(bound, (telegram, '')) if bound is not None else None
             profile = await broker_call('identity.resolve', {'telegramId': telegram})
             route = (telegram, '')
+            if bound is not None and bound['profileId'] != profile['profileId']:
+                raise PermissionError('Interactive owner binding changed')
+            generation = self._chat_generation(profile, route, observed)
             query_id = str(getattr(inline, 'id', '') or '')
             kind = 'inline'
         else:
             raise PermissionError('Unsupported interactive update')
         if not query_id or len(query_id) > 256:
             raise PermissionError('Invalid interactive query')
-        return profile, route, query_id, kind
+        return profile, route, query_id, kind, generation
 
     async def interactive_admit(self, update):
         """Guard не отправляет callback в общий native gateway."""
@@ -614,7 +704,11 @@ class Resolver:
 
     async def interactive(self, update):
         """Отправить подлинный callback только его UID-bound worker."""
-        profile, route, query_id, kind = await self.interactive_binding(update)
+        profile, route, query_id, kind, generation = await self.interactive_binding(update)
+        from types import SimpleNamespace
+        bridge = await self(SimpleNamespace(user_id=str(profile['telegramId'])))
+        peer = await bridge.connect()
+        self._chat_generation(profile, route, generation)
         now = time.monotonic()
         self.interactive_scopes = {key: value for key, value in self.interactive_scopes.items()
                                    if value['expires'] > now}
@@ -623,13 +717,10 @@ class Resolver:
         scope_id = uuid.uuid4().hex
         self.interactive_scopes[scope_id] = {'owner': self.ledger.owner(profile),
             'route': route, 'actorTelegramId': str(profile['telegramId']),
-            'queryId': query_id, 'kind': kind, 'expires': now + 300}
-        from types import SimpleNamespace
-        bridge = await self(SimpleNamespace(user_id=str(profile['telegramId'])))
-        peer = await bridge.connect()
+            'queryId': query_id, 'kind': kind, 'expires': now + 300, 'generation': generation}
         result = await peer.call('interactive', {'update': update.to_dict(),
                                 'owner': profile['userId'], 'scope_id': scope_id,
-                                'actor_telegram_id': str(profile['telegramId'])})
+                                'actor_telegram_id': str(profile['telegramId']), 'chat_generation': generation})
         if not isinstance(result, dict) or result.get('accepted') is not True:
             raise PermissionError('Interactive dispatch unconfirmed')
         return result
@@ -664,7 +755,14 @@ class Resolver:
             if (not grant or grant['owner'] != self.ledger.owner(profile) or grant['kind'] != kind
                     or grant['expires'] <= time.monotonic() or values.get(key) != grant['queryId']):
                 raise PermissionError('Foreign interactive query')
+            generation = self._chat_generation(profile, grant['route'], grant.get('generation'))
             await self._account(profile, grant.get('actorTelegramId', grant['route'][0]))
+            def current():
+                self._chat_generation(profile, grant['route'], generation)
+                if self.interactive_scopes.get(scope_id) is not grant or grant['expires'] <= time.monotonic():
+                    raise PermissionError('Interactive delivery expired')
+            current.generation = generation
+            current()
             if kind == 'inline':
                 values['is_personal'] = True
                 values['cache_time'] = 0
@@ -714,7 +812,9 @@ class Resolver:
         operation = getattr(bot, method, None)
         if not callable(operation):
             raise RuntimeError('Trusted Telegram UI unavailable')
-        with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
+        current()
+        journal_route = route if route is not None else grant['route']
+        with self.journal.scope(profile, thread=journal_route[1]) if self.journal is not None else nullcontext():
             result = await operation(**values)
         if method.startswith('answer_') or method == 'delete_message':
             if result is not True:
@@ -723,7 +823,7 @@ class Resolver:
         raw = result.to_dict() if callable(getattr(result, 'to_dict', None)) else result
         if not isinstance(raw, dict) or not str(raw.get('message_id', '')).isdecimal():
             raise ValueError('Missing Telegram UI message receipt')
-        self.ledger.record(profile, route, raw['message_id'])
+        self._record_delivery(profile, route, raw['message_id'], current.generation, created=method == 'send_message')
         return raw
 
     async def end(self, profile, worker_turn):

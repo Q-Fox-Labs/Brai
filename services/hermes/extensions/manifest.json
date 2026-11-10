@@ -214,7 +214,13 @@
     "hermes_constants.py",
     "hermes_cli/service_manager.py",
     "tui_gateway/change_watcher.py",
-    "tools/bot_mode_probe.py"
+    "tools/bot_mode_probe.py",
+    "agent/relay_llm.py",
+    "agent/conversation_loop.py",
+    "agent/codex_runtime.py",
+    "agent/context_compressor.py",
+    "agent/chat_completion_nonstream.py",
+    "agent/conversation_compression.py"
   ],
   "core_added_files": [
     "apps/desktop/src/i18n/ru_complete.json",
@@ -235,7 +241,8 @@
     "tests/hermes_cli/test_russian_presentation.py",
     "tests/tools/test_approval_localization.py",
     "tools/approval_conversation.py",
-    "tools/approval_localization.py"
+    "tools/approval_localization.py",
+    "agent/brai_turn_budget.py"
   ],
   "plugins": [
     "codex-cli-search",
@@ -258,6 +265,7 @@
     "patches/russian-failure-notice.patch",
     "patches/telegram-media-display.patch",
     "patches/telegram-stream-delivery.patch",
+    "patches/turn-request-budget.patch",
     "plugins/codex-cli-search/README.txt",
     "plugins/codex-cli-search/__init__.py",
     "plugins/codex-cli-search/plugin.yaml",

@@ -197,6 +197,17 @@
          event.metadata = dict(event.metadata or {})
 --- a/gateway/run_startup.py
 +++ b/gateway/run_startup.py
+@@ -91,6 +91,10 @@
+         until it finishes, else a user message can race it)."""
+         from gateway.run import _AGENT_PENDING_SENTINEL
+         try:
++            if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++                allowed = getattr(self, "_brai_identity_recovery_allowed", None)
++                if not callable(allowed) or allowed(event.source) is not True:
++                    return
+             await adapter.handle_message(event)
+             session_tasks = getattr(adapter, "_session_tasks", {})
+             task = session_tasks.get(session_key) if isinstance(session_tasks, dict) else None
 @@ -293,6 +293,8 @@
          ``_send_restart_notification`` and ``_redeliver_pending_obligations`` used to be awaited inline
          *before* ``_finish_startup_restore`` released the gate. See #91969.
@@ -242,6 +253,16 @@
          from gateway.run import (
              _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window, _is_fresh_gateway_interruption,
          )
+@@ -628,5 +640,9 @@
+                 continue
+             source = self._restored_source(entry)
++            if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++                allowed = getattr(self, "_brai_identity_recovery_allowed", None)
++                if not callable(allowed) or allowed(source) is not True:
++                    continue
+             adapter = self._delivery_adapter_for(source)
+             if adapter is None:
+                 logger.debug(
 @@ -1140,6 +1150,8 @@
 
      async def _start_recover_previous_run(self) -> None:
@@ -317,7 +338,7 @@
          # The launch profile's durable completions replay here, not at import (#123265); the
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -1842,6 +1842,8 @@
+@@ -1842,7 +1842,9 @@
      DEVNULL stdin even passes ``isatty``), so discovery runs with interactive OAuth suppressed — the
      same gate the CLI's background discovery uses. An expired token then parks the server with an
      actionable ``hermes mcp login`` warning instead of opening an authorize tab.

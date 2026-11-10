@@ -5,6 +5,7 @@ import asyncio
 import ipaddress
 import hashlib
 import json
+import logging
 import os
 import pwd
 from pathlib import Path
@@ -14,15 +15,21 @@ import socket
 import ssl
 import stat
 import struct
+import time
+import uuid
 from urllib.parse import urlsplit
+
+from . import network
 
 HEADER_LIMIT = 32768
 BODY_LIMIT = 8 * 1024 * 1024
-IDLE_TIMEOUT = 120
+IDLE_TIMEOUT = 960
+DRAIN_TIMEOUT = 120
 CONNECT_TIMEOUT = 10
 CREDENTIAL_TIMEOUT = 20
 SEARCH_CONCURRENCY = 2
 MAX_CONNECTIONS = 128
+LOGGER = logging.getLogger(__name__)
 TOKEN = re.compile(rb"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 MODEL_PATHS = {"/v1/chat/completions", "/v1/responses", "/v1/embeddings",
                "/v1/images/generations", "/v1/images/edits"}
@@ -159,18 +166,11 @@ async def _pipe(reader, writer):
                 pass
             return
         writer.write(data)
-        await asyncio.wait_for(writer.drain(), IDLE_TIMEOUT)
+        await asyncio.wait_for(writer.drain(), DRAIN_TIMEOUT)
 
 
 async def _duplex(a_reader, a_writer, b_reader, b_writer):
-    tasks = [asyncio.create_task(_pipe(a_reader, b_writer)),
-             asyncio.create_task(_pipe(b_reader, a_writer))]
-    try:
-        await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await network._duplex(a_reader, a_writer, b_reader, b_writer)
 
 
 def _profile(registry, uid):
@@ -752,6 +752,8 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
     async def handle(reader, writer):
         task = asyncio.current_task()
         active.add(task)
+        connection_id = uuid.uuid4().hex
+        started = time.monotonic()
         operation = watcher = None
         try:
             if semaphore.locked():
@@ -765,7 +767,10 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
                     return
                 operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search))
                 watcher = asyncio.create_task(_watch_access(uid, registry_loader, authorize))
-                await asyncio.wait((operation, watcher), return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait((operation, watcher), return_when=asyncio.FIRST_COMPLETED)
+                if watcher in done and operation not in done:
+                    LOGGER.info('connection=%s stage=access elapsed=%.3f reason=revoke',
+                                connection_id, time.monotonic() - started)
         except (OSError, ValueError, TypeError):
             pass
         finally:
@@ -799,6 +804,7 @@ async def _main():
     parser.add_argument("--registry", required=True)
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
     config = _protected_json(args.config)
     registry = _protected_json(args.registry)
     if not isinstance(registry, dict) or registry.get("version") != 1 or not isinstance(registry.get("profiles"), dict):
