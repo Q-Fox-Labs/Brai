@@ -15,7 +15,7 @@ const toolList=[
  {name:'diary_create_text',description:'Сохраняет точный текст в собственный дневник. Неизвестная дата остаётся null; requestId повторяется точно.',inputSchema:schema({requestId:uuid,title:{type:'string'},text:{type:'string'},eventDate:{type:['string','null']}},['requestId','text'])}
 ];
 async function body(req,max=2*1024*1024){const parts=[];let size=0;for await(const part of req){size+=part.length;if(size>max)throw new DiaryFault('TOO_LARGE',413);parts.push(part);}try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(parts,size)));}catch{throw new DiaryFault('INVALID_ARGUMENT');}}
-function send(res,status,value){if(res.destroyed||res.writableEnded)return;const bytes=Buffer.from(JSON.stringify(value));if(bytes.length>3*1024*1024)throw new DiaryFault('TOO_LARGE',413);res.writeHead(status,{'content-type':'application/json','cache-control':'private, no-store','x-content-type-options':'nosniff'});res.end(bytes);}
+function send(res,status,value){if(res.destroyed||res.writableEnded)return;const bytes=Buffer.from(JSON.stringify(value));if(bytes.length>4*1024*1024)throw new DiaryFault('TOO_LARGE',413);res.writeHead(status,{'content-type':'application/json','cache-control':'private, no-store','x-content-type-options':'nosniff'});res.end(bytes);}
 /** Создаёт listener; транспорт не решает owner из тела запроса. */
 export function createDiaryServer(cfg,store,ports){
  let active=0;
@@ -61,7 +61,7 @@ export function createDiaryServer(cfg,store,ports){
     const prepared=await ports.prepared(entry);
     send(res,201,{entry,ready:prepared.artifact.status==='ready'});return;
    }
-   const match=/^\/v1\/(entry|upload|file)\/([a-f0-9-]+)$/.exec(url.pathname);
+   const match=/^\/v1\/(entry|upload|file|retry)\/([a-f0-9-]+)$/.exec(url.pathname);
    if(!match)throw new DiaryFault('NOT_FOUND',404);
    const entry=await store.get(user.id,id(match[2]));
    if(match[1]==='file'&&['GET','HEAD'].includes(req.method)){
@@ -71,6 +71,11 @@ export function createDiaryServer(cfg,store,ports){
     res.writeHead(upstream.status,output);if(upstream.body)Readable.fromWeb(upstream.body).on('error',()=>res.destroy()).pipe(res);else res.end();return;
    }
    if(match[1]==='entry'&&req.method==='GET'){send(res,200,{entry});return;}
+   if(match[1]==='retry'&&req.method==='POST'){
+    const input=await body(req);
+    if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==1||!('requestId' in input))throw new DiaryFault('INVALID_ARGUMENT');
+    send(res,202,await store.retry(user.id,user.profileId,entry.id,id(input.requestId),ports));return;
+   }
    if(match[1]==='upload'&&['GET','PATCH'].includes(req.method)&&entry.source==='audio'){
     const prepared=await ports.prepared(entry),abort=new AbortController();
     const interrupted=()=>abort.abort();req.once('aborted',interrupted);if(req.aborted)interrupted();

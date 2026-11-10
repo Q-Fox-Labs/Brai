@@ -262,6 +262,7 @@
       "services/hermes/identity/broker.py",
       "services/hermes/identity/network.py",
       "services/hermes/identity/telegram_runtime.py",
+      "services/hermes/identity/artifact_read.py",
       "services/hermes/identity/native_ingress.py",
       "services/hermes/identity/native.patch",
       "services/hermes/identity/egress.py",
@@ -347,7 +348,8 @@
       "services/hermes/identity/tests/memory_spool.test.mjs",
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
-      "services/hermes/tests/dialogues-summary.test.mjs"
+      "services/hermes/tests/dialogues-summary.test.mjs",
+      "services/hermes/identity/tests/test_worker_artifact_read.py"
     ]
   },
   "dependencies": [
@@ -667,6 +669,7 @@
       "services/hermes/identity/broker.py",
       "services/hermes/identity/network.py",
       "services/hermes/identity/telegram_runtime.py",
+      "services/hermes/identity/artifact_read.py",
       "services/hermes/identity/native_ingress.py",
       "services/hermes/identity/native.patch",
       "services/hermes/identity/egress.py",

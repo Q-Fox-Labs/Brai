@@ -154,7 +154,7 @@ class OwnerFiles:
                     or '..' in Path(p).parts or (not Path(p).is_relative_to(home) and
                     (key != 'serviceRoots' or p not in (
                         '/opt/brai-profile/engine', '/opt/brai-profile/runtime',
-                        '/opt/brai-profile/instructions'))) for p in roots):
+                        '/opt/brai-profile/instructions', '/opt/brai-profile/system-skills'))) for p in roots):
                 raise PermissionError('Foreign file root')
         return value
 
@@ -228,6 +228,27 @@ class OwnerFiles:
                 os.close(fd)
             return {**result, 'localPath': path, 'markdown': '[file](<' + path + '>)'}
         return self.materialize(uid, profile, result)
+
+    async def open_ingress(self, uid, profile, artifact_id):
+        """Открыть конкретный owner-bound артефакт; права каталогов не меняются."""
+        try:
+            from ..identity.artifact_read import FIELDS, verify
+        except ImportError:
+            from identity.artifact_read import FIELDS, verify
+        aid = str(uuid.UUID(artifact_id))
+        result = await self.control.call('artifacts.fetch', {'uid': uid, 'artifactId': aid}, timeout=120)
+        if result.get('artifactId') != aid:
+            raise PermissionError('Artifact mismatch')
+        fd = self.open_cache(uid, result, profile)
+        try:
+            if os.fstat(fd).st_mode & 0o022:
+                raise PermissionError('Writable artifact cache')
+            metadata = {key: result[key] for key in FIELDS}
+            await verify(fd, metadata)
+            return metadata, fd
+        except BaseException:
+            os.close(fd)
+            raise
 
     async def prepare_ingress(self, uid, profile, paths):
         """Перенести уже скачанные файлы ingress в media проверенного профиля."""

@@ -95,6 +95,15 @@ class ContextGifTests(unittest.TestCase):
             def stream(inner, *args, **kwargs):
                 self.requests.append((args, kwargs))
                 return Response()
+        class Opener:
+            def open(inner, request, timeout):
+                self.client_options = {'headers': dict(request.header_items())}
+                self.requests.append(((request.get_method(), request.full_url), {'json': json.loads(request.data)}))
+                if status_error:
+                    raise status_error
+                response = Response()
+                response.read = lambda maximum: json.dumps({'data': [{'b64_json': encoded}]}).encode()
+                return response
         provider = SimpleNamespace(is_available=lambda: True)
         backend = SimpleNamespace(
             _read_codex_credential=lambda: ('test-credential', 'https://chatgpt.com/backend-api/codex'),
@@ -105,13 +114,14 @@ class ContextGifTests(unittest.TestCase):
             'agent.codex_headers': SimpleNamespace(codex_cloudflare_headers=lambda *args, **kwargs: {}),
             'httpx': SimpleNamespace(Client=Client, Timeout=lambda *args, **kwargs: None),
         }
-        with patch.dict(sys.modules, modules), patch.object(GIF.importlib, 'import_module', return_value=backend):
+        with patch.dict(sys.modules, modules), patch.object(GIF.importlib, 'import_module', return_value=backend), patch.object(GIF, 'build_opener', return_value=Opener()):
             return GIF.native_generate(self.home, 'кот машет лапой')
 
     def test_native_subscription_request_and_exact_response_bytes(self):
         result = self.native()
         self.assertEqual(result['method'], 'native-gif')
         self.assertEqual(Path(result['image']).read_bytes(), animation())
+        self.assertTrue(Path(result['image']).is_relative_to(self.home / 'workspace'))
         body = self.requests[0][1]['json']
         self.assertEqual((body['output_format'], body['frame_count'], body['frame_duration_ms']), ('gif', 9, 200))
         self.assertEqual((body['size'], body['quality']), ('auto', 'auto'))
@@ -160,6 +170,25 @@ class ContextGifTests(unittest.TestCase):
         self.assertNotIn('Authorization', self.client_options['headers'])
         self.assertFalse((self.home / 'context-gifs.json').exists())
         self.assertEqual(Path(result['image']).read_bytes(), animation())
+
+    def test_api_runs_without_httpx_in_personal_profile(self):
+        """Отсутствие SDK в системном Python не мешает owner-bound API GIF."""
+        with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'), patch.dict(sys.modules, httpx=None):
+            # native() подменяет httpx только для подписочного маршрута; API не импортирует его.
+            import base64
+            response = SimpleNamespace(read=lambda maximum: json.dumps({
+                'data': [{'b64_json': base64.b64encode(animation()).decode()}]}).encode())
+            class Response:
+                def __enter__(self): return response
+                def __exit__(self, *args): pass
+            with patch.object(GIF, 'build_opener', return_value=SimpleNamespace(open=lambda *a, **k: Response())):
+                result = GIF.native_generate(self.home, 'Луна')
+        self.assertEqual(Path(result['image']).read_bytes(), animation())
+        self.assertTrue(Path(result['image']).is_relative_to(self.home / 'workspace'))
+
+    def test_api_redirect_never_forwards_request(self):
+        with self.assertRaisesRegex(GIF.GifError, 'GIF_REDIRECT_REJECTED'):
+            GIF.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other.invalid')
 
     def test_api_error_does_not_fall_back_to_subscription(self):
         self.api_settings()

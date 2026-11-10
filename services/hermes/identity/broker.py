@@ -385,6 +385,40 @@ class Broker:
                             os.killpg(child.pid, signal.SIGKILL)
                         await child.wait()
 
+    async def open_artifact(self, peer_uid, params):
+        """Выдать FD только ingress после Auth и повторной проверки текущего хода."""
+        if peer_uid != self.config['ingressUid']:
+            raise PermissionError('Ingress required')
+        validate_params('ingress.open-artifact', params)
+        uid = params['uid']
+        turn = self.turns.get(uid) if 'turnId' in params else None
+        def current():
+            if 'turnId' in params and (turn is None or self.turns.get(uid) is not turn
+                    or turn['turnId'] != params['turnId']
+                    or 'inputId' in params and turn['inputId'] != params['inputId']):
+                raise PermissionError('Owner turn changed')
+        current()
+        profile = await self.authorize(uid)
+        if turn is not None:
+            origin = await self.resolve(str(turn['telegramId']))
+            if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
+                raise PermissionError('Telegram account binding changed')
+        current()
+        metadata, fd = await self.files.open_ingress(uid, profile, params['artifactId'])
+        try:
+            checked = await self.authorize(uid)
+            if checked['userId'] != profile['userId'] or checked['profileId'] != profile['profileId']:
+                raise PermissionError('Profile changed')
+            if turn is not None:
+                origin = await self.resolve(str(turn['telegramId']))
+                if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
+                    raise PermissionError('Telegram account binding changed')
+            current()
+            return metadata, fd
+        except BaseException:
+            os.close(fd)
+            raise
+
     async def call(self, peer_uid, method, params):
         """Принять один запрос; worker никогда не выбирает собственный UID или owner."""
         if not isinstance(params, dict):
@@ -733,6 +767,7 @@ PARAMETERS = {
     'ingress.close': ({'uid', 'turnId'}, {'questionMessageId', 'inputId', 'accountOfferId'}),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
+    'ingress.open-artifact': ({'uid', 'artifactId'}, {'turnId', 'inputId'}),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
     'ingress.profiles': (set(), set()),
@@ -761,6 +796,8 @@ def validate_params(method, params):
     required, optional = PARAMETERS[method]
     if not isinstance(params, dict) or not required <= set(params) or set(params) - required - optional:
         raise ValueError('Invalid params')
+    if method == 'ingress.open-artifact' and 'inputId' in params and 'turnId' not in params:
+        raise ValueError('Input requires turn')
     for key in ('turnId', 'requestId', 'path', 'name', 'code', 'telegramId'):
         if key in params and (not isinstance(params[key], str) or not params[key]):
             raise ValueError('Invalid string')
@@ -838,7 +875,12 @@ async def rpc_request(broker, uid, request):
             try:
                 result = await broker.call(uid, method, params)
                 response = {'jsonrpc': '2.0', 'id': identifier, 'result': result}
-            except Exception:
+            except Exception as error:
+                cause = error.__cause__ or error
+                # Только тип и errno: исходный текст может содержать ключ или данные владельца.
+                sys.stderr.write(json.dumps({'event': 'identity_request_failed', 'method': method,
+                    'error': type(error).__name__, 'cause': type(cause).__name__,
+                    'errno': getattr(cause, 'errno', None)}) + '\n')
                 response = rpc_error(identifier, -32001, 'Request unavailable')
     return None if notification else response
 
@@ -865,6 +907,39 @@ async def rpc_frame(broker, uid, raw):
     return responses or None
 
 
+async def artifact_response(broker, uid, request, writer):
+    """Один JSON-RPC вызов с OOB FD; notification не получает ни ответа, ни FD."""
+    from .artifact_read import send_response
+    fd = None
+    identifier = request.get('id')
+    if (request.get('jsonrpc') != '2.0' or set(request) - {'jsonrpc', 'id', 'method', 'params'}
+            or 'id' in request and identifier is not None and type(identifier) not in (str, int, float)):
+        await send_response(writer, rpc_error(None, -32600, 'Invalid Request'))
+        return
+    if 'id' not in request:
+        return
+    try:
+        try:
+            validate_params('ingress.open-artifact', request.get('params', {}))
+        except (ValueError, TypeError, AttributeError):
+            response = rpc_error(identifier, -32602, 'Invalid params')
+        else:
+            try:
+                async with asyncio.timeout(120):
+                    metadata, fd = await broker.open_artifact(uid, request['params'])
+                response = {'jsonrpc': '2.0', 'id': identifier, 'result': metadata}
+            except Exception as error:
+                cause = error.__cause__ or error
+                sys.stderr.write(json.dumps({'event': 'identity_request_failed', 'method': 'ingress.open-artifact',
+                    'error': type(error).__name__, 'cause': type(cause).__name__,
+                    'errno': getattr(cause, 'errno', None)}) + '\n')
+                response = rpc_error(identifier, -32001, 'Request unavailable')
+        await send_response(writer, response, fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 async def serve(config):
     """Запустить ограниченный Unix listener и закрыть его по сигналу."""
     control = ControlPort(config['controlCommand'], config['controlConfigPath'])
@@ -887,13 +962,16 @@ async def serve(config):
                 if len(raw) > (8192 if personal_only else MAX_FRAME) or not raw.endswith(b'\n'):
                     raise ValueError('Frame too large')
                 try:
-                    header = json.loads(raw)
+                    header = json.loads(raw, parse_constant=_invalid_constant)
                 except (ValueError, UnicodeError):
                     header = None
                 if personal_only and (not isinstance(header, dict) or header.get('method') not in ('dialogues.authorize', 'dialogues.summarize-stream')):
                     raise PermissionError('Personal service operation denied')
                 if isinstance(header, dict) and header.get('method') == 'dialogues.summarize-stream':
                     await broker.stream_dialogues_summary(uid, header, reader, writer)
+                    return
+                if isinstance(header, dict) and header.get('method') == 'ingress.open-artifact':
+                    await artifact_response(broker, uid, header, writer)
                     return
                 response = await rpc_frame(broker, uid, raw)
                 if response is None:

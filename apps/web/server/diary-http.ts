@@ -29,5 +29,7 @@ export function diaryPrepare(request:Request){return proxy(request,"/v1/audio");
 export function diaryUpload(request:Request){const id=key(request);return id?proxy(request,"/v1/upload/"+id):Promise.resolve(Response.json({code:"INVALID_ARGUMENT"},{status:400,headers:noStore}));}
 /** Читает raw и исправленный текст своей записи. */
 export function diaryRead(request:Request){const id=key(request);return id?proxy(request,"/v1/entry/"+id):Promise.resolve(Response.json({code:"INVALID_ARGUMENT"},{status:400,headers:noStore}));}
+/** Явно продолжает остановившуюся расшифровку своей записи. */
+export function diaryRetry(request:Request){const id=key(request);return id?proxy(request,"/v1/retry/"+id):Promise.resolve(Response.json({code:"INVALID_ARGUMENT"},{status:400,headers:noStore}));}
 /** Читает оригинальный audio через проверенную сессию. */
 export function diaryFile(request:Request){const id=key(request);return id?proxy(request,"/v1/file/"+id,true):Promise.resolve(Response.json({code:"INVALID_ARGUMENT"},{status:400,headers:noStore}));}
