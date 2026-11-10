@@ -2,7 +2,7 @@
 // ABOUTME: Использует небольшие временные репозитории без сети и установки пакетов.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { packageComponent } from './package-runtime.mjs';
@@ -45,6 +45,29 @@ test('deterministic payloads preserve layout and mode; existing payload is verif
   writeFileSync(join(executable.path, 'services/example/main.mjs'), 'export const value = 0;\n');
   await assert.rejects(build(), /IMMUTABLE_OUTPUT_MISMATCH/);
   assert.match(readFileSync(join(executable.path, 'services/example/main.mjs'), 'utf8'), /value = 0/);
+});
+
+test('build umask does not change immutable identity and source modes stay intact', async t => {
+  const {root,write,component,build}=fixture(t);
+  const app={name:'@brai/example',version:'1.0.0',type:'module',dependencies:{tool:'1.0.0'}};
+  write('services/example/package.json',app);
+  write('node_modules/tool/package.json',{name:'tool',version:'1.0.0',type:'module',exports:'./index.js'});
+  write('node_modules/tool/index.js','export const value=1;');
+  write('node_modules/tool/bin.js','#!/usr/bin/env node\n');
+  write('package-lock.json',{lockfileVersion:3,packages:{'services/example':app,'node_modules/tool':{version:'1.0.0'}}});
+  component.delivery.files.push('services/example/package.json');component.npm={workspaces:['services/example']};
+  for(const file of ['services/example/main.mjs','node_modules/tool/index.js'])chmodSync(join(root,file),0o664);
+  chmodSync(join(root,'node_modules/tool/bin.js'),0o775);
+  chmodSync(join(root,'node_modules/tool'),0o775);
+  const first=await build();
+  assert.ok(first.files.every(file=>file.symlink || !(file.mode & 0o022)));
+  assert.equal(first.files.find(file=>file.path==='services/example/main.mjs').mode,0o644);
+  assert.equal(first.files.find(file=>file.path==='node_modules/tool/bin.js').mode,0o755);
+  assert.equal(lstatSync(join(root,'services/example/main.mjs')).mode & 0o777,0o664);
+  assert.equal(lstatSync(join(root,'node_modules/tool/bin.js')).mode & 0o777,0o775);
+  for(const file of ['services/example/main.mjs','node_modules/tool/index.js'])chmodSync(join(root,file),0o644);
+  chmodSync(join(root,'node_modules/tool/bin.js'),0o755);chmodSync(join(root,'node_modules/tool'),0o755);
+  assert.equal((await build()).payloadHash,first.payloadHash);
 });
 
 test('npm closure preserves workspace-local and nested lock paths and omits dev packages', async t => {
