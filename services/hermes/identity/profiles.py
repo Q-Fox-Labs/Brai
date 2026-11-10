@@ -110,7 +110,7 @@ def stt_config(model):
     if (not isinstance(model, dict) or set(model) != {'modelId', 'revision', 'profileId'}
             or any(not isinstance(value, str) or not value.strip() for value in model.values())):
         raise ValueError('Explicit STT model selector required')
-    command = '/opt/brai-profile/python/bin/python3 -B -m identity.transcribe'
+    command = '/opt/brai-profile/python/bin/python3 -s -P -B -m identity.transcribe'
     for flag, key in [('model-id', 'modelId'), ('revision', 'revision'), ('profile-id', 'profileId')]:
         command += ' --' + flag + ' ' + shlex.quote(model[key])
     command += ' --input {input_path} --output {output_path}'
@@ -138,7 +138,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         'tts': {'provider': 'silero', 'providers': {'silero': {
             'type': 'command',
             'command': 'PYTHONPATH=' + instructions_root + '/services/hermes /usr/bin/python3 '
-                       '-B -m identity.synthesize --input {input_path} --output {output_path}',
+                       '-s -P -B -m identity.synthesize --input {input_path} --output {output_path}',
             'output_format': 'ogg', 'voice_compatible': True,
             'timeout': 200, 'max_text_length': 900}}},
         'skills': {'external_dirs': ['/opt/brai-profile/skills'],
@@ -149,7 +149,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                     'media_delivery_allow_dirs': [home + '/workspace', home + '/results', home + '/media/downloads']},
         'updates': {'check': False},
         'mcp_servers': {'brai': {'command': '/usr/bin/python3',
-                               'args': [instructions_root + '/services/hermes/identity/tool_client.py'],
+                               'args': ['-s', '-P', instructions_root + '/services/hermes/identity/tool_client.py'],
                                'env': {'BRAI_IDENTITY_BROKER': '/run/brai-profile/control.sock'}}},
         'memory': {'provider': 'memos-rest'},
         'plugins': {'enabled': ['codex-cli-search', 'memos-rest', 'telegram-business', 'groq-voice', 'brai-telegram']},
@@ -254,6 +254,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=HOME=' + home, 'Environment=HERMES_HOME=' + home,
         'Environment=HERMES_ROOT=/opt/brai-profile/engine',
         'Environment=PYTHONPATH=' + ':'.join(paths),
+        'Environment=PYTHONNOUSERSITE=1', 'Environment=PYTHONSAFEPATH=1',
         'Environment=PYTHONDONTWRITEBYTECODE=1', 'Environment=PYTHONUNBUFFERED=1',
         'Environment=PATH=' + ('/opt/brai-profile/instructions/bin:' if instructions_root else '')
         + '/opt/brai-profile/python/bin:/usr/local/bin:/usr/bin:/bin',
@@ -279,7 +280,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=TELEGRAM_ALLOWED_USERS=' + profile['telegramId'],
         'Environment=TELEGRAM_GROUP_ALLOWED_USERS=' + profile['telegramId'],
         'Environment=BRAI_IDENTITY_PROFILE_ID=' + profile['profileId'],
-        'ExecStart=/opt/brai-profile/python/bin/' + python_name + ' -P -B -m identity.worker --config ' + home + '/worker.json',
+        'ExecStart=/opt/brai-profile/python/bin/' + python_name + ' -s -P -B -m identity.worker --config ' + home + '/worker.json',
         'UMask=0077', 'Restart=always', 'RestartSec=3',
         'PrivateNetwork=yes', 'PrivateTmp=yes', 'PrivateDevices=yes',
         'NoNewPrivileges=yes', 'CapabilityBoundingSet=', 'AmbientCapabilities=',

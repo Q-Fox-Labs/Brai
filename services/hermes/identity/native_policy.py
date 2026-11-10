@@ -62,6 +62,45 @@ def protected_config(path):
     return value
 
 
+def restrict_exclusive_plugins(product):
+    """Привязать независимые loader-ы к bundled коду до загрузки пользовательских модулей."""
+    import importlib
+    from plugins import plugin_loader
+    import providers
+    original_user = plugin_loader.user_plugins_dir
+    plugin_loader.user_plugins_dir = lambda: original_user() if active_configuration() else None
+    for name in ('_user_plugins_dir', '_installed_plugins_dir'):
+        original = getattr(providers, name)
+        setattr(providers, name, lambda original=original: original() if active_configuration() else None)
+    original_entrypoints = providers._discover_entry_point_providers
+    providers._discover_entry_point_providers = lambda: original_entrypoints() if active_configuration() else None
+    for group, iterator_name in (('memory', '_iter_provider_dirs'), ('context_engine', '_iter_engine_dirs'),
+                                 ('cron_providers', '_iter_provider_dirs'), ('computer_use', '_iter_provider_dirs')):
+        module = importlib.import_module('plugins.' + group)
+        bundled = Path(module.__file__).resolve().parent
+        original = getattr(module, iterator_name)
+        def directories(original=original, bundled=bundled, group=group):
+            if active_configuration():
+                return original()
+            # Вернуть canonical readonly путь: HOME symlink не должен пережить проверку.
+            rows = [(name, Path(path).resolve()) for name, path in original()
+                    if Path(path).resolve().is_relative_to(bundled)]
+            if group == 'memory':
+                rows.append(('memos-rest', product / 'extensions/plugins/memos-rest'))
+            return rows
+        setattr(module, iterator_name, directories)
+        if group == 'memory':
+            original_alias, original_points = module._get_user_plugins_dir, module._iter_entry_points
+            original_find = module.find_provider_dir
+            module._get_user_plugins_dir = lambda: original_alias() if active_configuration() else None
+            module._iter_entry_points = lambda: original_points() if active_configuration() else []
+            def find(name, original_find=original_find, directories=directories):
+                if active_configuration():
+                    return original_find(name)
+                return next((path for candidate, path in directories() if candidate == name), None)
+            module.find_provider_dir = find
+
+
 def install():
     """Закрепить гостевой startup и общий guard registry до обнаружения инструментов."""
     global _installed, _guest, _role, _suspended, _startup_state
@@ -78,6 +117,8 @@ def install():
     _guest = _role == 'guest'
     _suspended = _guest or state.get('staged') is True or state.get('backgroundsSuspended') is True
     if _guest or state.get('staged') is True:
+        product = Path(__file__).resolve().parents[1]
+        restrict_exclusive_plugins(product)
         import hermes_cli.config as config
         accepted = protected_config('/opt/brai-profile/profile-config.json')
         # AIDEV-NOTE: Не читаем прежний личный config: он мог сохранить hooks, MCP и исполняемые плагины.
