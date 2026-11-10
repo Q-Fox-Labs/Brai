@@ -121,6 +121,8 @@ export function loadCoordinatorConfig(env: NodeJS.ProcessEnv = process.env): Coo
       positive(env, key, suffix.endsWith('_MS'));
       local[key] = required(env, key);
     }
+    // Транспорт не должен бросать ещё действующее вычисление по более короткому таймеру.
+    if (Number(local.TRANSCRIPTION_LOCAL_AI_HOP_TIMEOUT_MS) < domain.defaultExecutionTimeoutMs) invalid();
   }
   return {
     domain, bindings: bindings as AuthBinding[],

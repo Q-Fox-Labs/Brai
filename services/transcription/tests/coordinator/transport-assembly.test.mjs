@@ -52,6 +52,13 @@ test('child projections exclude ambient/owner/migration secrets and localAI conf
   const local = loadCoordinatorConfig(configured);
   assert.equal(local.children.local.TRANSCRIPTION_LOCAL_AI_NATS_INBOX_PREFIX, '_INBOX.brai_transcription_local');
   assert.equal(local.children.local.TRANSCRIPTION_LOCAL_AI_HOP_TIMEOUT_MS, '100');
+  // Длинный ASR не теряет ответ из-за более короткого транспорта.
+  assert.throws(() => loadCoordinatorConfig({ ...configured, TRANSCRIPTION_DEFAULT_EXECUTION_TIMEOUT_MS: '230000', TRANSCRIPTION_LOCAL_AI_HOP_TIMEOUT_MS: '225000' }));
+  for (const hop of ['900000', '930000']) {
+    const long = loadCoordinatorConfig({ ...configured, TRANSCRIPTION_DEFAULT_EXECUTION_TIMEOUT_MS: '900000', TRANSCRIPTION_LOCAL_AI_HOP_TIMEOUT_MS: hop });
+    assert.equal(long.domain.defaultExecutionTimeoutMs, 900000);
+    assert.equal(long.children.local.TRANSCRIPTION_LOCAL_AI_HOP_TIMEOUT_MS, hop);
+  }
   for (const key of ['TRANSCRIPTION_LOCAL_AI_NATS_INBOX_PREFIX', 'TRANSCRIPTION_LOCAL_AI_HOP_TIMEOUT_MS', 'TRANSCRIPTION_LOCAL_AI_RESPONSE_BYTES']) {
     const env = { ...configured }; delete env[key]; assert.throws(() => loadCoordinatorConfig(env));
   }
