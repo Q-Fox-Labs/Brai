@@ -40,6 +40,7 @@ export async function advance(entry,ports,save){
   if(a.ownerId!==e.ownerId||a.source!=='diary'||a.kind!=='original')throw new DiaryFault('ARTIFACT_OWNER_MISMATCH',403);
   await update({audioArtifactId:a.artifactId,audioSha256:a.sha256,audioSizeBytes:a.sizeBytes,state:'transcribing'});
  }
+ if(e.state==='transcribing'&&(e.processingVersion===2||e.transcriptionRetry))return advanceParts(e,ports,save);
  if(e.state==='transcribing'){
   const result=await ports.transcribe(e);
   if(!result)return e;
@@ -52,5 +53,69 @@ export async function advance(entry,ports,save){
   const correction=parseCorrection(raw);
   await update({...correction,correction:{model:'gpt-6-luna',promptVersion:'diary-v1',rawResponse:raw,completedAt:new Date().toISOString()},state:'ready',errorCode:null});
  }
+ return e;
+}
+
+/** Проверяет полное непрерывное покрытие оригинала частями, без путей файловой системы. */
+export function validateAudioPlan(p){
+ if(p?.version!==1||p.sampleRate!==16000||!Number.isSafeInteger(p.totalFrames)||p.totalFrames<1||p.totalFrames>18001*16000||!Array.isArray(p.parts)||!p.parts.length||p.parts.length>128)throw new DiaryFault('AUDIO_INVALID',409);
+ let end=0;const artifacts=new Set();
+ for(const [index,part]of p.parts.entries()){
+  id(part.artifactId);
+  if(part.index!==index||part.startFrame!==end||!Number.isSafeInteger(part.frames)||part.frames<1||part.frames>170*16000||part.sizeBytes!==44+part.frames*2||!/^[a-f0-9]{64}$/.test(part.sha256)||artifacts.has(part.artifactId))throw new DiaryFault('AUDIO_INVALID',409);
+  artifacts.add(part.artifactId);end+=part.frames;
+ }
+ if(end!==p.totalFrames)throw new DiaryFault('AUDIO_INCOMPLETE',409);return p;
+}
+/** Считает только подтверждённые кадры; обработка текущей части не создаёт выдуманный процент. */
+export function audioProgress(p){
+ const sum=predicate=>p.parts.reduce((n,part)=>n+(predicate(part)?part.frames:0),0);
+ return {totalFrames:p.totalFrames,sampleRate:p.sampleRate,totalParts:p.parts.length,
+  transcribedFrames:sum(part=>typeof part.rawText==='string'),correctedFrames:sum(part=>!!part.correction||part.rawText===''),
+  completedParts:p.parts.filter(part=>!!part.correction||part.rawText==='').length};
+}
+/** Обрабатывает одну часть за шаг; каждый raw и результат Luna сохраняются до следующего вычисления. */
+export async function advanceParts(entry,ports,save){
+ let e=structuredClone(entry);
+ const update=async patch=>{e={...e,...patch};await save(e);};
+ if(!e.audioProcessing){
+  const plan=validateAudioPlan(await ports.prepareAudio(e));
+  await update({audioProcessing:plan,audioProgress:audioProgress(plan),errorCode:null});
+ }
+ const plan=validateAudioPlan(e.audioProcessing);
+ const persist=async()=>update({audioProcessing:plan,audioProgress:audioProgress(plan)});
+ const part=plan.parts.find(p=>!p.correction&&p.rawText!=='');
+ if(part){
+  if(typeof part.rawText!=='string'){
+   const result=await ports.transcribePart(e,part);
+   if(!result||result.pending){
+    if(result?.requestId&&plan.pendingRequestId!==result.requestId){plan.pendingRequestId=id(result.requestId);await persist();}
+    return e;
+   }
+   part.rawText=text(result.text,1048576,true);part.transcription=result.provenance;
+   delete plan.pendingRequestId;await persist();
+   const raw=plan.parts.filter(p=>typeof p.rawText==='string').map(p=>p.rawText).join('\n\n');
+   if(Buffer.byteLength(raw)>1048576)throw new DiaryFault('TRANSCRIPT_TOO_LARGE',409);
+   // AIDEV-NOTE: Сначала фиксируем raw; при следующем ходе можно безопасно начать редактуру.
+   return e;
+  }
+  if(part.lunaStartedAt)throw new DiaryFault('LUNA_OUTCOME_UNKNOWN',409);
+  part.lunaStartedAt=new Date().toISOString();await persist();
+  const raw=await ports.correct({...e,rawText:part.rawText,audioPart:{index:part.index,totalParts:plan.parts.length}});
+  part.correction={...parseCorrection(raw),model:'gpt-6-luna',promptVersion:'diary-parts-v1',rawResponse:raw,completedAt:new Date().toISOString()};
+  await persist();return e;
+ }
+ const rawText=text(plan.parts.map(p=>p.rawText).join('\n\n'));
+ const correctedText=text(plan.parts.map(p=>p.correction?.correctedText??'').filter(Boolean).join('\n\n'));
+ const dated=plan.parts.map(p=>p.correction).filter(p=>p?.eventDate),dates=[...new Set(dated.map(p=>p.eventDate))];
+ const ambiguous=plan.parts.some(p=>p.correction?.eventDate===null&&p.correction.dateEvidence.trim());
+ const eventDate=dates.length===1&&!ambiguous?dates[0]:null;
+ const evidence=eventDate?dated.find(p=>p.eventDate===eventDate).dateEvidence:'';
+ const first=plan.parts[0].transcription,models=plan.parts.map(p=>JSON.stringify(p.transcription.actualModel));
+ const provenance=plan.parts.map(({rawText,correction,lunaStartedAt,...p})=>({...p,rawTextSha256:createHash('sha256').update(rawText).digest('hex'),correctionCompletedAt:correction?.completedAt??null}));
+ await update({rawText,correctedText,eventDate,dateStatus:eventDate?'identified':'needs_clarification',dateEvidence:evidence,
+  transcription:{requestId:first.requestId,actualModel:models.every(v=>v===models[0])?first.actualModel:null,strategy:'parts-v1',parts:provenance,receivedAt:new Date().toISOString()},
+  correction:{model:'gpt-6-luna',promptVersion:'diary-parts-v1',rawResponse:JSON.stringify(plan.parts.map(p=>p.correction?.rawResponse??null)),completedAt:new Date().toISOString()},
+  audioProcessing:{...plan,parts:provenance},state:'ready',errorCode:null});
  return e;
 }

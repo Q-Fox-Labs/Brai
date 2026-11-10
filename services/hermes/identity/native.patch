@@ -42,7 +42,10 @@
              self._register_handlers(self._app)
              await self._initialize_app_with_retries(builder)
              await self._app.start()
-@@ -5569,28 +5588,20 @@
+@@ -5566,34 +5585,26 @@
+         slot_until[str(normalize_telegram_chat_id(chat_id))] = (
+             asyncio.get_running_loop().time() + max(0.0, budget))
+
 -    async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
 -        """Send typing indicator."""
 -        if not self._bot or self._typing_in_cooldown(chat_id):
@@ -91,6 +94,9 @@
 +            logger.warning("telegram_typing_failed error=%s thread_id=%s reason=%s",
 +                           type(error).__name__, message_thread_id, reason)
 +
+     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+         """Get information about a Telegram chat."""
+         if not self._bot:
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -5623,6 +5623,17 @@
@@ -463,3 +469,37 @@
 +            task = asyncio.create_task(coro)
          self._background_tasks.add(task)
          task.add_done_callback(self._background_tasks.discard)
+
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -704,2 +704,9 @@
+     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
++        if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform == Platform.TELEGRAM:
++            configured = self.platforms.get(platform)
++            home = configured.home_channel if configured else None
++            chat = str(home.chat_id) if home else os.environ.get("BRAI_IDENTITY_TELEGRAM_ID", "")
++            if chat:
++                # Brai ingress resolves the automatic topic at delivery time, never a stale topic ID.
++                return HomeChannel(platform=platform, chat_id=chat, name="Уведомления")
+         return self.platforms[platform].home_channel if self.platforms.get(platform) else None
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -1427,3 +1427,3 @@
+         # One-time prompt if no home channel is set (webhooks deliver to configured targets instead).
+-        if not human_platform:
++        if not human_platform or source.platform == Platform.TELEGRAM:
+             return
+--- a/cron/scheduler_delivery.py
++++ b/cron/scheduler_delivery.py
+@@ -483,2 +483,5 @@
+-    value = _env_home_target_chat_id(platform_name)
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform_name.lower() == "telegram":
++        home = _get_config_home_channel(platform_name)
++        return str(home.chat_id) if home is not None else ""
++    value = _env_home_target_chat_id(platform_name)
+     if value:
+@@ -498,2 +501,4 @@
+     if platform_name.lower() == "telegram":
++        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++            return None  # Automatic topic is resolved by the trusted Brai ingress.
+         cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)

@@ -94,6 +94,13 @@ def make_adapter(config, platform, peer, publish_file):
             self._bot = None
 
         async def _action(self, name, payload):
+            metadata = payload.get('metadata') or {}
+            if (delivery_scope.get() is None and name in {
+                    'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video',
+                    'send_voice', 'send_animation'} and not payload.get('reply_to')
+                    and not metadata.get('thread_id') and not metadata.get('message_thread_id')
+                    and not metadata.get('direct_messages_topic_id')):
+                payload = {**payload, 'metadata': {**metadata, '_brai_notifications': True}}
             try:
                 value = await peer.call('send', {'action': name, 'payload': payload, 'scope_id': delivery_scope.get()})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
@@ -105,6 +112,10 @@ def make_adapter(config, platform, peer, publish_file):
                     'identity_delivery_failed action=%s error=%s rpc_code=%s',
                     name, type(error).__name__, getattr(error, 'code', None))
                 return SendResult(success=False, error='Ingress delivery unavailable or outcome unknown')
+
+        async def create_handoff_thread(self, parent_chat_id, name):
+            """Оставить создание фоновой темы ingress, без отдельной темы на каждое cron-задание."""
+            return None
 
         async def send(self, chat_id, content, reply_to=None, metadata=None):
             return await self._action('send', dict(chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata))

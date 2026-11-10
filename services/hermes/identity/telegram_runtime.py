@@ -2,6 +2,7 @@
 # ABOUTME: Авторизует update до media и не помещает коды входа в историю.
 """Только транспорт Telegram; пользовательский агент исполняется в другом UID."""
 import asyncio
+from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import hashlib
@@ -18,6 +19,7 @@ import uuid
 from .ingress import Bridge
 from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
+from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
 
 MAX_FRAME = 2 * 1024 * 1024
@@ -140,7 +142,13 @@ async def admit_update(update, adapter):
         await _control_reply(adapter, telegram, message, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
-        await broker_call('identity.resolve', {'telegramId': telegram})
+        profile = await broker_call('identity.resolve', {'telegramId': telegram})
+        resolver = _resolvers.get(id(adapter))
+        if resolver is not None and resolver.journal is not None:
+            try:
+                await asyncio.to_thread(resolver.journal.incoming, profile, message, chat, user)
+            except Exception:
+                _logger.warning('BRAI_TELEGRAM_JOURNAL_WRITE_FAILED')
         return True
     except Exception:
         pass
@@ -169,6 +177,11 @@ def _receipt(value):
     receipt = {key: data[key] for key in ('success', 'message_id', 'error', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind') if key in data}
     # Native Telegram _send_chunks хранит все части в raw_response; наружу передаём только ID.
     raw = data.get('raw_response')
+    if isinstance(raw, dict) and any(raw.get(key) for key in (
+            'partial_overflow', 'delivered_chunks', 'delivered_message_ids', 'last_message_id')):
+        # AIDEV-NOTE: Не терять доказательство частичной доставки при очистке metadata.
+        # Сам текст недоставленных частей через ingress не возвращается.
+        receipt['raw_response'] = {'partial_overflow': True}
     parts = raw.get('message_ids') if isinstance(raw, dict) else None
     if isinstance(parts, list):
         existing = receipt.get('continuation_message_ids', [])
@@ -179,11 +192,13 @@ def _receipt(value):
 
 
 class Resolver:
-    """Хранит только транспорт и проверенные связи без общего transcript."""
-    def __init__(self, adapter, runner=None, ledger=None):
+    """Хранит проверенные маршруты; журнал Telegram изолирован по личному профилю."""
+    def __init__(self, adapter, runner=None, ledger=None, journal=None):
         self.adapter, self.runner = adapter, runner
+        self.journal = journal
         self.bridges, self.turns = {}, {}
         self.ledger = ledger if ledger is not None else RouteLedger()
+        self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None
         self.closed = False
@@ -192,6 +207,8 @@ class Resolver:
     def retire(self):
         """Исключить старый resolver из синхронной перезагрузки plugin."""
         self.retired = True
+        if self.journal is not None and self.journal.restore is not None:
+            self.journal.restore()
 
     def start(self):
         """Держать native lifetime всех active профилей без нового сообщения."""
@@ -203,6 +220,8 @@ class Resolver:
         if self.closed:
             return
         self.closed = True
+        if self.journal is not None and self.journal.restore is not None:
+            self.journal.restore()
         if _resolvers.get(id(self.adapter)) is self:
             _resolvers.pop(id(self.adapter))
         if self.supervisor is not None:
@@ -248,6 +267,8 @@ class Resolver:
 
     def _bridge(self, profile):
         """Настроить scope/UI delivery общего account-bound транспорта."""
+        if self.journal is not None:
+            self.journal.routes[str(profile['telegramId'])] = profile
         bridge = self._account_bridge(profile)
         if not bridge.require_scope:
             author = str(profile.get('authorTelegramId', profile['telegramId']))
@@ -432,6 +453,23 @@ class Resolver:
             supports = getattr(self.adapter, 'supports_draft_streaming', None)
             if not callable(supports) or not supports('dm', metadata):
                 return {'success': False, 'error': 'Draft transport unavailable'}
+        notification = (payload.get('metadata') or {}).get('_brai_notifications') is True
+        if notification:
+            if (request_scope.get() is not None or turn is not None or route[1]
+                    or payload.get('reply_to') or action not in {
+                        'send', 'send_file_set', 'send_image_file', 'send_document',
+                        'send_video', 'send_voice', 'send_animation'}):
+                raise PermissionError('Invalid notification delivery')
+            async def send_notification(target, options):
+                await self._account(profile, target[0])
+                return await self._deliver_route(profile, action, payload, target, options,
+                                                 None, current)
+            return await self.notifications.deliver(profile, route[0], send_notification,
+                                                    text=action == 'send')
+        return await self._deliver_route(profile, action, payload, route, metadata, turn, current)
+
+    async def _deliver_route(self, profile, action, payload, route, metadata, turn, current):
+        """Отправить в уже проверенный маршрут и сохранить только фактические квитанции."""
         uid = profile['uid']
         input_id = turn.get('inputId') if turn else None
         offer_id = turn.get('accountOfferId') if turn else None
@@ -470,8 +508,9 @@ class Resolver:
                 current()
                 # Только media API receipt означает доставку файла. Native text fallback
                 # после ошибки не может превратиться в успешный голосовой ответ.
-                ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
-                                            fallback, reply_to=payload.get('reply_to'))
+                with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
+                    ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
+                                                fallback, reply_to=payload.get('reply_to'))
                 if (not isinstance(ids, list) or len(ids) != len(prepared)
                         or any(type(value) not in (int, str) or not str(value).isdecimal()
                                or int(value) <= 0 for value in ids)):
@@ -491,7 +530,8 @@ class Resolver:
         if not callable(method):
             raise ValueError('Native delivery unavailable')
         current()
-        result = await method(**values)
+        with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
+            result = await method(**values)
         if action == 'send_typing' and result is None:
             return {'success': True}
         receipt = _receipt(result)
@@ -674,7 +714,8 @@ class Resolver:
         operation = getattr(bot, method, None)
         if not callable(operation):
             raise RuntimeError('Trusted Telegram UI unavailable')
-        result = await operation(**values)
+        with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
+            result = await operation(**values)
         if method.startswith('answer_') or method == 'delete_message':
             if result is not True:
                 raise ValueError('Unconfirmed Telegram UI operation')
@@ -702,5 +743,7 @@ def create_resolver(adapter, runner):
     key = id(adapter)
     if key not in _resolvers or _resolvers[key].retired:
         home = Path(os.environ['HERMES_HOME'])
-        _resolvers[key] = Resolver(adapter, runner, RouteLedger(home / 'identity-delivery.sqlite'))
+        from .chat_journal import IdentityJournal
+        journal = IdentityJournal(home / 'identity-chats')
+        _resolvers[key] = Resolver(adapter, runner, RouteLedger(home / 'identity-delivery.sqlite'), journal)
     return _resolvers[key]

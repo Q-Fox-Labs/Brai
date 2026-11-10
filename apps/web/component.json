@@ -283,7 +283,8 @@
       "apps/web/app/bug-hunt/styles.css",
       "services/bug-hunt/schemas/messages.schema.json",
       "apps/web/server/bug-hunt-evidence.ts",
-      "apps/web/app/api/bug-hunt/evidence/route.ts"
+      "apps/web/app/api/bug-hunt/evidence/route.ts",
+      "apps/web/app/agent/telegram-rich.tsx"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -344,7 +345,8 @@
       "apps/web/tests/admin-download.test.ts",
       "apps/web/tests/admin-chats-render.test.ts",
       "apps/web/tests/diary-render.test.ts",
-      "apps/web/tests/diary-upload.test.ts"
+      "apps/web/tests/diary-upload.test.ts",
+      "apps/web/tests/admin-chat-pages.test.ts"
     ]
   },
   "dependencies": [

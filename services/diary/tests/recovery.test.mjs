@@ -28,6 +28,26 @@ test('explicit retry preserves original and unknown outcome; replay schedules on
  assert.equal((await retryTranscription(f.c,f.ports,f.args)).state,'already_scheduled');
  assert.equal(f.calls,1);assert.equal(f.queries.filter(q=>q.startsWith('UPDATE')).length,1);
 });
+test('owner retry uses app RLS and derives the previous request from its own entry',async()=>{
+ const f=fixture();delete f.args.previousRequestId;
+ const prior=randomUUID();f.ports.transcriptionStatus=async()=>({request:{requestId:prior,taskState:'failed'}});
+ f.args.ownerId='owner';f.args.profileId='profile';
+ assert.equal((await retryTranscription(f.c,f.ports,f.args)).state,'scheduled');
+ assert.equal(f.entry.transcriptionRetry.previousRequestId,prior);
+ assert.ok(f.queries.findIndex(q=>q.includes('set_config'))<f.queries.findIndex(q=>q.startsWith('SELECT document')));
+});
+test('foreign owner or profile cannot schedule a retry',async()=>{
+ for(const scope of [{ownerId:'other',profileId:'profile'},{ownerId:'owner',profileId:'other'}]){
+  const f=fixture();Object.assign(f.args,scope);
+  await assert.rejects(retryTranscription(f.c,f.ports,f.args),/NOT_FOUND/);
+  assert.equal(f.calls,0);assert.ok(!f.queries.some(q=>q.startsWith('UPDATE')));
+ }
+});
+test('a different retry key cannot schedule a second computation',async()=>{
+ const f=fixture();await retryTranscription(f.c,f.ports,f.args);
+ f.args.retryId=randomUUID();await assert.rejects(retryTranscription(f.c,f.ports,f.args),/RETRY_NOT_ALLOWED/);
+ assert.equal(f.calls,1);assert.equal(f.queries.filter(q=>q.startsWith('UPDATE')).length,1);
+});
 test('inspection is read-only',async()=>{
  const f=fixture();f.args.mode='inspect';assert.equal((await retryTranscription(f.c,f.ports,f.args)).state,'eligible');
  assert.deepEqual(f.entry,f.original);assert.ok(!f.queries.some(q=>q.startsWith('UPDATE')));
