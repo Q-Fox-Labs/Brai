@@ -58,6 +58,9 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
         resolver = build_resolver(adapter, runner)
+        journal = getattr(resolver, 'journal', None)
+        if journal is not None:
+            journal.install(app.bot)
         if not callable(resolver):
             raise RuntimeError('Trusted ingress resolver unavailable')
         from telegram import Update

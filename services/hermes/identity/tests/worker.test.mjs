@@ -32,7 +32,7 @@ test('Hermes Telegram ingress', () => {
   assert.equal(result.status, 0, result.stderr || result.error?.message || 'Telegram tests failed');
 });
 
-for (const pattern of ['test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py']) {
+for (const pattern of ['test_chat_journal.py', 'test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py']) {
   test('Hermes owner boundary: ' + pattern, () => {
     const result = spawnSync(process.env.PYTHON || 'python3',
       ['-B', '-m', 'unittest', 'discover', '-s', here, '-p', pattern, '-v'],
