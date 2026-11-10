@@ -1,0 +1,799 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "brai-bug-hunt-messages.schema.json",
+  "definitions": {
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "observation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "operation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "expected": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "observed": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "component_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "steps": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "component_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "commit_sha": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-fA-F0-9]{7,64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "deployment_revision": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error_code": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "diagnostic_text": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "client_occurred_at": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "conversation_ref": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supersedes_report_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidence_artifact_ids": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          "required": [
+            "title",
+            "operation",
+            "expected",
+            "observed"
+          ]
+        }
+      },
+      "required": [
+        "request_id",
+        "observation"
+      ]
+    },
+    "get": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "case_id"
+      ]
+    },
+    "list": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "review_state": {
+              "enum": [
+                "new",
+                "triaged",
+                "archived"
+              ]
+            },
+            "component_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "source": {
+              "enum": [
+                "codex",
+                "hermes",
+                "web"
+              ]
+            },
+            "registered_from": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "registered_to": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": []
+        }
+      },
+      "required": []
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "review_state": {
+          "enum": [
+            "new",
+            "triaged",
+            "archived"
+          ]
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "^[^\\u0000]*$"
+        }
+      },
+      "required": [
+        "request_id",
+        "case_id",
+        "expected_revision",
+        "review_state",
+        "explanation"
+      ]
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "required": []
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "REQUEST_TOO_LARGE",
+            "RESULT_TOO_LARGE",
+            "UNAUTHENTICATED",
+            "FORBIDDEN",
+            "NOT_FOUND",
+            "IDEMPOTENCY_CONFLICT",
+            "REVISION_CONFLICT",
+            "BUSY",
+            "DATABASE_UNAVAILABLE",
+            "DEPENDENCY_UNAVAILABLE",
+            "DEADLINE_EXCEEDED",
+            "INTERNAL"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "not_accepted",
+            "unknown"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "outcome",
+        "retryable"
+      ]
+    },
+    "report_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "review_state": {
+          "const": "new"
+        },
+        "verification_status": {
+          "const": "unverified"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "request_id",
+        "report_id",
+        "case_id",
+        "registered_at",
+        "review_state",
+        "verification_status",
+        "replayed"
+      ]
+    },
+    "review_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "review_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "case_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "review_state": {
+          "enum": [
+            "new",
+            "triaged",
+            "archived"
+          ]
+        },
+        "verification_status": {
+          "const": "unverified"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "request_id",
+        "review_id",
+        "case_id",
+        "registered_at",
+        "review_state",
+        "verification_status",
+        "revision",
+        "replayed"
+      ]
+    },
+    "case_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "owner_id": {
+          "type": "string"
+        },
+        "installation_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "component_id": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "codex",
+            "hermes",
+            "web"
+          ]
+        },
+        "review_state": {
+          "enum": [
+            "new",
+            "triaged",
+            "archived"
+          ]
+        },
+        "verification_status": {
+          "const": "unverified"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "owner_id",
+        "installation_id",
+        "title",
+        "component_id",
+        "source",
+        "review_state",
+        "verification_status",
+        "revision",
+        "registered_at",
+        "updated_at"
+      ]
+    },
+    "review_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "actor_id": {
+          "type": "string"
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "old_state": {
+          "enum": [
+            "new",
+            "triaged",
+            "archived"
+          ]
+        },
+        "new_state": {
+          "enum": [
+            "new",
+            "triaged",
+            "archived"
+          ]
+        },
+        "old_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "new_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "registered_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "actor_id",
+        "explanation",
+        "old_state",
+        "new_state",
+        "old_revision",
+        "new_revision",
+        "registered_at"
+      ]
+    },
+    "list_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/definitions/case_summary"
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ]
+    },
+    "get_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "case": {
+          "$ref": "#/definitions/case_summary"
+        },
+        "report": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "actor_id": {
+              "type": "string"
+            },
+            "registered_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "observation": {
+              "$ref": "#/definitions/report/properties/observation"
+            }
+          },
+          "required": [
+            "id",
+            "actor_id",
+            "registered_at",
+            "observation"
+          ]
+        },
+        "reviews": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "items": {
+              "type": "array",
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/definitions/review_record"
+              }
+            },
+            "next_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "items",
+            "next_cursor"
+          ]
+        }
+      },
+      "required": [
+        "case",
+        "report",
+        "reviews"
+      ]
+    },
+    "status_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "const": true
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "nats_ready": {
+          "type": "boolean"
+        },
+        "counters": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "ready",
+        "schema_version",
+        "nats_ready",
+        "counters"
+      ]
+    },
+    "context": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "web"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cookie": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "user-agent": {
+                  "type": "string"
+                },
+                "sec-fetch-site": {
+                  "type": "string"
+                }
+              },
+              "required": []
+            }
+          },
+          "required": [
+            "kind",
+            "headers"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "hermes"
+            },
+            "userId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "userId",
+            "profileId"
+          ]
+        }
+      ]
+    },
+    "ingress_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/definitions/context"
+        },
+        "input": {
+          "$ref": "#/definitions/report"
+        }
+      },
+      "required": [
+        "context",
+        "input"
+      ]
+    },
+    "ingress_get": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/definitions/context"
+        },
+        "input": {
+          "$ref": "#/definitions/get"
+        }
+      },
+      "required": [
+        "context",
+        "input"
+      ]
+    },
+    "ingress_list": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/definitions/context"
+        },
+        "input": {
+          "$ref": "#/definitions/list"
+        }
+      },
+      "required": [
+        "context",
+        "input"
+      ]
+    },
+    "ingress_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/definitions/context"
+        },
+        "input": {
+          "$ref": "#/definitions/review"
+        }
+      },
+      "required": [
+        "context",
+        "input"
+      ]
+    }
+  }
+}

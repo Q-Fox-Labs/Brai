@@ -1,0 +1,97 @@
+{
+  "formatVersion": 1,
+  "id": "bug-hunt",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/bug-hunt/src/main.ts",
+    "services/bug-hunt/src/health.ts",
+    "services/bug-hunt/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/bug-hunt/tsconfig.json"
+    ],
+    "runtime": [
+      "services/bug-hunt/src/config.ts",
+      "services/bug-hunt/src/contracts.ts",
+      "services/bug-hunt/src/domain.ts",
+      "services/bug-hunt/src/health.ts",
+      "services/bug-hunt/src/identity.ts",
+      "services/bug-hunt/src/load.ts",
+      "services/bug-hunt/src/main.ts",
+      "services/bug-hunt/src/mcp.ts",
+      "services/bug-hunt/src/migrate.ts",
+      "services/bug-hunt/src/storage.ts",
+      "services/bug-hunt/package.json",
+      "services/bug-hunt/migrations/001.sql",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "services/bug-hunt/CONTRACT.md",
+      "services/bug-hunt/DEPLOYMENT.md",
+      "deploy/compose.bug-hunt.yml",
+      "services/bug-hunt/asyncapi.json",
+      "services/bug-hunt/contracts/agent-guide.json"
+    ],
+    "checks": [
+      "services/bug-hunt/tests/contracts.test.mjs",
+      "services/bug-hunt/tests/domain.test.mjs",
+      "services/bug-hunt/tests/identity.test.mjs",
+      "services/bug-hunt/tests/load.test.mjs",
+      "services/bug-hunt/tests/integration/init.sql",
+      "services/bug-hunt/tests/integration/storage.test.mjs",
+      "services/bug-hunt/tests/integration/runtime.test.mjs",
+      "services/bug-hunt/tests/integration/fixture.mjs",
+      "services/bug-hunt/tests/integration/browser.test.mjs",
+      "services/bug-hunt/tests/integration/restore.test.mjs",
+      "services/bug-hunt/tests/mcp.test.mjs",
+      "services/bug-hunt/tests/process-group.mjs",
+      "services/bug-hunt/tests/process-group.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/bug-hunt/dist",
+      "services/bug-hunt/package.json",
+      "services/bug-hunt/migrations",
+      "services/bug-hunt/schemas",
+      "services/bug-hunt/CONTRACT.md",
+      "services/bug-hunt/DEPLOYMENT.md",
+      "deploy/compose.bug-hunt.yml",
+      "services/bug-hunt/asyncapi.json",
+      "services/bug-hunt/contracts"
+    ],
+    "entrypoints": [
+      "services/bug-hunt/dist/main.js",
+      "services/bug-hunt/dist/migrate.js",
+      "services/bug-hunt/dist/health.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.22.1"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "bug-hunt",
+      "bug-hunt-migrate"
+    ],
+    "migrations": [
+      "services/bug-hunt/migrations"
+    ],
+    "health": "node services/bug-hunt/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/bug-hunt"
+    ]
+  }
+}

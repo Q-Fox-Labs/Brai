@@ -285,6 +285,9 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/bug-hunt.mjs",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
       "services/hermes/identity/telegram-chat-read.mjs"
     ],
@@ -355,6 +358,7 @@
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
       "services/hermes/tests/dialogues-summary.test.mjs",
+      "services/hermes/tests/identity-bug-hunt.test.mjs",
       "services/hermes/identity/tests/test_chat_journal.py",
       "services/hermes/identity/tests/telegram-chat-read.test.mjs",
       "services/hermes/identity/tests/test_worker_artifact_read.py"
@@ -443,6 +447,17 @@
       ],
       "delivery": [
         "services/auth/contracts"
+      ]
+    },
+    {
+      "id": "bug-hunt",
+      "inputs": [
+        "services/bug-hunt/schemas/**",
+        "services/bug-hunt/contracts/**"
+      ],
+      "delivery": [
+        "services/bug-hunt/schemas",
+        "services/bug-hunt/contracts"
       ]
     }
   ],
@@ -701,6 +716,9 @@
       "services/hermes/identity/lifecycle.py",
       "services/hermes/extensions/scripts/context_gif.py",
       "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
+      "services/hermes/identity/bug-hunt.mjs",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
       "services/hermes/identity/telegram-chat-read.mjs"
     ],
