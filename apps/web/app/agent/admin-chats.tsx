@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import WorkspaceFrame from "../shell/workspace-frame";
 import TelegramRichMessage from "./telegram-rich";
-import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, type AdminChat, type ChatMessage } from "./admin-chat-client";
+import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, selectedChatUnavailable, type AdminChat, type ChatMessage, type ChatOwner } from "./admin-chat-client";
 import "./telegram-observer.css";
 
 type History = { key: string; messages: ChatMessage[]; cursor: string | null; updatesCursor?: string };
@@ -43,6 +43,7 @@ export function AdminMessageBody({ message, owner }: { message: ChatMessage; own
 /** Сохраняет историю и прокрутку; скрытый раздел не опрашивает сервер, потеря прав очищает экран. */
 export default function AdminChats({ userId, active, onUnauthorized }: { userId: string; active: boolean; onUnauthorized: () => void }) {
   const [chats, setChats] = useState<AdminChat[]>([]), [selected, setSelected] = useState<AdminChat | null>(null);
+  const [unavailable, setUnavailable] = useState<ChatOwner[]>([]);
   const [history, setHistory] = useState<History>(emptyHistory);
   const [listError, setListError] = useState(""), [messageError, setMessageError] = useState(""), [denied, setDenied] = useState(false);
   const [loading, setLoading] = useState(false), [connected, setConnected] = useState(false), [newCount, setNewCount] = useState(0);
@@ -57,7 +58,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
   const saveHistory = (value: History) => { historyRef.current = value; setHistory(value); };
   const reject = (error: unknown) => {
     if (!(error instanceof AdminChatError) || ![401, 403].includes(error.status)) return false;
-    deniedRef.current = true; setDenied(true); setChats([]); saveHistory(emptyHistory()); setSelected(null);
+    deniedRef.current = true; setDenied(true); setChats([]); setUnavailable([]); saveHistory(emptyHistory()); setSelected(null);
     if (error.status === 401) unauthorized.current();
     return true;
   };
@@ -74,7 +75,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
         const value = await loadAdminChats(chatsRef.current, controller.signal);
         if (controller.signal.aborted || deniedRef.current) return;
         setChats(value.chats);
-        setListError(value.unavailable.length ? "Не удалось обновить: " + value.unavailable.join(", ") + ". Повторяем подключение." : "");
+        setUnavailable(value.unavailable); setListError("");
         setSelected(current => current ? value.chats.find(chat => adminChatKey(chat) === adminChatKey(current)) ?? null : value.chats[0] ?? null);
       } catch (error) { if (!controller.signal.aborted && !reject(error)) setListError("Не удалось обновить список чатов. Повторяем подключение."); }
       finally { if (!controller.signal.aborted && !deniedRef.current) timer = setTimeout(() => { void refresh(); }, 10000); }
@@ -127,10 +128,10 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
     <p className="tg-subtitle">Все пользователи · только просмотр</p>
     <div className="tg-chat-list">{chats.map(chat => <button type="button" className="tg-chat" data-frame-close-rail data-selected={selectedKey === adminChatKey(chat)} key={adminChatKey(chat)} onClick={() => setSelected(chat)}>
       <ParticipantAvatar chat={chat} /><span className="tg-chat-copy"><strong>{title(chat)}</strong><span>{chatParticipant(chat)} · {time(chat.updatedAt)}</span></span>
-    </button>)}{!chats.length && !listError && !denied && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
+    </button>)}{unavailable.map(owner => <p className="tg-error" role="status" key={owner.id}>{owner.name || owner.telegramId || owner.id}: источник чатов недоступен. Повторяем подключение.</p>)}{listError && <p className="tg-error" role="status">{listError}</p>}{!chats.length && !unavailable.length && !listError && !denied && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
   </aside>}>
     <section className="tg-main" aria-label="Переписка"><header className="tg-header">{selected && <ParticipantAvatar chat={selected} />}<div><strong>{selected ? title(selected) : "Переписка"}</strong><span>{selected ? chatParticipant(selected) + " · " : ""}Только просмотр</span></div></header>
-      {(listError || messageError || denied) && <p className="tg-error" role="status">{denied ? "Сервер отклонил доступ к чатам. Обновите страницу; если ошибка повторится, проверьте доступ к разделу." : messageError || listError}</p>}
+      {(messageError || denied || selectedChatUnavailable(selected, unavailable)) && <p className="tg-error" role="status">{denied ? "Сервер отклонил доступ к чатам. Обновите страницу; если ошибка повторится, проверьте доступ к разделу." : messageError || "Источник чатов выбранного профиля недоступен. Повторяем подключение."}</p>}
       <div ref={scroll} className="tg-conversation" onScroll={event => { const el = event.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; if (follow.current) setNewCount(0); }}>
         {!selected ? <div className="tg-empty"><h2>Выберите чат</h2><p>Здесь появятся переписки с агентом.</p></div> : <div className="tg-timeline">
           {shown.cursor && <button type="button" className="tg-older" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}

@@ -2,8 +2,10 @@
 # ABOUTME: Сохраняет блокировки, подтверждение очистки и fencing прежних сессий.
 """Explicit profile/owner/cube-scoped maintenance; never invoked automatically."""
 import fcntl
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -110,6 +112,91 @@ class Admin:
         with file_lock(self.root / 'delivery.lock', timeout):
             pass
         return self.status()
+
+    def repair_checkpoint_queue(self, scope, event_hashes, *, apply=False):
+        """Проверить и явно переоткрыть заданные pending без смены payload и event ID.
+
+        Требуются frozen профиль и полный SHA-256 manifest очереди. Точные исходные
+        bytes сохраняются до первой правки. Повтор с тем же manifest идемпотентен;
+        доставка и read-back остаются обязанностью штатного writer после resume.
+        """
+        self.scope(scope)
+        if (not isinstance(event_hashes, dict) or not 1 <= len(event_hashes) <= 1000
+                or any(not isinstance(event, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', event)
+                       or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
+                       for event, digest in event_hashes.items())):
+            raise ValueError('Queue repair requires explicit event IDs and original SHA-256')
+        with file_lock(self.root / 'admin.lock'), file_lock(self.root / 'submit.lock'), file_lock(self.root / 'delivery.lock'):
+            self.scope(scope)
+            config = self.config()
+            if config.get('frozen') is not True:
+                raise ValueError('Queue repair requires frozen memory')
+            identity = {'scope': scope, 'epoch': config.get('memory_epoch'),
+                        'generation': config.get('generation', 1), 'event_hashes': event_hashes}
+            plan_id = stable_id(identity)
+            backup = self.root / 'queue-repair-v1' / plan_id
+            state_path = backup / 'manifest.json'
+            state = json_file(state_path)
+            if state:
+                if state.get('identity') != identity:
+                    raise MemOSError('Queue repair manifest conflict')
+                if state.get('status') == 'applied':
+                    return {'plan_id': plan_id, 'status': 'applied', 'events': len(event_hashes)}
+            paths = {path.stem: path for path in (self.root / 'pending').glob('*.json')}
+            if set(paths) != set(event_hashes):
+                raise ValueError('Queue repair manifest must match the entire pending queue')
+            originals, jobs = {}, {}
+            home_scope = stable_id(str(self.home.resolve()))
+            for event, path in paths.items():
+                original_path = backup / (event + '.json')
+                original = original_path.read_bytes() if original_path.exists() else path.read_bytes()
+                if hashlib.sha256(original).hexdigest() != event_hashes[event]:
+                    raise MemOSError('Queue repair original hash mismatch')
+                job = json.loads(original)
+                info = (job.get('body') or {}).get('info') or {}
+                if (job.get('event_id') != event or job.get('operation') != 'route'
+                        or job.get('epoch') != config.get('memory_epoch')
+                        or job.get('generation') != config.get('generation', 1)
+                        or info.get('hermes_event_id') != event
+                        or info.get('hermes_home_scope') != home_scope
+                        or info.get('hermes_memory_epoch') != config.get('memory_epoch')
+                        or info.get('hermes_kind') not in ('checkpoint', 'turn')
+                        or job.get('delete_filter') or job.get('replacement_id') or job.get('shared_infra')
+                        or (job['body'].get('user_id', config['user_id']) != config['user_id'])):
+                    raise MemOSError('Queue repair job scope or operation mismatch')
+                provenance = {'version': 1, 'plan_id': plan_id, 'original_sha256': event_hashes[event]}
+                repaired = {**job, 'next_attempt': 0, 'queue_repair': provenance}
+                current = json.loads(path.read_bytes())
+                if current != job and current != repaired:
+                    raise MemOSError('Queue changed after repair planning')
+                originals[event], jobs[event] = original, repaired
+            if not apply:
+                return {'plan_id': plan_id, 'status': 'planned', 'events': len(jobs),
+                        'event_hashes': dict(event_hashes)}
+            backup.mkdir(parents=True, mode=0o700, exist_ok=True)
+            backup.chmod(0o700)
+            for event, original in originals.items():
+                path = backup / (event + '.json')
+                if not path.exists():
+                    with path.open('xb') as handle:
+                        os.chmod(path, 0o600)
+                        handle.write(original)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            for directory in (backup, backup.parent, self.root):
+                descriptor = os.open(directory, os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            # AIDEV-NOTE: Все originals и manifest durable до изменения первого pending.
+            atomic_json_write(state_path, {'version': 1, 'identity': identity, 'status': 'prepared'},
+                              mode=0o600, fsync_dir=True)
+            for event, job in jobs.items():
+                atomic_json_write(paths[event], job, mode=0o600, fsync_dir=True)
+            atomic_json_write(state_path, {'version': 1, 'identity': identity, 'status': 'applied'},
+                              mode=0o600, fsync_dir=True)
+            return {'plan_id': plan_id, 'status': 'applied', 'events': len(jobs)}
 
     def quality_plan(self, scope, restore_plan_id=None):
         """Проверить факты без изменения MemOS, сохранив обратимый план в профиле.

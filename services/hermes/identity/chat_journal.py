@@ -5,12 +5,14 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
 import inspect
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import sqlite3
 import stat
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -75,6 +77,7 @@ class IdentityJournal:
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA journal_mode=WAL')
         db.execute('PRAGMA busy_timeout=1000')
+        db.execute('PRAGMA synchronous=FULL')
         db.executescript("""
             CREATE TABLE IF NOT EXISTS messages(
               id INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT NOT NULL, thread TEXT NOT NULL,
@@ -83,15 +86,209 @@ class IdentityJournal:
               kind TEXT NOT NULL, attachments TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
               rich TEXT NOT NULL DEFAULT 'null', UNIQUE(chat,telegram_id));
             CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS chat_pauses(
+              chat TEXT NOT NULL, thread TEXT NOT NULL, paused INTEGER NOT NULL,
+              generation INTEGER NOT NULL, recovery_blocked INTEGER NOT NULL,
+              discard_through INTEGER NOT NULL DEFAULT 0, resume_after INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY(chat,thread));
+            CREATE TABLE IF NOT EXISTS chat_admissions(
+              chat TEXT NOT NULL, thread TEXT NOT NULL, message_id TEXT NOT NULL,
+              generation INTEGER NOT NULL, allowed INTEGER NOT NULL,
+              PRIMARY KEY(chat,thread,message_id));
+            CREATE TABLE IF NOT EXISTS chat_presentations(
+              chat TEXT NOT NULL, thread TEXT NOT NULL, message_id TEXT NOT NULL,
+              generation INTEGER NOT NULL, PRIMARY KEY(chat,thread,message_id));
+            CREATE TABLE IF NOT EXISTS operator_pause_audit(
+              operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
+              receipt TEXT NOT NULL, occurred_at TEXT NOT NULL);
         """)
         if 'rich' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
             db.execute("ALTER TABLE messages ADD COLUMN rich TEXT NOT NULL DEFAULT 'null'")
             db.commit()
+        if 'resume_after' not in {row[1] for row in db.execute('PRAGMA table_info(chat_pauses)')}:
+            db.execute('ALTER TABLE chat_pauses ADD COLUMN resume_after INTEGER NOT NULL DEFAULT 0')
+            db.commit()
         return db
+
+    @staticmethod
+    def _chat_state(row):
+        return {'paused': bool(row['paused']) if row else False,
+                'generation': row['generation'] if row else 0,
+                'recoveryBlocked': bool(row['recovery_blocked']) if row else False,
+                'discardThrough': row['discard_through'] if row else 0,
+                'resumeAfter': row['resume_after'] if row else 0}
+
+    def chat_state(self, profile, route):
+        """Прочитать устойчивый запрет только из доверенного каталога профиля."""
+        db = self.database(profile)
+        try:
+            return self._chat_state(db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?', route).fetchone())
+        finally:
+            db.close()
+
+    def presentation_generation(self, profile, route, message_id):
+        """Прочитать неизменное поколение создания bot message; дата сообщения не является clicktime."""
+        db = self.database(profile)
+        try:
+            row = db.execute('SELECT generation FROM chat_presentations WHERE chat=? AND thread=? AND message_id=?',
+                             (*route, str(message_id))).fetchone()
+            return row[0] if row else None
+        finally:
+            db.close()
+
+    def record_presentation(self, profile, route, message_id, generation):
+        """Записать только рождение нового bot message; повтор и edit не омолаживают кнопки."""
+        if type(generation) is not int or generation < 0:
+            raise ValueError('INVALID_PRESENTATION_GENERATION')
+        db = self.database(profile)
+        try:
+            with db:
+                db.execute('INSERT OR IGNORE INTO chat_presentations VALUES(?,?,?,?)',
+                           (*route, str(message_id), generation))
+        finally:
+            db.close()
+
+    def chat_states(self, profile):
+        """Передать worker bounded snapshot до native startup и recovery."""
+        db = self.database(profile)
+        try:
+            rows = db.execute('SELECT * FROM chat_pauses ORDER BY chat,thread LIMIT 10001').fetchall()
+            if len(rows) > 10000:
+                raise ValueError('TOO_MANY_CHAT_PAUSES')
+            return [dict(self._chat_state(row), chat=row['chat'], thread=row['thread']) for row in rows]
+        finally:
+            db.close()
+
+    def _set_chat_pause_in_transaction(self, db, route, paused):
+        """Изменить pause внутри уже открытого BEGIN IMMEDIATE."""
+        row = db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?', route).fetchone()
+        state = self._chat_state(row)
+        if row is not None and state['paused'] == paused:
+            return state
+        cutoff = db.execute("SELECT COALESCE(MAX(CAST(telegram_id AS INTEGER)),0) FROM messages WHERE chat=? AND thread=? AND direction='in'", route).fetchone()[0]
+        state.update(paused=paused, generation=state['generation'] + 1, recoveryBlocked=True,
+                     discardThrough=max(cutoff, state['discardThrough']),
+                     resumeAfter=state['resumeAfter'] if paused else int(time.time()) + 1)
+        db.execute('INSERT OR REPLACE INTO chat_pauses VALUES(?,?,?,?,?,?,?)',
+                   (*route, int(paused), state['generation'], 1, state['discardThrough'], state['resumeAfter']))
+        return state
+
+    def set_chat_pause(self, profile, route, paused):
+        """Commit запрет до отмены worker; повтор не меняет generation."""
+        if type(paused) is not bool:
+            raise ValueError('INVALID_PAUSE')
+        db = self.database(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                return self._set_chat_pause_in_transaction(db, route, paused)
+        finally:
+            db.close()
+
+    def _operator_pause_readback(self, db, profile, operation_id, fingerprint):
+        row = db.execute('SELECT * FROM operator_pause_audit WHERE operation_id=?', (operation_id,)).fetchone()
+        if row is None or row['fingerprint'] != fingerprint:
+            raise ValueError('OPERATOR_READBACK_MISMATCH')
+        payload, receipt = json.loads(row['payload']), json.loads(row['receipt'])
+        if (payload['actor'] != 'os:root' or receipt['actor'] != 'os:root'
+                or receipt['auditId'] != operation_id or receipt['operationId'] != operation_id
+                or receipt['userId'] != profile['userId'] or receipt['profileId'] != profile['profileId']
+                or payload['binding']['userId'] != profile['userId'] or payload['binding']['profileId'] != profile['profileId']
+                or receipt['workerUid'] != payload['binding']['workerUid']
+                or (receipt['chat'], receipt['thread']) != (payload['chat'], payload['thread'])
+                or type(receipt['generation']) is not int or receipt['generation'] < 1):
+            raise ValueError('OPERATOR_READBACK_MISMATCH')
+        state = self._chat_state(db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?',
+                                           (receipt['chat'], receipt['thread'])).fetchone())
+        if not state['paused'] or state['generation'] != receipt['generation']:
+            # AIDEV-NOTE: Replay старого operationId не отменяет последующий явный resume.
+            raise ValueError('OPERATOR_READBACK_MISMATCH')
+        return {**receipt, 'verified': True}
+
+    def verify_operator_pause(self, profile, operation_id, fingerprint):
+        """Проверить commit новым соединением; ошибка не подтверждает отсутствие записи."""
+        db = self.database(profile)
+        try:
+            return self._operator_pause_readback(db, profile, operation_id, fingerprint)
+        finally:
+            db.close()
+
+    def seed_operator_pause(self, profile, route, operation_id, fingerprint, payload):
+        """Helper-only: атомарно записать pause и отдельный Root audit после strict checks/drop UID.
+
+        Сетевого порта нет. Root authority проверяет pause_preseed до сброса UID;
+        ingress владеет только записью в своём журнале, без Auth impersonation.
+        """
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+        if (payload.get('actor') != 'os:root' or payload.get('operationId') != operation_id
+                or payload.get('binding', {}).get('userId') != profile['userId']
+                or payload.get('binding', {}).get('profileId') != profile['profileId']
+                or (payload.get('chat'), payload.get('thread')) != tuple(route)
+                or hashlib.sha256(encoded.encode('utf-8')).hexdigest() != fingerprint):
+            raise ValueError('INVALID_OPERATOR_PAUSE')
+        db = self.database(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                previous = db.execute('SELECT fingerprint,payload FROM operator_pause_audit WHERE operation_id=?',
+                                      (operation_id,)).fetchone()
+                if previous is not None:
+                    if previous['fingerprint'] != fingerprint or previous['payload'] != encoded:
+                        raise ValueError('OPERATOR_OPERATION_CONFLICT')
+                    self._operator_pause_readback(db, profile, operation_id, fingerprint)
+                else:
+                    state = self._set_chat_pause_in_transaction(db, route, True)
+                    receipt = {'status': 'paused', 'actor': 'os:root', 'auditId': operation_id,
+                               'operationId': operation_id, 'userId': profile['userId'],
+                               'profileId': profile['profileId'], 'workerUid': payload['binding']['workerUid'],
+                               'chat': route[0], 'thread': route[1], 'generation': state['generation']}
+                    db.execute('INSERT INTO operator_pause_audit VALUES(?,?,?,?,?)',
+                               (operation_id, fingerprint, encoded,
+                                json.dumps(receipt, sort_keys=True, separators=(',', ':')),
+                                datetime.now(timezone.utc).isoformat()))
+        finally:
+            db.close()
+        return self.verify_operator_pause(profile, operation_id, fingerprint)
+
+    def chat_admission(self, profile, route, message_id):
+        """Не допустить старый input после pause/resume, включая подготовку."""
+        db = self.database(profile)
+        try:
+            state = self._chat_state(db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?', route).fetchone())
+            row = db.execute('SELECT generation,allowed FROM chat_admissions WHERE chat=? AND thread=? AND message_id=?',
+                             (*route, str(message_id))).fetchone()
+            return (not state['paused'] and (row is None or row['allowed'] and row['generation'] == state['generation'])
+                    and (not str(message_id).isdecimal() or int(message_id) > state['discardThrough']))
+        finally:
+            db.close()
+
+    def chat_started(self, profile, route, generation):
+        """Новый принятый input разрешает recovery только своей generation."""
+        db = self.database(profile)
+        try:
+            with db:
+                db.execute('UPDATE chat_pauses SET recovery_blocked=0 WHERE chat=? AND thread=? AND generation=? AND paused=0',
+                           (*route, generation))
+        finally:
+            db.close()
 
     def incoming(self, profile, message, chat, user):
         """Записать оригинал до ASR, обёрток и объединения native очередями."""
         self.routes[str(chat.id)] = profile
+        route = (str(chat.id), str(getattr(message, 'message_thread_id', None) or ''))
+        if route[1] == '1':
+            route = (route[0], '')
+        db = self.database(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                state = self._chat_state(db.execute('SELECT * FROM chat_pauses WHERE chat=? AND thread=?', route).fetchone())
+                date = getattr(message, 'date', None)
+                fresh = not state['resumeAfter'] or isinstance(date, datetime) and date.timestamp() >= state['resumeAfter']
+                db.execute('INSERT OR IGNORE INTO chat_admissions VALUES(?,?,?,?,?)',
+                           (*route, str(message.message_id), state['generation'], int(not state['paused'] and fresh)))
+        finally:
+            db.close()
         self.save(profile, message, 'in', getattr(user, 'full_name', '') or '',
                   getattr(user, 'username', '') or '')
 

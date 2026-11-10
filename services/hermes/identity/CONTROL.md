@@ -15,6 +15,69 @@ Control проверяет текущую сессию администрато�
 
 Машинные контракты: [AsyncAPI](asyncapi.yaml), [схемы DTO](schemas/control.schema.json), [приватный OpenRPC](control.openrpc.json).
 
+## Постоянная пауза беседы
+
+`admin-chats-pause` и `admin-chats-resume` принимают `headers`, `userId`,
+`source:"telegram"` и штатный `chatId`: JSON-массив строк `[chat,thread]`.
+Пустая тема обозначается пустой строкой; General topic 1 имеет ту же каноническую
+форму. Native session ID и карантин не являются целями этих мутаций. Для каждого
+запроса Control заново проверяет Origin, действующую сессию администратора,
+реестр владельца и аудит `chats.pause` либо `chats.resume`.
+
+Trusted ingress сохраняет паузу в своём изолированном журнале профиля до отмены
+живого хода через уже открытый duplex worker. Ответ `{paused:true,state:"stopping"}`
+подтверждает устойчивый запрет, но не завершение отмены. `state:"stopped"` требует
+подтверждения worker и отсутствия незавершённого dispatch. При недоступном worker
+возвращается `stopping`. `admin-chats-get` с Telegram source возвращает такой же
+объект в `body.control`; чтение возобновлённой беседы не меняет worker.
+
+Пауза сохраняет историю и session ID; native `suspended` не используется.
+Завершённая отправка до commit паузы остаётся отправкой. Новые входы во время
+паузы сохраняются в журнале, но не передаются модели. Смена поколения отсекает
+старую подготовку и сообщения, уже принятые до pause/resume. Resume возвращает
+`{paused:false,state:"resumed"}`, снимает запрет без запуска модели и без replay
+старой очереди. Следующий новый вход работает обычным образом.
+
+Для Telegram backlog, впервые доставленного после resume, журнал сохраняет
+UTC-границу `resumeAfter` и сверяет оригинальную дату сообщения. Старые сообщения
+не становятся новыми input только из-за поздней доставки. Telegram хранит дату
+с точностью до секунды, поэтому resume ждёт ближайшую секундную границу
+(менее секунды) до выдачи квитанции. Новый вход после квитанции проходит обычно.
+
+Callback и inline action проходят тот же запрет и проверку поколения до native
+handlers и выдачи прав доставки. Trusted journal хранит только IDs маршрута,
+сообщения и неизменное поколение рождения нового bot message. Edit не создаёт
+и не обновляет это поколение. После первой pause/resume неизвестная legacy
+кнопка или кнопка прежнего поколения запрещена; требуется новый prompt как
+новое сообщение текущего поколения. Дата исходного callback message не является
+временем click и для этой проверки не используется.
+
+Основной worker RPC `interactive` принимает `chat_generation`. Отсутствующее
+поле совместимо только с поколением 0. Проверка повторяется после activation
+и до handler; callback не снимает `recoveryBlocked`. Пауза отменяет текущие
+callbacks. Уже исполненный внешний эффект отменить нельзя; дальнейшая доставка
+использует generation-bound scope и заново проверяет запрет.
+
+Private порт `chats.control` описан в [ingress.openrpc.json](ingress.openrpc.json).
+Его поднимает существующий Telegram Resolver по
+`BRAI_IDENTITY_INGRESS_CONTROL_SOCKET`; Control использует `ingressControlSocket`
+и проверяет UID сокета через `telegramJournalUid`. Сокет имеет режим 0600,
+принадлежит ingress, принимает только peer UID 0. Его родитель принадлежит root:
+0700 либо POSIX access ACL ровно для ingress UID с rwx, group/other без прав.
+Установка и восстановление каталога принадлежат операторскому lifecycle.
+Нового сервиса нет. Не более 16 соединений, 64 запросов на соединение; кадр
+до 1 МиБ, соединение до 30 секунд, ответ Control до 32 КиБ и ожидание 10 секунд.
+Timeout не отменяет committed pause; тот же запрос состояния идемпотентен.
+
+До native startup и recovery worker получает полный owner-bound snapshot через
+обратный `chat_states` на основном duplex, не более 10000 маршрутов.
+Неизвестное состояние запрещает startup/recovery. Recovery запрещён также после
+resume до нового принятого input. Более новое поколение trusted dispatch
+восстанавливает resume, если его отдельная IPC квитанция потеряна.
+Перед первым новым input worker вызывает штатный native API
+`clear_resume_pending`: старое задание не добавляет автоматическую resume-note
+к новому сообщению. API сохраняет session ID и transcript.
+
 NATS Services: `brai_hermes_identity`, queue `brai_hermes_identity`, subjects `brai.hermes.identity.v1.admin-memory-list`, `admin-memory-get`, `admin-chats-list`, `admin-chats-get`, `admin-artifacts-list`, `admin-artifacts-get` и `admin-artifacts-download` с тем же префиксом. В запросе нужны `headers: {cookie,origin}` и `userId`. Чтение одной записи принимает `memoryId`, `chatId` или `artifactId`; списки и сообщения принимают `cursor` и `limit` от 1 до 100, по умолчанию 50. Поиск памяти принимает `query`.
 
 Для `admin-chats-get` необязательный `order` принимает `asc` (по умолчанию, прежний стабильный снимок от начала) или `desc` (последние сообщения). В `desc` каждая страница читает свежую защищённую копию и сразу удаляет её; ответ остаётся хронологическим, `nextCursor` продолжает по ID к более ранним репликам и не истекает по сроку снимка. Новые записи не сдвигают эту границу; изменения уже прочитанных строк за пределами свежей страницы и удаление сообщений не синхронизируются. Подписанный cursor привязан также к порядку; для другого порядка историю открывают заново. При повторном чтении без cursor возвращается свежая последняя страница. Это режим наблюдения Web; прежняя админка сохраняет `asc`. В каждом запросе заново проверяются сессия, роль и аудит; новые NATS subjects не вводятся.
@@ -117,3 +180,63 @@ ID, поэтому два личных аккаунта сохраняют ра�
 административный просмотр заполняет кэш. Перезапуск control не сбрасывает его.
 Если кэш не настроен или фото закрыто, остаётся подпись сессии и инициалы.
 Кэш не участвует в авторизации и не переносится в личную память агента.
+
+## Root preseed до первого запуска
+
+Одноразовый pause-only helper `identity.pause_preseed` предназначен для
+остановленной операторской lifecycle границы. Он не запускает ingress, worker
+или native gateway. Оператор останавливает процессы и удерживает границу до
+успешной записи и проверки паузы; затем допускает reconcile новой поставки.
+Ошибка helper блокирует дальнейший запуск, включая автоматический rollback
+на старый runtime, который ещё не умеет проверять паузу.
+
+Машинные DTO: [pause-preseed.schema.json](schemas/pause-preseed.schema.json).
+CLI принимает только `--config PATH --request PATH`. Реальный и effective UID
+должны быть 0. Оба файла имеют root ownership, режим ровно 0600, один hardlink,
+размер до 8192 байт и root-owned ancestors без group/other write. Symlink,
+повторные JSON-ключи и неизвестные поля запрещены.
+
+Config содержит только `version:1`, `registryPath`, `telegramJournalRoot`,
+`ingressUid`, `ingressGid`. Request содержит только `version:1`,
+`operationId`, `expectedUserId`, `expectedProfileId`, `expectedWorkerUid`,
+`expectedAuthorTelegramId`, `chat`, `thread`, `reason`. UUID канонические;
+`chat` обязан совпадать с canonical author Telegram ID реестра. Alias не
+угадывается. Topic 1 записывается как пустая тема. Reason — непустая строка
+до 512 символов без секретов или содержимого переписки.
+
+До записи helper читает защищённый registry штатным `load_registry` и сверяет
+единственное точное соответствие user/profile/worker UID/author Telegram ID.
+Ingress UID не может совпадать с UID любого worker. Все входные FD закрываются,
+затем процесс очищает дополнительные группы, устанавливает ingress GID/UID и
+проверяет real/effective/saved IDs. Возврат Root-привилегий не сохраняется.
+Только после этого открывается trusted ingress journal; его каталоги не могут
+принадлежать worker или быть доступны на запись посторонним.
+
+Одна SQLite transaction с FULL synchronous commit записывает `paused=true`
+и отдельный append-only `operator_pause_audit` с actor `os:root`, точным
+binding, маршрутом, operation ID, reason, временем и fingerprint. Это
+операторский аудит, а не действие вымышленного человеческого администратора.
+Обычный admin API сохраняет все прежние Auth/session/Origin/audit guards.
+Текст сообщений, native session ID, архив и история не изменяются.
+
+После commit helper проверяет паузу и аудит новым SQLite соединением. Только
+затем stdout содержит receipt: `status:"paused"`, `actor:"os:root"`,
+`auditId`, `operationId`, `userId`, `profileId`, `workerUid`, `chat`,
+`thread`, `generation`, `verified:true`. Audit ID равен operation ID.
+Ошибка выдаёт только `OPERATOR_PAUSE_PRESEED_FAILED` в stderr и ненулевой
+exit code. Receipt не утверждает, что worker остановлен: это предусловие
+оператора.
+
+Тот же operation ID с тем же fingerprint повторяет только readback и не
+создаёт аудит заново. Конфликт payload запрещён. Если после успешного seed
+прошёл явный resume или другое поколение, старый operation ID завершается
+отказом и не устанавливает паузу повторно. Новое операторское намерение
+требует нового operation ID. Resume helper отсутствует.
+
+Для изолированного запуска из content-pinned Root sealed package нужны
+ровно `identity/__init__.py`, `pause_preseed.py`, `chat_journal.py` и
+`memory_registry.py`; внешние Python пакеты не требуются. Операторский
+launcher использует Python `-I -S -B`, добавляет только проверенный sealed
+package root и выполняет `runpy.run_module("identity.pause_preseed",
+run_name="__main__")`. Произвольные пользовательские import paths и HOME
+в запуск не добавляются.

@@ -25,7 +25,8 @@
             "required": [
               "source",
               "message_id",
-              "delivery_scope"
+              "delivery_scope",
+              "chat_generation"
             ],
             "properties": {
               "source": {
@@ -131,6 +132,11 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 128
+              },
+              "chat_generation": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Монотонное поколение trusted ingress после durable admission. Более новое разрешённое поколение восстанавливает потерянную IPC квитанцию resume; старое не запускается."
               }
             },
             "additionalProperties": false
@@ -407,6 +413,15 @@
             "type": "string",
             "pattern": "^[1-9][0-9]{0,19}$"
           }
+        },
+        {
+          "name": "chat_generation",
+          "required": false,
+          "description": "Поколение trusted ingress. Отсутствие совместимо только с generation0 до первой паузы. Проверяется до activation и непосредственно до native callback; actor и effective private route остаются owner-bound.",
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       ],
       "result": {
@@ -423,7 +438,8 @@
           },
           "additionalProperties": false
         }
-      }
+      },
+      "description": "Paused или stale callback не исполняет native handler и не снимает recoveryBlocked. Birth-generation исходного bot message хранится доверенным ingress; date старого сообщения не является временем click. После pause/resume legacy или старые кнопки требуют нового prompt-сообщения текущего поколения. Inflight callbacks отменяются при pause, уже выполненный внешний эффект не отзывается."
     },
     {
       "name": "telegram_api",
@@ -478,6 +494,153 @@
               "const": true
             }
           ]
+        }
+      }
+    },
+    {
+      "name": "chat_pause",
+      "summary": "Trusted ingress применяет route generation до отмены native хода. Только primary duplex; secondary остаётся health-only.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "chat",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "thread",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^$|^[1-9][0-9]{0,15}$",
+            "not": {
+              "const": "1"
+            }
+          }
+        },
+        {
+          "name": "paused",
+          "required": true,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "generation",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "stopped",
+                "stopping",
+                "resumed"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "chat_states",
+      "summary": "Обратный callback ingress: полный snapshot владельца до native startup. Недоступный snapshot запрещает startup/recovery.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "snapshot",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "routes"
+          ],
+          "properties": {
+            "owner": {
+              "type": "string",
+              "minLength": 1
+            },
+            "routes": {
+              "type": "array",
+              "maxItems": 10000,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "chat",
+                  "thread",
+                  "paused",
+                  "generation",
+                  "recoveryBlocked",
+                  "discardThrough",
+                  "resumeAfter"
+                ],
+                "properties": {
+                  "chat": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  },
+                  "thread": {
+                    "type": "string",
+                    "pattern": "^$|^[1-9][0-9]{0,15}$",
+                    "not": {
+                      "const": "1"
+                    }
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "recoveryBlocked": {
+                    "type": "boolean"
+                  },
+                  "discardThrough": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "resumeAfter": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "UTC Unix seconds: raw Telegram message date must be at or after durable resume barrier."
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

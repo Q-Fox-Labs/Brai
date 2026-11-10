@@ -141,7 +141,10 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
             'timeout': 200, 'max_text_length': 900}}},
         'skills': {'external_dirs': ['/opt/brai-profile/skills'],
                    'create_dir': home + '/usercustom/userdata/skills'},
-        'terminal': {'cwd': home + '/workspace'},
+        # AIDEV-NOTE: Дочерние инструменты остаются в PrivateNetwork и должны
+        # пользоваться тем же trusted relay; credentials в allowlist не входят.
+        'terminal': {'cwd': home + '/workspace', 'env_passthrough': [
+            'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']},
         'gateway': {'multiplex_profiles': False, 'profile_routes': [],
                     'auto_multiplex_migration': False,
                     'media_delivery_allow_dirs': [home + '/workspace', home + '/results', home + '/media/downloads']},

@@ -394,6 +394,7 @@ class MemOSProvider(MemoryProvider):
                                "is_bot": bool(kwargs.get("author_is_bot", False))}
 
     def _body(self, rows, session_id, kind, author, event_id, extra=None):
+        """Собрать исходное свидетельство; checkpoint не подтверждает личность говорящих."""
         info = {
             "hermes_event_id": event_id, "hermes_kind": kind, "hermes_messages": rows,
             "hermes_home_scope": digest(str(self.home.resolve())),
@@ -409,6 +410,7 @@ class MemOSProvider(MemoryProvider):
         return {"session_id": session_id, "messages": rows, "info": info}
 
     def _archive(self, rows, session_id, kind, ordinal, author=None, extra=None, delete_filter=None):
+        """Поставить неизменяемое событие в durable очередь с повторяемым ID."""
         rows = dialogue(rows)
         if not rows or kind in ('turn', 'native') and internal_dialogue(rows):
             return None
@@ -486,6 +488,7 @@ class MemOSProvider(MemoryProvider):
             self._counter = 0
 
     def on_pre_compress(self, messages, *, require_checkpoint=False):
+        """Подтвердить архив до сжатия; неопознанные говорящие не становятся фактами."""
         if not self.primary:
             if require_checkpoint:
                 raise MemOSError("MemOS checkpoints require a primary agent context")
@@ -494,8 +497,17 @@ class MemOSProvider(MemoryProvider):
         if not rows:
             return "MemOS: no direct dialogue evidence to checkpoint."
         with self._lock:
-            event_id = self._archive(rows, self.session_id, "checkpoint", digest(rows), {"id": "multiple_or_unknown"})
+            # AIDEV-NOTE: Роль не доказывает личность: архив нескольких говорящих
+            # не становится набором утверждений владельца личного процесса.
+            checkpoint = {'version': 1, 'authors': [
+                {'message_index': index, 'role': row['role'], 'author_id': None}
+                for index, row in enumerate(rows)],
+                'origin': {'session_id': self.session_id, 'platform': self.context.get('platform', 'cli')}}
+            event_id = self._archive(rows, self.session_id, "checkpoint", digest(rows), {"id": "multiple_or_unknown"},
+                                     extra={'hermes_checkpoint': checkpoint, 'hermes_source_author_id': 'multiple_or_unknown'})
         if not self.outbox.flush(float(self.config["flush_timeout"]), event_id):
+            if self.outbox.failure(event_id):
+                raise MemOSError("MemOS checkpoint permanently failed; the durable failure record is retained")
             raise MemOSError("MemOS checkpoint is pending; no durable checkpoint was confirmed")
         receipt = self.outbox.receipt(event_id)
         return "MemOS dialogue checkpoint verified: " + ", ".join(receipt["memory_ids"])

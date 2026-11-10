@@ -9,6 +9,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
+import { createConnection } from 'node:net';
 import { createTelegramProfiles, telegramPhotoDownload } from './telegram-profiles.mjs';
 import { messageColumns, visibleChatMessage, sessionParticipant } from './chat-display.mjs';
 import { createTelegramChatRead } from './telegram-chat-read.mjs';
@@ -16,6 +17,7 @@ import { createTelegramChatRead } from './telegram-chat-read.mjs';
 const operations = {
   'admin-memory-list': ['memory.list', 'memoryRead'], 'admin-memory-get': ['memory.read', 'memoryRead'],
   'admin-chats-list': ['chats.list', 'chatRead'], 'admin-chats-get': ['chats.read', 'chatRead'],
+  'admin-chats-pause': ['chats.pause', 'chatControl'], 'admin-chats-resume': ['chats.resume', 'chatControl'],
   'admin-artifacts-list': ['artifacts.list', 'artifactsCall'], 'admin-artifacts-get': ['artifacts.read', 'artifactsCall'],
   'admin-artifacts-download': ['artifacts.read', 'artifactsCall'],
 };
@@ -41,9 +43,9 @@ const permittedTool = (tool, role) => object(tool) && text(tool.name) && !['publ
 
 /** Политика control с явно переданными доверенными портами. */
 export class Control {
-  constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, telegramProfiles = undefined, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
+  constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, chatControl = undefined, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, telegramProfiles = undefined, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
     if (!text(origin) || new URL(origin).origin !== origin || !text(cursorKey) || Buffer.byteLength(cursorKey) < 32 || typeof registry !== 'function' || typeof authCall !== 'function') throw new TypeError('Invalid control configuration');
-    Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, telegramProfiles, archiveProfile, quarantineArtifactsOwnerId });
+    Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, chatControl, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, telegramProfiles, archiveProfile, quarantineArtifactsOwnerId });
     this.memorySnapshots = new Map();
     this.memoryReads = 0;
   }
@@ -72,8 +74,13 @@ export class Control {
   async invoke(operation, input) {
     const entry = operations[operation];
     if (!entry || !object(input) || !object(input.headers) || !text(input.userId)) return error(400, 'INVALID_ARGUMENT');
-    const idKey = operation.endsWith('-get') || operation === 'admin-artifacts-download' ? operation.includes('memory') ? 'memoryId' : operation.includes('chats') ? 'chatId' : 'artifactId' : null;
-    const allowed = new Set(['headers', 'userId', 'cursor', 'limit', ...(operation.startsWith('admin-chats-') ? ['source'] : []), ...(operation === 'admin-chats-get' ? ['order'] : []), ...(operation === 'admin-memory-list' ? ['query'] : []), ...(idKey ? [idKey] : [])]);
+    const mutation = entry[1] === 'chatControl';
+    const idKey = mutation || operation.endsWith('-get') || operation === 'admin-artifacts-download' ? operation.includes('memory') ? 'memoryId' : operation.includes('chats') ? 'chatId' : 'artifactId' : null;
+    const allowed = new Set(['headers', 'userId', ...(!mutation ? ['cursor', 'limit'] : []), ...(operation.startsWith('admin-chats-') ? ['source'] : []), ...(operation === 'admin-chats-get' ? ['order'] : []), ...(operation === 'admin-memory-list' ? ['query'] : []), ...(idKey ? [idKey] : [])]);
+    if (mutation) {
+      if (input.source !== 'telegram' || input.userId === quarantineTarget) return error(400, 'INVALID_ARGUMENT');
+      try { chatRoute(input.chatId); } catch { return error(400, 'INVALID_ARGUMENT'); }
+    }
     if (input.source === 'telegram' && input.order === 'asc') return error(400, 'INVALID_ARGUMENT');
     if (input.source !== undefined && !['native', 'telegram'].includes(input.source)) return error(400, 'INVALID_ARGUMENT');
     if (input.order !== undefined && !['asc', 'desc'].includes(input.order)) return error(400, 'INVALID_ARGUMENT');
@@ -113,6 +120,9 @@ export class Control {
         : await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50, order: input.order ?? (input.source === 'telegram' ? 'desc' : 'asc'), source: input.source ?? 'native' });
       if (!object(result)) return error(503, 'SOURCE_UNAVAILABLE');
       const body = { ...result };
+      if (operation === 'admin-chats-get' && input.source === 'telegram' && typeof this.chatControl === 'function') {
+        body.control = await this.chatControl({ operation: 'state', profile: selected, id: input.chatId });
+      }
       if (operation === 'admin-chats-list' && input.userId !== quarantineTarget && this.telegramProfiles) {
         try {
           const identity = await this.authCall('identity-get', { userId: selected.userId });
@@ -522,6 +532,57 @@ export function createArtifactReader({ wire, internalBaseURL }) {
   };
 }
 
+/** Разобрать канонический chatId Telegram, сохраняя границу темы. */
+function chatRoute(id) {
+  const route = JSON.parse(id);
+  if (!Array.isArray(route) || route.length !== 2 || !/^[1-9][0-9]{0,19}$/.test(route[0]) ||
+      typeof route[0] !== 'string' || typeof route[1] !== 'string' || route[1] === '1' ||
+      route[1] !== '' && !/^[1-9][0-9]{0,15}$/.test(route[1])) throw new Error('INVALID_ARGUMENT');
+  return route;
+}
+
+/** Вызвать root-only RPC existing ingress; исход timeout не вызывает повтор мутации. */
+export function createChatControl(socketPath, ingressUid) {
+  return async ({ operation, profile, id }) => {
+    if (!isAbsolute(socketPath ?? '') || !Number.isSafeInteger(ingressUid) || ingressUid <= 0)
+      throw new Error('SOURCE_UNAVAILABLE');
+    const target = lstatSync(socketPath), parent = lstatSync(dirname(socketPath));
+    if (!target.isSocket() || target.uid !== ingressUid || (target.mode & 0o777) !== 0o600 ||
+        !parent.isDirectory() || parent.uid !== 0 || parent.mode & 0o007) throw new Error('SOURCE_UNAVAILABLE');
+    const [chat, thread] = chatRoute(id);
+    const requestId = randomUUID();
+    const params = { userId: profile.userId, profileId: profile.profileId, chat, thread,
+      ...(operation === 'state' ? {} : { paused: operation === 'admin-chats-pause' }) };
+    const result = await new Promise((resolve, reject) => {
+      const socket = createConnection(socketPath);
+      let data = '', finished = false;
+      const finish = (error, result) => {
+        if (finished) return;
+        finished = true; socket.destroy();
+        error ? reject(error) : resolve(result);
+      };
+      socket.setTimeout(10000, () => finish(new Error('SOURCE_UNAVAILABLE')));
+      socket.on('error', () => finish(new Error('SOURCE_UNAVAILABLE')));
+      socket.on('end', () => finish(new Error('SOURCE_UNAVAILABLE')));
+      socket.on('connect', () => socket.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'chats.control', params }) + '\n'));
+      socket.setEncoding('utf8');
+      socket.on('data', chunk => {
+        data += chunk;
+        if (Buffer.byteLength(data) > 32768) return finish(new Error('SOURCE_UNAVAILABLE'));
+        if (!data.includes('\n')) return;
+        try {
+          const reply = JSON.parse(data.slice(0, data.indexOf('\n')));
+          if (reply.jsonrpc !== '2.0' || reply.id !== requestId || reply.error || !object(reply.result)) throw new Error();
+          finish(null, reply.result);
+        } catch { finish(new Error('SOURCE_UNAVAILABLE')); }
+      });
+    });
+    if (typeof result.paused !== 'boolean' || !['stopped', 'stopping', 'resumed'].includes(result.state) ||
+        result.paused === (result.state === 'resumed')) throw new Error('SOURCE_UNAVAILABLE');
+    return result;
+  };
+}
+
 /** Читать HTTP memory gateway с жёстким пределом и немедленным завершением при обрыве. */
 export function createMemoryReader(socketPath) {
   return ({ operation, profile, id, query, cursor, limit }) => new Promise((resolve, reject) => {
@@ -614,6 +675,7 @@ export async function startControl(config, adapters = {}) {
   const control = new Control({ origin: config.origin, cursorKey: config.cursorKey, registry, authCall,
     memoryRead, telegramProfiles, telegramSend: adapters.telegramSend ?? telegramSend, telegramInfo: adapters.telegramInfo ?? telegramInfo, chatRead: adapters.chatRead ?? createChatRead(config), artifactsCall: adapters.artifactsCall ?? artifactsCall,
     toolCatalog: adapters.toolCatalog, perUserRuntime: adapters.perUserRuntime, historyCall: adapters.historyCall,
+    chatControl: adapters.chatControl ?? (config.ingressControlSocket ? createChatControl(config.ingressControlSocket, config.telegramJournalUid) : undefined),
     quarantineProfile: config.quarantineProfile, quarantineArtifactsOwnerId: config.quarantineArtifactsOwnerId });
   control.onIdentityChanged = adapters.onIdentityChanged;
   control.bootstrapFilesConfiguration = adapters.bootstrapFilesConfiguration;

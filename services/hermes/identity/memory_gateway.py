@@ -156,6 +156,8 @@ class Boundary:
                 or info.get('hermes_home_scope') != profile['homeScope']
                 or info.get('hermes_memory_epoch') != profile['memoryEpoch']
                 or (not quarantine and info.get('hermes_author_id') != profile['authorId'])
+                or (not quarantine and info.get('hermes_owner_id', profile['userId']) != profile['userId'])
+                or (not quarantine and info.get('hermes_profile_id', profile['profileId']) != profile['profileId'])
                 or (quarantine and (info.get('hermes_quarantined') is not True
                     or info.get('hermes_profile_id') != profile['profileId'] or info.get('hermes_user_id') != profile['userId']))
                 or info.get('hermes_cube') != physical
@@ -169,6 +171,17 @@ class Boundary:
                       'hermes_memberships': [cubes[item] for item in memberships]}
         if 'hermes_primary_cube' in info:
             clean_info['hermes_primary_cube'] = cubes[info['hermes_primary_cube']]
+        # AIDEV-NOTE: Физический author остаётся owner scope для защищённого индекса.
+        # Клиенту возвращается исходная атрибуция checkpoint для legacy read-back.
+        if info.get('hermes_kind') == 'checkpoint' and 'hermes_source_author_id' in info:
+            if (info['hermes_source_author_id'] not in ('unknown', 'multiple_or_unknown', profile['authorId'])
+                    or info.get('hermes_owner_id') != profile['userId']
+                    or info.get('hermes_profile_id') != profile['profileId']
+                    or not isinstance(info.get('hermes_checkpoint'), dict)
+                    or type(info['hermes_checkpoint'].get('version')) is not int
+                    or info['hermes_checkpoint']['version'] != 1):
+                raise Denied('UPSTREAM_SCOPE_MISMATCH')
+            clean_info['hermes_author_id'] = info['hermes_source_author_id']
         return {**row, '_cube_id': cube, 'metadata': {**metadata, 'info': clean_info}}
 
     @staticmethod
@@ -378,6 +391,36 @@ class Boundary:
             client = self.client(profile, cube)
             physical = physical_cube(profile, cube)
             info = dict(body.get('info') or {})
+            for field, expected in (('hermes_owner_id', profile['userId']), ('hermes_profile_id', profile['profileId'])):
+                if field in info and info[field] != expected:
+                    raise Denied('OWNER_DENIED')
+            if info.get('hermes_kind') == 'checkpoint':
+                source = info.get('hermes_author_id', 'multiple_or_unknown')
+                if source not in ('multiple_or_unknown', 'unknown', profile['authorId']):
+                    raise Denied('SCOPE_DENIED')
+                messages = info.get('hermes_messages', body.get('messages'))
+                if not isinstance(messages, list) or not messages or any(not isinstance(m, dict) for m in messages):
+                    raise Denied('INVALID_CHECKPOINT')
+                checkpoint = info.get('hermes_checkpoint')
+                if checkpoint is None:
+                    checkpoint = {'version': 1, 'authors': [
+                        {'message_index': index, 'role': message.get('role'), 'author_id': None}
+                        for index, message in enumerate(messages)],
+                        'origin': {'session_id': body.get('session_id'), 'platform': info.get('hermes_platform', 'unknown')}}
+                if (not isinstance(checkpoint, dict) or type(checkpoint.get('version')) is not int
+                        or checkpoint['version'] != 1 or not isinstance(checkpoint.get('origin'), dict)
+                        or not isinstance(checkpoint.get('authors'), list)
+                        or len(checkpoint['authors']) != len(messages)
+                        or any(not isinstance(author, dict) or type(author.get('message_index')) is not int
+                               or author['message_index'] != index or author.get('role') != messages[index].get('role')
+                               or author.get('author_id') is not None
+                               for index, author in enumerate(checkpoint['authors']))):
+                    raise Denied('INVALID_CHECKPOINT')
+                if info.get('hermes_source_author_id', source) != source:
+                    raise Denied('INVALID_CHECKPOINT')
+                info.update(hermes_author_id=profile['authorId'], hermes_source_author_id=source,
+                            hermes_owner_id=profile['userId'], hermes_profile_id=profile['profileId'],
+                            hermes_checkpoint=checkpoint)
             fixed = {'hermes_home_scope': profile['homeScope'], 'hermes_memory_epoch': profile['memoryEpoch'],
                      'hermes_author_id': profile['authorId'], 'hermes_cube': cube}
             for key, value in fixed.items():

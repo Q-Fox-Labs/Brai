@@ -2,7 +2,7 @@
 // ABOUTME: Использует синтетические ответы существующего HTTP API без реальных пользователей.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, type AdminChat, type ChatMessage } from "../app/agent/admin-chat-client.ts";
+import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, selectedChatUnavailable, type AdminChat, type ChatMessage } from "../app/agent/admin-chat-client.ts";
 const chat: AdminChat = { id: "same", title: "Чат", updatedAt: "2026-11-08T00:00:00Z", owner: { id: "u1", name: "Анна", profileId: "p1" } };
 const message = (id: number): ChatMessage => ({ id: String(id), role: "user", text: "Сообщение " + id, createdAt: "2026-11-08T00:00:00Z" });
 
@@ -20,7 +20,10 @@ test("all owners and Telegram pages stay distinct; one failed profile keeps its 
   const result = await loadAdminChats([old],new AbortController().signal);
   assert.equal(result.chats.length,3);
   assert.equal(new Set(result.chats.map(adminChatKey)).size,3);
-  assert.deepEqual(result.unavailable,["Иван"]);
+  assert.deepEqual(result.unavailable.map(owner=>owner.id),["u2"]);
+  assert.equal(selectedChatUnavailable(chat,result.unavailable),false);
+  assert.equal(selectedChatUnavailable(old,result.unavailable),true);
+  assert.equal(selectedChatUnavailable(null,result.unavailable),false);
   assert.ok(!result.chats.some(c=>c.owner.id==="__quarantine__"));
   assert.ok(requests.filter(q=>q.searchParams.get("operation")==="admin-chats-list").every(q=>q.searchParams.get("source")==="telegram"));
   assert.equal(requests.filter(q=>q.searchParams.get("userId")==="u1").length,2);
