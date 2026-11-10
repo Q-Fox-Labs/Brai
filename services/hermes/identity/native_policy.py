@@ -101,6 +101,60 @@ def restrict_exclusive_plugins(product):
             module.find_provider_dir = find
 
 
+def execution_grant(name):
+    """Одна проверка фактического native/inline имени до любого пользовательского hook."""
+    try:
+        if not isinstance(name, str):
+            return None
+        grant = broker_call('native.authorize', {'name': name})
+        before = principal()
+        if grant.get('allowed') is True and all(grant.get(key) == before.get(key) for key in ('role', 'generation')):
+            return before
+    except Exception:
+        pass
+    return None
+
+
+def grant_current(before):
+    """Не выдавать результат после смены роли, поколения или отказа Auth."""
+    try:
+        return principal() == before
+    except Exception:
+        return False
+
+
+def install_executor_guard():
+    """Закрыть общий executor и direct API, включая inline/delegation до Registry."""
+    from agent import tool_executor, agent_runtime_helpers
+    common = tool_executor._dispatch_authorized_once
+    invoke = agent_runtime_helpers.invoke_tool
+    denied = json.dumps({'error': 'Это действие недоступно для вашей роли.'}, ensure_ascii=False)
+    changed = json.dumps({'error': 'Права доступа изменились. Результат не выдан.'}, ensure_ascii=False)
+    def guarded_common(agent, state, ref, *, execute, scope_block, display_index,
+                       begin_execution, authorization_gate):
+        before = execution_grant(ref.name)
+        if before is None:
+            state.blocked = True
+            if begin_execution is not None:
+                begin_execution()
+            # Native blocked helper вызывает plugin post hook; здесь код hooks не разрешён.
+            return denied
+        result = common(agent, state, ref, execute=execute, scope_block=scope_block,
+                        display_index=display_index, begin_execution=begin_execution,
+                        authorization_gate=authorization_gate)
+        return result if grant_current(before) else changed
+    def guarded_invoke(agent, function_name, function_args, *args, **kwargs):
+        before = execution_grant(function_name)
+        if before is None:
+            return denied
+        result = invoke(agent, function_name, function_args, *args, **kwargs)
+        return result if grant_current(before) else changed
+    guarded_common.__wrapped__ = common
+    guarded_invoke.__wrapped__ = invoke
+    tool_executor._dispatch_authorized_once = guarded_common
+    agent_runtime_helpers.invoke_tool = guarded_invoke
+
+
 def install():
     """Закрепить гостевой startup и общий guard registry до обнаружения инструментов."""
     global _installed, _guest, _role, _suspended, _startup_state
@@ -169,6 +223,7 @@ def install():
             return json.dumps({'error': 'Права доступа изменились. Результат не выдан.'}, ensure_ascii=False)
         return result
     ToolRegistry.get_definitions, ToolRegistry.dispatch = guarded_definitions, guarded_dispatch
+    install_executor_guard()
     _installed = True
     if _suspended or state.get('staged') is True:
         from gateway.run import GatewayRunner

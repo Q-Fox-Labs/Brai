@@ -521,6 +521,28 @@ def load_config(path, environ):
     return config['socketPath'], int(ingress), owner, telegram, egress
 
 
+async def publish_delivery_file(file_path, *, broker=None):
+    """Доставить уже принадлежащий артефакт по ID; guest публикует только admitted input."""
+    if broker is None:
+        from .tool_client import broker_call
+        broker = broker_call
+    import brai_files
+    reference = brai_files.reference_metadata(file_path)
+    if reference is not None:
+        descriptor = await asyncio.to_thread(broker, 'artifacts.fetch', {'artifactId': reference['artifactId']})
+        if descriptor.get('artifactId') != reference['artifactId']:
+            raise PermissionError('Artifact mismatch')
+    else:
+        permissions = await asyncio.to_thread(broker, 'permissions.get', {})
+        if permissions.get('role') not in ('creator', 'admin', 'user', 'guest'):
+            raise PermissionError('Access unavailable')
+        method = 'files.publish' if permissions['role'] == 'guest' else 'artifacts.publish'
+        descriptor = await asyncio.to_thread(broker, method, {'path': file_path, 'requestId': str(uuid.uuid4())})
+    if not isinstance(descriptor, dict) or not isinstance(descriptor.get('artifactId'), str) or not descriptor['artifactId']:
+        raise RuntimeError('Broker returned no artifact')
+    return {'artifact_id': descriptor['artifactId']}
+
+
 async def run(config_path):
     """Запустить relay и worker; остановить оба при штатном SIGTERM."""
     from .network import start_relay
@@ -530,12 +552,7 @@ async def run(config_path):
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
-    async def publish_file(file_path):
-        descriptor = await asyncio.to_thread(broker_call, 'artifacts.publish', {'path': file_path, 'requestId': str(uuid.uuid4())})
-        if not isinstance(descriptor, dict) or not isinstance(descriptor.get('artifactId'), str) or not descriptor['artifactId']:
-            raise RuntimeError('Broker returned no artifact')
-        return {'artifact_id': descriptor['artifactId']}
-    worker = Worker(ingress, owner, telegram, publish_file)
+    worker = Worker(ingress, owner, telegram, publish_delivery_file)
     relay = await start_relay(egress, port=18080)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

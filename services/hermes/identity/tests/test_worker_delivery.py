@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.adapter import make_adapter
-from identity.worker import Worker
+from identity.worker import Worker, publish_delivery_file
 from identity.ingress import Bridge
 from identity.ipc import RpcError
 from identity.scope import delivery_scope
@@ -284,6 +284,96 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         result = await worker.send_voice('123', '/missing', metadata={'thread_id': '77'}, is_voice=True)
         self.assertFalse(result.success)
         transport.assert_not_awaited()
+
+    async def test_delivery_alias_fetches_fresh_descriptor_without_republishing(self):
+        artifact_id = '11111111-1111-4111-8111-111111111111'
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            return {'artifactId': artifact_id, 'filename': 'file.txt'}
+
+        with patch.object(native, 'reference_metadata',
+                          return_value={'artifactId': artifact_id, 'filename': 'file.txt'}):
+            result = await publish_delivery_file('/old/alias.txt', broker=broker)
+        self.assertEqual(result, {'artifact_id': artifact_id})
+        self.assertEqual(calls, [('artifacts.fetch', {'artifactId': artifact_id})])
+
+    async def test_delivery_alias_fetch_failure_never_falls_back_to_publish(self):
+        artifact_id = '11111111-1111-4111-8111-111111111111'
+        for failure in (PermissionError('foreign artifact'), ConnectionError('fetch failed')):
+            calls = []
+
+            def broker(method, params):
+                calls.append((method, params))
+                raise failure
+
+            with self.subTest(failure=type(failure).__name__), patch.object(
+                    native, 'reference_metadata',
+                    return_value={'artifactId': artifact_id, 'filename': 'file.txt'}):
+                with self.assertRaises(type(failure)):
+                    await publish_delivery_file('/old/alias.txt', broker=broker)
+            self.assertEqual(calls, [('artifacts.fetch', {'artifactId': artifact_id})])
+
+    async def test_delivery_alias_rejects_mismatched_fetched_id(self):
+        artifact_id = '11111111-1111-4111-8111-111111111111'
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            return {'artifactId': '22222222-2222-4222-8222-222222222222'}
+
+        with patch.object(native, 'reference_metadata',
+                          return_value={'artifactId': artifact_id, 'filename': 'file.txt'}):
+            with self.assertRaisesRegex(PermissionError, 'Artifact mismatch'):
+                await publish_delivery_file('/old/alias.txt', broker=broker)
+        self.assertEqual(calls, [('artifacts.fetch', {'artifactId': artifact_id})])
+
+    async def test_guest_delivery_without_alias_uses_only_files_publish(self):
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            if method == 'permissions.get':
+                return {'role': 'guest'}
+            return {'artifactId': '11111111-1111-4111-8111-111111111111'}
+
+        with patch.object(native, 'reference_metadata', return_value=None):
+            result = await publish_delivery_file('/tmp/admitted.txt', broker=broker)
+        self.assertEqual(result, {'artifact_id': '11111111-1111-4111-8111-111111111111'})
+        self.assertEqual([method for method, _ in calls],
+                         ['permissions.get', 'files.publish'])
+        self.assertEqual(calls[1][1]['path'], '/tmp/admitted.txt')
+        self.assertTrue(calls[1][1]['requestId'])
+
+    async def test_user_delivery_without_alias_uses_generic_artifact_publish(self):
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            if method == 'permissions.get':
+                return {'role': 'user'}
+            return {'artifactId': '11111111-1111-4111-8111-111111111111'}
+
+        with patch.object(native, 'reference_metadata', return_value=None):
+            result = await publish_delivery_file('/tmp/output.txt', broker=broker)
+        self.assertEqual(result, {'artifact_id': '11111111-1111-4111-8111-111111111111'})
+        self.assertEqual([method for method, _ in calls],
+                         ['permissions.get', 'artifacts.publish'])
+        self.assertEqual(calls[1][1]['path'], '/tmp/output.txt')
+        self.assertTrue(calls[1][1]['requestId'])
+
+    async def test_unknown_delivery_role_is_denied_without_publishing(self):
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            return {'role': 'unknown'}
+
+        with patch.object(native, 'reference_metadata', return_value=None):
+            with self.assertRaisesRegex(PermissionError, 'Access unavailable'):
+                await publish_delivery_file('/tmp/output.txt', broker=broker)
+        self.assertEqual(calls, [('permissions.get', {})])
 
     async def test_invalid_voice_flag_and_foreign_route_are_rejected(self):
         bridge = Bridge('owner', '123', 101, '/unused', AsyncMock(), None)

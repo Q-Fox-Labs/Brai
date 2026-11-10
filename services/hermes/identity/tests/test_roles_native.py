@@ -40,6 +40,7 @@ class NativeGuardTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('identity.native_policy', ROOT / 'services/hermes/identity/native_policy.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module.install_executor_guard = lambda: None
         module.install()
         return Registry(), calls
 
@@ -69,6 +70,50 @@ class NativeGuardTests(unittest.TestCase):
             [{'role':'user','generation':1},{'role':'user','generation':1}])
         self.assertEqual(registry.dispatch('terminal', {}), 'EXECUTED')
         self.assertEqual(calls, ['terminal'])
+
+
+class InlineExecutorTests(unittest.TestCase):
+    """Inline и direct обходы registry получают собственную проверку перед эффектами."""
+
+    def policy(self, grants, snapshots):
+        from unittest.mock import patch
+        effects = []
+        package = types.ModuleType('identity'); package.__path__ = []
+        client = types.ModuleType('identity.tool_client')
+        client.broker_call = lambda name, args: grants.pop(0) if name == 'native.authorize' else snapshots.pop(0)
+        agent = types.ModuleType('agent'); agent.__path__ = []
+        common = types.ModuleType('agent.tool_executor')
+        direct = types.ModuleType('agent.agent_runtime_helpers')
+        def execute(agent, state, ref, **kwargs):
+            effects.append('common'); kwargs['begin_execution'](); return 'RESULT'
+        common._dispatch_authorized_once = execute
+        direct.invoke_tool = lambda *a, **k: effects.append('direct') or 'RESULT'
+        agent.tool_executor, agent.agent_runtime_helpers = common, direct
+        with patch.dict(sys.modules, {'identity': package, 'identity.tool_client': client, 'agent': agent,
+                                     'agent.tool_executor': common, 'agent.agent_runtime_helpers': direct}):
+            spec = importlib.util.spec_from_file_location('identity.native_policy', ROOT / 'services/hermes/identity/native_policy.py')
+            policy = importlib.util.module_from_spec(spec); spec.loader.exec_module(policy)
+            policy.install_executor_guard()
+        return common, direct, effects
+
+    def test_denied_inline_and_direct_do_not_enter_executor(self):
+        common, direct, effects = self.policy([{'allowed': False}] * 2, [{'role': 'guest', 'generation': 2}] * 2)
+        state, ref, begun = types.SimpleNamespace(blocked=False), types.SimpleNamespace(name='delegate_task'), []
+        result = common._dispatch_authorized_once(None, state, ref, execute=None, scope_block=None,
+            display_index=0, begin_execution=lambda: begun.append(True), authorization_gate=None)
+        self.assertIn('error', json.loads(result)); self.assertTrue(state.blocked)
+        self.assertEqual(begun, [True]); self.assertEqual(effects, [])
+        self.assertIn('error', json.loads(direct.invoke_tool(None, 'manage_connections', '{}')))
+        self.assertEqual(effects, [])
+
+    def test_authorized_inline_executes_once_and_checks_generation_afterwards(self):
+        common, _, effects = self.policy([{'allowed': True, 'role': 'user', 'generation': 1}],
+            [{'role': 'user', 'generation': 1}, {'role': 'guest', 'generation': 2}])
+        state, begun = types.SimpleNamespace(blocked=False), []
+        result = common._dispatch_authorized_once(None, state, types.SimpleNamespace(name='delegate_task'),
+            execute=None, scope_block=None, display_index=0, begin_execution=lambda: begun.append(True), authorization_gate=None)
+        self.assertIn('error', json.loads(result)); self.assertFalse(state.blocked)
+        self.assertEqual(begun, [True]); self.assertEqual(effects, ['common'])
 
 
 class ExclusiveLoaderTests(unittest.TestCase):
@@ -191,6 +236,7 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
             policy = importlib.util.module_from_spec(spec); spec.loader.exec_module(policy)
             policy.protected_config = lambda path: {'source': 'trusted'}
             policy.restrict_exclusive_plugins = lambda product: None
+            policy.install_executor_guard = lambda: None
             policy.install()
             runner = Runner()
             await runner._start_recover_previous_run()
