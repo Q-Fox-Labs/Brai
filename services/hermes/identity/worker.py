@@ -36,6 +36,11 @@ class Worker:
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
         self.lifecycle_task = None
+        self.policy_task = None
+        self.policy_ready = asyncio.Event()
+        self.policy_ready.set()
+        self.policy_error = None
+        self.policy_stopping = False
         self.activation = asyncio.Event()
         self.exited = asyncio.Event()
         self.exit_code = None
@@ -115,6 +120,9 @@ class Worker:
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
         self.tools_ready = False
+        self.policy_stopping = False
+        self.policy_error = None
+        self.policy_ready.set()
         self.operational.clear()
         self.activation.clear()
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
@@ -178,8 +186,58 @@ class Worker:
             from .native_policy import permitted, catalog_permitted
             if registry.get_entry('mcp__brai__create_text_file') is None or not catalog_permitted('mcp__brai__create_text_file') or catalog_permitted('terminal') or catalog_permitted('mcp__brai__brai_login'):
                 raise RpcError(-32603, 'Worker role policy unavailable')
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import has_deferred_startup, prepared_principal
+            if has_deferred_startup(runner) and self.policy_task is None:
+                self.policy_ready.clear()
+                self.policy_task = asyncio.create_task(self._activate_user_startup(
+                    runner, self.adapter, prepared_principal()))
         self.tools_ready = True
         self.operational.set()
+
+    async def _activate_user_startup(self, runner, adapter, expected):
+        """Владеть ожиданием Auth и восстановлением; stop_runtime отменяет весь этап."""
+        from .native_policy import principal, activate_deferred_startup
+        def alive():
+            if self.policy_stopping or self.runner is not runner or self.adapter is not adapter:
+                raise asyncio.CancelledError()
+        async def check():
+            alive()
+            current = await asyncio.to_thread(principal)
+            alive()
+            if current != expected:
+                raise PermissionError('Runtime preparation changed')
+        try:
+            while True:
+                alive()
+                try:
+                    current = await asyncio.to_thread(principal)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await asyncio.sleep(.5)
+                    continue
+                alive()
+                if current != expected:
+                    raise PermissionError('Runtime preparation changed')
+                break
+            await activate_deferred_startup(runner, adapter, check)
+            alive()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.policy_error = self.lifecycle_error = error
+            self.exit_code = 1
+            runner._exit_code = 1
+            runner._request_clean_exit('role-activation-failed')
+        finally:
+            self.policy_ready.set()
+
+    async def ensure_user_policy(self):
+        """Не передавать первое событие одновременно с reload/restore пользователя."""
+        await self.policy_ready.wait()
+        if self.policy_stopping or self.policy_error is not None:
+            raise RpcError(-32603, 'Worker startup unavailable')
 
     async def _run_lifecycle(self):
         """Выполнить native daemon lifecycle и сохранить service restart verdict."""
@@ -203,11 +261,21 @@ class Worker:
             self.lifecycle_error = error
             self.exit_code = 1
         finally:
+            if self.policy_error is not None:
+                self.exit_code = 1
             self.operational.clear()
             self.exited.set()
 
     async def stop_runtime(self):
         """Дождаться native drain и внешней обвязки до освобождения peer."""
+        self.policy_stopping = True
+        policy = self.policy_task
+        if policy is not None and not policy.done():
+            policy.cancel()
+        if policy is not None:
+            await asyncio.gather(policy, return_exceptions=True)
+        self.policy_task = None
+        self.policy_ready.set()
         task = self.lifecycle_task
         if task is not None and not self.activation.is_set() and not task.done():
             task.cancel()
@@ -252,6 +320,7 @@ class Worker:
                 or not isinstance(actor_telegram_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', actor_telegram_id)):
             raise RpcError(-32602, 'Invalid interactive event')
         await self.ensure_tools()
+        await self.ensure_user_policy()
         from .scope import delivery_scope
         token = delivery_scope.set(scope_id)
         try:
@@ -308,6 +377,7 @@ class Worker:
             before = self.adapter._session_tasks.get(key)
             typing = self.adapter.start_turn_typing(message)
             await self.ensure_tools()
+            await self.ensure_user_policy()
             await self.adapter.handle_message(message)
             task = self.adapter._session_tasks.get(key)
             token = None

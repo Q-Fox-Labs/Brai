@@ -115,7 +115,7 @@ def install():
         raise PermissionError('Доступ не подтверждён')
     _role = state['role']
     _guest = _role == 'guest'
-    _suspended = _guest or state.get('staged') is True or state.get('backgroundsSuspended') is True
+    _suspended = _guest or state.get('backgroundsSuspended') is True
     if _guest or state.get('staged') is True:
         product = Path(__file__).resolve().parents[1]
         restrict_exclusive_plugins(product)
@@ -154,17 +154,84 @@ def install():
         return result
     ToolRegistry.get_definitions, ToolRegistry.dispatch = guarded_definitions, guarded_dispatch
     _installed = True
-    if _suspended:
+    if _suspended or state.get('staged') is True:
         from gateway.run import GatewayRunner
-        async def without_recovery(self):
-            self._start_register_plugins_relay_hooks()
-        async def without_restore(self, connected_count):
+        recovery = GatewayRunner._start_recover_previous_run
+        finish = GatewayRunner._start_finish_wiring
+        watchers = GatewayRunner._start_spawn_background_watchers
+        def defer(runner, callback, *args):
+            pending = getattr(runner, '_brai_deferred_startup', None)
+            if pending is None:
+                pending = runner._brai_deferred_startup = []
+            pending.append((callback, args))
+        async def prepared_recovery(self):
+            if not _suspended and active_configuration():
+                return await recovery(self)
+            # Только trusted discovery нужен admission health/human bridge.
+            from hermes_cli.plugins import get_plugin_manager
+            get_plugin_manager().discover_and_load()
+            if not _suspended:
+                defer(self, recovery)
+        async def prepared_finish(self, connected_count):
+            if not _suspended and active_configuration():
+                return await finish(self, connected_count)
             self._startup_restore_in_progress = False
-        def without_watchers(self):
-            self._spawn_reconnect_watcher()
-        GatewayRunner._start_recover_previous_run = without_recovery
-        GatewayRunner._start_finish_wiring = without_restore
-        GatewayRunner._start_spawn_background_watchers = without_watchers
+            if not _suspended:
+                defer(self, finish, connected_count)
+        def prepared_watchers(self):
+            if not _suspended and active_configuration():
+                return watchers(self)
+            if _suspended:
+                self._spawn_reconnect_watcher()
+            else:
+                defer(self, watchers)
+        GatewayRunner._start_recover_previous_run = prepared_recovery
+        GatewayRunner._start_finish_wiring = prepared_finish
+        GatewayRunner._start_spawn_background_watchers = prepared_watchers
+
+
+def prepared_principal():
+    """Ожидаемая личность, чьи trusted assets прошли bootstrap этого процесса."""
+    return {'role': _role, 'generation': (_startup_state or {}).get('generation')}
+
+
+def has_deferred_startup(runner):
+    """Health готовит каталог; исполнение старых работ отдельно ждёт Auth active."""
+    return bool(getattr(runner, '_brai_deferred_startup', ()))
+
+
+async def activate_deferred_startup(runner, adapter, check):
+    """Однократно вернуть ordinary user startup после fresh active generation."""
+    from hermes_cli.plugins import get_plugin_manager
+    import inspect
+    import sys
+    await check()
+    pending = getattr(runner, '_brai_deferred_startup', [])
+    if not pending:
+        return
+    runner._brai_deferred_startup = []
+    manager = get_plugin_manager()
+    # Sync import не оставляет неотменяемый discovery thread после stop_runtime.
+    manager.discover_and_load(force=True)
+    await check()
+    runner._subscribe_plugin_rewire(manager)
+    runner._rewire_plugin_handlers()
+    human = sys.modules.get('_brai_identity_human')
+    attach = getattr(human, 'attach', None)
+    if not callable(attach):
+        raise PermissionError('Worker human plugin unavailable')
+    await attach(adapter)
+    await check()
+    runner._startup_restore_in_progress = True
+    try:
+        for callback, args in pending:
+            await check()
+            result = callback(runner, *args)
+            if inspect.isawaitable(result):
+                await result
+            await check()
+    finally:
+        runner._startup_restore_in_progress = False
 
 
 def revalidate_startup():
@@ -183,7 +250,7 @@ def catalog_permitted(name):
 
 def active_configuration():
     """Личный конфиг user/admin читается только после подтверждённого применения."""
-    if _guest:
+    if _guest or _suspended:
         return False
     try:
         return principal().get('role') == _role
@@ -201,4 +268,4 @@ def scheduler_permitted():
 
 def staging_mode():
     """Не читать прежний dotenv во время подтверждаемой подготовки."""
-    return _guest or bool((_startup_state or {}).get('staged'))
+    return _guest or not active_configuration()

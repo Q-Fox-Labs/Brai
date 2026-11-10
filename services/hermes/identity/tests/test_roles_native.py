@@ -132,5 +132,81 @@ class ExclusiveLoaderTests(unittest.TestCase):
                 self.assertEqual(len(getattr(module, iterator)()), 2)
 
 
+class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
+    """Ordinary startup возвращается после Auth; sticky old jobs остаются закрытыми."""
+
+    async def exercise(self, sticky):
+        from unittest.mock import patch
+        active, effects = {'value': False}, []
+        class Runner:
+            async def _start_recover_previous_run(self): effects.append('recover')
+            async def _start_finish_wiring(self, count): effects.append(('finish', count))
+            def _start_spawn_background_watchers(self): effects.append('watchers')
+            def _spawn_reconnect_watcher(self): effects.append('reconnect')
+            def _subscribe_plugin_rewire(self, manager): effects.append('subscribe')
+            def _rewire_plugin_handlers(self): effects.append('rewire')
+        class Registry:
+            def get_definitions(self, names, quiet=False): return names
+            def dispatch(self, name, args, **kwargs): return '{}'
+        class Manager:
+            def _collect_directory_manifests(self): return ['HOME']
+            def _scan_entry_points(self): return []
+            def discover_and_load(self, force=False): effects.append('reload' if force else 'trusted')
+        manager = Manager()
+        package = types.ModuleType('identity'); package.__path__ = []
+        client = types.ModuleType('identity.tool_client')
+        def broker(method, args):
+            if method == 'permissions.bootstrap':
+                return {'role': 'user', 'generation': 4, 'staged': True, 'backgroundsSuspended': sticky}
+            if method == 'permissions.get' and active['value']:
+                return {'role': 'user', 'generation': 4}
+            raise PermissionError('not active')
+        client.broker_call = broker
+        hermes = types.ModuleType('hermes_cli'); hermes.__path__ = []
+        config = types.ModuleType('hermes_cli.config')
+        config.load_config = config.load_config_readonly = lambda *a, **k: {'source': 'HOME'}
+        plugins = types.ModuleType('hermes_cli.plugins'); plugins.PluginManager = Manager
+        plugins.get_plugin_manager = lambda: manager
+        plugins.get_bundled_plugins_dir = lambda: Path('/trusted/native/plugins')
+        discovery = types.ModuleType('hermes_cli.plugins_discovery'); discovery.scan_directory = lambda *a, **k: []
+        gateway = types.ModuleType('gateway'); gateway.__path__ = []
+        run = types.ModuleType('gateway.run'); run.GatewayRunner = Runner
+        tools = types.ModuleType('tools'); tools.__path__ = []
+        registry = types.ModuleType('tools.registry'); registry.ToolRegistry = Registry
+        async def attach(adapter): effects.append('attach')
+        modules = {'identity': package, 'identity.tool_client': client, 'hermes_cli': hermes,
+                   'hermes_cli.config': config, 'hermes_cli.plugins': plugins,
+                   'hermes_cli.plugins_discovery': discovery, 'gateway': gateway, 'gateway.run': run,
+                   'tools': tools, 'tools.registry': registry,
+                   '_brai_identity_human': types.SimpleNamespace(attach=attach)}
+        with patch.dict(sys.modules, modules):
+            spec = importlib.util.spec_from_file_location('identity.native_policy', ROOT / 'services/hermes/identity/native_policy.py')
+            policy = importlib.util.module_from_spec(spec); spec.loader.exec_module(policy)
+            policy.protected_config = lambda path: {'source': 'trusted'}
+            policy.restrict_exclusive_plugins = lambda product: None
+            policy.install()
+            runner = Runner()
+            await runner._start_recover_previous_run()
+            await runner._start_finish_wiring(1)
+            runner._start_spawn_background_watchers()
+            self.assertEqual(effects, ['trusted', 'reconnect'] if sticky else ['trusted'])
+            self.assertEqual(policy.backgrounds_suspended(), sticky)
+            active['value'] = True
+            async def check(): self.assertEqual(policy.principal(), {'role': 'user', 'generation': 4})
+            await policy.activate_deferred_startup(runner, object(), check)
+            expected = ['trusted', 'reconnect'] if sticky else [
+                'trusted', 'reload', 'subscribe', 'rewire', 'attach', 'recover', ('finish', 1), 'watchers']
+            self.assertEqual(effects, expected)
+            await policy.activate_deferred_startup(runner, object(), check)
+            self.assertEqual(effects, expected, 'activation must be idempotent')
+            self.assertEqual(config.load_config()['source'], 'trusted' if sticky else 'HOME')
+
+    async def test_ordinary_user_startup_is_deferred_then_restored_once(self):
+        await self.exercise(False)
+
+    async def test_promoted_guest_does_not_restore_old_backgrounds(self):
+        await self.exercise(True)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
