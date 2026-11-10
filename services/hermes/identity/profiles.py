@@ -171,6 +171,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
     if role == 'guest':
         config['agent']['system_prompt'] = config['agent']['system_prompt'].replace(
             'По просьбе войти на наш сайт Brai вызови mcp__brai__brai_login: сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.', '')
+        config['tools'] = {'tool_search': {'enabled': 'off'}}
         config['skills'] = {'external_dirs': [], 'disabled': True}
         config['cron'] = {'enabled': False}
         config['hooks'] = {}
