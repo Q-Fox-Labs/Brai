@@ -39,7 +39,8 @@
       "services/diary/tests/proxy.test.mjs",
       "services/diary/tests/audio.test.mjs",
       "services/diary/tests/parts.test.mjs",
-      "services/diary/tests/retry-http.test.mjs"
+      "services/diary/tests/retry-http.test.mjs",
+      "services/diary/tests/transcription-contract.test.mjs"
     ]
   },
   "dependencies": [
@@ -62,7 +63,9 @@
     {
       "id": "transcription",
       "inputs": [
-        "services/transcription/CONTRACT.md"
+        "services/transcription/CONTRACT.md",
+        "services/transcription/contracts/**",
+        "services/transcription/schemas/**"
       ],
       "delivery": []
     }
