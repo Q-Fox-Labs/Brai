@@ -576,6 +576,24 @@ def record_delivery(event, response, success, message_id=None):
     if row and row["owner"]==owner and row["status"]=="pending" and row["question"] in response:
         store.delivered(row["id"],message_id)
 
+def record_stream_delivery(runner, turn, response, message_id):
+    """Arm the same question after native confirms final streaming delivery, before suppressing send."""
+    if (not enabled() or not isinstance(response,str) or not response or not message_id
+            or message_id=="__no_edit__"):
+        return
+    source=turn.source
+    if getattr(source,"is_bot",False) or not source.user_id or not turn.session_key:
+        return
+    db=runner.session_store._db_for_key(turn.session_key)
+    if not db:
+        return
+    store=Store(db)
+    row=store.query(conversation_key(source))
+    if (row and row["owner"]==str(source.user_id) and row["session_id"]==str(turn.session_id or "")
+            and row["input_id"]==str(turn.inbound_message_id or "")
+            and row["status"]=="pending" and row["question"] in response):
+        store.delivered(row["id"],message_id)
+
 def resume_note(scope):
     """Give the agent the exact authorized invocation, never a model-created approval token."""
     row=Store(scope.db).query(scope.key)
