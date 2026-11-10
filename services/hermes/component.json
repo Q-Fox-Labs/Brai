@@ -287,6 +287,7 @@
       "services/hermes/identity/lifecycle.py",
       "services/hermes/identity/bug-hunt.mjs",
       "services/bug-hunt/schemas/messages.schema.json",
+      "services/bug-hunt/schemas/v2.schema.json",
       "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
       "services/hermes/identity/telegram-chat-read.mjs"
@@ -718,6 +719,7 @@
       "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
       "services/hermes/identity/bug-hunt.mjs",
       "services/bug-hunt/schemas/messages.schema.json",
+      "services/bug-hunt/schemas/v2.schema.json",
       "docs/user-agent/instructions/hermes/BUG_HUNT.md",
       "services/hermes/identity/chat_journal.py",
       "services/hermes/identity/telegram-chat-read.mjs"

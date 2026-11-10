@@ -1,0 +1,413 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.one/schemas/bug-hunt/processing-v2",
+  "title": "bug-hunt operator processing v2",
+  "definitions": {
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "required": []
+    },
+    "pause": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "request_id",
+        "paused",
+        "reason"
+      ]
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "business_attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "request_id",
+        "job_id",
+        "business_attempt_id",
+        "reason"
+      ]
+    },
+    "statusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paused": {
+          "type": "boolean"
+        },
+        "jobs": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "waiting_dependency",
+                  "succeeded",
+                  "blocked_policy",
+                  "input_too_large",
+                  "outcome_unknown",
+                  "failed",
+                  "budget_exhausted"
+                ]
+              },
+              "branch": {
+                "enum": [
+                  "local",
+                  "embedding",
+                  "classification"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "state",
+              "branch",
+              "count"
+            ]
+          }
+        },
+        "budgets": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "branch": {
+                "enum": [
+                  "embedding",
+                  "classification"
+                ]
+              },
+              "scope": {
+                "enum": [
+                  "owner",
+                  "global"
+                ]
+              },
+              "reserved_calls": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "branch",
+              "scope",
+              "reserved_calls"
+            ]
+          }
+        },
+        "derivative_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dailyLimits": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "embedding": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "global": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "owner",
+                    "global"
+                  ]
+                },
+                "classification": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "owner": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "global": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "owner",
+                    "global"
+                  ]
+                }
+              },
+              "required": [
+                "embedding",
+                "classification"
+              ]
+            },
+            "maxDatabaseBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "intakeReserveBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxDerivativeBytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "dailyLimits",
+            "maxDatabaseBytes",
+            "intakeReserveBytes",
+            "maxDerivativeBytes"
+          ]
+        },
+        "generations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "active": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "build": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "activation_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "active_coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "total_reports": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "indexed_reports": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "state": {
+                  "enum": [
+                    "complete",
+                    "partial",
+                    "pending"
+                  ]
+                }
+              },
+              "required": [
+                "total_reports",
+                "indexed_reports",
+                "state"
+              ]
+            },
+            "build_coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "total_reports": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "indexed_reports": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "state": {
+                  "enum": [
+                    "complete",
+                    "partial",
+                    "pending"
+                  ]
+                }
+              },
+              "required": [
+                "total_reports",
+                "indexed_reports",
+                "state"
+              ]
+            }
+          },
+          "required": [
+            "active",
+            "build",
+            "activation_revision",
+            "active_coverage",
+            "build_coverage"
+          ]
+        }
+      },
+      "required": [
+        "paused",
+        "jobs",
+        "budgets",
+        "limits",
+        "generations"
+      ]
+    },
+    "pauseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paused": {
+          "type": "boolean"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paused",
+        "replayed"
+      ]
+    },
+    "retryResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "business_attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "state": {
+          "const": "pending"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_id",
+        "business_attempt_id",
+        "state",
+        "replayed"
+      ]
+    },
+    "activate-generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "generation": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "expected_active_generation": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "request_id",
+        "generation",
+        "expected_active_generation",
+        "reason"
+      ]
+    },
+    "activate-generationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "previous_generation": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "activation_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "total_reports": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "indexed_reports": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "generation",
+        "previous_generation",
+        "activation_revision",
+        "total_reports",
+        "indexed_reports",
+        "replayed"
+      ]
+    }
+  }
+}
