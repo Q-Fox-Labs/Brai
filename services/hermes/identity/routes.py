@@ -37,7 +37,7 @@ class RouteLedger:
                            str(profile.get('authorTelegramId', profile['telegramId']))], separators=(',', ':'))
 
     def admit(self, profile, route, metadata, message_id=None):
-        """Запомнить маршрут только после реального broker ingress.admit."""
+        """Запомнить маршрут после broker ingress.admit либо доверенного createForumTopic."""
         self.db.execute('INSERT OR REPLACE INTO routes VALUES (?,?,?,?)',
             (self.owner(profile), *route, json.dumps(metadata, sort_keys=True)))
         if message_id:
