@@ -42,24 +42,20 @@
              self._register_handlers(self._app)
              await self._initialize_app_with_retries(builder)
              await self._app.start()
-@@ -5586,32 +5586,25 @@
+@@ -5566,34 +5585,26 @@
+         slot_until[str(normalize_telegram_chat_id(chat_id))] = (
              asyncio.get_running_loop().time() + max(0.0, budget))
 
-     async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
+-    async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
 -        """Send typing indicator."""
-+        """Send typing only to the originating conversation; never drop its topic."""
-         if not self._bot or self._typing_in_cooldown(chat_id):
-             return
+-        if not self._bot or self._typing_in_cooldown(chat_id):
+-            return
 -        _is_dm_topic: bool = False
-         message_thread_id: Optional[int] = None
+-        message_thread_id: Optional[int] = None
 -
 -        async def _action(**kw) -> None:
 -            await self._bot.send_chat_action(chat_id=normalize_telegram_chat_id(chat_id), action="typing", **kw)
-+        try:
-+            message_thread_id = self._message_thread_id_for_typing(self._metadata_thread_id(metadata))
-+            await self._bot.send_chat_action(chat_id=normalize_telegram_chat_id(chat_id),
-+                                             action="typing", message_thread_id=message_thread_id)
-             self._telegram_typing_cooldown_until.pop(str(chat_id), None)
+-            self._telegram_typing_cooldown_until.pop(str(chat_id), None)
 -        try:
 -            _is_dm_topic = self._dm_topic_fallback(metadata)
 -            message_thread_id = self._message_thread_id_for_typing(self._metadata_thread_id(metadata))
@@ -77,6 +73,17 @@
 -            elif self._is_transient_typing_error(e):
 -                self._record_typing_cooldown(chat_id, e)
 -            logger.debug("[%s] Failed to send Telegram typing indicator: %s", self.name, _redact_telegram_error_text(e), exc_info=True)
+-
++    async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
++        """Send typing only to the originating conversation; never drop its topic."""
++        if not self._bot or self._typing_in_cooldown(chat_id):
++            return
++        message_thread_id: Optional[int] = None
++        try:
++            message_thread_id = self._message_thread_id_for_typing(self._metadata_thread_id(metadata))
++            await self._bot.send_chat_action(chat_id=normalize_telegram_chat_id(chat_id),
++                                             action="typing", message_thread_id=message_thread_id)
++            self._telegram_typing_cooldown_until.pop(str(chat_id), None)
 +        except Exception as error:
 +            if self._is_transient_typing_error(error):
 +                self._record_typing_cooldown(chat_id, error)
@@ -87,9 +94,9 @@
 +            logger.warning("telegram_typing_failed error=%s thread_id=%s reason=%s",
 +                           type(error).__name__, message_thread_id, reason)
 +
-
      async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
          """Get information about a Telegram chat."""
+         if not self._bot:
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -5623,6 +5623,17 @@
