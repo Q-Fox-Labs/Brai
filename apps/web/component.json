@@ -275,7 +275,15 @@
       "apps/web/app/agent/admin-chat-client.ts",
       "apps/web/app/api/admin/route.ts",
       "apps/web/server/admin-download.ts",
-      "apps/web/app/diary/upload.ts"
+      "apps/web/app/diary/upload.ts",
+      "apps/web/server/bug-hunt.ts",
+      "apps/web/app/api/bug-hunt/route.ts",
+      "apps/web/app/bug-hunt/page.tsx",
+      "apps/web/app/bug-hunt/screen.tsx",
+      "apps/web/app/bug-hunt/styles.css",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "apps/web/server/bug-hunt-evidence.ts",
+      "apps/web/app/api/bug-hunt/evidence/route.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -406,6 +414,15 @@
         "services/diary/contracts/**"
       ],
       "delivery": []
+    },
+    {
+      "id": "bug-hunt",
+      "inputs": [
+        "services/bug-hunt/schemas/**"
+      ],
+      "delivery": [
+        "services/bug-hunt/schemas"
+      ]
     }
   ],
   "commands": {

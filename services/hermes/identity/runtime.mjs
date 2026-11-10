@@ -8,6 +8,7 @@ import { validateConfig } from '../config.mjs';
 import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { createBraiTools, connectPorts } from '../runtime.mjs';
 import { createHistoryCatalog } from './history.mjs';
+import { createBugHuntCatalog } from './bug-hunt.mjs';
 import { createOwnerTranscription } from './transcription.mjs';
 import { fileConfiguration } from '../files/configuration.mjs';
 import { readProtectedJSON, runStdio as runControl } from './control.mjs';
@@ -108,6 +109,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
   if(existing?.signature===signature)return existing.promise;
   if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
   const promise=(async()=>{
+   let bugHunt;
    const runtime=await startLimited(async()=>{
    if(start)return start(tools);
    let runtime;
@@ -115,6 +117,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
     const ports=await openPorts(tools);
     try{
     const history=createHistoryCatalog(ports.request.bind(ports));
+    if(shared?.bugHunt?.enabled===true)bugHunt=createBugHuntCatalog(ports.request.bind(ports),{userId:entry.userId,profileId:entry.profileId});
     const endpoint=shared?.transcription;
     const transcription=endpoint&&endpoint.enabled!==false
      ? transcriptionFactory({userId:entry.userId,profileId:entry.profileId},endpoint,
@@ -138,9 +141,10 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    return runtime;
    });
    return {
-    async listTools(){return (await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name));},
+    async listTools(){return [...(await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name)),...(bugHunt?.list()??[])];},
     async callTool(name,args,signal){
      if(['publish_file','fetch_file'].includes(name))invalid();
+     if(name.startsWith('bug_hunt_')){if(!bugHunt)invalid();return bugHunt.call(name,args,signal);}
      // Личный broker принимает тот же короткий голосовой ввод, что и MCP.
      return name==='local_ai_invoke_synthesize'
       ? runtime.synthesizeVoice(args,signal) : runtime.call(name,args,signal);

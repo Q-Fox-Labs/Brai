@@ -281,7 +281,10 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
-      "services/hermes/identity/lifecycle.py"
+      "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/bug-hunt.mjs",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "docs/user-agent/instructions/BUG_HUNT.md"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -347,7 +350,8 @@
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
       "services/hermes/tests/dialogues-summary.test.mjs",
-      "services/hermes/identity/tests/test_worker_artifact_read.py"
+      "services/hermes/identity/tests/test_worker_artifact_read.py",
+      "services/hermes/tests/identity-bug-hunt.test.mjs"
     ]
   },
   "dependencies": [
@@ -433,6 +437,15 @@
       ],
       "delivery": [
         "services/auth/contracts"
+      ]
+    },
+    {
+      "id": "bug-hunt",
+      "inputs": [
+        "services/bug-hunt/schemas/**"
+      ],
+      "delivery": [
+        "services/bug-hunt/schemas"
       ]
     }
   ],
@@ -687,7 +700,10 @@
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
       "services/hermes/extensions/scripts/context_gif.py",
-      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
+      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
+      "services/hermes/identity/bug-hunt.mjs",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "docs/user-agent/instructions/BUG_HUNT.md"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

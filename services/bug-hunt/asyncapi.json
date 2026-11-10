@@ -1,0 +1,323 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {
+    "title": "Brai bug-hunt",
+    "version": "1.0.0",
+    "description": "NATS Services brai_bug_hunt; queue brai_bug_hunt. Durable acceptance belongs to PostgreSQL. See CONTRACT.md for access, deadlines and idempotency."
+  },
+  "defaultContentType": "application/json",
+  "channels": {
+    "reply": {
+      "address": null,
+      "description": "Reply subject is supplied by the NATS request API.",
+      "messages": {
+        "error": {
+          "name": "error",
+          "headers": {
+            "type": "object",
+            "required": [
+              "Nats-Service-Error",
+              "Nats-Service-Error-Code"
+            ],
+            "properties": {
+              "Nats-Service-Error": {
+                "type": "string"
+              },
+              "Nats-Service-Error-Code": {
+                "type": "string",
+                "pattern": "^[45][0-9]{2}$"
+              }
+            }
+          },
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/error"
+          }
+        },
+        "report": {
+          "name": "report_response",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/report_response"
+          }
+        },
+        "get": {
+          "name": "get_response",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/get_response"
+          }
+        },
+        "list": {
+          "name": "list_response",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/list_response"
+          }
+        },
+        "operator_list": {
+          "name": "operator_list_response",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/list_response"
+          }
+        },
+        "review": {
+          "name": "review_response",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/review_response"
+          }
+        },
+        "status": {
+          "name": "status_response",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/status_response"
+          }
+        }
+      }
+    },
+    "report": {
+      "address": "brai.bug_hunt.v1.report",
+      "description": "Trusted ingress only. Owner is resolved, not taken from model arguments.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "report_request",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/ingress_report"
+          }
+        }
+      }
+    },
+    "get": {
+      "address": "brai.bug_hunt.v1.get",
+      "description": "Trusted ingress only. Owner is resolved, not taken from model arguments.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "get_request",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/ingress_get"
+          }
+        }
+      }
+    },
+    "list": {
+      "address": "brai.bug_hunt.v1.list",
+      "description": "Trusted ingress only. Owner is resolved, not taken from model arguments.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "list_request",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/ingress_list"
+          }
+        }
+      }
+    },
+    "operator_list": {
+      "address": "brai.bug_hunt.v1.operator-list",
+      "description": "Current Auth reviewer required.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "operator_list_request",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/ingress_list"
+          }
+        }
+      }
+    },
+    "review": {
+      "address": "brai.bug_hunt.v1.review",
+      "description": "Current Auth reviewer required.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "review_request",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/ingress_review"
+          }
+        }
+      }
+    },
+    "status": {
+      "address": "brai.bug_hunt.v1.status",
+      "description": "Operator ACL only, no caller-controlled identity.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "status_request",
+          "payload": {
+            "$ref": "schemas/messages.schema.json#/definitions/status"
+          }
+        }
+      }
+    }
+  },
+  "operations": {
+    "report": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/report"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/report/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/report"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ]
+      }
+    },
+    "get": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/get/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/get"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ]
+      }
+    },
+    "list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/list/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/list"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ]
+      }
+    },
+    "operator_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/operator_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/operator_list/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/operator_list"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ]
+      }
+    },
+    "review": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/review"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/review/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/review"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ]
+      }
+    },
+    "status": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/status"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/status/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/status"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ]
+      }
+    }
+  }
+}
