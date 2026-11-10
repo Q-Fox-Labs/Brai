@@ -49,6 +49,9 @@ class CheckpointIntegrationTests(unittest.TestCase):
         self.profile = {'userId':'u', 'profileId':'p', 'authorId':'111', 'homeScope':stable_id(str(self.home)),
                         'memoryEpoch':'epoch', 'status':'active', 'cubes':self.catalog.cubes}
         self.rows, self.add_count = {}, 0
+        self.lose_response = False
+        self.omit_final_part = False
+        self.expected_parts = 0
         test = self
 
         class Backend:
@@ -65,11 +68,17 @@ class CheckpointIntegrationTests(unittest.TestCase):
                         'memory':'\n'.join(row['content'] for row in body['messages']),
                         'metadata':{'user_id':body['user_id'], 'session_id':body['session_id'],
                                     'info':copy.deepcopy(body['info'])}}
+                    if test.lose_response:
+                        test.lose_response = False
+                        raise test.modules['client'].MemOSError('Synthetic response lost after commit')
                     return {'code':200, 'data':[{'cube_id':self.cube, 'memory_id':identifier}]}
                 raise AssertionError(path)
 
             def _memory_read(self, body, timeout=None):
                 rows = [copy.deepcopy(row) for row in test.rows.values() if row['_cube_id'] == self.cube]
+                if (test.omit_final_part and len(rows) == test.expected_parts
+                        and 'info.hermes_chunk_index' not in body.get('filter', {})):
+                    rows = rows[:-1]
                 return {'code':200, 'data':{'text_mem':[{'cube_id':self.cube, 'memories':rows}]}}
 
         self.boundary = Boundary('', '', authorize=lambda *args:True, cursor_key=b'x',
@@ -126,6 +135,63 @@ class CheckpointIntegrationTests(unittest.TestCase):
         self.provider.outbox.process_once()
         self.assertIsNotNone(self.provider.outbox.receipt('legacy'))
         self.assertEqual(self.add_count, 2)
+
+    def track_chunk_delivery(self):
+        """Измерить durable journal и ширину read-back, не ограничивая сохранённые данные."""
+        sizes, reads = [], []
+        original_write = self.modules['outbox'].atomic_json_write
+        def journal(path, value, **kwargs):
+            if Path(path).parent.name == 'pending':
+                sizes.append(len(json.dumps(value).encode()))
+            return original_write(path, value, **kwargs)
+        self.modules['outbox'].atomic_json_write = journal
+        original_request = self.provider.client.request
+        def request(path, body=None, **kwargs):
+            if path == '/product/get_memory':
+                reads.append(dict(body['filter']))
+            return original_request(path, body, **kwargs)
+        self.provider.client.request = request
+        return sizes, reads
+
+    def test_large_checkpoint_journal_stays_bounded_and_part_reads_are_scoped(self):
+        sizes, reads = self.track_chunk_delivery()
+        rows = [{'role':'user', 'content':'Direct synthetic checkpoint evidence. ' * 190}]
+        self.provider.on_pre_compress(rows, require_checkpoint=True)
+        self.assertGreater(self.add_count, 8)
+        self.assertLessEqual(max(sizes), sizes[0] * 6, 'Part progress must not multiply full source bodies')
+        event_reads = [value for value in reads if 'info.hermes_event_id' in value
+                       and 'info.hermes_chunk_index' not in value]
+        self.assertLessEqual(len(event_reads), 2, 'Read the complete event at recovery and final verification')
+        self.assertEqual(self.provider.outbox.status()['verified_events'], 1)
+
+    def test_compact_part_progress_recovers_lost_response_and_legacy_body_without_duplicates(self):
+        rows = [{'role':'user', 'content':'Recover synthetic checkpoint evidence. ' * 190}]
+        expected = len(self.modules['client'].dialogue_parts(rows))
+        self.lose_response = True
+        with self.assertRaisesRegex(Exception, 'pending'):
+            self.provider.on_pre_compress(rows, require_checkpoint=True)
+        self.assertEqual(self.add_count, 1)
+        path = next(self.provider.outbox.pending.glob('*.json'))
+        job = json.loads(path.read_bytes())
+        # Legacy journal copies are disposable; the original body and committed IDs remain authority.
+        job['archive']['memory_parts'][0]['body'] = copy.deepcopy(job['archive']['body'])
+        job['next_attempt'] = 0
+        path.write_text(json.dumps(job))
+        self.provider.outbox.process_once()
+        self.assertEqual(self.provider.outbox.status()['pending'], 0)
+        self.assertEqual(self.provider.outbox.status()['verified_events'], 1)
+        self.assertEqual(self.add_count, expected)
+        self.provider.outbox.process_once()
+        self.assertEqual(self.add_count, expected)
+
+    def test_final_complete_event_read_still_rejects_a_missing_part(self):
+        rows = [{'role':'user', 'content':'Complete synthetic checkpoint evidence. ' * 190}]
+        self.expected_parts = len(self.modules['client'].dialogue_parts(rows))
+        self.omit_final_part = True
+        with self.assertRaisesRegex(Exception, 'pending'):
+            self.provider.on_pre_compress(rows, require_checkpoint=True)
+        self.assertEqual(self.provider.outbox.status()['verified_events'], 0)
+        self.assertEqual(self.provider.outbox.status()['pending'], 1)
 
     def test_six_pending_repair_has_exact_backup_readback_and_no_duplicates(self):
         originals, hashes = {}, {}

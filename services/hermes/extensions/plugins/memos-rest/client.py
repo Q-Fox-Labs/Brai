@@ -476,8 +476,13 @@ class Client:
         return ids
 
     def verify(self, job, ids):
+        """Проверить все ожидаемые IDs; часть читает свой индекс, событие — весь архив."""
         info = job["body"]["info"]
-        rows = self.get({"hermes_event_id": info["hermes_event_id"]})
+        filter_ = {"hermes_event_id": info["hermes_event_id"]}
+        if "hermes_chunk_index" in info:
+            filter_["hermes_chunk_index"] = info["hermes_chunk_index"]
+        # AIDEV-NOTE: Итоговый job не имеет chunk_index и всегда проверяет все части.
+        rows = self.get(filter_)
         expected = set(ids)
         verified = set()
         mismatches = set()
@@ -562,12 +567,24 @@ class Client:
                 if "memory_parts" in job:
                     if len(job["memory_parts"]) != len(parts):
                         raise MemOSError("Memory part plan does not match the dialogue")
+                    compacted = False
+                    for state in job["memory_parts"]:
+                        if "body" in state:
+                            state.pop("body")
+                            compacted = True
+                    if compacted:
+                        checkpoint(job)
                     ids = []
                     for index, part in enumerate(parts):
                         info = {**body["info"], "hermes_chunk_index": index, "hermes_chunk_count": len(parts)}
-                        unit = job["memory_parts"][index]
-                        unit["body"] = {**body, "messages": [part], "info": info}
-                        ids.extend(self._execute_one(unit, lambda _: checkpoint(job)))
+                        state = job["memory_parts"][index]
+                        # AIDEV-NOTE: Полный источник хранится один раз; journal части
+                        # закрепляет только IDs. Это сохраняет recovery без квадратичной копии body.
+                        unit = {**state, "body": {**body, "messages": [part], "info": info}}
+                        def checkpoint_part(value):
+                            state["memory_ids"] = list(value["memory_ids"])
+                            checkpoint(job)
+                        ids.extend(self._execute_one(unit, checkpoint_part))
                     job["memory_ids"] = ids
                     checkpoint(job)
                     verified = self.verify(job, ids)
