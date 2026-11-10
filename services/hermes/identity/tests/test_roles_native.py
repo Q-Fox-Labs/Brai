@@ -85,15 +85,18 @@ class InlineExecutorTests(unittest.TestCase):
         common = types.ModuleType('agent.tool_executor')
         direct = types.ModuleType('agent.agent_runtime_helpers')
         def execute(agent, state, ref, **kwargs):
-            effects.append('common'); kwargs['begin_execution'](); return 'RESULT'
+            kwargs['begin_execution'](); return kwargs['execute']()
         common._dispatch_authorized_once = execute
         direct.invoke_tool = lambda *a, **k: effects.append('direct') or 'RESULT'
-        agent.tool_executor, agent.agent_runtime_helpers = common, direct
+        inline = types.ModuleType('agent.inline_tool_executors')
+        inline.resolve_invoke_tool_executor = lambda agent, name: None
+        agent.tool_executor, agent.agent_runtime_helpers, agent.inline_tool_executors = common, direct, inline
         with patch.dict(sys.modules, {'identity': package, 'identity.tool_client': client, 'agent': agent,
-                                     'agent.tool_executor': common, 'agent.agent_runtime_helpers': direct}):
+                                     'agent.tool_executor': common, 'agent.agent_runtime_helpers': direct, 'agent.inline_tool_executors': inline}):
             spec = importlib.util.spec_from_file_location('identity.native_policy', ROOT / 'services/hermes/identity/native_policy.py')
             policy = importlib.util.module_from_spec(spec); spec.loader.exec_module(policy)
             policy.install_executor_guard()
+        self.loaded_policy = policy
         return common, direct, effects
 
     def test_denied_inline_and_direct_do_not_enter_executor(self):
@@ -106,13 +109,40 @@ class InlineExecutorTests(unittest.TestCase):
         self.assertIn('error', json.loads(direct.invoke_tool(None, 'manage_connections', '{}')))
         self.assertEqual(effects, [])
 
-    def test_authorized_inline_executes_once_and_checks_generation_afterwards(self):
-        common, _, effects = self.policy([{'allowed': True, 'role': 'user', 'generation': 1}],
+    def test_nested_call_cannot_replace_inherited_generation(self):
+        common, direct, effects = self.policy(
+            [{'allowed': True, 'role': 'user', 'generation': 2}] * 2,
+            [{'role': 'user', 'generation': 2}] * 2)
+        token = self.loaded_policy._execution_state.set({'role': 'user', 'generation': 1})
+        state, begun = types.SimpleNamespace(blocked=False), []
+        try:
+            result = common._dispatch_authorized_once(None, state, types.SimpleNamespace(name='delegate_task'),
+                execute=lambda: effects.append('forbidden'), scope_block=None, display_index=0,
+                begin_execution=lambda: begun.append(True), authorization_gate=None)
+            self.assertIn('error', json.loads(result)); self.assertTrue(state.blocked)
+            self.assertIn('error', json.loads(direct.invoke_tool(None, 'delegate_task', '{}')))
+            self.assertEqual(effects, []); self.assertEqual(begun, [True])
+        finally:
+            self.loaded_policy._execution_state.reset(token)
+
+    def test_revocation_during_native_preparation_blocks_late_execute(self):
+        common, _, effects = self.policy(
+            [{'allowed': True, 'role': 'user', 'generation': 1}, {'allowed': False}],
             [{'role': 'user', 'generation': 1}, {'role': 'guest', 'generation': 2}])
         state, begun = types.SimpleNamespace(blocked=False), []
         result = common._dispatch_authorized_once(None, state, types.SimpleNamespace(name='delegate_task'),
-            execute=None, scope_block=None, display_index=0, begin_execution=lambda: begun.append(True), authorization_gate=None)
-        self.assertIn('error', json.loads(result)); self.assertFalse(state.blocked)
+            execute=lambda: effects.append('forbidden'), scope_block=None, display_index=0,
+            begin_execution=lambda: begun.append(True), authorization_gate=None)
+        self.assertIn('error', json.loads(result)); self.assertTrue(state.blocked)
+        self.assertEqual(begun, [True]); self.assertEqual(effects, [])
+
+    def test_authorized_inline_executes_once_and_checks_generation_afterwards(self):
+        common, _, effects = self.policy([{'allowed': True, 'role': 'user', 'generation': 1}] * 2,
+            [{'role': 'user', 'generation': 1}] * 2 + [{'role': 'guest', 'generation': 2}])
+        state, begun = types.SimpleNamespace(blocked=False), []
+        result = common._dispatch_authorized_once(None, state, types.SimpleNamespace(name='delegate_task'),
+            execute=lambda: effects.append('common') or 'RESULT', scope_block=None, display_index=0, begin_execution=lambda: begun.append(True), authorization_gate=None)
+        self.assertIn('error', json.loads(result)); self.assertTrue(state.blocked)
         self.assertEqual(begun, [True]); self.assertEqual(effects, ['common'])
 
 

@@ -2,6 +2,7 @@
 # ABOUTME: Гостевой config и плагины берутся только из неизменяемой поставки.
 """Политика устанавливается до импорта GatewayRunner и plugin discovery."""
 from copy import deepcopy
+from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ _guest = False
 _role = None
 _suspended = False
 _startup_state = None
+_execution_state = ContextVar('brai_native_invocation', default=None)
 
 
 def guest_mode():
@@ -108,7 +110,9 @@ def execution_grant(name):
             return None
         grant = broker_call('native.authorize', {'name': name})
         before = principal()
-        if grant.get('allowed') is True and all(grant.get(key) == before.get(key) for key in ('role', 'generation')):
+        expected = _execution_state.get()
+        if ((expected is None or expected == before) and grant.get('allowed') is True
+                and all(grant.get(key) == before.get(key) for key in ('role', 'generation'))):
             return before
     except Exception:
         pass
@@ -125,7 +129,11 @@ def grant_current(before):
 
 def install_executor_guard():
     """Закрыть общий executor и direct API, включая inline/delegation до Registry."""
-    from agent import tool_executor, agent_runtime_helpers
+    from agent import tool_executor, agent_runtime_helpers, inline_tool_executors
+    invocation = _execution_state
+    resolve_inline = inline_tool_executors.resolve_invoke_tool_executor
+    class RevokedInvocation(Exception):
+        pass
     common = tool_executor._dispatch_authorized_once
     invoke = agent_runtime_helpers.invoke_tool
     denied = json.dumps({'error': 'Это действие недоступно для вашей роли.'}, ensure_ascii=False)
@@ -139,16 +147,59 @@ def install_executor_guard():
                 begin_execution()
             # Native blocked helper вызывает plugin post hook; здесь код hooks не разрешён.
             return denied
-        result = common(agent, state, ref, execute=execute, scope_block=scope_block,
-                        display_index=display_index, begin_execution=begin_execution,
-                        authorization_gate=authorization_gate)
-        return result if grant_current(before) else changed
+        def guarded_execute(*args, **kwargs):
+            # Hooks, approval и middleware могли ожидать после первоначального grant.
+            if execution_grant(ref.name) != before:
+                state.blocked = True
+                raise RevokedInvocation()
+            result = execute(*args, **kwargs)
+            if not grant_current(before):
+                state.blocked = True
+                raise RevokedInvocation()
+            return result
+        token = invocation.set(before)
+        try:
+            result = common(agent, state, ref, execute=guarded_execute, scope_block=scope_block,
+                            display_index=display_index, begin_execution=begin_execution,
+                            authorization_gate=authorization_gate)
+        except RevokedInvocation:
+            state.blocked = True
+            return changed
+        finally:
+            invocation.reset(token)
+        if not grant_current(before):
+            state.blocked = True
+            return changed
+        return result
     def guarded_invoke(agent, function_name, function_args, *args, **kwargs):
         before = execution_grant(function_name)
         if before is None:
             return denied
-        result = invoke(agent, function_name, function_args, *args, **kwargs)
-        return result if grant_current(before) else changed
+        token = invocation.set(before)
+        try:
+            result = invoke(agent, function_name, function_args, *args, **kwargs)
+            return result if grant_current(before) else changed
+        except RevokedInvocation:
+            return changed
+        finally:
+            invocation.reset(token)
+    def guarded_resolve(agent, name):
+        before = invocation.get()
+        if before is None or execution_grant(name) != before:
+            raise RevokedInvocation()
+        execute = resolve_inline(agent, name)
+        if execute is None:
+            return None
+        def guarded_inline(*args, **kwargs):
+            if before is None or execution_grant(name) != before:
+                # Не возвращать строку в SDK: иначе он вызовет post hooks после отзыва.
+                raise RevokedInvocation()
+            result = execute(*args, **kwargs)
+            if not grant_current(before):
+                raise RevokedInvocation()
+            return result
+        return guarded_inline
+    inline_tool_executors.resolve_invoke_tool_executor = guarded_resolve
     guarded_common.__wrapped__ = common
     guarded_invoke.__wrapped__ = invoke
     tool_executor._dispatch_authorized_once = guarded_common
@@ -216,7 +267,9 @@ def install():
     def guarded_dispatch(self, name, args, **kwargs):
         grant = broker_call('native.authorize', {'name': name})
         before = principal()
-        if grant.get('allowed') is not True or any(grant.get(key) != before.get(key) for key in ('role','generation')):
+        expected = _execution_state.get()
+        if ((expected is not None and expected != before) or grant.get('allowed') is not True
+                or any(grant.get(key) != before.get(key) for key in ('role','generation'))):
             return json.dumps({'error': 'Это действие недоступно для вашей роли.'}, ensure_ascii=False)
         result = dispatch(self, name, args, **kwargs)
         if principal() != before:
