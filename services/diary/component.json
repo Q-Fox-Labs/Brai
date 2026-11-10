@@ -29,13 +29,17 @@
       "services/diary/src/retry-transcription.mjs",
       "services/diary/src/recovery.mjs",
       "services/diary/src/store.mjs",
-      "services/diary/src/http.mjs"
+      "services/diary/src/http.mjs",
+      "services/diary/src/audio.mjs"
     ],
     "checks": [
       "services/diary/tests/recovery.test.mjs",
       "services/diary/tests/domain.test.mjs",
       "services/diary/tests/postgres.integration.test.mjs",
-      "services/diary/tests/proxy.test.mjs"
+      "services/diary/tests/proxy.test.mjs",
+      "services/diary/tests/audio.test.mjs",
+      "services/diary/tests/parts.test.mjs",
+      "services/diary/tests/retry-http.test.mjs"
     ]
   },
   "dependencies": [
@@ -86,7 +90,8 @@
       "services/diary/src/domain.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.22.1"
+      "Node.js 24.22.1",
+      "FFmpeg and ffprobe through configured commands; private writable spool; maximum audio duration 18000 seconds"
     ]
   },
   "deploy": {
