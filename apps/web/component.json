@@ -275,7 +275,8 @@
       "apps/web/app/agent/admin-chat-client.ts",
       "apps/web/app/api/admin/route.ts",
       "apps/web/server/admin-download.ts",
-      "apps/web/app/diary/upload.ts"
+      "apps/web/app/diary/upload.ts",
+      "apps/web/app/agent/telegram-rich.tsx"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -336,7 +337,8 @@
       "apps/web/tests/admin-download.test.ts",
       "apps/web/tests/admin-chats-render.test.ts",
       "apps/web/tests/diary-render.test.ts",
-      "apps/web/tests/diary-upload.test.ts"
+      "apps/web/tests/diary-upload.test.ts",
+      "apps/web/tests/admin-chat-pages.test.ts"
     ]
   },
   "dependencies": [
