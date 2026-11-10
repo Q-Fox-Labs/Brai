@@ -299,12 +299,18 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         from types import MethodType
         import textwrap
         lines = (Path(__file__).parents[1] / 'native.patch').read_text().splitlines()
-        start = next(i for i, line in enumerate(lines) if line.startswith('+    async def send_typing('))
+        start = next(i for i, line in enumerate(lines)
+                     if line[:1] in ('+', ' ') and line[1:].startswith('    async def send_typing('))
         body = []
         for line in lines[start:]:
-            if not line.startswith('+') or line.startswith('+++'):
+            if line.startswith(('---', '+++', '@@')):
                 break
-            body.append(line[1:])
+            if line.startswith('-'):
+                continue
+            value = line[1:] if line[:1] in ('+', ' ') else line
+            if body and value.startswith('    ') and value.lstrip().startswith(('async def ', 'def ')):
+                break
+            body.append(value)
         scope = {'normalize_telegram_chat_id': int, 'logger': runtime._logger}
         exec('from __future__ import annotations\n' + textwrap.dedent('\n'.join(body)), scope)
         return MethodType(scope['send_typing'], adapter)
