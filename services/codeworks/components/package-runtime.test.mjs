@@ -146,7 +146,8 @@ test('OCI context uses only copied files and starts the selected entrypoint', as
   const result = await build();
   const docker = readFileSync(join(result.path, 'Dockerfile'), 'utf8');
   assert.match(docker, /FROM node:24\.22\.1-bookworm-slim/);
-  assert.match(docker, /COPY \. \/app/);
+  assert.doesNotMatch(docker, /COPY \. \/app/);
+  assert.match(docker, /COPY \["artifact-manifest.json","\/app\/artifact-manifest.json"\]/);
   assert.match(docker, /CMD \["node","main.mjs"\]/);
   assert.doesNotMatch(docker, /RUN|npm|tsc/);
   component.delivery.command = ['node', '../../node_modules/next/dist/bin/next', 'start'];
@@ -201,4 +202,30 @@ test('personal documentation is rejected even through a selected parent director
   write('docs/user-agent/usercustom/personal.md','local only');
   component.delivery.files.push('docs/user-agent');
   await assert.rejects(build(), /FORBIDDEN_DELIVERY_FILE: docs\/user-agent\/usercustom/);
+});
+
+
+test('code-only changes keep root and nested dependency COPY layers unchanged', async t => {
+  for (const dependencyRoot of ['node_modules', 'services/example/node_modules']) await t.test(dependencyRoot, async t => {
+    const {write,component,build}=fixture(t);
+    const pkg={name:'@brai/example',version:'1.0.0',type:'module',dependencies:{tiny:'1.0.0'}};
+    write('services/example/package.json',pkg);
+    write(`${dependencyRoot}/tiny/package.json`,{name:'tiny',version:'1.0.0',type:'module',exports:'./index.js'});
+    write(`${dependencyRoot}/tiny/index.js`,'export const dependency=42;');
+    write('package-lock.json',{lockfileVersion:3,packages:{'services/example':pkg,[`${dependencyRoot}/tiny`]:{version:'1.0.0',integrity:'sha512-fixture'}}});
+    component.npm={workspaces:['services/example']};
+    component.delivery.files.push('services/example/package.json');
+    component.delivery.kind='oci-context';
+    const first=await build();
+    write('services/example/main.mjs','export const value=43;');
+    const second=await build();
+    const copies=result=>readFileSync(join(result.path,'Dockerfile'),'utf8').split('\n').filter(line=>line.startsWith('COPY ')).map(line=>JSON.parse(line.slice(5)));
+    const before=copies(first),after=copies(second);
+    assert.deepEqual(before,after);
+    assert.deepEqual(before[0],[dependencyRoot+'/',`/app/${dependencyRoot}/`]);
+    assert.ok(before.slice(1).every(([source])=>source!=='.'&&!dependencyRoot.startsWith(source.replace(/\/$/,'')+'/')));
+    const manifest=JSON.parse(readFileSync(join(second.path,'artifact-manifest.json'),'utf8'));
+    assert.ok(manifest.files.some(row=>row.path===`${dependencyRoot}/tiny/index.js`));
+    assert.notEqual(first.payloadHash,second.payloadHash);
+  });
 });
