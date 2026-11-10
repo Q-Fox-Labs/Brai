@@ -203,7 +203,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         value = {'ownerId': 'owner', 'stateRoot': str(self.home / 'workspace/files'),
                  'resultRoot': str(self.home / 'results'),
                  'serviceRoots': ['/opt/brai-profile/instructions', '/opt/brai-profile/engine',
-                                  '/opt/brai-profile/runtime', str(self.home / 'usercustom/instructions')]}
+                                  '/opt/brai-profile/runtime', '/opt/brai-profile/skills', str(self.home / 'usercustom/instructions')]}
 
         async def configuration(method, args):
             self.assertEqual(method, 'files.configuration')
@@ -214,6 +214,11 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         for field, path in [('serviceRoots', '/etc'),
                             ('serviceRoots', str(self.root / 'another-user')),
                             ('serviceRoots', '/opt/brai-profile/instructions-extra'),
+                            ('serviceRoots', '/opt/brai-profile/skills-extra'),
+                            ('serviceRoots', '/opt/brai-profile/system-skills'),
+                            ('readRoots', '/opt/brai-profile/skills'),
+                            ('temporaryRoots', '/opt/brai-profile/skills'),
+                            ('legacyRoots', '/opt/brai-profile/skills'),
                             ('serviceRoots', '/opt/brai-profile/instructions/../engine'),
                             ('readRoots', '/opt/brai-profile/instructions'),
                             ('temporaryRoots', '/opt/brai-profile/instructions'),

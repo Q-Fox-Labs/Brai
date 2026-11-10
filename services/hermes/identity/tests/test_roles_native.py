@@ -169,14 +169,21 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
         plugins.get_plugin_manager = lambda: manager
         plugins.get_bundled_plugins_dir = lambda: Path('/trusted/native/plugins')
         discovery = types.ModuleType('hermes_cli.plugins_discovery'); discovery.scan_directory = lambda *a, **k: []
+        tools_config = types.ModuleType('hermes_cli.tools_config')
+        tools_config.load_config = config.load_config
+        effective = types.ModuleType('hermes_cli.config_effective')
+        effective.load_user_config_effective = lambda *a, **k: {'source': 'HOME'}
         gateway = types.ModuleType('gateway'); gateway.__path__ = []
+        raw = types.ModuleType('gateway.config_loader')
+        raw.read_yaml_layers = lambda *a, **k: {'source': 'HOME'}
+        raw.load_legacy_gateway_json = lambda *a, **k: {'legacy': True}
         run = types.ModuleType('gateway.run'); run.GatewayRunner = Runner
         tools = types.ModuleType('tools'); tools.__path__ = []
         registry = types.ModuleType('tools.registry'); registry.ToolRegistry = Registry
         async def attach(adapter): effects.append('attach')
         modules = {'identity': package, 'identity.tool_client': client, 'hermes_cli': hermes,
-                   'hermes_cli.config': config, 'hermes_cli.plugins': plugins,
-                   'hermes_cli.plugins_discovery': discovery, 'gateway': gateway, 'gateway.run': run,
+                   'hermes_cli.config': config, 'hermes_cli.tools_config': tools_config, 'hermes_cli.config_effective': effective, 'hermes_cli.plugins': plugins,
+                   'hermes_cli.plugins_discovery': discovery, 'gateway': gateway, 'gateway.config_loader': raw, 'gateway.run': run,
                    'tools': tools, 'tools.registry': registry,
                    '_brai_identity_human': types.SimpleNamespace(attach=attach)}
         with patch.dict(sys.modules, modules):
@@ -191,6 +198,10 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
             runner._start_spawn_background_watchers()
             self.assertEqual(effects, ['trusted', 'reconnect'] if sticky else ['trusted'])
             self.assertEqual(policy.backgrounds_suspended(), sticky)
+            self.assertEqual(tools_config.load_config()['source'], 'trusted')
+            self.assertEqual(effective.load_user_config_effective()['source'], 'trusted')
+            self.assertEqual(raw.read_yaml_layers(Path('/untrusted/home'))['source'], 'trusted')
+            self.assertEqual(raw.load_legacy_gateway_json(Path('/untrusted/home')), {})
             active['value'] = True
             async def check(): self.assertEqual(policy.principal(), {'role': 'user', 'generation': 4})
             await policy.activate_deferred_startup(runner, object(), check)
@@ -199,7 +210,12 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(effects, expected)
             await policy.activate_deferred_startup(runner, object(), check)
             self.assertEqual(effects, expected, 'activation must be idempotent')
-            self.assertEqual(config.load_config()['source'], 'trusted' if sticky else 'HOME')
+            expected_source = 'trusted' if sticky else 'HOME'
+            self.assertEqual(config.load_config()['source'], expected_source)
+            self.assertEqual(tools_config.load_config()['source'], expected_source)
+            self.assertEqual(effective.load_user_config_effective()['source'], expected_source)
+            self.assertEqual(raw.read_yaml_layers(Path('/untrusted/home'))['source'], expected_source)
+            self.assertEqual(raw.load_legacy_gateway_json(Path('/untrusted/home')), {} if sticky else {'legacy': True})
 
     async def test_ordinary_user_startup_is_deferred_then_restored_once(self):
         await self.exercise(False)

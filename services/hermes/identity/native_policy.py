@@ -125,6 +125,22 @@ def install():
         original_load, original_read = config.load_config, config.load_config_readonly
         config.load_config = lambda *args, **kwargs: deepcopy(accepted) if not active_configuration() else original_load(*args, **kwargs)
         config.load_config_readonly = lambda *args, **kwargs: deepcopy(accepted) if not active_configuration() else original_read(*args, **kwargs)
+        # Gateway turn/startup readers имеют отдельные raw YAML/legacy пути.
+        from hermes_cli import config_effective
+        from gateway import config_loader
+        original_effective = config_effective.load_user_config_effective
+        original_yaml = config_loader.read_yaml_layers
+        original_legacy = config_loader.load_legacy_gateway_json
+        config_effective.load_user_config_effective = lambda *args, **kwargs: (
+            original_effective(*args, **kwargs) if active_configuration() else deepcopy(accepted))
+        config_loader.read_yaml_layers = lambda *args, **kwargs: (
+            original_yaml(*args, **kwargs) if active_configuration() else deepcopy(accepted))
+        config_loader.load_legacy_gateway_json = lambda *args, **kwargs: (
+            original_legacy(*args, **kwargs) if active_configuration() else {})
+        import sys
+        tools_config = sys.modules.get('hermes_cli.tools_config')
+        if tools_config is not None:
+            tools_config.load_config = config.load_config
         import hermes_cli.plugins as plugins
         from hermes_cli.plugins_discovery import scan_directory
         product = Path(__file__).resolve().parents[1]
