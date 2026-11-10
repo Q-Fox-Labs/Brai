@@ -29,6 +29,11 @@ export async function runNats(nc:NatsConnection,cfg:Config,handler:(request:Requ
       msg.respond(Buffer.from(JSON.stringify({status:401,body:{error:"UNAUTHORIZED"},setCookies:[]})));return;
      }
      response=emailGrant?await withEmailGrant(emailGrant,()=>bridge(name as Operation,request,cfg.origin,handler,cfg)):await bridge(name as Operation,request,cfg.origin,handler,cfg);
+     if(emailGrant&&name==='send-code'&&response.status===200){
+      const current=await captureEmailGrant(pool,data.body?.email);
+      if(current.userId!==emailGrant.userId||current.linked!==emailGrant.linked||current.generation!==emailGrant.generation||current.allowed!==emailGrant.allowed)
+       response={status:403,body:{error:"FORBIDDEN"},setCookies:[]};
+     }
      if(emailGrant&&name==="verify-code"&&response.status===200&&!await confirmEmailSession(pool,cfg,handler,responseCookies(response.setCookies),emailGrant))response={status:401,body:{error:"UNAUTHORIZED"},setCookies:[]};
      if(cfg.identityMode!=="telegram"&&name==="session"&&response.body&&!await permitsWebSession(pool,cfg,handler,new Headers(data.headers)))response.body=null;
      if(cfg.identityMode==="telegram"&&name==="session"&&response.body){
