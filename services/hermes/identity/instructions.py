@@ -7,7 +7,7 @@ import os
 import stat
 
 ROOT = Path('/opt/brai-profile/instructions')
-FILES = ('context.md', 'INDEX.md', 'BASE.md', 'skills/creative/context-gifs/SKILL.md')
+FILES = ('context.md', 'INDEX.md', 'BASE.md', 'BUG_HUNT.md', 'skills/creative/context-gifs/SKILL.md')
 
 
 def read_context(root):

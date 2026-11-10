@@ -2,6 +2,7 @@
 # ABOUTME: Использует только временные данные и подставной broker без генерации или Telegram.
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -80,6 +81,7 @@ class SystemTests(unittest.TestCase):
                 with native.conversation(agent, 'hello'):
                     self.assertIn('Required context.md', agent.ephemeral_system_prompt)
                     self.assertIn('Required BASE.md', agent.ephemeral_system_prompt)
+                    self.assertIn('Required BUG_HUNT.md', agent.ephemeral_system_prompt)
                     self.assertIn('Required INDEX.md', agent.ephemeral_system_prompt)
                     self.assertIn('Personal preference', agent.ephemeral_system_prompt)
             self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
@@ -90,6 +92,22 @@ class SystemTests(unittest.TestCase):
                 with native.conversation(agent, 'hello'):
                     self.fail('Missing mandatory context must stop the turn')
         self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
+
+    def test_bug_hunt_protocol_is_loaded_from_delivered_profile_without_personal_files(self):
+        repository = Path(__file__).resolve().parents[4]
+        source = repository / 'docs/user-agent/instructions'
+        installed = self.root / 'installed'
+        shutil.copytree(source / 'hermes', installed)
+        shutil.copyfile(source / 'context.md', installed / 'context.md')
+        protocol = (installed / 'BUG_HUNT.md').read_text()
+        context = instructions.read_context(installed)
+        self.assertEqual(context.count(protocol), 1)
+        self.assertIn('bug_hunt_report', context)
+        self.assertIn('request_id', context)
+        self.assertIn('не подтверждена', context)
+        (installed / 'BUG_HUNT.md').unlink()
+        with self.assertRaises(FileNotFoundError):
+            instructions.read_context(installed)
 
     def test_personal_prompts_are_read_fresh_and_deletion_is_optional(self):
         first, second = self.root / 'first', self.root / 'second'

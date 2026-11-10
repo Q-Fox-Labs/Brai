@@ -284,7 +284,7 @@
       "services/hermes/identity/lifecycle.py",
       "services/hermes/identity/bug-hunt.mjs",
       "services/bug-hunt/schemas/messages.schema.json",
-      "docs/user-agent/instructions/BUG_HUNT.md"
+      "docs/user-agent/instructions/hermes/BUG_HUNT.md"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -703,7 +703,7 @@
       "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
       "services/hermes/identity/bug-hunt.mjs",
       "services/bug-hunt/schemas/messages.schema.json",
-      "docs/user-agent/instructions/BUG_HUNT.md"
+      "docs/user-agent/instructions/hermes/BUG_HUNT.md"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
