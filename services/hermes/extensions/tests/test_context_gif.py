@@ -121,6 +121,7 @@ class ContextGifTests(unittest.TestCase):
         result = self.native()
         self.assertEqual(result['method'], 'native-gif')
         self.assertEqual(Path(result['image']).read_bytes(), animation())
+        self.assertTrue(Path(result['image']).is_relative_to(self.home / 'workspace'))
         body = self.requests[0][1]['json']
         self.assertEqual((body['output_format'], body['frame_count'], body['frame_duration_ms']), ('gif', 9, 200))
         self.assertEqual((body['size'], body['quality']), ('auto', 'auto'))
@@ -183,6 +184,7 @@ class ContextGifTests(unittest.TestCase):
             with patch.object(GIF, 'build_opener', return_value=SimpleNamespace(open=lambda *a, **k: Response())):
                 result = GIF.native_generate(self.home, 'Луна')
         self.assertEqual(Path(result['image']).read_bytes(), animation())
+        self.assertTrue(Path(result['image']).is_relative_to(self.home / 'workspace'))
 
     def test_api_redirect_never_forwards_request(self):
         with self.assertRaisesRegex(GIF.GifError, 'GIF_REDIRECT_REJECTED'):
