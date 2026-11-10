@@ -16,7 +16,7 @@ test('real MCP + NATS + Auth acceptance',async t=>{
  try{
   const request={request_id:randomUUID(),observation};let receipt;
   await t.test('MCP discovery, report and replay use the authenticated owner',async()=>{
-   const tools=(await f.client.listTools()).tools;assert.deepEqual(tools.map(t=>t.name),['bug_hunt_report','bug_hunt_get','bug_hunt_list']);
+   const tools=(await f.client.listTools()).tools;assert.deepEqual(tools.map(t=>t.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list']);
    const first=await f.client.callTool({name:'bug_hunt_report',arguments:request});assert.equal(first.isError,undefined);receipt=first.structuredContent;
    const replay=await f.client.callTool({name:'bug_hunt_report',arguments:request});assert.equal(replay.structuredContent.case_id,receipt.case_id);assert.equal(replay.structuredContent.replayed,true);
    assert.equal((await web('get',{case_id:receipt.case_id})).case.owner_id,f.user.id);

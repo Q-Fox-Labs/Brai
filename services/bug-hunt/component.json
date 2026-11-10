@@ -32,7 +32,8 @@
       "services/bug-hunt/CONTRACT.md",
       "services/bug-hunt/DEPLOYMENT.md",
       "deploy/compose.bug-hunt.yml",
-      "services/bug-hunt/asyncapi.json"
+      "services/bug-hunt/asyncapi.json",
+      "services/bug-hunt/contracts/agent-guide.json"
     ],
     "checks": [
       "services/bug-hunt/tests/contracts.test.mjs",
@@ -65,7 +66,8 @@
       "services/bug-hunt/CONTRACT.md",
       "services/bug-hunt/DEPLOYMENT.md",
       "deploy/compose.bug-hunt.yml",
-      "services/bug-hunt/asyncapi.json"
+      "services/bug-hunt/asyncapi.json",
+      "services/bug-hunt/contracts"
     ],
     "entrypoints": [
       "services/bug-hunt/dist/main.js",

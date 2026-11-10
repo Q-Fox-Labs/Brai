@@ -7,8 +7,10 @@
 
 ## Идентичность и границы
 
-MCP Streamable HTTP предоставляет только bug_hunt_report, bug_hunt_get,
-bug_hunt_list. Каждый HTTP-запрос заново проверяет credential по защищённому
+MCP Streamable HTTP предоставляет bug_hunt_help, bug_hunt_report, bug_hunt_get,
+bug_hunt_list. Help принимает только {}, возвращает публичные правила и пример
+без регистрации наблюдения и без NATS/SQL. В постоянных server instructions
+только одна короткая строка; подробный текст загружается вызовом help. Каждый HTTP-запрос заново проверяет credential по защищённому
 реестру и действующий active owner через Auth identity-get. Нет общего владельца
 для всех клиентов. principalId стабилен при ротации токена; bearer и connection ID
 не входят в ключ повтора. У MCP нет сохраняемых сессий.

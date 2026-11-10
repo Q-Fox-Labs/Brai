@@ -442,10 +442,12 @@
     {
       "id": "bug-hunt",
       "inputs": [
-        "services/bug-hunt/schemas/**"
+        "services/bug-hunt/schemas/**",
+        "services/bug-hunt/contracts/**"
       ],
       "delivery": [
-        "services/bug-hunt/schemas"
+        "services/bug-hunt/schemas",
+        "services/bug-hunt/contracts"
       ]
     }
   ],

@@ -19,15 +19,23 @@ test('MCP bounds incomplete HTTP sockets before authentication',async()=>{
  }finally{for(const socket of sockets)socket.destroy();await runtime.close();gate.stop();await gate.drain();}
 });
 
-test('new MCP client receives the full protocol during initialize',async()=>{
+test('new MCP client receives a short reminder and loads help only on demand',async()=>{
  const gate=createGate(),hosts=[],principal={ownerId:'fixture',actorId:'fixture',source:'codex',reviewer:false};
- const runtime=await startMcp({host:'127.0.0.1',port:0,allowedHosts:hosts,allowedOrigins:[],principalsFile:'/unused',maxConnections:4},gate,async()=>principal,async()=>({}));
+ let effects=0;
+ const runtime=await startMcp({host:'127.0.0.1',port:0,allowedHosts:hosts,allowedOrigins:[],principalsFile:'/unused',maxConnections:4},gate,async()=>principal,async()=>{effects++;return {};});
  hosts.push(new URL(runtime.url).host);
  const client=new Client({name:'instruction-fixture',version:'1.0.0'});
  try{
   await client.connect(new StreamableHTTPClientTransport(new URL(runtime.url)));
   assert.equal(client.getInstructions(),agentInstructions);
-  assert.ok(client.getInstructions().includes('request_id'));
-  assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['bug_hunt_report','bug_hunt_get','bug_hunt_list']);
+  assert.ok(client.getInstructions().length<150);
+  assert.ok(client.getInstructions().includes('bug_hunt_help'));
+  const guide=await client.callTool({name:'bug_hunt_help',arguments:{}});
+  assert.ok(guide.content[0].text.includes('request_id'));
+  assert.ok(guide.content[0].text.includes('Пример входа'));
+  assert.ok(guide.content[0].text.length>client.getInstructions().length);
+  const invalid=await client.callTool({name:'bug_hunt_help',arguments:{owner_id:'forged'}});
+  assert.equal(invalid.isError,true);assert.equal(effects,0);
+  assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list']);
  }finally{await client.close();await runtime.close();gate.stop();await gate.drain();}
 });

@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет общие навыки, обязательный контекст и native TTS личного профиля.
 # ABOUTME: Использует только временные данные и подставной broker без генерации или Telegram.
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -93,7 +94,7 @@ class SystemTests(unittest.TestCase):
                     self.fail('Missing mandatory context must stop the turn')
         self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
 
-    def test_bug_hunt_protocol_is_loaded_from_delivered_profile_without_personal_files(self):
+    def test_short_bug_hunt_reminder_is_loaded_without_the_detailed_guide(self):
         repository = Path(__file__).resolve().parents[4]
         source = repository / 'docs/user-agent/instructions'
         installed = self.root / 'installed'
@@ -102,9 +103,13 @@ class SystemTests(unittest.TestCase):
         protocol = (installed / 'BUG_HUNT.md').read_text()
         context = instructions.read_context(installed)
         self.assertEqual(context.count(protocol), 1)
-        self.assertIn('bug_hunt_report', context)
-        self.assertIn('request_id', context)
-        self.assertIn('не подтверждена', context)
+        guide = json.loads((repository / 'services/bug-hunt/contracts/agent-guide.json').read_text())
+        self.assertEqual(protocol.strip(), guide['reminder'])
+        self.assertNotIn(guide['help'], context)
+        self.assertLess(len(protocol), 150)
+        self.assertIn('bug_hunt_help', context)
+        self.assertNotIn('Пример входа', context)
+        self.assertNotIn('evidence_artifact_ids', context)
         (installed / 'BUG_HUNT.md').unlink()
         with self.assertRaises(FileNotFoundError):
             instructions.read_context(installed)

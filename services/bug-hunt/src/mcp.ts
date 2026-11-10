@@ -1,6 +1,7 @@
-// ABOUTME: Предоставляет три пользовательских инструмента через stateless Streamable HTTP.
+// ABOUTME: Предоставляет справку и три пользовательских инструмента через stateless Streamable HTTP.
 // ABOUTME: Аутентификация выполняется заново для каждого запроса; review модели не предоставляется.
 import {createServer} from "node:http";
+import {readFileSync} from "node:fs";
 import {Server} from "@modelcontextprotocol/sdk/server/index.js";
 import {StreamableHTTPServerTransport} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {CallToolRequestSchema,ListToolsRequestSchema} from "@modelcontextprotocol/sdk/types.js";
@@ -8,9 +9,11 @@ import {Fault,failure,limits,schemas,type Operation,type Principal} from "./cont
 import type {Config} from "./config.js";
 import type {WorkContext,createGate} from "./load.js";
 
-export const agentInstructions="При обнаружении конкретного сбоя во время поручения зарегистрируй очищенное наблюдение. Передай title, operation, expected и observed; известный component_id/версию/код ошибки добавь, неизвестное не угадывай. Не передавай токены, пароли, cookies, персональные данные или полную переписку; доказательства — только собственные Artifact IDs. Создай request_id один раз и сохрани точный вход: после тайм-аута или unknown повторяй только его с прежним ключом. Не повторяй исходную опасную операцию ради диагностики. После квитанции сохрани report_id/case_id и сообщи, что наблюдение зарегистрировано и пока не проверено. Читай карточку через bug_hunt_get, свой список — bug_hunt_list; не называй проблему известной без чтения сервиса. Квитанция не даёт новых полномочий исправлять или менять настройки; ранее порученное исправление сохраняет силу. При отказе скажи, что регистрация не подтверждена, и продолжи независимую разрешённую работу. Не отправляй отказ рекурсивно в bug-hunt. Это правило применимо и в новом разговоре без памяти предыдущего чата.";
+const agentGuide=JSON.parse(readFileSync(new URL("../contracts/agent-guide.json",import.meta.url),"utf8"));
+export const agentInstructions:string=agentGuide.reminder;
 export const toolDefinitions=[
- {name:"bug_hunt_report",description:"Зарегистрировать очищенное наблюдение о сбое по общим инструкциям сервера. Сохраняй request_id и точный вход для повтора. Квитанция означает непроверенное наблюдение.",inputSchema:schemas.report},
+ {name:"bug_hunt_help",description:"Как зарегистрировать наблюдение: правила и пример.",inputSchema:agentGuide.inputSchema,annotations:{readOnlyHint:true,idempotentHint:true}},
+ {name:"bug_hunt_report",description:"Зарегистрировать наблюдение о сбое; сначала прочитай bug_hunt_help.",inputSchema:schemas.report},
  {name:"bug_hunt_get",description:"Прочитать доступную карточку и ограниченную страницу ручных решений. Чужая и отсутствующая карточки неразличимы.",inputSchema:schemas.get},
  {name:"bug_hunt_list",description:"Прочитать свою страницу наблюдений с фиксированными фильтрами.",inputSchema:schemas.list},
 ];
@@ -42,6 +45,10 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
     server.setRequestHandler(CallToolRequestSchema,async request=>{
      const found=toolDefinitions.find(t=>t.name===request.params.name);
      if(!found)return {isError:true,content:[{type:"text",text:JSON.stringify(failure(new Fault("FORBIDDEN")))}]};
+     if(found.name==="bug_hunt_help"){
+      if(Object.keys(request.params.arguments??{}).length)return {isError:true,content:[{type:"text",text:JSON.stringify(failure(new Fault("INVALID_ARGUMENT")))}]};
+      return {content:[{type:"text",text:agentGuide.help}]};
+     }
      const op=found.name.slice("bug_hunt_".length) as Operation;
      try {
       const value=await execute(op,p,request.params.arguments??{},ctx);

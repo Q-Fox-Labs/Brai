@@ -5,7 +5,10 @@ import assert from 'node:assert/strict';
 import {createBugHuntCatalog} from '../identity/bug-hunt.mjs';
 test('broker назначает owner и не предоставляет review',async()=>{
  const calls=[];const catalog=createBugHuntCatalog(async(...args)=>{calls.push(args);return {registered:true};},{userId:'owner-a',profileId:'profile-a'});
- assert.deepEqual(catalog.list().map(x=>x.name),['bug_hunt_report','bug_hunt_get','bug_hunt_list']);
+ assert.deepEqual(catalog.list().map(x=>x.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list']);
+ const guide=await catalog.call('bug_hunt_help',{});
+ assert.ok(guide.instructions.includes('request_id'));assert.ok(guide.instructions.includes('Пример входа'));assert.equal(calls.length,0);
+ await assert.rejects(catalog.call('bug_hunt_help',{owner_id:'forged'}));
  const input={request_id:'r',observation:{title:'Сбой',operation:'open',expected:'ok',observed:'failed'}};
  await catalog.call('bug_hunt_report',input);await catalog.call('bug_hunt_report',input);
  assert.deepEqual(calls[0][1],calls[1][1]);assert.deepEqual(calls[0][1].context,{kind:'hermes',userId:'owner-a',profileId:'profile-a'});
