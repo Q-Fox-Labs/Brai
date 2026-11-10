@@ -106,7 +106,7 @@ def api_generate(home, prompt, config):
         payload = json.loads(raw_response)
     raw = base64.b64decode(payload['data'][0]['b64_json'], validate=True)
     frames = gif_frames(raw)
-    cache = home / 'cache/generated/images'
+    cache = home / 'workspace/generated/images'
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / (uuid.uuid4().hex + '.gif')
     with target.open('xb') as output:
@@ -169,7 +169,7 @@ def native_generate(home, prompt):
     encoded = payload['data'][0]['b64_json']
     raw = base64.b64decode(encoded, validate=True)
     frames = gif_frames(raw)  # PNG с расширением .gif не проходит.
-    cache = home / 'cache/generated/images'
+    cache = home / 'workspace/generated/images'
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / (uuid.uuid4().hex + '.gif')
     with target.open('xb') as output:
