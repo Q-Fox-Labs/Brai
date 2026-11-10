@@ -71,12 +71,15 @@ rawText=correctedText, source=text, state=ready. eventDate передаётся 
 dateStatus=provided либо needs_clarification. Смена существующего текста,
 удаление записей и публичные ссылки не предоставляются.
 
-POST /v1/retry/{id} с единственным requestId UUID разрешает владельцу один явный
-повтор needs_attention/TRANSCRIPTION_FAILED без rawText и без начатой Luna.
+POST /v1/retry/{id} с единственным requestId UUID разрешает владельцу явный
+повтор needs_attention/TRANSCRIPTION_FAILED без общего rawText и без незавершённой Luna.
 Это новое вычисление, в том числе после неизвестного исхода прежнего; автоматического
 повтора нет. Прежний requestId, статус и ошибка остаются в transcriptionRetry.
-Повтор того же requestId не запускает второе вычисление; другой ключ после
-первого повтора отклоняется. Запись и Artifacts original сохраняются.
+Повтор текущего или исторического requestId не запускает второе вычисление.
+Новый ключ допускается после нового терминального ASR-исхода: прежний requestId
+должен отличаться от уже использованного при предыдущем разрешении.
+История разрешений хранится в transcriptionRetry.history. Готовые raw/correction
+части и счётчики сохраняются; pendingRequestId снимается перед новым запросом. Запись и Artifacts original сохраняются.
 Auth, canonical Origin, owner/profile, app-role RLS и worker advisory lock
 проверяются до изменения; активное прежнее задание и изменившийся оригинал запрещены.
 Чтение/обновление страницы никогда не повторяет распознавание.

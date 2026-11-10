@@ -14,15 +14,19 @@ export async function retryTranscription(c,ports,{entryId,previousRequestId,retr
   if(!e||(ownerId&&(e.ownerId!==ownerId||e.profileId!==profileId)))throw new DiaryFault('NOT_FOUND',404);
   await ports.active(e.ownerId,e.profileId);
   let result={state:'already_scheduled',entryId};
-  if(e.transcriptionRetry?.key!==retryId){
-   if(e.state!=='needs_attention'||e.errorCode!=='TRANSCRIPTION_FAILED'||e.rawText!==null||e.lunaStartedAt||e.transcriptionRetry)throw new DiaryFault('RETRY_NOT_ALLOWED',409);
+  const {history=[],...previous}=e.transcriptionRetry??{};
+  const replay=previous.key===retryId||history.some(attempt=>attempt.key===retryId);
+  if(!replay){
+   if(e.state!=='needs_attention'||e.errorCode!=='TRANSCRIPTION_FAILED'||e.rawText!==null||e.lunaStartedAt||e.audioProcessing?.parts.some(part=>part.lunaStartedAt&&!part.correction))throw new DiaryFault('RETRY_NOT_ALLOWED',409);
    const status=await ports.transcriptionStatus(e),r=status.request??status;
-   if(!['failed','outcome_unknown','cancelled'].includes(r.taskState)||(previousRequestId!==undefined&&r.requestId!==previousRequestId))throw new DiaryFault('PREVIOUS_NOT_TERMINAL',409);
+   if(!['failed','outcome_unknown','cancelled'].includes(r.taskState)||(previousRequestId!==undefined&&r.requestId!==previousRequestId)||r.requestId===previous.previousRequestId)throw new DiaryFault('PREVIOUS_NOT_TERMINAL',409);
    previousRequestId=id(r.requestId);
    const a=await ports.artifact(e);
    if(a.status!=='ready'||a.artifactId!==e.audioArtifactId||a.sha256!==e.audioSha256||a.sizeBytes!==e.audioSizeBytes)throw new DiaryFault('ORIGINAL_CHANGED',409);
    if(mode==='apply'){
-    const updated={...e,state:'transcribing',errorCode:null,transcriptionRetry:{key:retryId,previousRequestId,previousState:r.taskState,previousErrorCode:r.errorCode,authorizedAt:new Date().toISOString()}};
+    const audioProcessing=e.audioProcessing?structuredClone(e.audioProcessing):null;
+    if(audioProcessing)delete audioProcessing.pendingRequestId;
+    const updated={...e,...(audioProcessing?{audioProcessing}:{}),state:'transcribing',errorCode:null,transcriptionRetry:{key:retryId,previousRequestId,previousState:r.taskState,previousErrorCode:r.errorCode,authorizedAt:new Date().toISOString(),history:previous.key?[...history,previous]:history}};
     await c.query("UPDATE diary.entries SET state='transcribing',document=$2,available_at=now(),updated_at=now() WHERE id=$1",[entryId,updated]);
    }
    result={state:mode==='apply'?'scheduled':'eligible',entryId,previousState:r.taskState,previousErrorCode:r.errorCode};
