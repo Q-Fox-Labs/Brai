@@ -146,18 +146,18 @@ test('repeated gates reuse immutable reads but re-read live CI and reject a new 
   const f=fixture(),counts={contents:0,objects:0,checks:0,runs:0};let saved=structuredClone(f.proof);
   let transient=true;
   const adapter=createGitHub({evidenceStore:{read:async()=>saved,save:async(_p,proof)=>{saved=structuredClone(proof);}},registryFactory:()=>({
-    ...f.ports.registry,lookup:async(id,ref)=>{if(ref.startsWith('sha256:'))counts.objects++;return f.ports.registry.lookup(id,ref);},
+    ...f.ports.registry,lookup:async(id,ref)=>{if(ref.startsWith('sha256:')){counts.objects++;if(transient){transient=false;throw Error('temporary read failure');}}return f.ports.registry.lookup(id,ref);},
   }),run:async(_exe,args)=>{
     if(args[0]==='auth')return {stdout:'fixture'};
     const endpoint=args.at(-1).slice(('repos/'+f.project.github.repository+'/').length);
     if(endpoint.startsWith('commits/')){counts.checks++;return {stdout:JSON.stringify({total_count:1,check_runs:[f.check]})};}
-    if(endpoint.startsWith('contents/')){counts.contents++;if(transient){transient=false;throw Error('temporary read failure');}}
+    if(endpoint.startsWith('contents/'))counts.contents++;
     if(endpoint.startsWith('actions/runs/'))counts.runs++;
     return {stdout:JSON.stringify(await f.ports.api(endpoint))};
   }});
   assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,false);
   assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,true);
-  const cold={...counts};assert(cold.contents>1);assert(cold.objects>0);
+  const cold={...counts};assert.equal(cold.contents,0);assert(cold.objects>0);
   assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,true);
   assert.equal(counts.contents,cold.contents);assert.equal(counts.objects,cold.objects);
   assert.equal(counts.checks,3);assert(counts.runs>cold.runs);
@@ -179,4 +179,88 @@ test('activity cancellation propagates instead of becoming unavailable CI',async
     return {stdout:JSON.stringify({total_count:1,check_runs:[f.check]})};
   }});
   await assert.rejects(withExecutionContext({signal:controller.signal},()=>adapter.checks(f.project,f.sha)),error=>error===reason);
+});
+
+function multiSourceFixture() {
+  const f=fixture(),origins=new Map(),objects=new Map();
+  f.composition.components=Array.from({length:10},(_,i)=>{
+    const id='probe-'+i,source=(i+1).toString(16).padStart(40,'0'),runId=String(200+i);
+    const component={id,keys:{artifact:'1'.repeat(64),checks:'2'.repeat(64)}};
+    for(const kind of ['artifact','check']) {
+      const object=structuredClone(f.objects[kind]);
+      object.digest='sha256:'+(2*i+(kind==='artifact'?1:2)).toString(16).padStart(64,'0');
+      object.reference='ghcr.io/'+f.project.github.repository+'-components/'+id+'@'+object.digest;
+      Object.assign(object.metadata,{source,runId});
+      component[kind]=object;objects.set(id+'/'+object.digest,object);
+    }
+    const proof={composition:{...structuredClone(f.composition),source,runId,components:[structuredClone(component)]}};
+    origins.set(runId,{source,proof});return component;
+  });
+  f.proof.composition=structuredClone(f.composition);
+  const api=f.ports.api;
+  f.ports.api=async endpoint=>{
+    const id=endpoint.match(/^actions\/runs\/(\d+)\//)?.[1],origin=origins.get(id);
+    if(origin&&endpoint.includes('/attempts/'))return {...structuredClone(f.run),head_sha:origin.source};
+    return api(endpoint);
+  };
+  f.ports.registry.lookup=async(id,ref)=>structuredClone(id==='release'?f.objects.release:objects.get(id+'/'+ref));
+  f.origins=origins;return f;
+}
+
+test('fresh adapters reuse durable recipes for ten sources while checking every origin live',async t=>{
+  const f=multiSourceFixture(),records=new Map();let calls=[];
+  const key=(p,id,attempt)=>JSON.stringify([p.github.repository,p.github.ci,String(id),String(attempt)]);
+  const store={
+    read:async(p,id,attempt)=>structuredClone(records.get(key(p,id,attempt))??null),
+    save:async(p,proof)=>records.set(key(p,proof.composition.runId,proof.composition.attempt),structuredClone(proof)),
+  };
+  for(const [id,origin]of f.origins)records.set(key(f.project,id,1),origin.proof);
+  f.ports.readVerified=(id,attempt)=>store.read(f.project,id,attempt);
+  f.ports.saveVerified=proof=>store.save(f.project,proof);
+  const api=f.ports.api;f.ports.api=async endpoint=>{calls.push(endpoint);return api(endpoint);};
+  assert.equal((await f.verify()).state,'CI_VERIFIED');
+  assert.equal(calls.filter(c=>c.startsWith('contents/')).length,recipeFiles.length*11+1);
+  const pass=async()=>{
+    calls=[];
+    const adapter=createGitHub({evidenceStore:store,registryFactory:()=>f.ports.registry,run:async(_exe,args)=>{
+      if(args[0]==='auth')return {stdout:'fixture'};
+      const endpoint=args.at(-1).slice(('repos/'+f.project.github.repository+'/').length);
+      if(endpoint.startsWith('commits/')){calls.push(endpoint);return {stdout:JSON.stringify({total_count:1,check_runs:[f.check]})};}
+      return {stdout:JSON.stringify(await f.ports.api(endpoint))};
+    }});
+    return (await adapter.checks(f.project,f.sha))[0];
+  };
+  for(let i=0;i<3;i++) {
+    assert.equal((await pass()).ci_verified,true);
+    assert.equal(calls.filter(c=>c.startsWith('contents/')).length,0,'new adapter must reuse verified recipes');
+    assert.equal(calls.filter(c=>c.startsWith('commits/')).length,1);
+    assert.equal(calls.filter(c=>/^actions\/runs\/\d+\/attempts\/1$/.test(c)).length,10);
+    assert.equal(calls.filter(c=>c.includes('/jobs?')).length,1);
+  }
+  assert.equal(calls.length,13);
+  t.diagnostic('Ten reused sources, fresh adapter: 13 live GitHub GETs; 143 repeated recipe GETs removed.');
+  f.origins.get('200').source='f'.repeat(40);
+  assert.equal((await pass()).ci_state,'CI_REUSE_ORIGIN_UNVERIFIED');
+  f.origins.get('200').source='1'.padStart(40,'0');
+  f.proof.composition.components[0].artifact.digest='sha256:'+'9'.repeat(64);
+  records.set(key(f.project,'123',1),structuredClone(f.proof));
+  assert.equal((await pass()).ci_state,'CI_RUN_DIGEST_MISMATCH');
+});
+
+test('full policy change or a new attempt invalidates durable recipe reuse',async()=>{
+  const f=fixture(),records=new Map(),calls=[];
+  const key=(p,id,attempt)=>JSON.stringify([p.github.repository,p.github.ci,String(id),String(attempt)]);
+  f.ports.readVerified=async(id,attempt)=>structuredClone(records.get(key(f.project,id,attempt))??null);
+  f.ports.saveVerified=async proof=>records.set(key(f.project,proof.composition.runId,proof.composition.attempt),structuredClone(proof));
+  const api=f.ports.api;f.ports.api=async endpoint=>{calls.push(endpoint);return api(endpoint);};
+  assert.equal((await f.verify()).verified,true);
+  calls.length=0;assert.equal((await f.verify()).verified,true);assert(!calls.some(c=>c.startsWith('contents/')));
+  f.project.github.ci.workflow_sha256='0'.repeat(64);
+  assert.equal((await f.verify()).state,'CI_WORKFLOW_UNTRUSTED');assert(calls.some(c=>c.startsWith('contents/')));
+  f.project.github.ci.workflow_sha256=hash(readFileSync(resolve(root,workflow)));
+  f.project.github.ci.recipe_sha256='0'.repeat(64);
+  assert.equal((await f.verify()).state,'CI_RECIPE_UNTRUSTED');
+  f.project.github.ci.recipe_sha256=digestFiles(root,recipeFiles);
+  f.run.run_attempt=2;calls.length=0;
+  assert.equal((await f.verify()).state,'CI_COMPOSITION_IDENTITY_MISMATCH');assert(calls.some(c=>c.startsWith('contents/')));
 });
