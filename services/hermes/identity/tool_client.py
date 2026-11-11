@@ -7,7 +7,6 @@ import socket
 import struct
 import sys
 import uuid
-from .ipc import safe_failure
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
 
@@ -39,8 +38,9 @@ def broker_call(method, params, *, path=None, timeout=120):
     if 'error' in response:
         error = ConnectionError('Broker rejected request')
         data = response['error'].get('data') if isinstance(response['error'], dict) else None
-        error.diagnostic = (safe_failure(**{k: data.get(k) for k in ('reason', 'stage')})
-            if isinstance(data, dict) else safe_failure())
+        # Root broker уже ограничил FailureDiagnostic; stdio CLI не импортирует пакет identity.
+        error.diagnostic = ({key: data[key] for key in ('reason', 'stage') if key in data}
+            if isinstance(data, dict) else None)
         raise error
     return response['result']
 

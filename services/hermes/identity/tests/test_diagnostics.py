@@ -89,3 +89,18 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         reasons = json.loads(schema.read_text())['definitions']['ServiceErrorCode']['enum']
         for reason in reasons:
             self.assertEqual(safe_failure(reason,'control'),{'reason':reason,'stage':'control'})
+
+    async def test_native_profile_stdio_command_starts_without_package_context(self):
+        import subprocess
+        from identity.profiles import native_profile
+        root = Path(__file__).resolve().parents[4]
+        config = native_profile({'home':'/fixture'}, instructions_root=str(root), model='fixture')
+        entry = config['mcp_servers']['brai']
+        request = {'jsonrpc':'2.0','id':1,'method':'initialize','params':{}}
+        result = subprocess.run([entry['command'], *entry['args']], input=json.dumps(request)+'\n',
+            text=True, capture_output=True, env={'PYTHONDONTWRITEBYTECODE':'1'}, timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stderr,'')
+        response = json.loads(result.stdout)
+        self.assertEqual(response['id'],1)
+        self.assertEqual(response['result']['serverInfo']['name'],'brai-identity')

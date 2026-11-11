@@ -300,9 +300,9 @@ def conversation_key(source):
 @contextmanager
 def turn_scope(db, source, session_id, instruction, input_id, *, real_input=True, generation_reader=None):
     """Bind authenticated gateway context across native worker/context propagation."""
+    # instruction уже может содержать вложения и служебные маркеры; доверяем только ingress/STT.
     scope = Scope(db,conversation_key(source),str(source.user_id or ""),str(session_id or ""),
-                  instruction if real_input and isinstance(instruction,str) else "",
-                  str(input_id or ""))
+                  "",str(input_id or ""))
     scope.generation_reader = generation_reader
     scope.generation = generation_reader() if callable(generation_reader) else None
     if db and scope.owner:
