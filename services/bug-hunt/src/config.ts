@@ -46,7 +46,7 @@ export interface ProcessingConfig {
  externalProjectionPolicy:typeof EXTERNAL_PROJECTION_POLICY|null;
  deadlineMs:number;intervalMs:number;heartbeatMs:number;leaseMs:number;
  intakeReserveBytes:number;maxDerivativeBytes:number;
- dailyLimits:{embedding:{owner:number;global:number};classification:{owner:number;global:number}};
+ dailyLimits:{embedding:{owner:number|null;global:number|null};classification:{owner:number;global:number}};
 }
 /** Проверяет ограниченные настройки worker; отсутствие конфигурации сохраняет выключенный фон. */
 export function processingConfig(value:unknown):ProcessingConfig {
@@ -77,6 +77,8 @@ export function processingConfig(value:unknown):ProcessingConfig {
   if(!Number.isSafeInteger(v.owner)||!Number.isSafeInteger(v.global)||v.owner<0||v.global<0||v.owner>100000||v.global>100000||v.owner>v.global)throw new Error("INVALID_PROCESSING_CONFIG");
   return {owner:v.owner,global:v.global};
  };
+ // AIDEV-NOTE: Только внутренняя Gemma допускает отсутствие суточного бюджета; ограничения ресурсов сохраняются.
+ const embeddingLimits=raw.dailyLimits?.embedding;
  const targetGeneration=raw.targetGeneration===undefined?GENERATION:raw.targetGeneration;if(typeof targetGeneration!=="string"||!generationPattern.test(targetGeneration))throw new Error("INVALID_PROCESSING_CONFIG");
  const cfg:ProcessingConfig={targetGeneration,enabled:flag("enabled"),embeddingEnabled:flag("embeddingEnabled"),classificationEnabled:flag("classificationEnabled"),
   externalProjectionPolicy,externalAllowedOwners:[...owners],externalProjections:projections.map(p=>({...p,excludedFields:[...p.excludedFields]})),
@@ -84,7 +86,7 @@ export function processingConfig(value:unknown):ProcessingConfig {
   heartbeatMs:number("heartbeatMs",5000,1000,10000),leaseMs:number("leaseMs",30000,10000,300000),
   intakeReserveBytes:number("intakeReserveBytes",67108864,16777216,1073741824),
   maxDerivativeBytes:number("maxDerivativeBytes",268435456,16777216,1073741824),
-  dailyLimits:{embedding:daily("embedding",100,1000),classification:daily("classification",20,100)}};
+  dailyLimits:{embedding:embeddingLimits?.owner===null&&embeddingLimits?.global===null?{owner:null,global:null}:daily("embedding",100,1000),classification:daily("classification",20,100)}};
  if(cfg.heartbeatMs*3>cfg.leaseMs)throw new Error("INVALID_PROCESSING_CONFIG");
  return cfg;
 }

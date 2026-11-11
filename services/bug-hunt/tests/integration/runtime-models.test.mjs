@@ -38,7 +38,7 @@ test('product runtime composes durable model branches through its own NATS ident
  let service;
  const operations=new Map(),embeddingRequests=[],classifyingRequests=[],getRequests=[],protocolFailures=[];
  const receipts=[],originals=new Map();
- const processing={enabled:false,embeddingEnabled:true,classificationEnabled:true,externalAllowedOwners:[f.user.id],externalProjections:[],externalProjectionPolicy:"technical-fields-v1",intervalMs:60000,deadlineMs:30000,heartbeatMs:1000,leaseMs:30000,intakeReserveBytes:16777216,maxDerivativeBytes:67108864,dailyLimits:{embedding:{owner:10,global:10},classification:{owner:10,global:10}}};
+ const processing={enabled:false,embeddingEnabled:true,classificationEnabled:true,externalAllowedOwners:[f.user.id],externalProjections:[],externalProjectionPolicy:"technical-fields-v1",intervalMs:60000,deadlineMs:30000,heartbeatMs:1000,leaseMs:30000,intakeReserveBytes:16777216,maxDerivativeBytes:67108864,dailyLimits:{embedding:{owner:null,global:null},classification:{owner:1000,global:1000}}};
  const requireProtocol=(condition,code)=>{if(!condition)throw new Error(code);};
  /** Детерминированные метки — только проверка композиции, не проверка качества модели. */
  function answers(questions){
@@ -194,7 +194,7 @@ test('product runtime composes durable model branches through its own NATS ident
   const saved=await f.runtime.pool.query('SELECT id,observation FROM report WHERE installation_id=$1',[installationId]);
   for(const row of saved.rows)assert.equal(observationHash(row.observation),originals.get(row.id));
   const status=await f.call('brai.bug_hunt.v2.processing.status',{});
-  assert.equal(status.paused,false);assert.equal(status.limits.dailyLimits.classification.global,10);
+  assert.equal(status.paused,false);assert.deepEqual(status.limits.dailyLimits,processing.dailyLimits);
   assert.equal(protocolFailures.length,0,protocolFailures.join(','));
  }finally{
   f.cfg.processing={...processing,enabled:false};
