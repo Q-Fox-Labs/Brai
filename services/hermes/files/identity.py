@@ -154,6 +154,7 @@ class OwnerFiles:
                     or '..' in Path(p).parts or (not Path(p).is_relative_to(home) and
                     (key != 'serviceRoots' or p not in (
                         '/opt/brai-profile/engine', '/opt/brai-profile/runtime',
+                        '/opt/brai-profile/skills',
                         '/opt/brai-profile/instructions', '/opt/brai-profile/system-skills'))) for p in roots):
                 raise PermissionError('Foreign file root')
         return value
