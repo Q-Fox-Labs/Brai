@@ -1,7 +1,8 @@
 // ABOUTME: Читает защищённые явные параметры экземпляра bug-hunt.
 // ABOUTME: Не принимает настройки или credentials из предметного запроса.
 import {readFileSync,lstatSync} from "node:fs";
-import {GENERATION} from "./projection.js";
+import {GENERATION,EXTERNAL_PROJECTION_POLICY,prepareExternalProjection} from "./projection.js";
+import type {Observation} from "./contracts.js";
 import {generationPattern} from "./generations.js";
 import {isAbsolute} from "node:path";
 
@@ -42,6 +43,7 @@ export interface ProcessingConfig {
  targetGeneration:string;
  enabled:boolean;embeddingEnabled:boolean;classificationEnabled:boolean;
  externalAllowedOwners:string[];externalProjections:ApprovedExternalProjection[];
+ externalProjectionPolicy:typeof EXTERNAL_PROJECTION_POLICY|null;
  deadlineMs:number;intervalMs:number;heartbeatMs:number;leaseMs:number;
  intakeReserveBytes:number;maxDerivativeBytes:number;
  dailyLimits:{embedding:{owner:number;global:number};classification:{owner:number;global:number}};
@@ -50,7 +52,7 @@ export interface ProcessingConfig {
 export function processingConfig(value:unknown):ProcessingConfig {
  if(value!==undefined&&(!value||typeof value!=="object"||Array.isArray(value)))throw new Error("INVALID_PROCESSING_CONFIG");
  const raw=(value??{}) as Record<string,any>;
- if(Object.keys(raw).some(k=>!["targetGeneration","enabled","embeddingEnabled","classificationEnabled","externalAllowedOwners","externalProjections","deadlineMs","intervalMs","heartbeatMs","leaseMs","intakeReserveBytes","maxDerivativeBytes","dailyLimits"].includes(k)))throw new Error("INVALID_PROCESSING_CONFIG");
+ if(Object.keys(raw).some(k=>!["targetGeneration","enabled","embeddingEnabled","classificationEnabled","externalAllowedOwners","externalProjections","externalProjectionPolicy","deadlineMs","intervalMs","heartbeatMs","leaseMs","intakeReserveBytes","maxDerivativeBytes","dailyLimits"].includes(k)))throw new Error("INVALID_PROCESSING_CONFIG");
  const number=(key:string,fallback:number,min:number,max:number)=>{
   const n=raw[key]??fallback;
   if(!Number.isSafeInteger(n)||n<min||n>max)throw new Error("INVALID_PROCESSING_CONFIG");return n;
@@ -59,6 +61,8 @@ export function processingConfig(value:unknown):ProcessingConfig {
  const owners=raw.externalAllowedOwners??[],projections=raw.externalProjections??[];
  if(!Array.isArray(owners)||owners.length>100||!owners.every(v=>typeof v==="string"&&v.length>0&&v.length<=255)||
  !Array.isArray(projections)||projections.length>100)throw new Error("INVALID_PROCESSING_CONFIG");
+ const externalProjectionPolicy=raw.externalProjectionPolicy??null;
+ if(externalProjectionPolicy!==null&&externalProjectionPolicy!==EXTERNAL_PROJECTION_POLICY)throw new Error("INVALID_PROCESSING_CONFIG");
  const seen=new Set<string>();
  for(const p of projections){
   if(!p||typeof p!=="object"||Array.isArray(p)||Object.keys(p).some(k=>!["ownerId","inputHash","text","excludedFields","policyVersion"].includes(k))||
@@ -75,7 +79,7 @@ export function processingConfig(value:unknown):ProcessingConfig {
  };
  const targetGeneration=raw.targetGeneration===undefined?GENERATION:raw.targetGeneration;if(typeof targetGeneration!=="string"||!generationPattern.test(targetGeneration))throw new Error("INVALID_PROCESSING_CONFIG");
  const cfg:ProcessingConfig={targetGeneration,enabled:flag("enabled"),embeddingEnabled:flag("embeddingEnabled"),classificationEnabled:flag("classificationEnabled"),
-  externalAllowedOwners:[...owners],externalProjections:projections.map(p=>({...p,excludedFields:[...p.excludedFields]})),
+  externalProjectionPolicy,externalAllowedOwners:[...owners],externalProjections:projections.map(p=>({...p,excludedFields:[...p.excludedFields]})),
   deadlineMs:number("deadlineMs",30000,1000,30000),intervalMs:number("intervalMs",5000,1000,60000),
   heartbeatMs:number("heartbeatMs",5000,1000,10000),leaseMs:number("leaseMs",30000,10000,300000),
   intakeReserveBytes:number("intakeReserveBytes",67108864,16777216,1073741824),
@@ -85,9 +89,10 @@ export function processingConfig(value:unknown):ProcessingConfig {
  return cfg;
 }
 
-/** Выбирает только заранее очищенную оператором проекцию точного неизменяемого входа. */
-export function approvedProjection(settings:ProcessingConfig,ownerId:string,inputHash:string) {
+/** Применяет защищённую политику к проверенному immutable входу; точная ручная проекция имеет приоритет. */
+export function approvedProjection(settings:ProcessingConfig,ownerId:string,inputHash:string,observation?:Observation) {
  if(!settings.classificationEnabled||!settings.externalAllowedOwners.includes(ownerId))return null;
  const p=settings.externalProjections.find(p=>p.ownerId===ownerId&&p.inputHash===inputHash);
- return p?{text:p.text,excluded_fields:[...p.excludedFields],policy_version:p.policyVersion}:null;
+ if(p)return {text:p.text,excluded_fields:[...p.excludedFields],policy_version:p.policyVersion};
+ return settings.externalProjectionPolicy===EXTERNAL_PROJECTION_POLICY&&observation?prepareExternalProjection(observation,[ownerId]):null;
 }

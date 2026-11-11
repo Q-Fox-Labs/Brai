@@ -61,3 +61,9 @@ targetGeneration готовит embedding рядом с active, без повт�
 Обычный test не обращается к моделям. Изолированные integration tests используют
 отдельные PostgreSQL/NATS fixture; model-quality.mjs запускается только явно
 с отдельным UUID и синтетическими текстами. Replay этого UUID не вызывает inference.
+
+Автоматическая классификация включается защищённой политикой
+processing.externalProjectionPolicy=technical-fields-v1 и явным
+externalAllowedOwners. Сервис готовит технические поля новых и накопленных
+обращений сам; ручной список externalProjections не требуется.
+Точные правила исключений, ограничения и аудит описаны в SYSTEMATIZATION.md.

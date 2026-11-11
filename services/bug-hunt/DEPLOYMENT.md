@@ -151,3 +151,19 @@ stage-2 binary с прежним ON CONFLICT очереди несовмести
 Исходная схема v1 и клиентские DTO не меняются; восстановление поколения не
 удаляет additive schema и данные. job_id текущей ветви для processing.retry
 доступен через enrichment.processing.branches вместе с index_generation.
+
+## Автоматическая подготовка для Jev
+
+После принятого выпуска включить classificationEnabled и защищённую
+externalProjectionPolicy=technical-fields-v1 для явно разрешённых owners.
+externalProjections может быть пустым: worker готовит каждое наблюдение
+автоматически, сохраняет исключённые поля и версию политики. Точный ручной
+inputHash/text остаётся необязательным исключением. Ни observation, ни модель
+не задают разрешение; выключение политики прекращает новые dispatch.
+
+Сначала поставить processing.pause, сохранить полную БД и runtime inputs,
+проверить Jev/Providers без inference и применить policy. Затем снять паузу,
+проверить реальные classification jobs и новые обращения, модель/usage,
+неизменность оригиналов и отсутствие новых invoke при replay.
+Суточные бюджеты сохраняются: оставшийся backfill продолжится после UTC rollover.
+Изменение только flags/политики не требует перезапуска runtime.

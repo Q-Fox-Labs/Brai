@@ -9,7 +9,7 @@ import addFormats from 'ajv-formats';
 import {startFixture,fixture as runtimeFixture} from './fixture.mjs';
 import {canonical} from '../../dist/contracts.js';
 import {observationHash,PIPELINE_VERSION} from '../../dist/processing.js';
-import {EMBEDDING_MODEL,GENERATION} from '../../dist/projection.js';
+import {EMBEDDING_MODEL,GENERATION,prepareExternalProjection} from '../../dist/projection.js';
 
 const encode=value=>Buffer.from(JSON.stringify(value));
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -38,7 +38,7 @@ test('product runtime composes durable model branches through its own NATS ident
  let service;
  const operations=new Map(),embeddingRequests=[],classifyingRequests=[],getRequests=[],protocolFailures=[];
  const receipts=[],originals=new Map();
- const processing={enabled:false,embeddingEnabled:true,classificationEnabled:true,externalAllowedOwners:[f.user.id],externalProjections:[],intervalMs:60000,deadlineMs:30000,heartbeatMs:1000,leaseMs:30000,intakeReserveBytes:16777216,maxDerivativeBytes:67108864,dailyLimits:{embedding:{owner:10,global:10},classification:{owner:10,global:10}}};
+ const processing={enabled:false,embeddingEnabled:true,classificationEnabled:true,externalAllowedOwners:[f.user.id],externalProjections:[],externalProjectionPolicy:"technical-fields-v1",intervalMs:60000,deadlineMs:30000,heartbeatMs:1000,leaseMs:30000,intakeReserveBytes:16777216,maxDerivativeBytes:67108864,dailyLimits:{embedding:{owner:10,global:10},classification:{owner:10,global:10}}};
  const requireProtocol=(condition,code)=>{if(!condition)throw new Error(code);};
  /** Детерминированные метки — только проверка композиции, не проверка качества модели. */
  function answers(questions){
@@ -93,8 +93,8 @@ test('product runtime composes durable model branches through its own NATS ident
    requireProtocol(providers.decideRequest(body),'DECIDE_REQUEST_SCHEMA');
    requireProtocol(body.ownerId===f.user.id&&body.provider==='typesafe'&&body.model==='jev-1.13.0','DECIDE_SCOPE_OR_SELECTOR');
    requireProtocol(!operations.has(body.operationId),'DECIDE_INVOKE_REPLAY');
-   const projection=processing.externalProjections.find(p=>p.ownerId===body.ownerId&&p.text===body.state);
-   requireProtocol(!!projection,'UNAPPROVED_EXTERNAL_STATE');
+   const allowedStates=[observation,{...observation,title:'Synthetic second runtime observation',observed:'The stored value is missing'}].map(o=>prepareExternalProjection(o).text);
+   requireProtocol(allowedStates.includes(body.state),'UNAPPROVED_EXTERNAL_STATE');
    classifyingRequests.push(body);const now=Date.now();
    const accepted={operationId:body.operationId,ownerId:body.ownerId,phase:'accepted',cancelRequested:false,createdAt:now,finishedAt:null,keyExpiresAt:now+7*86400000,resultExpiresAt:null,route:{provider:'typesafe',model:'jev-1.13.0',catalogVersion:'fixture-only-1'},result:null,errorCode:null,resultExpired:false,billingMayContinue:false};
    const succeeded={...accepted,phase:'succeeded',finishedAt:now+1,resultExpiresAt:now+86400000,result:{provider:'typesafe',requestedModel:'jev-1.13.0',actualModel:'jev-1.13.0',answers:answers(body.questions),usage:{inputTokens:30,outputTokens:8}}};
@@ -113,7 +113,7 @@ test('product runtime composes durable model branches through its own NATS ident
   const first=await report(observation);
   const secondObservation={...observation,title:'Synthetic second runtime observation',observed:'The stored value is missing'};
   const second=await report(secondObservation);
-  processing.externalProjections=[observation,secondObservation].map((obs,i)=>({ownerId:f.user.id,inputHash:observationHash(obs),text:'Synthetic approved incident '+i+': stored value is missing.',excludedFields:['diagnostic_text','steps'],policyVersion:'synthetic-reviewed-1'}));
+  assert.deepEqual(processing.externalProjections,[],'new reports do not require per-report configuration');
   const before=await f.runtime.pool.query("SELECT count(*)::int AS jobs,count(DISTINCT report_id)::int AS reports FROM processing_job WHERE installation_id=$1",[installationId]);
   assert.deepEqual(before.rows[0],{jobs:6,reports:2});
   const replay=await f.client.callTool({name:'bug_hunt_report',arguments:first.request});
@@ -132,6 +132,7 @@ test('product runtime composes durable model branches through its own NATS ident
    assert.equal(classification.model_id,'jev-1.13.0');assert.equal(classification.payload.actual_model,'jev-1.13.0');assert.equal(classification.payload.machine_suggestion,true);
    assert.equal(classification.payload.answers.evidence_sufficiency.noul,.8123456789012345);
    assert.equal(classification.payload.usage.inputTokens,30);
+   assert.equal(classification.payload.policy_version,'technical-fields-v1');
    assert.equal(classification.payload.operation_id,operations.get(classification.payload.operation_id).request.operationId);
   }
   const similar=await f.client.callTool({name:'bug_hunt_similar',arguments:{case_id:first.receipt.case_id}});

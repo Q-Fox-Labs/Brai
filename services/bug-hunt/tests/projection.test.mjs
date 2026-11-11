@@ -2,7 +2,7 @@
  // ABOUTME: Использует синтетические данные без внешних сервисов.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { searchProjection, exactSignature, modelProjection, chunkText, validateEmbedding } from "../dist/projection.js";
+import { prepareExternalProjection, searchProjection, exactSignature, modelProjection, chunkText, validateEmbedding } from "../dist/projection.js";
 
 const observation = { title: "Ошибка", component_id: "web", component_version: "1", operation: "открыть", expected: "не найдено", observed: "код 404", steps: "шаг", diagnostic_text: "диагностика" };
 test("точная сигнатура учитывает версии, доказательства, отрицание и область", () => {
@@ -65,4 +65,26 @@ test('explicitly unknown version is not sufficient context for automatic groupin
  assert.equal(exactSignature('installation','owner',input),null);
  assert.equal(exactSignature('installation','owner',{...input,component_version:' UNKNOWN '}),null);
  assert.notEqual(exactSignature('installation','owner',{...input,component_version:'1'}),null);
+});
+
+test('automatic technical projection preserves symptoms and omits sensitive or unsupported fields',()=>{
+ const original={...observation,steps:'1. Открыть\n2. Читать',diagnostic_text:'token=private',conversation_ref:'private conversation',run_id:'private-run'};
+ const before=structuredClone(original),result=prepareExternalProjection(original);
+ assert.match(result.text,/не найдено/);assert.match(result.text,/код 404/);assert.match(result.text,/2\. Читать/);
+ assert.ok(!result.text.includes('private'));
+ assert.deepEqual(result.excluded_fields,['conversation_ref','diagnostic_text','run_id']);
+ assert.deepEqual(original,before);
+ for(const secret of ['OPENAI_API_KEY=private','AWS_SECRET_ACCESS_KEY=private','PGPASSWORD=private','"openai_api_key": "private"','user_id=synthetic-other-owner','token=private','"token":"private"','"access_token": "private"','refresh-token=private','токен = секрет','пароль: секрет','PASSWORD: private','Authorization: Bearer private','Cookie: sid=private','-----BEGIN RSA PRIVATE KEY-----','https://example.test/private','postgres://user:pass@host/db','name@example.test','@private_user','Участник (@private_user) видит сбой','handle=@private_user','+7 (999) 123-45-67','192.168.1.10','12345678-1234-1234-1234-123456789abc','sk-123456789012345678901234']){
+  const projected=prepareExternalProjection({...original,observed:secret});
+  assert.ok(projected.excluded_fields.includes('observed'),secret);
+  assert.ok(!projected.text.includes(secret),secret);
+  assert.match(projected.text,/не найдено/);
+  assert.equal(modelProjection({...observation,observed:secret}).blocked,true,secret);
+ }
+});
+test('automatic projection normalizes Unicode without changing original and returns null for empty safe text',()=>{
+ const input={title:'тест😀\r\nещё',operation:'',expected:'',observed:''};
+ assert.match(prepareExternalProjection(input).text,/тест😀\nещё/);
+ assert.equal(input.title,'тест😀\r\nещё');
+ assert.equal(prepareExternalProjection({title:'token=private',operation:'',expected:'',observed:'',component_id:'web',component_version:'1'}),null);
 });
