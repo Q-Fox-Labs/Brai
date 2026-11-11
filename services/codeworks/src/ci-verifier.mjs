@@ -59,7 +59,10 @@ export async function loadRunProof(api,readProof,runId,attempt,source) {
   if(matching[0].expired)throw Error('CI_PROOF_UNAVAILABLE');
   return readProof(matching[0]);
 }
-/** API и registry читаются независимо от agent input; policy закрепляет workflow и recipe bytes. */
+/** API и registry читаются независимо от agent input; policy закрепляет workflow и recipe bytes.
+ * readVerified возвращает только owner proof для project/run/attempt и полной текущей policy.
+ * Live run/job и происхождение компонентов проверяются заново; состав сверяется целиком.
+ */
 export async function verifyCI(project,sha,checks,{api,registry,readProof,readVerified=async()=>null,saveVerified=async()=>{}}) {
   const policy=project.github.ci,repository=project.github.repository;
   if(!policy)return no('CI_POLICY_REQUIRED');
@@ -80,16 +83,20 @@ export async function verifyCI(project,sha,checks,{api,registry,readProof,readVe
   if(jobs.total_count!==1||jobs.jobs?.length!==1)return no('CI_JOB_IDENTITY_MISMATCH');
   const job=jobs.jobs[0];
   if(!match(job,{name:policy.check_name,head_sha:sha,status:'completed',conclusion:'success'})||job.check_run_url!==`https://api.github.com/repos/${repository}/check-runs/${check.id}`||job.labels?.length!==1||job.labels[0]!=='ubuntu-24.04')return no('CI_JOB_IDENTITY_MISMATCH');
-  const content=await api(`contents/${workflow}?ref=${sha}`);
-  if(content.encoding!=='base64'||hash(Buffer.from(content.content,'base64'))!==policy.workflow_sha256)return no('CI_WORKFLOW_UNTRUSTED');
-  if(!await verifyRecipeAt(api,sha,policy.recipe_sha256))return no('CI_RECIPE_UNTRUSTED');
+  // AIDEV-NOTE: Owner store привязан к полной policy и exact run/attempt; состав ниже обязан совпасть целиком.
+  const verifiedProof=await readVerified(runId,run.run_attempt);
+  if(!verifiedProof) {
+    const content=await api(`contents/${workflow}?ref=${sha}`);
+    if(content.encoding!=='base64'||hash(Buffer.from(content.content,'base64'))!==policy.workflow_sha256)return no('CI_WORKFLOW_UNTRUSTED');
+    if(!await verifyRecipeAt(api,sha,policy.recipe_sha256))return no('CI_RECIPE_UNTRUSTED');
+  }
   const hit=await registry.lookup('release',`run-${runId}-${run.run_attempt}`);
   if(!hit||!/^sha256:[0-9a-f]{64}$/.test(hit.digest)||!match(hit.metadata,{format:'brai-ci-object-v1',repository,source:sha,runId,attempt:String(run.run_attempt),kind:'composition',recipe:policy.recipe_sha256}))return no('CI_COMPOSITION_IDENTITY_MISMATCH');
   const manifest=await registry.readJSON('release',hit.digest,'release.json');
   if(!validateComposition(manifest))return no('CI_COMPOSITION_SCHEMA_INVALID');
   if(!match(manifest,{format:'brai-release-composition-v1',repository,source:sha,runId,attempt:String(run.run_attempt),workflow,recipe:policy.recipe_sha256})||manifest.billing?.state!=='hard-stop-confirmed'||!Array.isArray(manifest.components)||!manifest.components.length||new Set(manifest.components.map(c=>c.id)).size!==manifest.components.length)return no('CI_COMPOSITION_IDENTITY_MISMATCH');
   // Источники reuse принадлежат прошлому успешному exact run того же доверенного recipe.
-  const proof=await readVerified(runId,run.run_attempt)??await loadRunProof(api,readProof,runId,run.run_attempt,sha);
+  const proof=verifiedProof??await loadRunProof(api,readProof,runId,run.run_attempt,sha);
   if(proof.published?.digest!==hit.digest||!equal(proof.composition,manifest))return no('CI_RUN_DIGEST_MISMATCH');
   let catalog;
   if(manifest.reuseCatalog) {
@@ -107,7 +114,7 @@ export async function verifyCI(project,sha,checks,{api,registry,readProof,readVe
     const runKey=m.runId+'/'+m.attempt;if(!runs.has(runKey))runs.set(runKey,api(`actions/runs/${m.runId}/attempts/${m.attempt}`));
     const origin=await runs.get(runKey);
     if(!match(origin,{head_sha:m.source,path:workflow,event:'push',status:'completed',conclusion:'success'})||String(origin.run_attempt)!==m.attempt||origin.repository?.full_name!==repository)return no('CI_REUSE_ORIGIN_UNVERIFIED');
-    if(!sources.has(m.source))sources.set(m.source,verifyRecipeAt(api,m.source,policy.recipe_sha256));
+    if(!sources.has(m.source))sources.set(m.source,verifiedProof?Promise.resolve(true):verifyRecipeAt(api,m.source,policy.recipe_sha256));
     if(!await sources.get(m.source))return no('CI_REUSE_RECIPE_UNTRUSTED');
     if(catalogContains(catalog,component.id,actual))continue;
     if(!proofs.has(runKey))proofs.set(runKey,(async()=>await readVerified(m.runId,m.attempt)??await loadRunProof(api,readProof,m.runId,m.attempt,m.source))());
