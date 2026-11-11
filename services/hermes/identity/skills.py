@@ -295,6 +295,10 @@ def install_personal_policy(home, utils):
         except (OSError, ValueError, TypeError) as error:
             return json.dumps({'success': False, 'error': str(error)})
 
+    original_disabled = view._is_skill_disabled
+    view._is_skill_disabled = lambda *names, platform=None: (
+        False if any(name in system_aliases(utils) for name in names)
+        else original_disabled(*names, platform=platform))
     view.skill_view = personalized_view
     # A shared file's native mtime does not reflect changes of its personal supplement.
     def dedup(task, name, file):
@@ -315,7 +319,8 @@ def install_personal_policy(home, utils):
     schema = manager.SKILL_MANAGE_SCHEMA
     schema['description'] = ('Manage only the current user\'s personal skills. Shared/system skills are READ-ONLY. '
         'For a lesson about a shared skill use a single personalize operation with name and content '
-        '(complete personal addition; empty clears). It is automatically loaded by skill_view. ' + schema['description'])
+        '(complete personal addition; empty clears). It is automatically loaded by skill_view. ' + schema['description'].replace('Existing skills are modified wherever they live.',
+        'Existing personal skills are modified only in the current owner\'s personal directory.'))
     schema['parameters']['properties']['operations']['items']['anyOf'].append(
         manager._op_schema('personalize', {'content': {'type': 'string', 'description': 'Complete personal rules for this shared skill; empty clears.'}}, ('content',)))
     for name in ('_SKILL_REVIEW_PROMPT', '_COMBINED_REVIEW_PROMPT'):

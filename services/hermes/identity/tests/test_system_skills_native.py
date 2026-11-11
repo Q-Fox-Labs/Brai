@@ -219,7 +219,7 @@ print(mode+'-ok')
             (root/'outside.txt').write_text('untouched')
             for name in ['alice','bob']:
                 home=root/name; home.mkdir()
-                (home/'config.yaml').write_text('{}')
+                (home/'config.yaml').write_text('skills:\n  disabled: [common]\n')
             engine=os.environ['BRAI_NATIVE_ENGINE']
             for mode, name in [('seed','alice'),('recall','alice'),('foreign','bob')]:
                 env={**os.environ,'HERMES_HOME':str(root/name),'PYTHONPATH':source+':'+engine+':'+os.environ.get('PYTHONPATH','')}
