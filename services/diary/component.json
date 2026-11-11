@@ -9,7 +9,8 @@
   "executableSources": [
     "services/diary/src/main.mjs",
     "services/diary/src/migrate.mjs",
-    "services/diary/src/stdio-proxy.mjs"
+    "services/diary/src/stdio-proxy.mjs",
+    "services/diary/src/retry-transcription.mjs"
   ],
   "inputs": {
     "build": [],
@@ -25,13 +26,21 @@
       "services/diary/src/domain.mjs",
       "services/diary/src/luna.mjs",
       "services/diary/src/adapters.mjs",
+      "services/diary/src/retry-transcription.mjs",
+      "services/diary/src/recovery.mjs",
       "services/diary/src/store.mjs",
-      "services/diary/src/http.mjs"
+      "services/diary/src/http.mjs",
+      "services/diary/src/audio.mjs"
     ],
     "checks": [
+      "services/diary/tests/recovery.test.mjs",
       "services/diary/tests/domain.test.mjs",
       "services/diary/tests/postgres.integration.test.mjs",
-      "services/diary/tests/proxy.test.mjs"
+      "services/diary/tests/proxy.test.mjs",
+      "services/diary/tests/audio.test.mjs",
+      "services/diary/tests/parts.test.mjs",
+      "services/diary/tests/retry-http.test.mjs",
+      "services/diary/tests/transcription-contract.test.mjs"
     ]
   },
   "dependencies": [
@@ -54,7 +63,9 @@
     {
       "id": "transcription",
       "inputs": [
-        "services/transcription/CONTRACT.md"
+        "services/transcription/CONTRACT.md",
+        "services/transcription/contracts/**",
+        "services/transcription/schemas/**"
       ],
       "delivery": []
     }
@@ -75,13 +86,15 @@
     "entrypoints": [
       "services/diary/src/main.mjs",
       "services/diary/src/migrate.mjs",
-      "services/diary/src/stdio-proxy.mjs"
+      "services/diary/src/stdio-proxy.mjs",
+      "services/diary/src/retry-transcription.mjs"
     ],
     "smokeImports": [
       "services/diary/src/domain.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.22.1"
+      "Node.js 24.22.1",
+      "FFmpeg and ffprobe through configured commands; private writable spool; maximum audio duration 18000 seconds"
     ]
   },
   "deploy": {

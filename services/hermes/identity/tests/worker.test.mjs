@@ -2,7 +2,7 @@
 // ABOUTME: Не подключается к установленным сервисам и пользовательским данным.
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -32,8 +32,9 @@ test('Hermes Telegram ingress', () => {
   assert.equal(result.status, 0, result.stderr || result.error?.message || 'Telegram tests failed');
 });
 
-for (const pattern of ['test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py']) {
+for (const pattern of ['test_chat_journal.py', 'test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py']) {
   test('Hermes owner boundary: ' + pattern, () => {
+    if (pattern === 'test_chat_journal.py') mkdirSync(join(here, '../../../../tmp'), { recursive: true });
     const result = spawnSync(process.env.PYTHON || 'python3',
       ['-B', '-m', 'unittest', 'discover', '-s', here, '-p', pattern, '-v'],
       { encoding: 'utf8', timeout: 30000 });

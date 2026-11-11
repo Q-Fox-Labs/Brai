@@ -34,7 +34,13 @@ python3 "$HERMESCUSTOM_ROOT/scripts/context_gif.py" rare --scope '<scope>'
 
 ## Выделенный маршрут GIF
 
-Выбери Python установленного движка Hermes и фактический engine-root текущего экземпляра по его конфигурации. Не угадывай путь и не читай .env/credentials. Передай действующий HERMES_HOME. Пример с заполнителями:
+В личном Unix-профиле используй системный Python: API-ветке не нужны SDK или Python движка. Не выбирай `project_python` и не ищи venv:
+
+```sh
+python3 "$HERMESCUSTOM_ROOT/scripts/context_gif.py" once --scope '<scope>' --prompt 'Кот радуется завершённой задаче; мягкая короткая петля'
+```
+
+Для одиночного экземпляра вне личного Unix-профиля выбери Python установленного движка Hermes и фактический engine-root по его конфигурации. Не угадывай путь и не читай .env/credentials. Передай действующий HERMES_HOME. Пример с заполнителями:
 
 ```sh
 hermes_python="$(python3 -c 'import os,sys; from pathlib import Path; root=Path(os.environ["HERMES_ROOT"]); sys.path.insert(0,str(root)); from pm.environments import committed_venv,project_python; assert committed_venv(root) is not None; print(project_python(root))')"

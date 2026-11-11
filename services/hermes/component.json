@@ -30,7 +30,8 @@
     "services/hermes/identity/synthesize.py",
     "services/hermes/identity/media.py",
     "services/hermes/identity/network.py",
-    "services/hermes/identity/search.py"
+    "services/hermes/identity/search.py",
+    "services/hermes/identity/pause_preseed.py"
   ],
   "inputs": {
     "build": [],
@@ -83,11 +84,13 @@
       "services/hermes/extensions/LICENSE.hermes",
       "services/hermes/extensions/README.md",
       "services/hermes/extensions/config/server-defaults.json",
+      "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/extensions/locales/ru.desktop.yaml",
       "services/hermes/extensions/locales/ru.yaml",
       "services/hermes/extensions/patches/codex-cli-single-owner.patch",
       "services/hermes/extensions/patches/hermes-core.patch",
       "services/hermes/extensions/patches/memory-recall.patch",
+      "services/hermes/extensions/patches/turn-request-budget.patch",
       "services/hermes/extensions/patches/runtime-isolation.patch",
       "services/hermes/extensions/patches/russian-failure-notice.patch",
       "services/hermes/extensions/patches/telegram-media-display.patch",
@@ -164,6 +167,7 @@
       "services/hermes/identity/login.py",
       "services/hermes/identity/runtime.mjs",
       "services/hermes/identity/routes.py",
+      "services/hermes/identity/notifications.py",
       "services/hermes/identity/scope.py",
       "services/hermes/identity/telegram_proxy.py",
       "services/hermes/identity/search.py",
@@ -178,6 +182,8 @@
       "services/alerts/schemas/messages.schema.json",
       "services/hermes/identity/worker.py",
       "services/hermes/identity/control.mjs",
+      "services/hermes/identity/chat-display.mjs",
+      "services/hermes/identity/telegram-profiles.mjs",
       "services/hermes/identity/EGRESS.md",
       "services/hermes/identity/adapter.py",
       "services/hermes/identity/memory_registry.py",
@@ -196,6 +202,7 @@
       "services/hermes/identity/broker.py",
       "services/hermes/identity/network.py",
       "services/hermes/identity/telegram_runtime.py",
+      "services/hermes/identity/artifact_read.py",
       "services/hermes/identity/native_ingress.py",
       "services/hermes/identity/native.patch",
       "services/hermes/identity/egress.py",
@@ -215,9 +222,19 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
-      "services/hermes/identity/lifecycle.py"
+      "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/bug-hunt.mjs",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "services/bug-hunt/schemas/v2.schema.json",
+      "docs/user-agent/instructions/hermes/BUG_HUNT.md",
+      "services/hermes/identity/chat_journal.py",
+      "services/hermes/identity/telegram-chat-read.mjs",
+      "services/hermes/identity/ingress.openrpc.json",
+      "services/hermes/identity/pause_preseed.py",
+      "services/hermes/identity/schemas/pause-preseed.schema.json"
     ],
     "checks": [
+      "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/memos/embedding/adapter.test.mjs",
       "services/hermes/memos/tests/**",
       "services/hermes/telegram/tests/test_plugin.py",
@@ -247,6 +264,7 @@
       "services/hermes/identity/tests/transcription.test.mjs",
       "services/hermes/identity/tests/test_worker_ipc.py",
       "services/hermes/identity/tests/test_worker_delivery.py",
+      "services/hermes/identity/tests/test_worker_notifications.py",
       "services/hermes/identity/tests/test_worker_system.py",
       "services/hermes/identity/tests/test_lifecycle.py",
       "services/hermes/identity/tests/test_worker_permissions.py",
@@ -275,13 +293,27 @@
       "services/hermes/memos/tests/test_postgres_stream.py",
       "services/hermes/identity/tests/control_contract.test.mjs",
       "services/hermes/identity/tests/control_pagination.test.mjs",
+      "services/hermes/identity/tests/chat-display.test.mjs",
+      "services/hermes/identity/tests/telegram-profiles.test.mjs",
       "services/hermes/identity/tests/control_memory_detail.test.mjs",
       "services/hermes/identity/tests/memory_author.test.mjs",
       "services/hermes/identity/tests/memory_spool.test.mjs",
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
       "services/hermes/tests/dialogues-summary.test.mjs",
-      "services/hermes/identity/tests/test_system_skills_native.py"
+      "services/hermes/identity/tests/test_system_skills_native.py",
+      "services/hermes/tests/identity-bug-hunt.test.mjs",
+      "services/hermes/identity/tests/test_chat_journal.py",
+      "services/hermes/identity/tests/telegram-chat-read.test.mjs",
+      "services/hermes/identity/tests/test_worker_artifact_read.py",
+      "services/hermes/identity/tests/test_chat_pause.py",
+      "services/hermes/identity/tests/chat_pause.test.mjs",
+      "services/hermes/identity/tests/control_pause.test.mjs",
+      "services/hermes/identity/tests/memory_checkpoint.test.mjs",
+      "services/hermes/identity/tests/test_memory_checkpoint_integration.py",
+      "services/hermes/identity/tests/test_relay_lifetime.py",
+      "services/hermes/identity/tests/test_pause_preseed.py",
+      "services/hermes/identity/tests/pause_preseed.test.mjs"
     ]
   },
   "dependencies": [
@@ -368,6 +400,17 @@
       "delivery": [
         "services/auth/contracts"
       ]
+    },
+    {
+      "id": "bug-hunt",
+      "inputs": [
+        "services/bug-hunt/schemas/**",
+        "services/bug-hunt/contracts/**"
+      ],
+      "delivery": [
+        "services/bug-hunt/schemas",
+        "services/bug-hunt/contracts"
+      ]
     }
   ],
   "commands": {
@@ -424,11 +467,13 @@
       "services/hermes/extensions/LICENSE.hermes",
       "services/hermes/extensions/README.md",
       "services/hermes/extensions/config/server-defaults.json",
+      "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/extensions/locales/ru.desktop.yaml",
       "services/hermes/extensions/locales/ru.yaml",
       "services/hermes/extensions/patches/codex-cli-single-owner.patch",
       "services/hermes/extensions/patches/hermes-core.patch",
       "services/hermes/extensions/patches/memory-recall.patch",
+      "services/hermes/extensions/patches/turn-request-budget.patch",
       "services/hermes/extensions/patches/runtime-isolation.patch",
       "services/hermes/extensions/patches/russian-failure-notice.patch",
       "services/hermes/extensions/patches/telegram-media-display.patch",
@@ -504,6 +549,7 @@
       "services/hermes/identity/login.py",
       "services/hermes/identity/runtime.mjs",
       "services/hermes/identity/routes.py",
+      "services/hermes/identity/notifications.py",
       "services/hermes/identity/scope.py",
       "services/hermes/identity/telegram_proxy.py",
       "services/hermes/identity/search.py",
@@ -518,6 +564,8 @@
       "services/alerts/schemas/messages.schema.json",
       "services/hermes/identity/worker.py",
       "services/hermes/identity/control.mjs",
+      "services/hermes/identity/chat-display.mjs",
+      "services/hermes/identity/telegram-profiles.mjs",
       "services/hermes/identity/EGRESS.md",
       "services/hermes/identity/adapter.py",
       "services/hermes/identity/memory_registry.py",
@@ -536,6 +584,7 @@
       "services/hermes/identity/broker.py",
       "services/hermes/identity/network.py",
       "services/hermes/identity/telegram_runtime.py",
+      "services/hermes/identity/artifact_read.py",
       "services/hermes/identity/native_ingress.py",
       "services/hermes/identity/native.patch",
       "services/hermes/identity/egress.py",
@@ -555,7 +604,16 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
-      "services/hermes/extensions/scripts/context_gif.py"
+      "services/hermes/extensions/scripts/context_gif.py",
+      "services/hermes/identity/bug-hunt.mjs",
+      "services/bug-hunt/schemas/messages.schema.json",
+      "services/bug-hunt/schemas/v2.schema.json",
+      "docs/user-agent/instructions/hermes/BUG_HUNT.md",
+      "services/hermes/identity/chat_journal.py",
+      "services/hermes/identity/telegram-chat-read.mjs",
+      "services/hermes/identity/ingress.openrpc.json",
+      "services/hermes/identity/pause_preseed.py",
+      "services/hermes/identity/schemas/pause-preseed.schema.json"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
@@ -576,7 +634,8 @@
       "services/hermes/identity/synthesize.py",
       "services/hermes/identity/media.py",
       "services/hermes/identity/network.py",
-      "services/hermes/identity/search.py"
+      "services/hermes/identity/search.py",
+      "services/hermes/identity/pause_preseed.py"
     ],
     "smokeImports": [
       "services/hermes/catalog.mjs",

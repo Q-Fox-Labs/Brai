@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import Ajv from 'ajv';
+import addFormats from 'ajv-formats';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
@@ -35,7 +36,7 @@ test('AsyncAPI parses and declares exact subjects and valid references', () => {
     for (const value of Object.values(node)) visit(value);
   };
   visit(api);
-  assert.equal(Object.keys(api.operations).length, 7);
+  assert.equal(Object.keys(api.operations).length, 9);
 });
 
 test('admin schemas accept actual success and reject wrong fields', async () => {
@@ -173,4 +174,26 @@ print(json.dumps(gateway.admin(0, '/admin/list', {'userId':'user-a'}), ensure_as
     mutate(invalid.body.items[0]);
     assert.equal(validate(invalid), false);
   }
+});
+
+test('broker read-only FD metadata schema excludes filesystem and storage access', async () => {
+  const broker = await json('broker.openrpc.json');
+  const trusted = await json('../trusted.openrpc.json');
+  const method = broker.methods.find(item => item.name === 'ingress.open-artifact');
+  assert.equal(method.result.schema.$ref, '#/components/schemas/ArtifactReadResult');
+  assert.deepEqual(method['x-transport'], {ancillary:'SCM_RIGHTS', descriptorCount:1, access:'O_RDONLY', singleRequestOnly:true});
+  const definition = structuredClone(broker.components.schemas.ArtifactReadResult);
+  definition.properties.artifactId = trusted.components.schemas.Uuid;
+  const validator = new Ajv({strict:false});
+  addFormats(validator);
+  const validate = validator.compile(definition);
+  const result = {artifactId:'6aad00bf-f419-4dda-a61c-7cab79c8c9b0',filename:'voice.ogg',
+    mimeType:'audio/ogg',sizeBytes:42,sha256:'a'.repeat(64)};
+  assert.equal(validate(result), true, JSON.stringify(validate.errors));
+  for (const key of ['localPath','ownerId','internalUrl','credentials','fd']) {
+    assert.equal(validate({...result,[key]:'private'}), false, key);
+  }
+  for (const sizeBytes of [-1,67108865,'42']) assert.equal(validate({...result,sizeBytes}), false);
+  assert.equal(validate({...result,sha256:'invalid'}), false);
+  assert.equal(validate({...result,artifactId:'invalid'}), false);
 });

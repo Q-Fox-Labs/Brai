@@ -244,6 +244,34 @@ class ConsentTests(unittest.TestCase):
         self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
         consent.record_delivery(event,row["question"],True,"10")
         self.assertIsNotNone(self.store.query(self.scope.key)["delivered_at"])
+    def test_confirmed_stream_delivery_arms_exact_question_for_normal_reply(self):
+        row=self.prepare()
+        runner=types.SimpleNamespace(session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        turn=types.SimpleNamespace(source=source(),session_key="native-key",session_id="session",inbound_message_id="1")
+        consent.record_stream_delivery(runner,turn,row["question"],"10")
+        stored=self.store.query(self.scope.key)
+        self.assertIsNotNone(stored["delivered_at"])
+        self.assertEqual(stored["question_message_id"],"10")
+        self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",time.time()+1,"10"),"authorized")
+        self.assertTrue(self.store.claim(row["id"],stored["fingerprint"],"execute-once"))
+        self.assertFalse(self.store.claim(row["id"],stored["fingerprint"],"execute-again"))
+
+    def test_stream_receipt_never_arms_other_owner_session_topic_or_preview(self):
+        row=self.prepare()
+        runner=types.SimpleNamespace(session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        for actor,session,text,mid in ((source("bob"),"session",row["question"],"10"),
+            (source(thread="other"),"session",row["question"],"10"),
+            (source(),"new-session",row["question"],"10"),
+            (source(),"session","Предварительный ответ","10"),
+            (source(),"session",row["question"],None),
+            (source(),"session",row["question"],"__no_edit__")):
+            turn=types.SimpleNamespace(source=actor,session_key="native-key",session_id=session,inbound_message_id="1")
+            consent.record_stream_delivery(runner,turn,text,mid)
+            self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+        turn.inbound_message_id="other-input"
+        consent.record_stream_delivery(runner,turn,row["question"],"10")
+        self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+
     def test_reviewer_has_budget_context_and_bounded_retry(self):
         auxiliary=types.ModuleType("agent.auxiliary_client")
         auxiliary._get_task_timeout=lambda _:30

@@ -349,6 +349,83 @@
           }
         }
       }
+    },
+    "/v1/retry/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "retryTranscription",
+        "description": "Один явный повтор своей остановившейся ASR без raw/Luna; прежний неизвестный исход сохраняется.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "requestId"
+                ],
+                "properties": {
+                  "requestId": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Повтор запланирован либо точный replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "state",
+                    "entryId"
+                  ],
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "scheduled",
+                        "already_scheduled"
+                      ]
+                    },
+                    "entryId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "previousState": {
+                      "type": "string"
+                    },
+                    "previousErrorCode": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -556,6 +633,17 @@
               "receivedAt": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "strategy": {
+                "const": "parts-v1"
+              },
+              "parts": {
+                "type": "array",
+                "maxItems": 128,
+                "description": "Происхождение каждой части: Artifacts UUID, SHA256, PCM смещения и собственный requestId/actualModel Transcription.",
+                "items": {
+                  "type": "object"
+                }
               }
             }
           },
@@ -569,7 +657,10 @@
                 "const": "gpt-6-luna"
               },
               "promptVersion": {
-                "const": "diary-v1"
+                "enum": [
+                  "diary-v1",
+                  "diary-parts-v1"
+                ]
               },
               "rawResponse": {
                 "type": "string"
@@ -577,6 +668,123 @@
               "completedAt": {
                 "type": "string",
                 "format": "date-time"
+              }
+            }
+          },
+          "transcriptionRetry": {
+            "type": "object",
+            "description": "Текущее явное разрешение повтора и история прежних ключей; повтор любого ключа идемпотентен.",
+            "required": [
+              "key",
+              "previousRequestId",
+              "previousState",
+              "authorizedAt"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "previousRequestId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "previousState": {
+                "enum": [
+                  "failed",
+                  "outcome_unknown",
+                  "cancelled"
+                ]
+              },
+              "previousErrorCode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorizedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "history": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "key",
+                    "previousRequestId",
+                    "previousState",
+                    "authorizedAt"
+                  ],
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "previousRequestId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "previousState": {
+                      "enum": [
+                        "failed",
+                        "outcome_unknown",
+                        "cancelled"
+                      ]
+                    },
+                    "previousErrorCode": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "authorizedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "audioProgress": {
+            "type": "object",
+            "description": "Только подтверждённые PCM-кадры; процент = floor(100*готовые/totalFrames).",
+            "required": [
+              "totalFrames",
+              "sampleRate",
+              "transcribedFrames",
+              "correctedFrames",
+              "totalParts",
+              "completedParts"
+            ],
+            "properties": {
+              "totalFrames": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 288016000
+              },
+              "sampleRate": {
+                "const": 16000
+              },
+              "transcribedFrames": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "correctedFrames": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "totalParts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 128
+              },
+              "completedParts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
               }
             }
           }
@@ -617,6 +825,9 @@
           "createdAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "audioProgress": {
+            "$ref": "#/components/schemas/Entry/properties/audioProgress"
           }
         }
       },

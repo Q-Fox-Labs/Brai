@@ -14,6 +14,7 @@
 | [timer](timer.md) | Учёт интервалов времени |
 | [artifacts](artifacts.md) | Файлы, вложения и результаты |
 | [history](history.md) | История событий продукта |
+| [bug-hunt](bug-hunt.md) | Непроверенные наблюдения о сбоях и ручной разбор |
 | [alerts](alerts.md) | Уведомления и состояние прочтения |
 | [local-ai](local-ai.md) | Каталог моделей и локальные вычисления |
 | [transcription](transcription.md) | Задания расшифровки аудио |

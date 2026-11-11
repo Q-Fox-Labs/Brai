@@ -28,13 +28,21 @@ function message(code?: string): string {
   return "Обработка остановилась. Уже принятые материалы сохранены.";
 }
 /** Читает полный текст как текст: Markdown и инструкции дневника не исполняются. */
-export function DiaryRecord({entry, userId}: {entry: DiaryEntry; userId: string}) {
+export function DiaryRecord({entry, userId, onRetry, retrying = false}: {entry: DiaryEntry; userId: string; onRetry?: () => void; retrying?: boolean}) {
   return <article className="diary-entry">
     <header><p className="diary-date">{diaryDate(entry.eventDate)}</p><h1>{entry.title}</h1>
       <p className="diary-muted">{stage[entry.state]}</p>
     </header>
     {active(entry.state) && <p className="diary-processing" role="status">{entry.state === "awaiting_upload" ? "Файл ещё загружается. Если передача прервалась, выберите его снова." : "Файл принят. Обработку можно дождаться позже — она продолжится на сервере."}</p>}
+    {entry.audioProgress && <section className="diary-progress" aria-label="Обработка аудио" aria-live="polite">
+      {[["Расшифровка", entry.audioProgress.transcribedFrames], ["Подготовка текста", entry.audioProgress.correctedFrames]].map(([label, frames]) => {
+        const percent = Math.min(100, Math.floor(Number(frames) / entry.audioProgress!.totalFrames * 100));
+        return <div key={label as string}><div className="diary-progress-label"><span>{label}</span><span>{percent}%</span></div><progress aria-label={label as string} max={100} value={percent}/></div>;
+      })}
+    </section>}
+    {entry.state === "transcribing" && !entry.audioProgress && <p className="diary-muted">Подготавливаем аудио к расшифровке…</p>}
     {entry.state === "needs_attention" && <p className="diary-message diary-error" role="alert">{message(entry.errorCode ?? undefined)}</p>}
+    {onRetry && entry.state === "needs_attention" && entry.errorCode === "TRANSCRIPTION_FAILED" && entry.rawText === null && <Button variant="outline" disabled={retrying} onClick={onRetry}>{retrying ? "Возобновляем…" : "Повторить расшифровку"}</Button>}
     {entry.state === "ready" && entry.eventDate === null && <p className="diary-processing">В записи не удалось однозначно определить дату события.</p>}
     {entry.correctedText !== null && <div className="diary-text">{entry.correctedText}</div>}
     {entry.rawText !== null && <details className="diary-original"><summary>Исходная расшифровка</summary><div className="diary-text">{entry.rawText}</div></details>}
@@ -147,6 +155,21 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
       }),
     });
   }
+  async function retry() {
+    if (locked.current || !entry) return;
+    const id = entry.id, storageKey = "brai.diary.retry:" + userId + ":" + id + ":" + (entry.transcriptionRetry?.key ?? "initial");
+    locked.current = true; setBusy(true); setError(""); setNotice("");
+    try {
+      let requestId: string | null = null;
+      try {requestId = localStorage.getItem(storageKey);} catch { /* Ключ текущего действия сохранится до ответа. */ }
+      if (!requestId || !/^[0-9a-f-]{36}$/i.test(requestId)) requestId = crypto.randomUUID();
+      try {localStorage.setItem(storageKey, requestId);} catch { /* Сервер сверяет ключ и терминальный исход прежней попытки. */ }
+      await api("/retry?id=" + encodeURIComponent(id), {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({requestId})});
+      if (alive.current) setNotice("Расшифровка возобновлена. Обработка продолжится на сервере.");
+      await refresh(); await open(id, true);
+    } catch (e) {if (alive.current) {setError((e as Error).message); await refresh().catch(() => {}); await open(id, true);}}
+    finally {locked.current = false; if (alive.current) setBusy(false);}
+  }
   async function upload(files: File[]) {
     if (locked.current || !files.length) return;
     locked.current = true; setBusy(true); setError(""); setNotice("");
@@ -168,16 +191,16 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
   }
   const rail = <div className="diary-rail">
     <Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button>
-    {loading ? <p role="status">Открываем Дневник…</p> : !entries.length ? <p>Сохранённые записи появятся здесь.</p> : <nav aria-label="Записи Дневника">{entries.map(item => <button key={item.id} type="button" className={selected === item.id ? "selected" : ""} onClick={() => void open(item.id)} aria-current={selected === item.id ? "page" : undefined}><strong>{item.title}</strong><span>{diaryDate(item.eventDate)}</span><small>{stage[item.state]}</small></button>)}</nav>}
+    {loading ? <p role="status">Открываем Дневник…</p> : !entries.length ? <p>Сохранённые записи появятся здесь.</p> : <nav aria-label="Записи Дневника">{entries.map(item => <button key={item.id} type="button" className={selected === item.id ? "selected" : ""} onClick={() => void open(item.id)} aria-current={selected === item.id ? "page" : undefined}><strong>{item.title}</strong><span>{diaryDate(item.eventDate)}</span><small>{stage[item.state]}{item.audioProgress && item.state === "transcribing" ? " · " + Math.floor(item.audioProgress.transcribedFrames / item.audioProgress.totalFrames * 100) + "%" : ""}</small></button>)}</nav>}
     {hasMore && <Button variant="outline" disabled={paging} onClick={() => {setPaging(true); void api("?offset=" + entries.length).then(data => {if (alive.current) {setEntries(old => [...old, ...data.entries.filter((row: DiarySummary) => !old.some(x => x.id === row.id))]); setHasMore(data.entries.length === 50);}}).catch(e => {if (alive.current) setError(e.message);}).finally(() => {if (alive.current) setPaging(false);});}}>Ещё записи</Button>}
   </div>;
   return <WorkspaceFrame section="diary" userId={userId} title="Дневник" railTitle="Записи" rail={rail}>
     <input className="diary-file-input" ref={input} type="file" multiple accept="audio/*,.mp3,.m4a,.wav,.ogg,.opus,.webm,.flac,.aac" aria-label="Выбрать аудиодневники" disabled={busy} onChange={event => {const files = Array.from(event.target.files ?? []); event.target.value = ""; void upload(files);}}/>
     <div className="diary-screen">
-      <div className="diary-toolbar"><p>Голосовые записи и тексты дневника</p><Button variant="outline" disabled={busy} onClick={() => {setError(""); void refresh().then(() => selected ? open(selected, true) : undefined).catch(e => {if (alive.current) setError(e.message);});}} aria-label="Обновить Дневник"><RefreshCw size={16}/></Button></div>
+      <div className="diary-toolbar"><p>Голосовые записи и тексты дневника</p><Button variant="outline" disabled={busy} onClick={() => {setError(""); void refresh().then(() => selected ? open(selected, true) : undefined).catch(e => {if (alive.current) setError(e.message);});}} aria-label="Обновить Дневник" title="Обновить список и состояние записей"><RefreshCw size={16}/></Button></div>
       {error && <p className="diary-message diary-error" role="alert">{error}</p>}
       {notice && <div className="diary-message" role="status"><p>{notice}</p>{progress !== null && <><progress value={progress} max={100}/><span>{progress}%</span>{uploadSize && <small>{uploadBytes(uploadSize.loaded)} из {uploadBytes(uploadSize.total)}</small>}<small>Не закрывайте страницу до окончания загрузки.</small></>}</div>}
-      {reading && !entry ? <p role="status">Читаем запись…</p> : entry ? <DiaryRecord entry={entry} userId={userId}/> : <div className="diary-empty"><BookOpen size={36} strokeWidth={1.3}/><h1>Сохрани свой день</h1><p>Загрузи аудиозапись. Мы расшифруем её,<br/>подготовим текст и определим дату событий.</p><Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button></div>}
+      {reading && !entry ? <p role="status">Читаем запись…</p> : entry ? <DiaryRecord entry={entry} userId={userId} onRetry={() => void retry()} retrying={busy}/> : <div className="diary-empty"><BookOpen size={36} strokeWidth={1.3}/><h1>Сохрани свой день</h1><p>Загрузи аудиозапись. Мы расшифруем её,<br/>подготовим текст и определим дату событий.</p><Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button></div>}
     </div>
   </WorkspaceFrame>;
 }

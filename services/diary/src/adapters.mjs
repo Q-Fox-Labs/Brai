@@ -4,6 +4,8 @@ import {createHash,timingSafeEqual} from 'node:crypto';
 import {serviceDataScope} from '../../auth/contracts/service-data-scope.mjs';
 import {DiaryFault,id} from './domain.mjs';
 import {correctWithLuna} from './luna.mjs';
+import {prepareAudioFiles} from './audio.mjs';
+import {createReadStream} from 'node:fs';
 /** Ограничивает чтение ответа до JSON parse без усечения. */
 export async function boundedJson(response,max=2*1024*1024){
  if(!response.body)throw new DiaryFault('BAD_REPLY',502);const reader=response.body.getReader(),parts=[];let size=0;
@@ -55,18 +57,66 @@ export function createAdapters(cfg,nc){
   if(!response.ok)throw new DiaryFault(value.errorCode==='RESULT_UNAVAILABLE'?'TRANSCRIPT_LOST':'TRANSCRIPTION_'+(/^[A-Z_]{1,64}$/.test(value.errorCode??'')?value.errorCode:'BAD_REPLY'),response.status);
   return value;
  }
- return {authenticate,active,prepared,
-  async artifact(e){return (await prepared(e)).artifact;},
-  async file(e){const a=(await prepared(e)).artifact;if(a.status!=='ready')throw new DiaryFault('NOT_READY',409);const url=new URL(a.internalUrl);if(url.origin!==cfg.artifactsInternalOrigin||url.pathname!=='/files/'+id(a.artifactId)||url.username||url.password||url.search||url.hash)throw new DiaryFault('BAD_REPLY',502);return {artifact:a,url:url.href};},
-  async transcribe(e){
-   const submitted=await transcription(e,'request.submit',{clientIdempotencyKey:e.id,audioArtifactId:e.audioArtifactId,requestedModel:null,deadlineAt:null});
-   const record=submitted.request??submitted;
-   if(['failed','outcome_unknown','cancelled'].includes(record.taskState))throw new DiaryFault('TRANSCRIPTION_FAILED',409);
-   const response=await transcription(e,'result.get',{requestId:record.requestId});
-   if(response.state==='available'&&response.result)return {text:response.result.text,provenance:{requestId:record.requestId,actualModel:response.result.actualModel,receivedAt:new Date().toISOString()}};
-   if(['lost','expired'].includes(response.state))throw new DiaryFault('TRANSCRIPT_LOST',409);
-   return null;
+
+ async function file(e){
+  const a=(await prepared(e)).artifact;if(a.status!=='ready')throw new DiaryFault('NOT_READY',409);
+  const url=new URL(a.internalUrl);if(url.origin!==cfg.artifactsInternalOrigin||url.pathname!=='/files/'+id(a.artifactId)||url.username||url.password||url.search||url.hash)throw new DiaryFault('BAD_REPLY',502);
+  return {artifact:a,url:url.href};
+ }
+ /** Wire-контракт Transcription требует UUID; ключ стабилен для части и попытки. */
+ const partKey=(e,p)=>{
+  const bytes=createHash('sha256').update(JSON.stringify(['diary:parts-v1',e.id,p.index,e.transcriptionRetry?.key??'initial'])).digest().subarray(0,16);
+  bytes[6]=(bytes[6]&0x0f)|0x80;bytes[8]=(bytes[8]&0x3f)|0x80;
+  const hex=bytes.toString('hex');
+  return [hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20)].join('-');
+ };
+ async function recognize(e,artifactId,key){
+  const submitted=await transcription(e,'request.submit',{clientIdempotencyKey:key,audioArtifactId:artifactId,requestedModel:null,deadlineAt:null});
+  const record=submitted.request??submitted;id(record.requestId);
+  if(['failed','outcome_unknown','cancelled'].includes(record.taskState))throw new DiaryFault('TRANSCRIPTION_FAILED',409);
+  const response=await transcription(e,'result.get',{requestId:record.requestId});
+  if(response.state==='available'&&response.result)return {text:response.result.text,provenance:{requestId:record.requestId,actualModel:response.result.actualModel,receivedAt:new Date().toISOString()}};
+  if(['lost','expired'].includes(response.state))throw new DiaryFault('TRANSCRIPT_LOST',409);
+  return {pending:true,requestId:record.requestId};
+ }
+ async function prepareAudio(e){
+  await active(e.ownerId,e.profileId);
+  const original=await file(e);
+  if(original.artifact.sha256!==e.audioSha256||original.artifact.sizeBytes!==e.audioSizeBytes)throw new DiaryFault('ORIGINAL_CHANGED',409);
+  const files=await prepareAudioFiles(cfg.audio,{entryId:e.id,url:original.url,sha256:e.audioSha256,sizeBytes:e.audioSizeBytes});
+  try{
+   const parts=[];
+   for(const part of files.parts){
+    await active(e.ownerId,e.profileId);
+    const filename=e.id+'.part.'+String(part.index).padStart(4,'0')+'.wav';
+    const input={requestId:'diary:part:v1:'+e.ownerId+':'+e.id+':'+part.index,ownerId:e.ownerId,kind:'copy',
+     metadata:{title:filename,filename,extension:'wav',mimeType:'audio/wav',source:'diary',
+      details:{entryId:e.id,parentArtifactId:e.audioArtifactId,role:'asr-part',index:part.index,startFrame:part.startFrame,frames:part.frames,sampleRate:files.sampleRate,totalFrames:files.totalFrames}}};
+    let prepared=await request('brai.artifacts.v1.prepare',input);
+    const check=a=>{if(a.ownerId!==e.ownerId||a.source!=='diary'||a.kind!=='copy'||a.filename!==filename||a.mimeType!=='audio/wav')throw new DiaryFault('ARTIFACT_OWNER_MISMATCH',403);};
+    check(prepared.artifact);
+    if(prepared.artifact.status!=='ready'){
+     const url=new URL(prepared.uploadUrl);
+     if(url.origin!==cfg.artifactsUploadOrigin||!/^\/upload\/[A-Za-z0-9_-]{16,512}$/.test(url.pathname)||url.username||url.password||url.search||url.hash)throw new DiaryFault('BAD_REPLY',502);
+     const response=await fetch(url,{method:'PUT',headers:{'content-type':'audio/wav','content-length':String(part.sizeBytes)},body:createReadStream(part.path),duplex:'half',redirect:'error',signal:AbortSignal.timeout(120000)});
+     await response.body?.cancel();if(response.status!==201&&response.status!==409)throw new DiaryFault('DEPENDENCY_UNAVAILABLE',503);
+     prepared=await request('brai.artifacts.v1.prepare',input);check(prepared.artifact);
+    }
+    const a=prepared.artifact;
+    if(a.status!=='ready'||a.sha256!==part.sha256||a.sizeBytes!==part.sizeBytes)throw new DiaryFault('ORIGINAL_CHANGED',409);
+    const {path,...descriptor}=part;parts.push({...descriptor,artifactId:id(a.artifactId)});
+   }
+   return {version:1,sampleRate:files.sampleRate,totalFrames:files.totalFrames,durationSeconds:files.durationSeconds,parts};
+  }finally{await files.cleanup();}
+ }
+ return {authenticate,active,prepared,file,prepareAudio,
+  async transcriptionStatus(e){
+   const part=e.audioProcessing?.parts.find(p=>typeof p.rawText!=='string');
+   return transcription(e,'request.submit',{clientIdempotencyKey:part?partKey(e,part):e.id,audioArtifactId:part?.artifactId??e.audioArtifactId,requestedModel:null,deadlineAt:null});
   },
+  async artifact(e){return (await prepared(e)).artifact;},
+  async transcribe(e){const r=await recognize(e,e.audioArtifactId,e.transcriptionRetry?.key??e.id);return r.pending?null:r;},
+  async transcribePart(e,part){return recognize(e,part.artifactId,partKey(e,part));},
   async correct(e){await active(e.ownerId,e.profileId);return correctWithLuna(cfg.luna,e);}
  };
 }

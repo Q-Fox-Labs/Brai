@@ -12,10 +12,18 @@ from pathlib import Path
 import sys
 import uuid
 from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 class GifError(ValueError):
     """Безопасный код ошибки GIF без содержимого HTTP и секретов."""
+
+
+class NoRedirect(HTTPRedirectHandler):
+    """Не передавать запрос или credential на адрес из HTTP redirect."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Отказать до следующего сетевого запроса."""
+        raise GifError('GIF_REDIRECT_REJECTED')
 
 
 def gif_frames(raw):
@@ -68,7 +76,6 @@ def gif_frames(raw):
 
 def api_generate(home, prompt, config):
     """Сгенерировать GIF через отдельный API-ключ, не меняя провайдер диалога."""
-    import httpx
     if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
         endpoint = 'http://127.0.0.1:18080/gif/v1/images/generations'
         headers = {'Content-Type': 'application/json'}
@@ -89,19 +96,17 @@ def api_generate(home, prompt, config):
     body = {'model': model, 'prompt': prompt, 'size': 'auto', 'quality': 'low',
             'complexity': 'low', 'n': 1, 'output_format': 'gif',
             'frame_count': 9, 'frame_duration_ms': 200}
-    with httpx.Client(timeout=httpx.Timeout(180, connect=30), headers=headers) as client:
-        with client.stream('POST', endpoint, json=body) as response:
-            response.raise_for_status()
-            chunks, total = [], 0
-            for chunk in response.iter_bytes():
-                total += len(chunk)
-                if total > 14 * 1024 * 1024:
-                    raise GifError('GIF_RESPONSE_TOO_LARGE')
-                chunks.append(chunk)
-            payload = json.loads(b''.join(chunks))
+    # AIDEV-NOTE: API-ветка запускается системным Python внутри личного
+    # профиля: зависимости SDK и ссылки на venv движка ей не нужны.
+    request = Request(endpoint, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
+    with build_opener(NoRedirect()).open(request, timeout=180) as response:
+        raw_response = response.read(14 * 1024 * 1024 + 1)
+        if len(raw_response) > 14 * 1024 * 1024:
+            raise GifError('GIF_RESPONSE_TOO_LARGE')
+        payload = json.loads(raw_response)
     raw = base64.b64decode(payload['data'][0]['b64_json'], validate=True)
     frames = gif_frames(raw)
-    cache = home / 'cache/generated/images'
+    cache = home / 'workspace/generated/images'
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / (uuid.uuid4().hex + '.gif')
     with target.open('xb') as output:
@@ -164,7 +169,7 @@ def native_generate(home, prompt):
     encoded = payload['data'][0]['b64_json']
     raw = base64.b64decode(encoded, validate=True)
     frames = gif_frames(raw)  # PNG с расширением .gif не проходит.
-    cache = home / 'cache/generated/images'
+    cache = home / 'workspace/generated/images'
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / (uuid.uuid4().hex + '.gif')
     with target.open('xb') as output:

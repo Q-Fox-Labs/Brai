@@ -29,6 +29,15 @@ class ProfileTests(unittest.TestCase):
                                model='fixture-model')
         self.assertIn('brai-telegram', value['plugins']['enabled'])
 
+    def test_child_tools_receive_only_the_trusted_proxy_allowlist(self):
+        value = native_profile(self.profile(), instructions_root='/software/instructions',
+                               model='fixture-model')
+        self.assertEqual(value['terminal']['env_passthrough'],
+                         ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'])
+        self.assertEqual(value['terminal']['cwd'], self.profile()['home'] + '/workspace')
+        self.assertNotIn('OPENAI_API_KEY', value['terminal']['env_passthrough'])
+        self.assertNotIn('NO_PROXY', value['terminal']['env_passthrough'])
+
     def test_model_routes_responses_to_named_local_provider(self):
         value = native_profile(self.profile(), instructions_root='/software/instructions',
                                model='fixture-model')

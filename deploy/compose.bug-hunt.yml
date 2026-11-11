@@ -1,0 +1,43 @@
+# ABOUTME: Запускает отдельно выпускаемый bug-hunt с явными защищёнными inputs.
+# ABOUTME: Runtime не получает owner credential, миграция не выполняется при старте.
+services:
+  bug-hunt:
+    image: ${BRAI_RUNTIME_IMAGE:?accepted runtime image required}
+    command: [node, services/bug-hunt/dist/main.js]
+    user: "1000:1000"
+    read_only: true
+    restart: unless-stopped
+    environment:
+      BRAI_BUG_HUNT_CONFIG: /run/bug-hunt/runtime.json
+    volumes:
+      # Directory mount observes atomic registry replacements; owner inputs live outside it.
+      - ${BUG_HUNT_RUNTIME_INPUTS_DIR:?app-only inputs directory required}:/run/bug-hunt:ro
+    ports:
+      - "127.0.0.1:${BUG_HUNT_MCP_PORT:?loopback MCP port required}:8080"
+    networks: [database, messaging]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 512m
+    healthcheck:
+      test: [CMD, node, services/bug-hunt/dist/health.js]
+      interval: 30s
+      timeout: 12s
+      retries: 3
+  bug-hunt-migrate:
+    image: ${BRAI_RUNTIME_IMAGE:?accepted runtime image required}
+    profiles: [migration]
+    command: [node, services/bug-hunt/dist/migrate.js]
+    user: "1000:1000"
+    read_only: true
+    env_file: [${BUG_HUNT_MIGRATION_INPUT:?owner input required}]
+    networks: [database]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+networks:
+  database:
+    external: true
+    name: ${BUG_HUNT_DATABASE_NETWORK:?database network required}
+  messaging:
+    external: true
+    name: ${BUG_HUNT_NATS_NETWORK:?messaging network required}

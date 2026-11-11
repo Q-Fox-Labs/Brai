@@ -7,7 +7,7 @@ import os
 import stat
 
 ROOT = Path('/opt/brai-profile/instructions')
-FILES = ('context.md', 'INDEX.md', 'BASE.md')
+FILES = ('context.md', 'INDEX.md', 'BASE.md', 'BUG_HUNT.md')
 SKILL = 'creative/context-gifs/SKILL.md'
 SKILLS_ROOT = Path('/opt/brai-profile/system-skills/skills')
 

@@ -17,13 +17,23 @@ logger = logging.getLogger(__name__)
 
 
 class Outbox:
+    """Хранить pending, подтверждения и постоянные отказы в пределах профиля."""
+
     def __init__(self, home, client):
+        """Создать закрытые каталоги очереди, не запуская writer."""
         self.root = Path(home) / "memos-rest"
         self.pending = self.root / "pending"
         self.receipts = self.root / "receipts"
-        for path in (self.root, self.pending, self.receipts):
+        self.failed = self.root / "failed"
+        for path in (self.root, self.pending, self.receipts, self.failed):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.chmod(0o700)
+        for path in (self.root, self.root.parent):
+            directory = os.open(path, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         self.client = client
         self.stop = threading.Event()
         self.wake = threading.Event()
@@ -34,6 +44,7 @@ class Outbox:
         self.worker.start()
 
     def submit(self, event_id, job):
+        """Идемпотентно сохранить событие; failed требует явного обслуживания."""
         # Exclusive creation prevents one session overwriting another's delivery state.
         path = self.pending / (event_id + ".json")
         lock_path = self.root / "submit.lock"
@@ -45,7 +56,7 @@ class Outbox:
                 self.client.register_job(job)
             from .admin import json_file
             from .client import MemOSError
-            for existing in (self.receipts / path.name, path):
+            for existing in (self.receipts / path.name, self.failed / path.name, path):
                 if existing.exists():
                     if job.get('request_hash') and json_file(existing).get('request_hash') != job['request_hash']:
                         raise MemOSError('Memory operation ID conflicts with its original payload')
@@ -67,6 +78,7 @@ class Outbox:
             raise MemOSError('Legacy/stale job is fenced')
 
     def process_once(self):
+        """Доставить готовые события; failed изменения остаются барьером порядка."""
         lock_path = self.root / "delivery.lock"
         with lock_path.open("a", encoding="utf-8") as lock:
             os.chmod(lock_path, 0o600)
@@ -79,7 +91,7 @@ class Outbox:
                     return json.loads(path.read_text(encoding="utf-8")).get("created_at", 0)
                 except (OSError, ValueError):
                     return 0  # Surface a damaged queue file before making later writes.
-            paths = sorted(self.pending.glob("*.json"), key=order)
+            paths = sorted([*self.pending.glob("*.json"), *self.failed.glob("*.json")], key=order)
             blocked = False
             for path in paths:
                 if self.stop.is_set():
@@ -90,12 +102,20 @@ class Outbox:
                     if (self.receipts / path.name).exists():
                         path.unlink(missing_ok=True)
                         continue
+                    if path.parent == self.pending and (self.failed / path.name).exists():
+                        path.unlink(missing_ok=True)
+                        continue
                     job = json.loads(path.read_text(encoding="utf-8"))
                     # AIDEV-NOTE: Только независимые события диалога можно переставлять.
                     # Любая другая операция остаётся барьером для всех последующих событий.
-                    independent = (job.get("operation") == "route" and not job.get("delete_filter")
+                    independent = (job.get("operation") in (None, "route") and not job.get("delete_filter")
                                    and not job.get("replacement_id") and not job.get("shared_infra")
-                                   and (job.get("body", {}).get("info") or {}).get("hermes_kind") in ("turn", "business_message"))
+                                   and (job.get("body", {}).get("info") or {}).get("hermes_kind") in ("turn", "checkpoint", "business_message"))
+                    if path.parent == self.failed:
+                        if not independent:
+                            break
+                        blocked = True
+                        continue
                     if blocked and not independent:
                         break
                     if job.get("next_attempt", 0) > time.time():
@@ -125,9 +145,23 @@ class Outbox:
                     logger.warning("MemOS delivery deferred: %s", error)
                     if job is not None:
                         job["attempts"] = job.get("attempts", 0) + 1
-                        job["next_attempt"] = time.time() + min(60, 2 ** min(job["attempts"], 6))
                         job["last_error"] = error
-                        atomic_json_write(path, job, mode=0o600, fsync_dir=True)
+                        permanent = getattr(exc, 'permanent', False) is True
+                        job["failure_class"] = "permanent" if permanent else "temporary"
+                        job["failure_status"] = getattr(exc, 'status', None)
+                        if permanent:
+                            job["failed_at"] = time.time()
+                            job.pop("next_attempt", None)
+                            atomic_json_write(self.failed / path.name, job, mode=0o600, fsync_dir=True)
+                            path.unlink(missing_ok=True)
+                            directory = os.open(self.pending, os.O_DIRECTORY)
+                            try:
+                                os.fsync(directory)
+                            finally:
+                                os.close(directory)
+                        else:
+                            job["next_attempt"] = time.time() + min(60, 2 ** min(job["attempts"], 6))
+                            atomic_json_write(path, job, mode=0o600, fsync_dir=True)
                     if job is None or not independent:
                         break
                     blocked = True
@@ -142,10 +176,13 @@ class Outbox:
             self.wake.clear()
 
     def status(self):
+        """Вернуть раздельные количества pending, failed и verified без текста памяти."""
         pending = list(self.pending.glob("*.json"))
-        result = {"pending": len(pending), "verified_events": len(list(self.receipts.glob("*.json")))}
+        failed = list(self.failed.glob("*.json"))
+        result = {"pending": len(pending), "failed": len(failed),
+                  "verified_events": len(list(self.receipts.glob("*.json")))}
         errors = []
-        for path in pending:
+        for path in [*pending, *failed]:
             try:
                 error = json.loads(path.read_text(encoding="utf-8")).get("last_error")
                 if error:
@@ -156,20 +193,31 @@ class Outbox:
         return result
 
     def flush(self, timeout, event_id=None):
+        """Дождаться verified; постоянный отказ не считается успешной доставкой."""
         deadline = time.monotonic() + timeout
         self.wake.set()
         while time.monotonic() < deadline:
             if event_id:
                 if (self.receipts / (event_id + ".json")).exists():
                     return True
+                if (self.failed / (event_id + ".json")).exists():
+                    return False
             elif not any(self.pending.glob("*.json")):
-                return True
+                return not any(self.failed.glob("*.json"))
             time.sleep(0.05)
         return False
 
     def receipt(self, event_id):
+        """Прочитать только квитанцию завершённого read-back."""
         try:
             return json.loads((self.receipts / (event_id + ".json")).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+
+    def failure(self, event_id):
+        """Прочитать сохранённый постоянный отказ без повторной отправки."""
+        try:
+            return json.loads((self.failed / (event_id + ".json")).read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
 

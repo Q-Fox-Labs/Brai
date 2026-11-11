@@ -1,0 +1,167 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.example/schemas/hermes/identity/pause-preseed.schema.json",
+  "description": "Root-only pause-before-start CLI. Конфигурация и запрос protected root0600; canonical chat обязан совпадать с expectedAuthorTelegramId. Registry binding сверяется до permanent UID drop. Успех означает fresh-connection readback атомарных pause и отдельного operator audit, а не подтверждение остановки worker.",
+  "definitions": {
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "Uid": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "TelegramId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "Thread": {
+      "type": "string",
+      "pattern": "^(?:|[1-9][0-9]{0,15})$",
+      "not": {
+        "const": "1"
+      }
+    },
+    "AbsolutePath": {
+      "type": "string",
+      "pattern": "^/",
+      "not": {
+        "pattern": "(?:^|/)\\.\\.(?:/|$)|\\u0000"
+      }
+    },
+    "Config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "registryPath",
+        "telegramJournalRoot",
+        "ingressUid",
+        "ingressGid"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "registryPath": {
+          "$ref": "#/definitions/AbsolutePath"
+        },
+        "telegramJournalRoot": {
+          "$ref": "#/definitions/AbsolutePath"
+        },
+        "ingressUid": {
+          "$ref": "#/definitions/Uid"
+        },
+        "ingressGid": {
+          "$ref": "#/definitions/Uid"
+        }
+      }
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "operationId",
+        "expectedUserId",
+        "expectedProfileId",
+        "expectedWorkerUid",
+        "expectedAuthorTelegramId",
+        "chat",
+        "thread",
+        "reason"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "operationId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "expectedUserId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "expectedProfileId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "expectedWorkerUid": {
+          "$ref": "#/definitions/Uid"
+        },
+        "expectedAuthorTelegramId": {
+          "$ref": "#/definitions/TelegramId"
+        },
+        "chat": {
+          "$ref": "#/definitions/TelegramId"
+        },
+        "thread": {
+          "$ref": "#/definitions/Thread"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S",
+          "not": {
+            "pattern": "\\u0000"
+          }
+        }
+      }
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "actor",
+        "auditId",
+        "operationId",
+        "userId",
+        "profileId",
+        "workerUid",
+        "chat",
+        "thread",
+        "generation",
+        "verified"
+      ],
+      "properties": {
+        "status": {
+          "const": "paused"
+        },
+        "actor": {
+          "const": "os:root"
+        },
+        "auditId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "userId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "profileId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "workerUid": {
+          "$ref": "#/definitions/Uid"
+        },
+        "chat": {
+          "$ref": "#/definitions/TelegramId"
+        },
+        "thread": {
+          "$ref": "#/definitions/Thread"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "verified": {
+          "const": true
+        }
+      }
+    }
+  }
+}

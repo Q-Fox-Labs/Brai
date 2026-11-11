@@ -721,6 +721,50 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.profile['status'] = 'blocked'
         self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.profiles', {}), {'profiles': []})
 
+    async def test_open_artifact_requires_ingress_and_current_owner(self):
+        params = {'uid': WORKER_UID, 'artifactId': '6aad00bf-f419-4dda-a61c-7cab79c8c9b0'}
+        fd = os.open(__file__, os.O_RDONLY)
+        with mock.patch.object(self.broker.files, 'open_ingress',
+                mock.AsyncMock(return_value=({'artifactId': params['artifactId']}, fd))) as opened:
+            try:
+                with self.assertRaises(PermissionError):
+                    await self.broker.open_artifact(WORKER_UID, params)
+                self.assertEqual(await self.broker.open_artifact(INGRESS_UID, params),
+                                 ({'artifactId': params['artifactId']}, fd))
+                opened.assert_awaited_once_with(WORKER_UID, self.profile, params['artifactId'])
+            finally:
+                os.close(fd)
+            self.profile['status'] = 'blocked'
+            with self.assertRaises(PermissionError):
+                await self.broker.open_artifact(INGRESS_UID, params)
+
+    async def test_open_artifact_closes_grant_if_profile_revoked_during_fetch(self):
+        params = {'uid': WORKER_UID, 'artifactId': '6aad00bf-f419-4dda-a61c-7cab79c8c9b0'}
+        fd = os.open(__file__, os.O_RDONLY)
+        async def fetch(*args):
+            self.profile['status'] = 'blocked'
+            return {}, fd
+        with mock.patch.object(self.broker.files, 'open_ingress', side_effect=fetch):
+            with self.assertRaises(PermissionError):
+                await self.broker.open_artifact(INGRESS_UID, params)
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
+    async def test_open_artifact_closes_grant_if_input_changes_during_fetch(self):
+        params = {'uid': WORKER_UID, 'artifactId': '6aad00bf-f419-4dda-a61c-7cab79c8c9b0',
+                  'turnId': 'turn', 'inputId': 'a' * 64}
+        turn = {'turnId': 'turn', 'inputId': 'a' * 64, 'telegramId': self.profile['telegramId']}
+        self.broker.turns[WORKER_UID] = turn
+        fd = os.open(__file__, os.O_RDONLY)
+        async def fetch(*args):
+            turn['inputId'] = 'b' * 64
+            return {}, fd
+        with mock.patch.object(self.broker.files, 'open_ingress', side_effect=fetch):
+            with self.assertRaises(PermissionError):
+                await self.broker.open_artifact(INGRESS_UID, params)
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
     async def test_proactive_artifact_fetch_is_ingress_only_and_owner_checked(self):
         artifact = '6aad00bf-f419-4dda-a61c-7cab79c8c9b0'
         with mock.patch.object(self.broker.files, 'fetch', mock.AsyncMock(
@@ -1170,7 +1214,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             "controlCommand": [sys.executable, "-c", "import time; time.sleep(60)"],
             "controlConfigPath": "synthetic-control-config",
             "socketPath": str(socket_path),
-            "ingressUid": INGRESS_UID,
+            "ingressUid": WORKER_UID,
             "stagingRoot": self.config["stagingRoot"],
             "registryPath": "unused-registry",
         }

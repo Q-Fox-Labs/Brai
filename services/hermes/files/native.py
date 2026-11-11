@@ -1077,7 +1077,9 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
     with ExitStack() as stack:
         media = []
         for item, caption in zip(items, captions):
-            file = stack.enter_context(open(item['localPath'], 'rb'))
+            file = item.get('readHandle')
+            if file is None:
+                file = stack.enter_context(open(item['localPath'], 'rb'))
             if item['presentation'] in classes:
                 media.append(classes[item['presentation']](media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
             else:
