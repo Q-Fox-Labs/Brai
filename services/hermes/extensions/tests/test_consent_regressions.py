@@ -76,3 +76,195 @@ class ConsentRegressions(unittest.TestCase):
                 consent.review_action(self.descriptor, scope, call=call)
             self.assertIn({'message_id':'2','text':'Добавь годовые вкладки'},
                 calls[0]['authenticated_conversation_requests'])
+
+    def test_voice_answer_is_transcribed_before_consent(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        row = self.prepare()
+        self.store.delivered(row['id'], '10')
+        event = SimpleNamespace(source=fixture.source(), internal=False, message_id='11',
+            text='', timestamp=time.time()+1, reply_to_message_id='10')
+        runner = SimpleNamespace(_session_key_for_source=lambda _: 'session',
+            session_store=SimpleNamespace(_db_for_key=lambda _: self.db),
+            _pending_event_audio_paths=lambda _: ['voice.ogg'],
+            _transcribe_pending_audio_event_once=AsyncMock(return_value=('enriched', ['да'])),
+            _delivery_adapter_for=lambda _: None)
+        self.assertIsNone(asyncio.run(fixture.consent.gateway_input_prepared(runner, event, event)))
+        runner._transcribe_pending_audio_event_once.assert_awaited_once()
+        self.assertEqual(self.store.query(self.scope.key)['status'], 'authorized')
+        self.assertEqual(self.store.requests(self.scope.key, 'alice')[-1]['text'], 'да')
+
+    def test_voice_answer_cannot_authorize_a_question_created_during_stt(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        first = self.prepare()
+        self.store.delivered(first['id'], '10')
+        async def transcribe(*_):
+            self.store.invalidate(first['id'])
+            second = self.prepare()
+            self.store.delivered(second['id'], '12')
+            return 'enriched', ['да']
+        event = SimpleNamespace(source=fixture.source(), internal=False, message_id='13',
+            text='', timestamp=time.time()+1)
+        runner = SimpleNamespace(_session_key_for_source=lambda _: 'session',
+            session_store=SimpleNamespace(_db_for_key=lambda _: self.db),
+            _pending_event_audio_paths=lambda _: ['voice.ogg'],
+            _transcribe_pending_audio_event_once=transcribe,
+            _delivery_adapter_for=lambda _: None)
+        reply = asyncio.run(fixture.consent.gateway_input_prepared(runner, event, event))
+        self.assertIn('не относится', reply)
+        self.assertEqual(self.store.query(self.scope.key)['status'], 'pending')
+
+    def test_pause_during_voice_echo_prevents_authorization(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        row = self.prepare()
+        self.store.delivered(row['id'], '10')
+        current = [True]
+        async def echo(*_, **kwargs):
+            current[0] = False
+        event = SimpleNamespace(source=fixture.source(), internal=False, message_id='11',
+            text='', timestamp=time.time()+1)
+        runner = SimpleNamespace(_session_key_for_source=lambda _: 'session',
+            session_store=SimpleNamespace(_db_for_key=lambda _: self.db),
+            _pending_event_audio_paths=lambda _: ['voice.ogg'],
+            _transcribe_pending_audio_event_once=AsyncMock(return_value=('enriched', ['да'])),
+            _delivery_adapter_for=lambda _: object(), _reply_anchor_for_event=lambda _: None,
+            _thread_metadata_for_source=lambda *_: {}, _echo_pending_stt_transcripts_once=echo,
+            _brai_consent_route_current=lambda _: current[0])
+        self.assertEqual(asyncio.run(fixture.consent.gateway_input_prepared(runner,event,event)), '')
+        self.assertEqual(self.store.query(self.scope.key)['status'], 'pending')
+
+    def test_reply_to_delivered_reminder_keeps_first_receipt(self):
+        row = self.prepare()
+        self.store.delivered(row['id'], '10')
+        self.store.delivered(row['id'], '20')
+        self.assertEqual(self.store.query(self.scope.key)['question_message_id'], '10')
+        self.assertEqual(self.store.answer(self.scope.key, 'alice', '21', 'да',
+            time.time()+1, '20', expected_id=row['id']), 'authorized')
+
+    def test_new_generation_invalidates_old_grant_and_request_evidence(self):
+        consent = fixture.consent
+        self.scope.generation = 0
+        row = self.prepare()
+        self.store.record_request(self.scope.key, 'alice', '1', 'Старое поручение', generation=0)
+        self.store.record_request(self.scope.key, 'alice', '2', 'Новое поручение', generation=2)
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'Новое поручение', '2',
+                generation_reader=lambda: 2) as scope:
+            self.assertEqual(self.store.requests(scope.key,scope.owner,scope.generation), [{'message_id':'2','text':'Новое поручение'}])
+            self.assertIsNone(self.store.query(scope.key))
+        self.assertFalse(self.store.claim(row['id'], row['fingerprint'], 'old', generation=2))
+
+    def test_old_running_turn_cannot_consume_new_generation_consent(self):
+        consent = fixture.consent
+        generation = [0]
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'Старый ход', '1',
+                generation_reader=lambda: generation[0]):
+            generation[0] = 2
+            self.scope.generation = 2
+            row = self.prepare()
+            self.store.delivered(row['id'], '10')
+            self.assertEqual(self.store.answer(self.scope.key, 'alice', '11', 'да',
+                time.time()+1, generation=2), 'authorized')
+            with consent.tool_scope('terminal', {'command':'delete trip'}, 'old'):
+                self.assertEqual(consent.gate('delete trip')['status'], 'consent_changed')
+            self.assertEqual(self.store.query(self.scope.key)['status'], 'authorized')
+
+    def test_migration_revokes_only_unverifiable_unused_grants(self):
+        from dataclasses import replace
+        rows = {}
+        for status in ('pending', 'authorized', 'executing', 'unknown', 'completed', 'denied'):
+            scope = replace(self.scope, key=status)
+            row = self.store.prepare(scope, self.descriptor, fixture.REVIEW, 'Вопрос?')
+            rows[status] = row['id']
+            self.db._execute_write(lambda conn: conn.execute(
+                'UPDATE brai_consent SET status=? WHERE id=?', (status,row['id'])))
+        self.db._execute_write(lambda conn: conn.execute('ALTER TABLE brai_consent DROP COLUMN generation'))
+        self.db._execute_write(lambda conn: conn.execute('ALTER TABLE brai_consent_requests DROP COLUMN generation'))
+        store = fixture.consent.Store(self.db)
+        states = self.db._execute_write(lambda conn: dict(conn.execute('SELECT id,status FROM brai_consent')))
+        for previous, identity in rows.items():
+            expected = 'invalidated' if previous in ('pending','authorized') else previous
+            self.assertEqual(states[identity], expected)
+        row = self.prepare()
+        fixture.consent.Store(self.db)
+        self.assertEqual(store.query(self.scope.key)['id'], row['id'])
+        self.assertEqual(store.query(self.scope.key)['status'], 'pending')
+
+    def test_new_grant_cannot_be_consumed_with_legacy_fingerprint(self):
+        row = self.prepare()
+        self.store.delivered(row['id'], '10')
+        self.assertEqual(self.store.answer(self.scope.key, 'alice', '11', 'да',
+            time.time()+1), 'authorized')
+        legacy = fixture.consent._hash(self.descriptor)
+        self.assertNotEqual(row['fingerprint'], legacy)
+        self.assertFalse(self.store.claim(row['id'], legacy, 'legacy-execution'))
+        self.assertEqual(self.store.query(self.scope.key)['status'], 'authorized')
+
+    def test_completed_and_unknown_effects_keep_legacy_readable_fingerprints(self):
+        for known in (True, False):
+            with self.subTest(known=known):
+                row = self.prepare()
+                self.store.delivered(row['id'], '10')
+                self.assertEqual(self.store.answer(self.scope.key,'alice','11','да',time.time()+1), 'authorized')
+                self.assertTrue(self.store.claim(row['id'], row['fingerprint'], 'execute'))
+                self.store.finish(row['id'], 'execute', known)
+                legacy = fixture.consent._hash(self.descriptor)
+                found = self.db._execute_write(lambda conn: conn.execute(
+                    'SELECT status FROM brai_consent WHERE id=? AND fingerprint=?',
+                    (row['id'],legacy)).fetchone())
+                self.assertIsNotNone(found)
+                self.assertEqual(found[0], 'completed' if known else 'unknown')
+                self.assertFalse(self.store.claim(row['id'],legacy,'repeat'))
+
+    def test_generation_fence_keeps_unknown_execution_readable_after_rollback(self):
+        self.scope.generation = 0
+        row = self.prepare()
+        self.store.delivered(row['id'], '10')
+        self.store.answer(self.scope.key,'alice','11','да',time.time()+1,generation=0)
+        self.assertTrue(self.store.claim(row['id'],row['fingerprint'],'execute',generation=0))
+        self.store.fence(self.scope.key,'alice',2)
+        saved = self.store.operation(self.scope.key,row['fingerprint'])
+        self.assertEqual(saved['status'],'unknown')
+        self.assertEqual(saved['fingerprint'],fixture.consent._hash(self.descriptor))
+
+    def test_stop_or_pause_during_review_cannot_allow_or_create_question(self):
+        from unittest.mock import patch
+        consent = fixture.consent
+        for decision in ('allow', 'needs_consent'):
+            with self.subTest(decision=decision):
+                current = [0]
+                def review(*_, **kwargs):
+                    current[0] = 1
+                    return dict(fixture.REVIEW, decision=decision)
+                with consent.turn_scope(self.db, fixture.source(), 'session', 'Проверь', '1',
+                        generation_reader=lambda: current[0]):
+                    with consent.tool_scope('terminal', {'command':'delete trip'}, 'tool'):
+                        with patch.object(consent, 'review_action', side_effect=review):
+                            result = consent.gate('delete trip')
+                self.assertEqual(result['status'], 'consent_changed')
+                self.assertIsNone(self.store.query(self.scope.key))
+
+    def test_native_stop_fences_turn_without_requiring_identity_counter_change(self):
+        from types import SimpleNamespace
+        consent = fixture.consent
+        current = [True]
+        runner = SimpleNamespace(_is_session_run_current=lambda key, generation: current[0],
+            _brai_consent_generation=lambda source: 4)
+        ctx = SimpleNamespace(source=fixture.source(), run_generation=7)
+        reader = lambda: consent.gateway_generation(runner, ctx, 'session')
+        self.assertEqual(reader(), 4)
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'Проверь', '1',
+                generation_reader=reader):
+            current[0] = False
+            with consent.tool_scope('terminal', {'command':'delete trip'}, 'tool'):
+                self.assertEqual(consent.gate('delete trip')['status'], 'consent_changed')
+        self.assertIsNone(self.store.query(self.scope.key))
+
+
+
+if __name__ == "__main__":
+    unittest.main()

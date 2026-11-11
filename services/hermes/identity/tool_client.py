@@ -7,6 +7,7 @@ import socket
 import struct
 import sys
 import uuid
+from .ipc import safe_failure
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
 
@@ -33,8 +34,14 @@ def broker_call(method, params, *, path=None, timeout=120):
         raise ConnectionError('Broker response incomplete')
     response = json.loads(line)
     if (not isinstance(response, dict) or response.get('jsonrpc') != '2.0'
-            or response.get('id') != ident or 'error' in response or 'result' not in response):
+            or response.get('id') != ident or ('error' in response) == ('result' in response)):
         raise ConnectionError('Broker rejected request')
+    if 'error' in response:
+        error = ConnectionError('Broker rejected request')
+        data = response['error'].get('data') if isinstance(response['error'], dict) else None
+        error.diagnostic = (safe_failure(**{k: data.get(k) for k in ('reason', 'stage')})
+            if isinstance(data, dict) else safe_failure())
+        raise error
     return response['result']
 
 

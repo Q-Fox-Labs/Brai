@@ -95,6 +95,18 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             return {'artifact_id': self.files.publish(path, 'ipc-publish')['artifactId']}
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
 
+    async def test_forbidden_rpc_is_a_permanent_native_send_result(self):
+        calls = []
+        async def denied(owner, action, payload):
+            calls.append(action)
+            raise RpcError(-32003, 'Forbidden')
+        worker = self.adapter(denied)
+        result = await worker.send('123', 'Brai онлайн', metadata={'thread_id':'77'})
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_kind, 'forbidden')
+        self.assertFalse(result.retryable)
+        self.assertEqual(calls, ['send'])
+
     async def test_final_edit_uses_current_dispatch_topic_without_duplicate_send(self):
         calls = []
         async def deliver(owner, action, payload):

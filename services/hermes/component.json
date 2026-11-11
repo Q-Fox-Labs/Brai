@@ -273,6 +273,8 @@
       "services/hermes/identity/tests/test_login.py",
       "services/hermes/identity/tests/control.test.mjs",
       "services/hermes/identity/tests/test_broker.py",
+      "services/hermes/identity/tests/test_diagnostics.py",
+      "services/local-ai/schemas/messages.schema.json",
       "services/hermes/identity/tests/test_memory_boundary_contract.py",
       "services/hermes/identity/tests/test_network.py",
       "services/hermes/identity/tests/broker.test.mjs",

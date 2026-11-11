@@ -437,6 +437,11 @@ class Resolver:
                  str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
         if self.journal is not None and self.journal.chat_state(profile, (route[0], '' if route[1] == '1' else route[1]))['paused']:
             raise PermissionError('Conversation paused')
+        if '_brai_return_notice_generation' in metadata:
+            generation = metadata['_brai_return_notice_generation']
+            if type(generation) is not int or generation < 0:
+                raise PermissionError('Invalid return notice generation')
+            self._chat_generation(profile, route, generation)
         known = self.ledger.metadata(profile, route)
         if known is None and (route[1] or not re.fullmatch(r'[1-9][0-9]{0,19}', route[0])):
             raise PermissionError('Unknown owner conversation')

@@ -41321,7 +41321,7 @@ new file mode 100644
 index 00000000..f196f46f
 --- /dev/null
 +++ b/gateway/return_notices.py
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,288 @@
 +# ABOUTME: Хранит адресатов успешно доставленных предупреждений об остановке.
 +# ABOUTME: Подтверждает возврат по одному адресу, сохраняя ошибки для повтора.
 +"""Долговечные парные уведомления native gateway; без содержимого переписки."""
@@ -41332,6 +41332,8 @@ index 00000000..f196f46f
 +import contextlib
 +import json
 +import logging
++import math
++import time
 +from typing import Optional
 +from pathlib import Path
 +from uuid import uuid4
@@ -41366,7 +41368,7 @@ index 00000000..f196f46f
 +    raise LookupError("Shutdown notice adapter is not owned by this gateway")
 +
 +
-+def remember_return_notice(path: Path, platform: str, chat_id, thread_id, profile=None) -> None:
++def remember_return_notice(path: Path, platform: str, chat_id, thread_id, profile=None, *, generation=None) -> None:
 +    """Атомарно сохранить адрес успешного предупреждения; не хранить токены и текст.
 +
 +    Повторное предупреждение тому же адресу заменяет его квитанцию. Новая
@@ -41377,7 +41379,7 @@ index 00000000..f196f46f
 +    recipients = [r for r in recipients if return_notice_key(
 +        r["platform"], r["chat_id"], r.get("thread_id"), r.get("profile")) != key]
 +    recipients.append(dict(platform=key[1], chat_id=key[2], thread_id=key[3],
-+                           profile=key[0], notice_id=uuid4().hex))
++                           profile=key[0], notice_id=uuid4().hex, **({'generation': generation} if generation is not None else {})))
 +    atomic_json_write(path, {"recipients": recipients}, mode=0o600, fsync_dir=True)
 +
 +
@@ -41392,6 +41394,18 @@ index 00000000..f196f46f
 +    else:
 +        path.unlink(missing_ok=True)
 +
++
++
++def defer_return_notice(path: Path, notice_id: str, seconds: float) -> None:
++    """Сохранить срок временного отказа только для прежней квитанции."""
++    recipients = read_return_notices(path)
++    if recipients is None:
++        return
++    for target in recipients:
++        if target["notice_id"] == notice_id:
++            target["retry_at"] = time.time() + seconds
++            atomic_json_write(path, {"recipients": recipients}, mode=0o600, fsync_dir=True)
++            return
 +
 +def resume_note_interactive(runner, source) -> bool:
 +    """Выбрать вариант восстановления по фактическому адаптеру разговора."""
@@ -41456,10 +41470,18 @@ index 00000000..f196f46f
 +        return_thread_id=None, **send_kwargs
 +    ) -> bool:
 +        """Send one shutdown notice; True when delivered. Failures are debug-logged, never raised."""
++        state_reader = getattr(self, "_brai_return_notice_state", None)
++        expected = state_reader(chat_id, return_thread_id) if callable(state_reader) else None
++        if callable(state_reader) and (expected is None or expected["paused"]):
++            return False
 +        where = "home channel " if kind == "home channel" else ""
 +        fail_fmt = f"Failed to send shutdown notification to {where}%s:%s: %s"
 +        if not await self._send_notice_logged(adapter, chat_id, msg, platform_str, fail_fmt, **send_kwargs):
 +            return False
++        if callable(state_reader):
++            current = state_reader(chat_id, return_thread_id)
++            if current is None or current["paused"] or current["generation"] != expected["generation"]:
++                return True
 +        from gateway.config import Platform
 +        from gateway.run import _planned_restart_notification_path
 +        try:
@@ -41469,6 +41491,7 @@ index 00000000..f196f46f
 +            )
 +            remember_return_notice(
 +                _planned_restart_notification_path(), platform_str, chat_id, return_thread_id, profile,
++                generation=expected["generation"] if expected is not None else None,
 +            )
 +        except Exception:
 +            logger.error("Could not persist return notice for %s:%s", platform_str, chat_id, exc_info=True)
@@ -41489,12 +41512,24 @@ index 00000000..f196f46f
 +        from gateway.run_shutdown import _send_failed
 +        from gateway.run import _async_profile_runtime_scope
 +
++        state_reader = getattr(self, "_brai_return_notice_state", None)
 +        for target in recipients:
 +            try:
++                expected = state_reader(target["chat_id"], target.get("thread_id")) if callable(state_reader) else None
++                if callable(state_reader):
++                    if expected is None:
++                        continue
++                    if expected["paused"] or target.get("generation") != expected["generation"]:
++                        acknowledge_return_notice(path, target["notice_id"])
++                        logger.info("Return notice cancelled: route generation unavailable or changed")
++                        continue
++                if target.get("retry_at", 0) > time.time():
++                    continue
 +                platform = Platform(target["platform"])
 +                profile = target.get("profile")
 +                config = self.config if profile is None else (getattr(self, "_profile_configs", None) or {}).get(profile)
 +                if config is None:
++                    acknowledge_return_notice(path, target["notice_id"])
 +                    continue
 +                transport = _safe_delivery_transport(
 +                    platform, config, self._adapters_for_profile(profile), profile=profile,
@@ -41508,12 +41543,20 @@ index 00000000..f196f46f
 +                async with _async_profile_runtime_scope(home) if home else contextlib.nullcontext():
 +                    # AIDEV-NOTE: Отдельный send, не ответ агента: не закрывает текущую задачу.
 +                    from gateway.run import _interim_metadata, _non_conversational_metadata
++                    send_metadata = _non_conversational_metadata(_interim_metadata(metadata), platform=platform)
++                    if expected is not None:
++                        send_metadata = {**send_metadata, "_brai_return_notice_generation": expected["generation"]}
 +                    result = await asyncio.wait_for(transport.send(
 +                        platform, target["chat_id"], t("gateway.startup.online"),
-+                        metadata=_non_conversational_metadata(_interim_metadata(metadata), platform=platform),
++                        metadata=send_metadata,
 +                    ), timeout=15.0)
-+                if not _send_failed(result):
++                value = result if isinstance(result, dict) else {key: getattr(result,key,None) for key in ("error_kind","retry_after")}
++                if not _send_failed(result) or value.get("error_kind") in {"forbidden", "not_found", "too_long", "bad_format"}:
 +                    acknowledge_return_notice(path, target["notice_id"])
++                else:
++                    delay = value.get("retry_after")
++                    if type(delay) in (int, float) and math.isfinite(delay) and delay > 0:
++                        defer_return_notice(path, target["notice_id"], delay)
 +            except Exception:
 +                logger.warning("Return notice remains pending for %s", target.get("platform"), exc_info=True)
 +

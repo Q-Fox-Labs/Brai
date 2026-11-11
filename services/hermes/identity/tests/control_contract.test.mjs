@@ -197,3 +197,17 @@ test('broker read-only FD metadata schema excludes filesystem and storage access
   assert.equal(validate({...result,sha256:'invalid'}), false);
   assert.equal(validate({...result,artifactId:'invalid'}), false);
 });
+
+test('Local AI failure categories remain available through the private RPC contract', async () => {
+  const source = await json('../../local-ai/schemas/messages.schema.json');
+  const validate = ajv.compile(rpc.components.schemas.FailureDiagnostic);
+  for (const code of source.definitions.ServiceErrorCode.enum) {
+    const reply = await handlePrivateRpc({control:{invokeTool:async()=>{
+      throw Object.assign(new Error('private payload'),{code});
+    }}},{jsonrpc:'2.0',id:'stt',method:'tools.call',params:{uid:1001,name:'local_ai_invoke_transcribe',args:{}}});
+    assert.equal(reply.error.data.reason,code);
+    assert.ok(validate(reply.error.data),JSON.stringify(validate.errors));
+  }
+  assert.equal(validate({reason:'SECRET_VALUE',stage:'control'}),false);
+  assert.equal(validate({reason:'INTERNAL',stage:'control',audio:'private'}),false);
+});

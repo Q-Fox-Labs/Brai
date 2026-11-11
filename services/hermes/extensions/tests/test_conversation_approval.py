@@ -42,12 +42,28 @@ def source(owner="alice",thread="trip"):
     return types.SimpleNamespace(platform=types.SimpleNamespace(value="telegram"),profile="dev",
         chat_id="chat",thread_id=thread,user_id=owner,is_bot=False)
 
+def branding_module():
+    """Загрузить настоящий чистый formatter из i18n overlay без native зависимостей."""
+    lines=(ROOT/"services/hermes/extensions/patches/conversational-approvals.patch").read_text().splitlines()
+    start=lines.index("+def brand_text(text):")
+    body=[]
+    for line in lines[start:]:
+        if not line.startswith("+"):
+            break
+        body.append(line[1:])
+    module=types.ModuleType("agent.i18n")
+    exec(compile("\n".join(body),"native/agent/i18n.py","exec"),module.__dict__)
+    return module
+
+
 REVIEW={"decision":"needs_consent","effects_known":True,"target":"Папка Поездка","consequences":"Фотографии будут удалены без возможности восстановления.","reason":"Удаление не было поручено."}
 
 class ConsentTests(unittest.TestCase):
     def setUp(self):
         self.configuration=patch.object(consent,"configuration",return_value={"interaction":"conversation"})
         self.configuration.start()
+        self.branding=patch.dict(sys.modules,{'agent.i18n':branding_module()})
+        self.branding.start()
         (ROOT/"tmp").mkdir(exist_ok=True)
         self.temp=tempfile.TemporaryDirectory(dir=ROOT/"tmp")
         self.db=Database(Path(self.temp.name)/"state.db")
@@ -55,6 +71,7 @@ class ConsentTests(unittest.TestCase):
         self.store=consent.Store(self.db)
         self.descriptor={"command":"delete trip","arguments":{},"cwd":self.temp.name}
     def tearDown(self):
+        self.branding.stop()
         self.configuration.stop()
         self.db.close()
         self.temp.cleanup()
@@ -105,20 +122,20 @@ class ConsentTests(unittest.TestCase):
         self.store.record_request("other","alice","3","Отправляй деньги")
         with consent.turn_scope(self.db,source(),"session","model paraphrase","1") as scope:
             self.assertEqual(scope.instruction,"Публикуй готовый отчёт")
-            self.assertEqual(scope.authorizations,[{"message_id":"1","text":"Публикуй готовый отчёт"}])
+            self.assertEqual(self.store.requests(scope.key,scope.owner,scope.generation),[{"message_id":"1","text":"Публикуй готовый отчёт"}])
 
     def test_unknown_history_does_not_hide_newer_completed_operation(self):
         first=self.prepare()
         self.authorize(first)
-        self.store.claim(first["id"],consent._hash(self.descriptor),"first")
+        self.store.claim(first["id"],consent.operation_fingerprint(self.descriptor),"first")
         self.store.finish(first["id"],"first",False)
         second_descriptor={**self.descriptor,"command":"another operation"}
         second=self.store.prepare(self.scope,second_descriptor,REVIEW,"Другое действие?")
         self.authorize(second)
-        self.store.claim(second["id"],consent._hash(second_descriptor),"second")
+        self.store.claim(second["id"],consent.operation_fingerprint(second_descriptor),"second")
         self.store.finish(second["id"],"second",True)
         self.assertEqual(self.store.query(self.scope.key)["id"],second["id"])
-        self.assertEqual(self.store.operation(self.scope.key,consent._hash(self.descriptor))["status"],"unknown")
+        self.assertEqual(self.store.operation(self.scope.key,consent.operation_fingerprint(self.descriptor))["status"],"unknown")
         self.assertEqual({row["status"] for row in self.store.review_history(self.scope.key,"alice")},{"unknown","completed"})
 
     def test_stop_clears_prior_request_authority(self):
@@ -166,7 +183,7 @@ class ConsentTests(unittest.TestCase):
         row=self.prepare()
         self.authorize(row)
         with ThreadPoolExecutor(max_workers=8) as pool:
-            results=list(pool.map(lambda n:self.store.claim(row["id"],consent._hash(self.descriptor),str(n)),range(16)))
+            results=list(pool.map(lambda n:self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),str(n)),range(16)))
         self.assertEqual(sum(results),1)
     def test_changed_descriptor_does_not_consume_grant(self):
         row=self.prepare()
@@ -178,15 +195,15 @@ class ConsentTests(unittest.TestCase):
         self.authorize(row)
         self.store.cancel(self.scope.key,"bob")
         self.assertEqual(self.store.query(self.scope.key)["status"],"authorized")
-        self.store.claim(row["id"],consent._hash(self.descriptor),"execution")
+        self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),"execution")
         self.store.cancel(self.scope.key,"alice")
         self.assertEqual(self.store.query(self.scope.key)["status"],"unknown")
-        self.assertFalse(self.store.claim(row["id"],consent._hash(self.descriptor),"retry"))
+        self.assertFalse(self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),"retry"))
     def test_decline_is_not_a_grant(self):
         row=self.prepare()
         self.store.delivered(row["id"],"10")
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","нет",time.time()+1),"denied")
-        self.assertFalse(self.store.claim(row["id"],consent._hash(self.descriptor),"execution"))
+        self.assertFalse(self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),"execution"))
     def test_script_and_directory_are_bound(self):
         script=Path(self.temp.name)/"calculate.py"
         script.write_text("print(1)")

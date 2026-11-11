@@ -33,6 +33,54 @@ class NativeConsentTests(unittest.TestCase):
         return approval._human_decision(spec or approval._COMMAND_GATE,command="python -c 'print(1)'",
             description="script execution",pattern_key="python",pattern_keys=["python"],
             session_key="test-session",approval_callback=None,is_cli=False,is_gateway=True,is_ask=False,smart=True)
+
+    def test_native_round_presents_brai_question_without_technical_status(self):
+        from agent import turn_tool_round as rounds
+        from unittest.mock import Mock
+        for code in ('brai_conversation', 'policy_block'):
+            with self.subTest(code=code):
+                decision=types.SimpleNamespace(code=code,tool_name='terminal')
+                agent=types.SimpleNamespace(quiet_mode=True,verbose_logging=False,
+                    valid_tool_names={'terminal'},_tool_guardrail_halt_decision=None,
+                    _cap_delegate_task_calls=lambda calls:calls,
+                    _deduplicate_tool_calls=lambda calls:calls,
+                    _flush_messages_to_session_db=Mock(return_value=True),
+                    _emit_interim_assistant_message=Mock(),
+                    _emit_diagnostic_status=Mock(),_safe_print=Mock(),
+                    stream_delta_callback=Mock(),
+                    _toolguard_controlled_halt_response=lambda _: 'Разрешаете это действие?')
+                def execute(*_):
+                    agent._tool_guardrail_halt_decision=decision
+                agent._execute_tool_calls=Mock(side_effect=execute)
+                message=types.SimpleNamespace(tool_calls=[types.SimpleNamespace(
+                    function=types.SimpleNamespace(name='terminal',arguments='{}'))])
+                rows=[]
+                with patch.object(rounds,'validate_tool_calls',return_value=types.SimpleNamespace(
+                        action='execute',mixed_invalid_batch=False)), \
+                        patch.object(rounds,'normalize_provider_tool_call_ids'), \
+                        patch.object(rounds,'stage_tool_call_message',return_value=(
+                            {'role':'assistant','content':None},False)), \
+                        patch.dict(sys.modules,{
+                            'agent.conversation_loop':types.SimpleNamespace(_invalid_tool_name_error_content=lambda *_:'invalid'),
+                            'agent.tool_call_batches':types.SimpleNamespace(expand_local_tool_batches=lambda calls,**_:calls),
+                            'hermes_cli.observability.shared_metrics_harness':types.SimpleNamespace(finish_tool_round=lambda _:None)}):
+                    result=rounds.run_tool_round(agent,assistant_message=message,finish_reason='tool_calls',
+                        messages=rows,conversation_history=[],api_call_count=1,effective_task_id='fixture',
+                        user_message='Проверь',system_message='',active_system_prompt='',
+                        compression_attempts=0,max_compression_attempts=1,final_response='',failed=False,
+                        _turn_exit_reason='',truncated_tool_call_retries=0,current_turn_user_idx=0)
+                self.assertEqual(result.action,'break')
+                self.assertEqual(result.final_response,'Разрешаете это действие?')
+                self.assertEqual(rows[-1]['content'],result.final_response)
+                agent._execute_tool_calls.assert_called_once()
+                if code=='brai_conversation':
+                    agent._emit_diagnostic_status.assert_not_called()
+                else:
+                    agent._emit_diagnostic_status.assert_called_once()
+                    self.assertIn('policy_block',agent._emit_diagnostic_status.call_args.args[0])
+                self.assertEqual(sum(call.args==(result.final_response,)
+                    for call in agent.stream_delta_callback.call_args_list),1)
+
     def test_gate_precedes_every_legacy_transport(self):
         review={"decision":"needs_consent","effects_known":True,"target":"Папка Поездка","consequences":"Фотографии будут удалены без восстановления.","reason":"Удаление не поручалось."}
         with patch.object(consent,"review_action",return_value=review),patch.object(approval,"_await_gateway_decision",side_effect=AssertionError("legacy wait")),patch.object(approval,"_present_with_selected_transport",side_effect=AssertionError("legacy UI")):

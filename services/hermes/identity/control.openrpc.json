@@ -1017,12 +1017,66 @@
           }
         },
         "additionalProperties": false
+      },
+      "FailureDiagnostic": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "reason",
+          "stage"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "FORBIDDEN",
+              "INVALID_ARGUMENT",
+              "DEADLINE_EXCEEDED",
+              "OUTCOME_UNKNOWN",
+              "UPSTREAM_UNAVAILABLE",
+              "INVALID_UPSTREAM_RESPONSE",
+              "OWNER_MISMATCH",
+              "OVERLOADED",
+              "CANCELLED",
+              "NOT_FOUND",
+              "CONFLICT",
+              "REQUEST_TOO_LARGE",
+              "RESULT_TOO_LARGE",
+              "UNAVAILABLE",
+              "INTERNAL",
+              "MODEL_NOT_FOUND",
+              "MODEL_NOT_INSTALLED",
+              "UNSUPPORTED_OPERATION",
+              "MODEL_IN_USE",
+              "INPUT_TOO_LARGE",
+              "BUSY",
+              "MODEL_LOAD_FAILED",
+              "ENGINE_UNAVAILABLE",
+              "ARTIFACT_NOT_AVAILABLE",
+              "DEPENDENCY_UNAVAILABLE",
+              "INSTALLATION_FAILED",
+              "REVISION_CONFLICT",
+              "NOT_SUPPORTED"
+            ]
+          },
+          "stage": {
+            "enum": [
+              "control",
+              "broker"
+            ]
+          }
+        },
+        "additionalProperties": false
       }
     },
     "errors": {
       "RequestFailed": {
         "code": -32603,
-        "message": "Request failed"
+        "message": "Request failed",
+        "data": {
+          "reason": "INTERNAL",
+          "stage": "control"
+        }
       },
       "InvalidParams": {
         "code": -32602,
