@@ -1,5 +1,5 @@
 // ABOUTME: Хранит scoped задания, intent, бюджеты и результаты обработки bug-hunt.
-// ABOUTME: Все блокировки короткие; модельные вызовы выполняются после освобождения соединения.
+// ABOUTME: Сохранённый pending intent занимает модельный слот; вызовы выполняются вне SQL-транзакции.
 import {createHash,createHmac,timingSafeEqual,randomUUID} from "node:crypto";
 import type {Pool,PoolClient} from "pg";
 import {Fault,canonical,type Observation,type Principal} from "./contracts.js";
@@ -128,15 +128,24 @@ export function createProcessingStore(pool:Pool,options:ProcessingStoreOptions):
   async claim(limit=2,branches:Branch[]=["local","embedding","classification"]){
    return tx(async db=>{
     const state=await control(db);const build=target();await prepareGenerations(db,installation,build);
-    const active=await db.query("SELECT branch FROM processing_job WHERE installation_id=$1 AND state='running' AND lease_until>clock_timestamp()",[installation]);
+    const active=await db.query("SELECT id,branch FROM processing_job WHERE installation_id=$1 AND state='running' AND lease_until>clock_timestamp()",[installation]);
     const available=Math.min(2-active.rowCount!,2,Math.max(0,limit));
     if(available<=0)return [];
-    const candidates=await db.query("SELECT j.*,r.observation,COALESCE((SELECT max(x.claimed_at) FROM processing_job x WHERE x.installation_id=j.installation_id AND x.owner_id=j.owner_id),'-infinity'::timestamptz) AS owner_last FROM processing_job j JOIN report r ON r.id=j.report_id AND r.case_id=j.case_id AND r.owner_id=j.owner_id AND r.installation_id=j.installation_id WHERE j.installation_id=$1 AND j.pipeline_version=$2 AND (j.branch<>'embedding' OR j.index_generation=$7 OR EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')) AND ((j.state IN('pending','waiting_dependency','budget_exhausted') AND j.available_at<=clock_timestamp()) OR (j.state='running' AND j.lease_until<=clock_timestamp())) AND (NOT $3::boolean OR EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')) AND (j.branch=ANY($5::text[]) OR EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')) AND (j.branch='local' OR NOT(j.branch=ANY($6::text[]))) ORDER BY CASE WHEN $4::boolean THEN (j.priority='backfill') ELSE (j.priority='new') END DESC,owner_last,j.available_at,j.registered_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 16",[installation,PIPELINE_VERSION,state.paused,Number(state.claim_counter)%4===3,branches,active.rows.filter(x=>x.branch!=="local").map(x=>x.branch),build]);
+    const dispatching="EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')";
+    // AIDEV-NOTE: PROVIDER_PENDING освобождает lease, но сохраняет модельный слот до чтения исходного intent.
+    const pending=await db.query("SELECT j.id,j.branch FROM processing_job j WHERE j.installation_id=$1 AND j.branch<>'local' AND j.state IN('pending','running','waiting_dependency') AND "+dispatching,[installation]);
+    const occupied=new Set([...active.rows,...pending.rows].map(j=>j.id));
+    const modelBusy=new Set([...active.rows,...pending.rows].filter(j=>j.branch!=="local").map(j=>j.branch));
+    const candidates=await db.query(`SELECT j.*,r.observation,${dispatching} AS recovering,COALESCE((SELECT max(x.claimed_at) FROM processing_job x WHERE x.installation_id=j.installation_id AND x.owner_id=j.owner_id),'-infinity'::timestamptz) AS owner_last FROM processing_job j JOIN report r ON r.id=j.report_id AND r.case_id=j.case_id AND r.owner_id=j.owner_id AND r.installation_id=j.installation_id WHERE j.installation_id=$1 AND j.pipeline_version=$2 AND (j.branch<>'embedding' OR j.index_generation=$7 OR ${dispatching}) AND ((j.state IN('pending','waiting_dependency','budget_exhausted') AND j.available_at<=clock_timestamp()) OR (j.state='running' AND j.lease_until<=clock_timestamp())) AND (NOT $3::boolean OR ${dispatching}) AND (j.branch=ANY($5::text[]) OR ${dispatching}) AND (j.branch='local' OR NOT(j.branch=ANY($6::text[]))) AND (${dispatching} OR ($8::boolean AND (j.branch='local' OR NOT(j.branch=ANY($9::text[]))))) ORDER BY recovering DESC,CASE WHEN $4::boolean THEN (j.priority='backfill') ELSE (j.priority='new') END DESC,owner_last,j.available_at,j.registered_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 16`,[installation,PIPELINE_VERSION,state.paused,Number(state.claim_counter)%4===3,branches,active.rows.filter(x=>x.branch!=="local").map(x=>x.branch),build,occupied.size<2,[...modelBusy]]);
     const busy=new Set(active.rows.filter(x=>x.branch!=="local").map(x=>x.branch)),selected:ProcessingJob[]=[];
     for(const row of candidates.rows){
      if(selected.length>=available)break;if(row.branch!=="local"&&busy.has(row.branch))continue;
+     if(!row.recovering&&(occupied.size>=2||row.branch!=="local"&&modelBusy.has(row.branch)))continue;
      const claimed=await db.query("UPDATE processing_job SET state='running',fence=fence+1,lease_until=clock_timestamp()+($2::int*interval '1 millisecond'),claimed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1 RETURNING fence",[row.id,lease]);
-     selected.push({...row,fence:claimed.rows[0].fence});if(row.branch!=="local")busy.add(row.branch);
+     const {recovering,...job}=row;
+     selected.push({...job,fence:claimed.rows[0].fence});
+     if(!recovering){occupied.add(row.id);if(row.branch!=="local")modelBusy.add(row.branch);}
+     if(row.branch!=="local")busy.add(row.branch);
     }
     await db.query("UPDATE processing_control SET claim_counter=claim_counter+1 WHERE installation_id=$1",[installation]);return selected;
    });

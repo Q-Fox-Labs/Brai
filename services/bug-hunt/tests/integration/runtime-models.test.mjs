@@ -93,19 +93,22 @@ test('product runtime composes durable model branches through its own NATS ident
    requireProtocol(providers.decideRequest(body),'DECIDE_REQUEST_SCHEMA');
    requireProtocol(body.ownerId===f.user.id&&body.provider==='typesafe'&&body.model==='jev-1.13.0','DECIDE_SCOPE_OR_SELECTOR');
    requireProtocol(!operations.has(body.operationId),'DECIDE_INVOKE_REPLAY');
+   requireProtocol([...operations.values()].every(entry=>entry.returned),'CONCURRENT_DECIDE_INTENT');
    const allowedStates=[observation,{...observation,title:'Synthetic second runtime observation',observed:'The stored value is missing'}].map(o=>prepareExternalProjection(o).text);
    requireProtocol(allowedStates.includes(body.state),'UNAPPROVED_EXTERNAL_STATE');
    classifyingRequests.push(body);const now=Date.now();
    const accepted={operationId:body.operationId,ownerId:body.ownerId,phase:'accepted',cancelRequested:false,createdAt:now,finishedAt:null,keyExpiresAt:now+7*86400000,resultExpiresAt:null,route:{provider:'typesafe',model:'jev-1.13.0',catalogVersion:'fixture-only-1'},result:null,errorCode:null,resultExpired:false,billingMayContinue:false};
    const succeeded={...accepted,phase:'succeeded',finishedAt:now+1,resultExpiresAt:now+86400000,result:{provider:'typesafe',requestedModel:'jev-1.13.0',actualModel:'jev-1.13.0',answers:answers(body.questions),usage:{inputTokens:30,outputTokens:8}}};
    requireProtocol(providers.operation(accepted)&&providers.operation(succeeded),'DECIDE_RESPONSE_SCHEMA');
-   operations.set(body.operationId,{body:canonical(body),request:body,result:succeeded});return accepted;
+   operations.set(body.operationId,{body:canonical(body),request:body,result:succeeded,accepted,pending:2,returned:false});return accepted;
   });
   endpoint('brai.providers.v1.operations.get',body=>{
    requireProtocol(providers.operationKey(body),'GET_REQUEST_SCHEMA');
    const entry=operations.get(body.operationId);
    requireProtocol(!!entry&&entry.request.ownerId===body.ownerId&&entry.body===canonical(entry.request),'GET_SCOPE_OR_INTENT_CHANGED');
-   getRequests.push(body);return entry.result;
+   getRequests.push(body);
+   if(entry.pending-->0)return entry.accepted;
+   entry.returned=true;return entry.result;
   });
   await f.nc.flush();
   // AIDEV-NOTE: Новый таймер получает 60s при disabled; endpoints уже существуют до разрешения dispatch.
@@ -122,7 +125,7 @@ test('product runtime composes durable model branches through its own NATS ident
   assert.equal(embeddingRequests.length+classifyingRequests.length,0);
   await drainJobs();
   assert.equal(protocolFailures.length,0,protocolFailures.join(','));
-  assert.equal(embeddingRequests.length,2);assert.equal(classifyingRequests.length,2);assert.equal(getRequests.length,2);
+  assert.equal(embeddingRequests.length,2);assert.equal(classifyingRequests.length,2);assert.equal(getRequests.length,6);
   for(const receipt of [first.receipt,second.receipt]){
    const enriched=await enrichment(receipt.case_id);
    assert.ok(enriched.processing.branches.every(b=>b.state==='succeeded'));
