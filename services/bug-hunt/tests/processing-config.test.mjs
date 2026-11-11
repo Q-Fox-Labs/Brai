@@ -1,10 +1,22 @@
-// ABOUTME: Проверяет запрет внешней отправки без точной защищённой проекции.
+// ABOUTME: Проверяет защищённые бюджеты worker и запрет внешней отправки без принятой проекции.
 // ABOUTME: Не читает закрытые runtime inputs и не вызывает реальные модели.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {processingConfig,approvedProjection} from '../dist/config.js';
 const observation={title:'Сбой чтения',operation:'прочитать',expected:'данные',observed:'пустой результат'};
 const hash='a'.repeat(64);
+test('only the internal embedding budget can be explicitly unlimited',()=>{
+ const dailyLimits={embedding:{owner:null,global:null},classification:{owner:1000,global:1000}};
+ assert.deepEqual(processingConfig({dailyLimits}).dailyLimits,dailyLimits);
+ assert.deepEqual(processingConfig(undefined).dailyLimits.embedding,{owner:100,global:1000});
+ for(const invalid of [
+  {...dailyLimits,embedding:{owner:null,global:1000}},
+  {...dailyLimits,embedding:{owner:100,global:null}},
+  {...dailyLimits,classification:{owner:null,global:null}},
+  {...dailyLimits,classification:{owner:1001,global:1000}},
+ ])assert.throws(()=>processingConfig({dailyLimits:invalid}),/INVALID_PROCESSING_CONFIG/);
+});
+
 test('external owner permission alone never exposes original observation',()=>{
  const off=processingConfig(undefined);
  assert.equal(off.enabled,false);assert.equal(off.classificationEnabled,false);

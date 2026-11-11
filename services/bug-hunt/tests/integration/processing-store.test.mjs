@@ -8,6 +8,7 @@ import {Pool} from 'pg';
 import {createProcessingStore,enqueueProcessing} from '../../dist/processing-store.js';
 import {migrate} from '../../dist/migrate.js';
 import {createProcessor} from '../../dist/processing.js';
+import {invokeProcessing} from '../../dist/processing-api.js';
 import {createSystemStore} from '../../dist/system-store.js';
 import {EMBEDDING_MODEL,chunkText,searchProjection,GENERATION} from '../../dist/projection.js';
 const fixture=JSON.parse(readFileSync(new URL('../../../../tmp/bug-hunt-test.json',import.meta.url),'utf8'));
@@ -74,6 +75,45 @@ test('real processing store lifecycle',async t=>{
    await owner.query("UPDATE processing_job SET available_at=clock_timestamp() WHERE id=$1",[j.id]);
    const [resumed]=await ctx.store.claim();assert.equal(resumed.id,j.id);assert.equal(resumed.business_attempt_id,j.business_attempt_id);
    assert.ok(await ctx.store.beginAttempt(resumed,body(resumed),0,metadata));
+  });
+  await t.test('a changed policy wakes same-day exhausted jobs without resetting their business identity or accounting',async()=>{
+   for(const branch of ['embedding','classification']){
+    let dailyLimits={embedding:{owner:1,global:1},classification:{owner:1,global:1}};
+    const ctx=context({dailyLimits,policy:()=>({dailyLimits})});
+    const info=branch==='embedding'?metadata:{model_id:'jev-1.13.0',model_revision:'jev-1.13.0',profile_id:'typesafe',question_version:'bug-hunt-jev-1'};
+    const request=j=>branch==='embedding'?body(j):{operationId:randomUUID(),ownerId:j.owner_id,deadlineAt:new Date(Date.now()+30000).toISOString(),model:'jev-1.13.0'};
+    await seed(ctx,user.ownerId,observation,branch);let [j]=await ctx.store.claim();
+    const first=await ctx.store.beginAttempt(j,request(j),0,info);assert.ok(first);
+    await ctx.store.finishAttempt(j,first,'succeeded');await ctx.store.finishJob(j,'succeeded');
+    await seed(ctx,user.ownerId,observation,branch);[j]=await ctx.store.claim();
+    assert.equal(await ctx.store.beginAttempt(j,request(j),0,info),null);
+    assert.equal((await ctx.store.claim()).length,0,'unchanged exhausted policy must not spin');
+    const before=(await owner.query('SELECT * FROM processing_job WHERE id=$1',[j.id])).rows[0];
+    assert.equal(before.state,'budget_exhausted');assert.ok(new Date(before.available_at)>new Date());
+    await ctx.store.pause(operator,{request_id:randomUUID(),paused:true,reason:'Synthetic budget policy change'});
+    dailyLimits=branch==='embedding'?{embedding:{owner:null,global:null},classification:{owner:1,global:1}}:{embedding:{owner:1,global:1},classification:{owner:1000,global:1000}};
+    assert.equal((await ctx.store.claim()).length,0,'a policy change cannot remove the pause');
+    await ctx.store.pause(operator,{request_id:randomUUID(),paused:false,reason:'Synthetic budget policy accepted'});
+    const [resumed]=await ctx.store.claim();assert.equal(resumed.id,j.id);assert.equal(resumed.business_attempt_id,before.business_attempt_id);
+    assert.deepEqual((await owner.query('SELECT reserved_calls FROM processing_budget WHERE installation_id=$1',[ctx.installationId])).rows.map(x=>x.reserved_calls),[1,1]);
+    const next=await ctx.store.beginAttempt(resumed,request(resumed),0,info);assert.ok(next);
+    await ctx.store.finishAttempt(resumed,next,'succeeded');await ctx.store.finishJob(resumed,'succeeded');
+    assert.deepEqual((await owner.query('SELECT reserved_calls FROM processing_budget WHERE installation_id=$1',[ctx.installationId])).rows.map(x=>x.reserved_calls),[2,2]);
+    assert.equal((await owner.query('SELECT phase FROM processing_attempt WHERE id=$1',[first.id])).rows[0].phase,'succeeded');
+    const status=await invokeProcessing(ctx.store,'status',{});assert.deepEqual(status.limits.dailyLimits,dailyLimits);
+    if(branch==='embedding'){
+     await owner.query('UPDATE processing_budget SET reserved_calls=100001 WHERE installation_id=$1',[ctx.installationId]);
+     await seed(ctx,user.ownerId,observation,branch);const [unlimited]=await ctx.store.claim();
+     assert.ok(await ctx.store.beginAttempt(unlimited,request(unlimited),0,info));
+     assert.deepEqual((await owner.query('SELECT reserved_calls FROM processing_budget WHERE installation_id=$1',[ctx.installationId])).rows.map(x=>x.reserved_calls),[100002,100002]);
+    }
+   }
+  });
+  await t.test('the store rejects unlimited external or half-unlimited internal budgets',async()=>{
+   for(const dailyLimits of [
+    {embedding:{owner:null,global:1000},classification:{owner:1,global:1}},
+    {embedding:{owner:1,global:1},classification:{owner:null,global:null}},
+   ])assert.throws(()=>context({dailyLimits}),/INVALID_PROCESSING_BUDGET/);
   });
   await t.test('pause is durable/idempotent and explicit retry requires a fresh business attempt',async()=>{
    const ctx=context();await seed(ctx,user.ownerId,observation,'embedding');const [j]=await ctx.store.claim();

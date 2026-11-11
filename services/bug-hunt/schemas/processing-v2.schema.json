@@ -155,13 +155,17 @@
                 "embedding": {
                   "type": "object",
                   "additionalProperties": false,
+                  "oneOf": [
+                    {"properties": {"owner": {"type": "integer"}, "global": {"type": "integer"}}},
+                    {"properties": {"owner": {"type": "null"}, "global": {"type": "null"}}}
+                  ],
                   "properties": {
                     "owner": {
-                      "type": "integer",
+                      "type": ["integer", "null"],
                       "minimum": 0
                     },
                     "global": {
-                      "type": "integer",
+                      "type": ["integer", "null"],
                       "minimum": 0
                     }
                   },
