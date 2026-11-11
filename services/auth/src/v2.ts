@@ -35,7 +35,7 @@ const admin={
  "role-set":z.strictObject({userId:id,role,requestId:id.optional()}),"status-set":z.strictObject({userId:id,status,requestId:id.optional()}),
  "sessions-revoke":z.strictObject({userId:id}),"invite-create":z.strictObject({role:inviteRole.optional()}),
  "invite-list":z.strictObject({}),"invite-revoke":z.strictObject({inviteId:id}),
- "admin-audit":z.strictObject({userId:id,action:z.enum(["memory.list","memory.read","chats.list","chats.read","artifacts.list","artifacts.read","personal.read"])})
+ "admin-audit":z.strictObject({userId:id,action:z.enum(["memory.list","memory.read","chats.list","chats.read","chats.pause","chats.resume","artifacts.list","artifacts.read","personal.read"])})
 };
 export const v2Subjects=Object.fromEntries([...Object.keys(trusted),...Object.keys(admin),"login-code-redeem"].map(name=>[name,"brai.auth.v2."+name]));
 type Handler=(request:Request)=>Promise<Response>;

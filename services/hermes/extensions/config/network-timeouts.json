@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "max_client_silence_seconds": 1800,
+  "transport_idle_grace_seconds": 60
+}

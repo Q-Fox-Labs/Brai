@@ -80,6 +80,15 @@ class ProfileTests(unittest.TestCase):
                              {'jsonrpc': '2.0', 'id': 'ping', 'result': {}})
             self.assertFalse(marker.exists())
 
+    def test_child_tools_receive_only_the_trusted_proxy_allowlist(self):
+        value = native_profile(self.profile(), instructions_root='/software/instructions',
+                               model='fixture-model')
+        self.assertEqual(value['terminal']['env_passthrough'],
+                         ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'])
+        self.assertEqual(value['terminal']['cwd'], self.profile()['home'] + '/workspace')
+        self.assertNotIn('OPENAI_API_KEY', value['terminal']['env_passthrough'])
+        self.assertNotIn('NO_PROXY', value['terminal']['env_passthrough'])
+
     def test_model_routes_responses_to_named_local_provider(self):
         value = native_profile(self.profile(), instructions_root='/software/instructions',
                                model='fixture-model')
@@ -105,6 +114,21 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual([p['role'] for p in value['profiles']], ['admin', 'user'])
         with self.assertRaises(ValueError):
             plan_users('123', 'original-owner', [{'telegramId': '456'}], profile_root='/profiles')
+
+    def test_system_documents_and_code_helpers_are_bound_read_only(self):
+        args = dict(engine_root='/software/engine', runtime_root='/software/runtime',
+                    python='/software/python/bin/python3.14', ingress_uid=995,
+                    broker_socket='/run/broker.sock', memory_socket='/run/memory.sock',
+                    egress_socket='/run/egress.sock', instructions_root='/software/instructions',
+                    system_skills_root='/shared/system-skills')
+        value = worker_unit(self.profile(), **args, skill_script_dirs=['media/example/scripts'])
+        self.assertIn('BindReadOnlyPaths=/shared/system-skills:/opt/brai-profile/system-skills', value)
+        self.assertIn('BindReadOnlyPaths=/software/instructions/skill-scripts/media/example/scripts:'
+                      '/opt/brai-profile/system-skills/skills/media/example/scripts', value)
+        self.assertNotIn('BindPaths=/shared/system-skills', value)
+        for relative in ('../foreign/scripts', 'scripts\nEnvironment=BAD=yes', '/absolute/scripts', 'bad%u/scripts'):
+            with self.subTest(relative=relative), self.assertRaises(ValueError):
+                worker_unit(self.profile(), **args, skill_script_dirs=[relative])
 
     def test_worker_unit_hides_shared_state_and_uses_installed_python(self):
         value = worker_unit(self.profile(), engine_root='/software/engine', runtime_root='/software/runtime',
@@ -187,7 +211,7 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn('--no-sandbox', value)
         self.assertNotIn('docker.sock', value)
         with self.assertRaises(ValueError):
-            browser_unit(profile, chrome_root='/software/chrome\\nUser=root')
+            browser_unit(profile, chrome_root='/software/chrome\nUser=root')
 
     def test_worker_unit_rejects_operator_path_injection(self):
         with self.assertRaises(ValueError):

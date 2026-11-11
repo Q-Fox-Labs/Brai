@@ -19,7 +19,13 @@ MAX_MEMORY_PART_BYTES = 768
 
 
 class MemOSError(RuntimeError):
-    pass
+    """Ошибка доставки; только структурированный HTTP/API status задаёт постоянный отказ."""
+
+    def __init__(self, message, *, status=None):
+        super().__init__(message)
+        self.status = status
+        self.permanent = (type(status) is int and 400 <= status < 500
+                          and status not in (408, 409, 425, 429))
 
 
 # AIDEV-NOTE: Срок принадлежит одному поиску, а не общему экземпляру provider.
@@ -254,14 +260,14 @@ class Client:
             exc.close()
             if allow_missing and exc.code == 404:
                 return None
-            raise MemOSError(f"MemOS {path}: HTTP {exc.code}") from None
+            raise MemOSError(f"MemOS {path}: HTTP {exc.code}", status=exc.code) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
             raise MemOSError(f"MemOS {path}: connection failed ({type(exc).__name__})") from None
         except (ValueError, UnicodeError):
             raise MemOSError(f"MemOS {path}: invalid JSON response") from None
         if not isinstance(result, dict) or result.get("code", 200) != 200:
             code = result.get("code", "unknown") if isinstance(result, dict) else "invalid"
-            raise MemOSError(f"MemOS {path}: API error {code}")
+            raise MemOSError(f"MemOS {path}: API error {code}", status=code)
         return result
 
     def _memory_read(self, body, timeout):
@@ -332,7 +338,7 @@ class Client:
                         raise MemOSError('MemOS memory stream has invalid record')
         except urllib.error.HTTPError as exc:
             exc.close()
-            raise MemOSError(f'MemOS memory stream: HTTP {exc.code}') from None
+            raise MemOSError(f'MemOS memory stream: HTTP {exc.code}', status=exc.code) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
             raise MemOSError(f'MemOS memory stream: connection failed ({type(exc).__name__})') from None
         except (ValueError, UnicodeError):
@@ -470,8 +476,13 @@ class Client:
         return ids
 
     def verify(self, job, ids):
+        """Проверить все ожидаемые IDs; часть читает свой индекс, событие — весь архив."""
         info = job["body"]["info"]
-        rows = self.get({"hermes_event_id": info["hermes_event_id"]})
+        filter_ = {"hermes_event_id": info["hermes_event_id"]}
+        if "hermes_chunk_index" in info:
+            filter_["hermes_chunk_index"] = info["hermes_chunk_index"]
+        # AIDEV-NOTE: Итоговый job не имеет chunk_index и всегда проверяет все части.
+        rows = self.get(filter_)
         expected = set(ids)
         verified = set()
         mismatches = set()
@@ -556,12 +567,24 @@ class Client:
                 if "memory_parts" in job:
                     if len(job["memory_parts"]) != len(parts):
                         raise MemOSError("Memory part plan does not match the dialogue")
+                    compacted = False
+                    for state in job["memory_parts"]:
+                        if "body" in state:
+                            state.pop("body")
+                            compacted = True
+                    if compacted:
+                        checkpoint(job)
                     ids = []
                     for index, part in enumerate(parts):
                         info = {**body["info"], "hermes_chunk_index": index, "hermes_chunk_count": len(parts)}
-                        unit = job["memory_parts"][index]
-                        unit["body"] = {**body, "messages": [part], "info": info}
-                        ids.extend(self._execute_one(unit, lambda _: checkpoint(job)))
+                        state = job["memory_parts"][index]
+                        # AIDEV-NOTE: Полный источник хранится один раз; journal части
+                        # закрепляет только IDs. Это сохраняет recovery без квадратичной копии body.
+                        unit = {**state, "body": {**body, "messages": [part], "info": info}}
+                        def checkpoint_part(value):
+                            state["memory_ids"] = list(value["memory_ids"])
+                            checkpoint(job)
+                        ids.extend(self._execute_one(unit, checkpoint_part))
                     job["memory_ids"] = ids
                     checkpoint(job)
                     verified = self.verify(job, ids)

@@ -36,7 +36,7 @@ test('AsyncAPI parses and declares exact subjects and valid references', () => {
     for (const value of Object.values(node)) visit(value);
   };
   visit(api);
-  assert.equal(Object.keys(api.operations).length, 7);
+  assert.equal(Object.keys(api.operations).length, 9);
 });
 
 test('admin schemas accept actual success and reject wrong fields', async () => {

@@ -9,10 +9,15 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
+import { createConnection } from 'node:net';
+import { createTelegramProfiles, telegramPhotoDownload } from './telegram-profiles.mjs';
+import { messageColumns, visibleChatMessage, sessionParticipant } from './chat-display.mjs';
+import { createTelegramChatRead } from './telegram-chat-read.mjs';
 
 const operations = {
   'admin-memory-list': ['memory.list', 'memoryRead'], 'admin-memory-get': ['memory.read', 'memoryRead'],
   'admin-chats-list': ['chats.list', 'chatRead'], 'admin-chats-get': ['chats.read', 'chatRead'],
+  'admin-chats-pause': ['chats.pause', 'chatControl'], 'admin-chats-resume': ['chats.resume', 'chatControl'],
   'admin-artifacts-list': ['artifacts.list', 'artifactsCall'], 'admin-artifacts-get': ['artifacts.read', 'artifactsCall'],
   'admin-artifacts-download': ['artifacts.read', 'artifactsCall'],
 };
@@ -54,9 +59,9 @@ function preparedProfile(profile, user, bootstrap = false) {
 
 /** Политика control с явно переданными доверенными портами. */
 export class Control {
-  constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
+  constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, chatControl = undefined, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, telegramProfiles = undefined, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
     if (!text(origin) || new URL(origin).origin !== origin || !text(cursorKey) || Buffer.byteLength(cursorKey) < 32 || typeof registry !== 'function' || typeof authCall !== 'function') throw new TypeError('Invalid control configuration');
-    Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, archiveProfile, quarantineArtifactsOwnerId });
+    Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, chatControl, artifactsCall, telegramSend, telegramInfo, toolCatalog, perUserRuntime, historyCall, telegramProfiles, archiveProfile, quarantineArtifactsOwnerId });
     this.memorySnapshots = new Map();
     this.memoryReads = 0;
   }
@@ -85,8 +90,15 @@ export class Control {
   async invoke(operation, input) {
     const entry = operations[operation];
     if (!entry || !object(input) || !object(input.headers) || !text(input.userId)) return error(400, 'INVALID_ARGUMENT');
-    const idKey = operation.endsWith('-get') || operation === 'admin-artifacts-download' ? operation.includes('memory') ? 'memoryId' : operation.includes('chats') ? 'chatId' : 'artifactId' : null;
-    const allowed = new Set(['headers', 'userId', 'cursor', 'limit', ...(operation === 'admin-chats-get' ? ['order'] : []), ...(operation === 'admin-memory-list' ? ['query'] : []), ...(idKey ? [idKey] : [])]);
+    const mutation = entry[1] === 'chatControl';
+    const idKey = mutation || operation.endsWith('-get') || operation === 'admin-artifacts-download' ? operation.includes('memory') ? 'memoryId' : operation.includes('chats') ? 'chatId' : 'artifactId' : null;
+    const allowed = new Set(['headers', 'userId', ...(!mutation ? ['cursor', 'limit'] : []), ...(operation.startsWith('admin-chats-') ? ['source'] : []), ...(operation === 'admin-chats-get' ? ['order'] : []), ...(operation === 'admin-memory-list' ? ['query'] : []), ...(idKey ? [idKey] : [])]);
+    if (mutation) {
+      if (input.source !== 'telegram' || input.userId === quarantineTarget) return error(400, 'INVALID_ARGUMENT');
+      try { chatRoute(input.chatId); } catch { return error(400, 'INVALID_ARGUMENT'); }
+    }
+    if (input.source === 'telegram' && input.order === 'asc') return error(400, 'INVALID_ARGUMENT');
+    if (input.source !== undefined && !['native', 'telegram'].includes(input.source)) return error(400, 'INVALID_ARGUMENT');
     if (input.order !== undefined && !['asc', 'desc'].includes(input.order)) return error(400, 'INVALID_ARGUMENT');
     if (Object.keys(input).some(k => !allowed.has(k)) || Object.keys(input.headers).some(k => !['cookie', 'origin'].includes(k)) || input.headers.origin !== this.origin || !text(input.headers.cookie)) return error(403, 'FORBIDDEN');
     if ((idKey && !text(input[idKey])) || (input.query !== undefined && (typeof input.query !== 'string' || input.query.length > 4096)) || (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100))) return error(400, 'INVALID_ARGUMENT');
@@ -109,7 +121,7 @@ export class Control {
       }
       const port = this[entry[1]];
       if (typeof port !== 'function') return error(503, 'SOURCE_UNAVAILABLE');
-      const binding = { operation, userId: input.userId, id: idKey ? input[idKey] : null, query: input.query ?? null, limit: input.limit ?? 50, ...(operation === 'admin-chats-get' ? { order: input.order ?? 'asc' } : {}) };
+      const binding = { operation, ...(input.source ? { source: input.source } : {}), userId: input.userId, id: idKey ? input[idKey] : null, query: input.query ?? null, limit: input.limit ?? 50, ...(operation === 'admin-chats-get' ? { order: input.order ?? (input.source === 'telegram' ? 'desc' : 'asc') } : {}) };
       if (operation === 'admin-memory-get') {
         if (!text(session.body.user.id) || !text(selected.profileId) || !text(selected.memoryEpoch)) return error(503, 'SOURCE_UNAVAILABLE');
         binding.actor = session.body.user.id;
@@ -121,9 +133,22 @@ export class Control {
       try { cursor = input.cursor === undefined ? undefined : this.decodeCursor(binding, input.cursor); } catch { return error(400, 'INVALID_CURSOR'); }
       const result = operation === 'admin-memory-get'
         ? await this.memoryDetail({ port, selected, input, binding, cursor })
-        : await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50, order: input.order ?? 'asc' });
+        : await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50, order: input.order ?? (input.source === 'telegram' ? 'desc' : 'asc'), source: input.source ?? 'native' });
       if (!object(result)) return error(503, 'SOURCE_UNAVAILABLE');
       const body = { ...result };
+      if (operation === 'admin-chats-get' && input.source === 'telegram' && typeof this.chatControl === 'function') {
+        body.control = await this.chatControl({ operation: 'state', profile: selected, id: input.chatId });
+      }
+      if (operation === 'admin-chats-list' && input.userId !== quarantineTarget && this.telegramProfiles) {
+        try {
+          const identity = await this.authCall('identity-get', { userId: selected.userId });
+          if (identity?.user?.id === selected.userId && identity.user.profileId === selected.profileId && Array.isArray(identity.telegramIds)) {
+            const ids = identity.telegramIds.filter(id => /^[1-9][0-9]{0,19}$/.test(id)).slice(0, 2);
+            body.profiles = (await Promise.all(ids.map(id => this.telegramProfiles.get(id)))).filter(Boolean);
+          }
+        } catch { body.profiles = []; }
+      }
+      if (body.updatesCursor) body.updatesCursor = this.encodeCursor(binding, body.updatesCursor);
       if ('nextCursor' in body && body.nextCursor !== null) {
         if (!text(body.nextCursor)) return error(503, 'SOURCE_UNAVAILABLE');
         body.nextCursor = this.encodeCursor(binding, body.nextCursor);
@@ -275,6 +300,7 @@ export class Control {
   /** Погасить команду до модели и отдельно прочитать имена актуальных связанных аккаунтов. */
   async redeemAccountLink(params) {
     const linked = await this.authCall('telegram-link-redeem', params);
+    if (linked?.user?.status === 'active') { try { await this.telegramProfiles?.get(params.telegramId); } catch { /* Фото не меняет результат привязки. */ } }
     if (!linked?.user) return { user: null, accounts: [] };
     try {
       const current = await this.authCall('identity-get', { userId: linked.user.id });
@@ -334,7 +360,8 @@ export class Control {
 }
 
 /** Скопировать подтверждённые inode профиля вместе с WAL в закрытый каталог. */
-export function snapshotSessionDB(profile, useCopy, { afterCopy, retainCopy = false } = {}) {
+export function snapshotSessionDB(profile, useCopy, { afterCopy, retainCopy = false, databaseName = 'state.db' } = {}) {
+  if (!['state.db', 'telegram.sqlite3', 'files.sqlite'].includes(databaseName)) throw new Error('SOURCE_UNAVAILABLE');
   const { home, workerUid } = profile;
   if (!isAbsolute(home) || !Number.isSafeInteger(workerUid) || workerUid <= 0 || home.split('/').some(part => part === '..' || part === '.')) throw new Error('SOURCE_UNAVAILABLE');
   const fds = [], chain = []; let temporary, retained = false;
@@ -348,7 +375,7 @@ export function snapshotSessionDB(profile, useCopy, { afterCopy, retainCopy = fa
       chain.push({ path, stat });
     }
     const files = [];
-    for (const name of ['state.db', 'state.db-wal']) {
+    for (const name of [databaseName, databaseName + '-wal']) {
       const path = `/proc/self/fd/${dir}/${name}`;
       let fd;
       try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
@@ -370,7 +397,7 @@ export function snapshotSessionDB(profile, useCopy, { afterCopy, retainCopy = fa
       if (file.missing) { try { lstatSync(file.path); throw new Error('SOURCE_UNAVAILABLE'); } catch (err) { if (err.code !== 'ENOENT') throw err; } }
       else if (!same(file.stat, fstatSync(file.fd)) || !same(file.stat, lstatSync(file.path))) throw new Error('SOURCE_UNAVAILABLE');
     }
-    const db = new DatabaseSync(join(temporary, 'state.db'), { readOnly: true });
+    const db = new DatabaseSync(join(temporary, databaseName), { readOnly: true });
     let value;
     try { value = useCopy(db, temporary); } finally { db.close(); }
     retained = retainCopy;
@@ -387,23 +414,24 @@ function recentChatPage(profile, id, cursor, limit) {
   return snapshotSessionDB(profile, db => {
     if (!db.prepare("SELECT id FROM sessions WHERE id=? AND source='telegram'").get(id)) throw new Error('SOURCE_UNAVAILABLE');
     const before = cursor?.slice(7) ?? null;
-    const rows = db.prepare("SELECT id,role,CASE WHEN length(CAST(content AS BLOB)) <= 900000 THEN content END AS content,timestamp FROM messages WHERE session_id=? AND role IN ('user','assistant') AND content IS NOT NULL AND (? IS NULL OR id < CAST(? AS INTEGER)) ORDER BY id DESC LIMIT ?").iterate(id, before, before, limit + 1);
-    const messages = []; let size = 0, more = false;
+    const rows = db.prepare(`SELECT id,role,CASE WHEN length(CAST(content AS BLOB)) <= 900000 THEN content END AS content,timestamp${messageColumns(db)} FROM messages WHERE session_id=? AND role IN ('user','assistant') AND content IS NOT NULL AND (? IS NULL OR id < CAST(? AS INTEGER)) ORDER BY id DESC LIMIT ?`).iterate(id, before, before, limit + 1);
+    const messages = []; let size = 0, more = false, count = 0, lastId;
     for (const row of rows) {
-      if (messages.length === limit) { more = true; break; }
+      if (count === limit) { more = true; break; }
       if (row.content === null) throw new Error('SOURCE_UNAVAILABLE');
-      const item = { id: String(row.id), role: row.role, text: row.content, createdAt: new Date(row.timestamp * 1000).toISOString() };
+      const item = visibleChatMessage(row, value => new Date(value * 1000).toISOString());
       const bytes = Buffer.byteLength(JSON.stringify(item)) + 1;
-      if (size + bytes > 900000) { if (!messages.length) throw new Error('SOURCE_UNAVAILABLE'); more = true; break; }
-      size += bytes; messages.push(item);
+      if (size + bytes > 900000) { if (!count) throw new Error('SOURCE_UNAVAILABLE'); more = true; break; }
+      size += bytes; count++; lastId = row.id; if (item) messages.push(item);
     }
-    const nextCursor = more ? `before:${messages.at(-1).id}` : null;
+    const nextCursor = more ? `before:${lastId}` : null;
     return { messages: messages.reverse(), nextCursor };
   });
 }
 
 /** Хранить закрытую копию SQLite и читать из неё только одну страницу. */
-export function createChatRead() {
+export function createChatRead(config = {}) {
+  const telegram = createTelegramChatRead({ root: config.telegramJournalRoot, uid: config.telegramJournalUid, snapshot: snapshotSessionDB });
   const snapshots = new Map();
   function dispose(key) {
     const snapshot = snapshots.get(key);
@@ -412,7 +440,8 @@ export function createChatRead() {
     clearTimeout(snapshot.timer);
     rmSync(snapshot.directory, { recursive: true, force: true });
   }
-  return async ({ operation, profile, id, cursor, limit, order = 'asc' }) => {
+  return async ({ operation, profile, id, cursor, limit, order = 'asc', source = 'native' }) => {
+    if (source === 'telegram') return telegram({ operation, profile, id, cursor, limit });
     if (operation === 'admin-chats-get' && order === 'desc') return recentChatPage(profile, id, cursor, limit);
     const now = Date.now();
     for (const [key, value] of snapshots) if (value.expires <= now) dispose(key);
@@ -443,22 +472,25 @@ export function createChatRead() {
       let finished = false;
       try {
         const date = value => new Date(value * 1000).toISOString();
+        const columns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row => row.name));
+        const identityColumns = ['user_id', 'chat_id', 'display_name', 'origin_json'].filter(name => columns.has(name));
+        const extra = identityColumns.length ? ',' + identityColumns.join(',') : '';
         const rows = operation === 'admin-chats-list'
-          ? db.prepare("SELECT id,title,COALESCE(last_activity_at,started_at) AS updated FROM sessions WHERE source='telegram' ORDER BY id LIMIT ? OFFSET ?").iterate(limit + 1, offset)
-          : db.prepare("SELECT id,role,CASE WHEN length(CAST(content AS BLOB)) <= 900000 THEN content END AS content,timestamp FROM messages WHERE session_id=? AND role IN ('user','assistant') AND content IS NOT NULL ORDER BY id LIMIT ? OFFSET ?").iterate(id, limit + 1, offset);
-        const items = []; let size = 0, more = false;
+          ? db.prepare(`SELECT id,title,COALESCE(last_activity_at,started_at) AS updated${extra} FROM sessions WHERE source='telegram' ORDER BY id LIMIT ? OFFSET ?`).iterate(limit + 1, offset)
+          : db.prepare(`SELECT id,role,CASE WHEN length(CAST(content AS BLOB)) <= 900000 THEN content END AS content,timestamp${messageColumns(db)} FROM messages WHERE session_id=? AND role IN ('user','assistant') AND content IS NOT NULL ORDER BY id LIMIT ? OFFSET ?`).iterate(id, limit + 1, offset);
+        const items = []; let size = 0, more = false, count = 0;
         for (const row of rows) {
-          if (items.length === limit) { more = true; break; }
+          if (count === limit) { more = true; break; }
           if (operation !== 'admin-chats-list' && row.content === null) throw new Error('SOURCE_UNAVAILABLE');
           const item = operation === 'admin-chats-list'
-            ? { id: row.id, title: row.title ?? '', updatedAt: date(row.updated) }
-            : { id: String(row.id), role: row.role, text: row.content, createdAt: date(row.timestamp) };
+            ? { id: row.id, title: row.title ?? '', updatedAt: date(row.updated), participant: sessionParticipant(row) }
+            : visibleChatMessage(row, date);
           const bytes = Buffer.byteLength(JSON.stringify(item)) + 1;
-          if (size + bytes > 900000) { if (!items.length) throw new Error('SOURCE_UNAVAILABLE'); more = true; break; }
-          size += bytes; items.push(item);
+          if (size + bytes > 900000) { if (!count) throw new Error('SOURCE_UNAVAILABLE'); more = true; break; }
+          size += bytes; count++; if (item) items.push(item);
         }
-        if (cursor && !items.length) throw new Error('SOURCE_UNAVAILABLE');
-        const next = offset + items.length;
+        if (cursor && !count) throw new Error('SOURCE_UNAVAILABLE');
+        const next = offset + count;
         finished = !more;
         return { [operation === 'admin-chats-list' ? 'items' : 'messages']: items, nextCursor: more ? `${key}:${next}` : null };
       } finally { db.close(); if (finished) dispose(key); }
@@ -519,6 +551,57 @@ export function createArtifactReader({ wire, internalBaseURL }) {
         (!page.items.length && offset < page.total)) throw new Error('SOURCE_UNAVAILABLE');
     const next = offset + page.items.length;
     return { items: page.items.map(publicArtifact), nextCursor: next < page.total ? `offset:${next}` : null };
+  };
+}
+
+/** Разобрать канонический chatId Telegram, сохраняя границу темы. */
+function chatRoute(id) {
+  const route = JSON.parse(id);
+  if (!Array.isArray(route) || route.length !== 2 || !/^[1-9][0-9]{0,19}$/.test(route[0]) ||
+      typeof route[0] !== 'string' || typeof route[1] !== 'string' || route[1] === '1' ||
+      route[1] !== '' && !/^[1-9][0-9]{0,15}$/.test(route[1])) throw new Error('INVALID_ARGUMENT');
+  return route;
+}
+
+/** Вызвать root-only RPC existing ingress; исход timeout не вызывает повтор мутации. */
+export function createChatControl(socketPath, ingressUid) {
+  return async ({ operation, profile, id }) => {
+    if (!isAbsolute(socketPath ?? '') || !Number.isSafeInteger(ingressUid) || ingressUid <= 0)
+      throw new Error('SOURCE_UNAVAILABLE');
+    const target = lstatSync(socketPath), parent = lstatSync(dirname(socketPath));
+    if (!target.isSocket() || target.uid !== ingressUid || (target.mode & 0o777) !== 0o600 ||
+        !parent.isDirectory() || parent.uid !== 0 || parent.mode & 0o007) throw new Error('SOURCE_UNAVAILABLE');
+    const [chat, thread] = chatRoute(id);
+    const requestId = randomUUID();
+    const params = { userId: profile.userId, profileId: profile.profileId, chat, thread,
+      ...(operation === 'state' ? {} : { paused: operation === 'admin-chats-pause' }) };
+    const result = await new Promise((resolve, reject) => {
+      const socket = createConnection(socketPath);
+      let data = '', finished = false;
+      const finish = (error, result) => {
+        if (finished) return;
+        finished = true; socket.destroy();
+        error ? reject(error) : resolve(result);
+      };
+      socket.setTimeout(10000, () => finish(new Error('SOURCE_UNAVAILABLE')));
+      socket.on('error', () => finish(new Error('SOURCE_UNAVAILABLE')));
+      socket.on('end', () => finish(new Error('SOURCE_UNAVAILABLE')));
+      socket.on('connect', () => socket.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'chats.control', params }) + '\n'));
+      socket.setEncoding('utf8');
+      socket.on('data', chunk => {
+        data += chunk;
+        if (Buffer.byteLength(data) > 32768) return finish(new Error('SOURCE_UNAVAILABLE'));
+        if (!data.includes('\n')) return;
+        try {
+          const reply = JSON.parse(data.slice(0, data.indexOf('\n')));
+          if (reply.jsonrpc !== '2.0' || reply.id !== requestId || reply.error || !object(reply.result)) throw new Error();
+          finish(null, reply.result);
+        } catch { finish(new Error('SOURCE_UNAVAILABLE')); }
+      });
+    });
+    if (typeof result.paused !== 'boolean' || !['stopped', 'stopping', 'resumed'].includes(result.state) ||
+        result.paused === (result.state === 'resumed')) throw new Error('SOURCE_UNAVAILABLE');
+    return result;
   };
 }
 
@@ -609,9 +692,12 @@ export async function startControl(config, adapters = {}) {
     if (value?.ok !== true) throw new Error('TELEGRAM_METADATA_UNAVAILABLE');
     return value.result;
   };
+  const telegramProfiles = config.telegramProfilesPath ? createTelegramProfiles({ path: config.telegramProfilesPath,
+    info: adapters.telegramInfo ?? telegramInfo, download: adapters.telegramPhotoDownload ?? telegramPhotoDownload(config.telegramToken) }) : undefined;
   const control = new Control({ origin: config.origin, cursorKey: config.cursorKey, registry, authCall,
-    memoryRead, telegramSend: adapters.telegramSend ?? telegramSend, telegramInfo: adapters.telegramInfo ?? telegramInfo, chatRead: adapters.chatRead ?? createChatRead(), artifactsCall: adapters.artifactsCall ?? artifactsCall,
+    memoryRead, telegramProfiles, telegramSend: adapters.telegramSend ?? telegramSend, telegramInfo: adapters.telegramInfo ?? telegramInfo, chatRead: adapters.chatRead ?? createChatRead(config), artifactsCall: adapters.artifactsCall ?? artifactsCall,
     toolCatalog: adapters.toolCatalog, perUserRuntime: adapters.perUserRuntime, historyCall: adapters.historyCall,
+    chatControl: adapters.chatControl ?? (config.ingressControlSocket ? createChatControl(config.ingressControlSocket, config.telegramJournalUid) : undefined),
     quarantineProfile: config.quarantineProfile, quarantineArtifactsOwnerId: config.quarantineArtifactsOwnerId });
   control.onIdentityChanged = adapters.onIdentityChanged;
   control.bootstrapFilesConfiguration = adapters.bootstrapFilesConfiguration;
@@ -651,7 +737,11 @@ export async function privateCall(runtime, method, params) {
     if (Object.keys(params).some(key => key !== 'userId') || !text(params.userId) || params.userId.length > 128) throw new Error('INVALID_ARGUMENT');
     return authCall('identity-get', {userId:params.userId});
   }
-  if (method === 'identity.resolve') return authCall('telegram-resolve', { telegramId: params.telegramId });
+  if (method === 'identity.resolve') {
+    const result = await authCall('telegram-resolve', { telegramId: params.telegramId });
+    if (result?.user?.status === 'active') { try { await control.telegramProfiles?.get(params.telegramId); } catch { /* Метаданные не влияют на вход. */ } }
+    return result;
+  }
   if (method === 'identity.invite-redeem') return authCall('invite-redeem', { telegramId: params.telegramId, code: params.code, ...(params.name === undefined ? {} : { name: params.name }) });
   if (method === 'identity.profile-ready') {
     if(Object.keys(params).some(key=>!['userId','profileId'].includes(key))||!text(params.userId)||!text(params.profileId))throw new Error('INVALID_ARGUMENT');

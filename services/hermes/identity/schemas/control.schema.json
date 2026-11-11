@@ -126,6 +126,14 @@
           "minimum": 1,
           "maximum": 100,
           "default": 50
+        },
+        "source": {
+          "enum": [
+            "native",
+            "telegram"
+          ],
+          "default": "native",
+          "description": "telegram читает только фактические Telegram updates и успешные Bot API receipts. native сохраняет прежнюю историю модели для административного архива."
         }
       }
     },
@@ -171,6 +179,14 @@
           ],
           "default": "asc",
           "description": "asc: прежний стабильный снимок от начала. desc: последние сообщения и cursor по ID к более ранним; каждая страница читает свежую защищённую копию, ответ в хронологическом порядке."
+        },
+        "source": {
+          "enum": [
+            "native",
+            "telegram"
+          ],
+          "default": "native",
+          "description": "telegram читает только фактические Telegram updates и успешные Bot API receipts. native сохраняет прежнюю историю модели для административного архива."
         }
       }
     },
@@ -332,6 +348,9 @@
         },
         "updatedAt": {
           "type": "string"
+        },
+        "participant": {
+          "$ref": "#/definitions/TelegramProfile"
         }
       }
     },
@@ -359,6 +378,44 @@
         },
         "createdAt": {
           "type": "string"
+        },
+        "authorName": {
+          "type": "string"
+        },
+        "authorUsername": {
+          "type": "string"
+        },
+        "telegramId": {
+          "type": "string"
+        },
+        "messageType": {
+          "type": "string"
+        },
+        "editedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "attachmentState": {
+          "enum": [
+            "none",
+            "ready",
+            "pending"
+          ]
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChatAttachment"
+          }
+        },
+        "richMessage": {
+          "type": "object",
+          "description": "Фактический RichMessage.blocks из Telegram receipt. Не HTML и не Markdown отправленного запроса."
         }
       }
     },
@@ -484,6 +541,16 @@
               "type": "null"
             }
           ]
+        },
+        "profiles": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/definitions/TelegramProfile"
+          }
+        },
+        "source": {
+          "const": "telegram"
         }
       }
     },
@@ -512,6 +579,16 @@
               "type": "null"
             }
           ]
+        },
+        "source": {
+          "const": "telegram"
+        },
+        "updatesCursor": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "control": {
+          "$ref": "#/definitions/ChatControlBody"
         }
       }
     },
@@ -745,6 +822,168 @@
         },
         "body": {
           "$ref": "#/definitions/DownloadDescriptor"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "TelegramProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "telegramId",
+        "name"
+      ],
+      "properties": {
+        "telegramId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "avatar": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32800,
+          "pattern": "^data:image/jpeg;base64,[A-Za-z0-9+/=]+$"
+        }
+      }
+    },
+    "ChatAttachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "filename",
+        "mimeType"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        }
+      }
+    },
+    "ChatControlBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paused",
+        "state"
+      ],
+      "properties": {
+        "paused": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "stopped",
+            "stopping",
+            "resumed"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "paused": {
+              "const": true
+            },
+            "state": {
+              "enum": [
+                "stopped",
+                "stopping"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "paused": {
+              "const": false
+            },
+            "state": {
+              "const": "resumed"
+            }
+          }
+        }
+      ]
+    },
+    "ChatControlRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId",
+        "chatId",
+        "source"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "not": {
+            "const": "__quarantine__"
+          }
+        },
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source": {
+          "const": "telegram"
+        }
+      }
+    },
+    "ChatControlResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/ChatControlBody"
         },
         "setCookies": {
           "type": "array",

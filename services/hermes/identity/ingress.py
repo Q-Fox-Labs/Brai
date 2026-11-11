@@ -2,6 +2,12 @@
 # ABOUTME: Перед доставкой заново проверяет владельца, маршрут и тип действия.
 """Подключение вызывается доверенным ingress после нативной проверки отправителя."""
 import asyncio
+import errno
+import os
+from pathlib import Path
+import socket
+import stat
+import struct
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from .ipc import MAX_FRAME, Peer, RpcError, peer_uid
@@ -33,6 +39,7 @@ class Bridge:
         self.routes = set()
         self.received = set()
         self.sent = set()
+        self.chat_state = self.chat_admission = self.chat_started = self.chat_states = None
         if not self.worker_telegram_id.isascii():
             raise ValueError('invalid worker Telegram identity')
 
@@ -46,9 +53,16 @@ class Bridge:
                 writer.close()
                 await writer.wait_closed()
                 raise PermissionError('Unexpected worker UID')
-            self.peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended, 'telegram_api': self.call_telegram_api})
+            self.peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended,
+                             'telegram_api': self.call_telegram_api, 'chat_states': self.read_chat_states})
             self.task = asyncio.create_task(self.peer.run())
             return self.peer
+
+    async def read_chat_states(self, owner):
+        """Отдать snapshot только worker этого duplex; ошибка store закрывает startup."""
+        if owner != self.owner or not callable(self.chat_states):
+            raise RpcError(-32602, 'Chat state unavailable')
+        return {'owner': self.owner, 'routes': self.chat_states()}
 
     def configure_delivery(self, *, authorize_delivery=None, telegram_api=None, require_scope=False):
         """Подключить доверенные порты до открытия IPC-соединения."""
@@ -78,13 +92,18 @@ class Bridge:
         source = event.source
         if source.platform.value != 'telegram' or str(source.user_id) not in self.telegram_ids or source.is_bot:
             raise PermissionError('Event owner mismatch')
+        route = (str(getattr(source, 'chat_id', '')), str(getattr(source, 'thread_id', None) or ''))
+        route = (route[0], '' if route[1] == '1' else route[1])
+        state = self.chat_state(route) if callable(self.chat_state) else None
+        if state and (state['paused'] or callable(self.chat_admission) and not self.chat_admission(route, event.message_id)):
+            return {'accepted': False, 'turn_id': None}
         # Отказ подключения не должен занимать беседу или допускать input,
         # который worker заведомо не сможет получить.
         peer = await self.connect()
         async with self._dispatch_scope() as scope:
-            return await self._dispatch(event, source, peer, scope)
+            return await self._dispatch(event, source, peer, scope, state)
 
-    async def _dispatch(self, event, source, peer, scope):
+    async def _dispatch(self, event, source, peer, scope, initial_state=None):
         """Подготовить и передать допущенное событие внутри dispatch fence."""
         data = await self.prepare_event(event)
         if not isinstance(data, dict):
@@ -99,9 +118,18 @@ class Bridge:
         self.routes.add(route)
         if event.message_id:
             self.received.add((route, str(event.message_id)))
+        route = (route[0], '' if route[1] == '1' else route[1])
+        state = self.chat_state(route) if callable(self.chat_state) else None
+        if state and (state['paused'] or state['generation'] != initial_state['generation']
+                      or callable(self.chat_admission) and not self.chat_admission(route, event.message_id)):
+            return {'accepted': False, 'turn_id': None}
+        if state:
+            data['chat_generation'] = state['generation']
         result = await peer.call('dispatch', {'event': data, 'owner': self.owner})
         if not isinstance(result, dict) or type(result.get('accepted')) is not bool:
             raise ConnectionError('Invalid dispatch receipt')
+        if result['accepted'] and state and callable(self.chat_started):
+            self.chat_started(route, state['generation'])
         turn_id = result.get('turn_id')
         scope['turn_id'] = turn_id
         if turn_id is not None:
@@ -219,6 +247,75 @@ class Bridge:
 
 
 _authorized_telegram = ContextVar('brai_identity_authorized_telegram', default=None)
+
+
+async def serve_chat_control(path, handler):
+    """Открыть private UDS существующего ingress только для root Control."""
+    target = Path(path)
+    if not target.is_absolute() or not target.parent.is_dir():
+        raise PermissionError('Invalid ingress control path')
+    for parent in target.parents:
+        meta = parent.lstat()
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_mode & 0o002:
+            raise PermissionError('Untrusted ingress control parent')
+    parent = target.parent.stat()
+    if parent.st_mode & 0o007:
+        raise PermissionError('Public ingress control parent')
+    if parent.st_mode & 0o070:
+        # AIDEV-NOTE: POSIX ACL отражает mask в group mode; доступ разрешён только ingress.
+        acl = os.getxattr(target.parent, 'system.posix_acl_access')
+        if len(acl) < 4 or struct.unpack_from('<I', acl)[0] != 2 or (len(acl) - 4) % 8:
+            raise PermissionError('Invalid ingress control ACL')
+        entries = {struct.unpack_from('<HHI', acl, offset) for offset in range(4, len(acl), 8)}
+        expected = {(1, 7, 4294967295), (2, 7, os.geteuid()), (4, 0, 4294967295),
+                    (16, 7, 4294967295), (32, 0, 4294967295)}
+        if entries != expected:
+            raise PermissionError('Unexpected ingress control ACL')
+    try:
+        old = target.lstat()
+    except FileNotFoundError:
+        old = None
+    if old is not None:
+        if not stat.S_ISSOCK(old.st_mode) or old.st_uid != os.geteuid():
+            raise PermissionError('Untrusted ingress control socket')
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(1)
+            if probe.connect_ex(str(target)) != errno.ECONNREFUSED:
+                raise PermissionError('Ingress control socket active')
+        finally:
+            probe.close()
+        current = target.lstat()
+        if (old.st_ino, old.st_dev) != (current.st_ino, current.st_dev):
+            raise PermissionError('Ingress control socket changed')
+        target.unlink()
+    clients = set()
+    async def accept(reader, writer):
+        if peer_uid(writer) != 0 or len(clients) >= 16:
+            writer.close()
+            await writer.wait_closed()
+            return
+        task = asyncio.current_task()
+        clients.add(task)
+        try:
+            await asyncio.wait_for(Peer(reader, writer, {'chats.control': handler}).run(), 30)
+        finally:
+            clients.discard(task)
+            writer.close()
+            await writer.wait_closed()
+    server = await asyncio.start_unix_server(accept, path=str(target), limit=MAX_FRAME + 1)
+    os.chmod(target, 0o600)
+    identity = target.lstat()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        for task in clients:
+            task.cancel()
+        await asyncio.gather(*clients, return_exceptions=True)
+        current = target.lstat()
+        if (identity.st_ino, identity.st_dev) == (current.st_ino, current.st_dev):
+            target.unlink()
 
 
 def install(runner, adapter, resolve_bridge):

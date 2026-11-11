@@ -9,6 +9,7 @@
     "services/hermes/files/native.patch",
     "patches/russian-failure-notice.patch",
     "patches/conversational-approvals.patch",
-    "patches/memory-recall.patch"
+    "patches/memory-recall.patch",
+    "patches/turn-request-budget.patch"
   ]
 }

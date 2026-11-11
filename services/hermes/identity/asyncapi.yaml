@@ -57,6 +57,18 @@ channels:
       request:
         payload:
           $ref: "./schemas/control.schema.json#/definitions/ChatsGetRequest"
+  adminChatsPause:
+    address: brai.hermes.identity.v1.admin-chats-pause
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatControlRequest"
+  adminChatsResume:
+    address: brai.hermes.identity.v1.admin-chats-resume
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatControlRequest"
   adminArtifactsList:
     address: brai.hermes.identity.v1.admin-artifacts-list
     bindings:
@@ -100,6 +112,12 @@ channels:
       adminChatsGet:
         payload:
           $ref: "./schemas/control.schema.json#/definitions/ChatsGetResponse"
+      adminChatsPause:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatControlResponse"
+      adminChatsResume:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatControlResponse"
       adminArtifactsList:
         payload:
           $ref: "./schemas/control.schema.json#/definitions/ArtifactsListResponse"
@@ -162,6 +180,32 @@ operations:
         $ref: "#/channels/replies"
       messages:
         - $ref: "#/channels/replies/messages/adminChatsGet"
+  adminChatsPause:
+    action: receive
+    channel:
+      $ref: "#/channels/adminChatsPause"
+    messages:
+      - $ref: "#/channels/adminChatsPause/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminChatsPause"
+  adminChatsResume:
+    action: receive
+    channel:
+      $ref: "#/channels/adminChatsResume"
+    messages:
+      - $ref: "#/channels/adminChatsResume/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminChatsResume"
   adminArtifactsList:
     action: receive
     channel:

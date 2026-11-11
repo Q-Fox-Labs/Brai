@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет overlay на настоящем закреплённом native движке и SessionDB.
 # ABOUTME: Все данные временные, модель и транспорт подменены; рабочий gateway не запускается.
 import os
+import asyncio
 from pathlib import Path
 import sys
 import tempfile
@@ -48,6 +49,23 @@ class NativeConsentTests(unittest.TestCase):
             with consent.turn_scope(self.db,self.source,"test-session","Посчитай","1"),consent.tool_scope("terminal",{},"tool"):
                 self.assertTrue(self.invoke()["approved"])
         self.assertIsNone(consent.Store(self.db).query(consent.conversation_key(self.source)))
+
+    def test_native_stream_suppression_records_delivered_consent(self):
+        from gateway.run_turn import GatewayTurnMixin
+        store=consent.Store(self.db)
+        scope=consent.Scope(self.db,consent.conversation_key(self.source),"alice","test-session","Посчитай","1")
+        row=store.prepare(scope,{"command":"create synthetic file"},{"decision":"needs_consent"},"Создать файл?")
+        runner=GatewayTurnMixin()
+        runner.session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db)
+        stream=types.SimpleNamespace(final_response_sent=True,final_content_delivered=False,message_id="10",
+            delivered_final_matches=lambda text:text==row["question"])
+        ctx=types.SimpleNamespace(source=self.source,session_key="key",session_id="test-session",inbound_message_id="1",stream_consumer_holder=[stream])
+        asyncio.run(runner._run_agent_mark_streamed_delivery({"failed":True,"final_response":row["question"]},ctx))
+        self.assertIsNone(store.query(scope.key)["delivered_at"])
+        response={"final_response":row["question"]}
+        asyncio.run(runner._run_agent_mark_streamed_delivery(response,ctx))
+        self.assertTrue(response["already_sent"])
+        self.assertEqual(store.query(scope.key)["question_message_id"],"10")
     def test_busy_and_idle_ingress_use_same_durable_answer(self):
         store=consent.Store(self.db)
         scope=consent.Scope(self.db,consent.conversation_key(self.source),"alice","test-session","Проверь папку","1")
