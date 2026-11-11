@@ -36,7 +36,7 @@ class SystemTests(unittest.TestCase):
         package = ModuleType('agent')
         package.skill_utils = utils
         with patch.dict(sys.modules, agent=package), patch.dict(os.environ, HERMES_HOME=str(self.root)), \
-             patch.object(system_skills, 'protected_root'), \
+             patch.object(system_skills, 'protected_root'), patch.object(system_skills, 'install_personal_policy'), \
              patch.object(system_skills, 'system_aliases', side_effect=lambda value: set(aliases)):
             system_skills.install_policy()
             roots = utils.get_skill_search_roots(self.root / 'malicious')
@@ -51,6 +51,7 @@ class SystemTests(unittest.TestCase):
             self.assertEqual(utils.get_disabled_skill_names(), set())
 
     def test_unprotected_system_root_is_rejected(self):
+        self.root.chmod(0o777)
         with self.assertRaises(PermissionError):
             system_skills.protected_root(self.root)
 
