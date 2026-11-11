@@ -20,7 +20,7 @@ export interface ProcessingSettings {
  enabled:boolean;embeddingEnabled:boolean;classificationEnabled:boolean;
  /** Защищённый allowlist; observation не является источником разрешения. */
  externalAllowedOwners:readonly string[];
- /** Оператор возвращает доказанно допустимую проекцию либо null. Regex такого доказательства не даёт. */
+ /** Защищённая политика готовит техническую или точную ручную проекцию; null запрещает отправку. */
  externalProjection?:(job:ProcessingJob)=>Promise<SafeExternalProjection|null>;
  deadlineMs?:number;intervalMs?:number;heartbeatMs?:number;
 }

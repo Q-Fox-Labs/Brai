@@ -81,7 +81,7 @@ export async function startRuntime(cfg=loadConfig()){
   const makeSystemStore=(deadlineAt?:number)=>createSystemStore(pool,{installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,deadlineAt});
   const systemStore=makeSystemStore();
   const processingStore=createProcessingStore(backgroundPool,{target:()=>readProcessing().targetGeneration,installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,leaseMs:initialProcessing.leaseMs,intakeReserveBytes:initialProcessing.intakeReserveBytes,maxDerivativeBytes:initialProcessing.maxDerivativeBytes,dailyLimits:initialProcessing.dailyLimits,policy:()=>({...readProcessing(),maxDatabaseBytes:cfg.maxDatabaseBytes})});
-  const externalProjection=async(job:ProcessingJob)=>approvedProjection(readProcessing(),job.owner_id,job.input_hash);
+  const externalProjection=async(job:ProcessingJob)=>approvedProjection(readProcessing(),job.owner_id,job.input_hash,job.observation);
   const models=createModelPorts({connection:nc});
   processor=createProcessor({store:processingStore,indexReport:async id=>{
     if(!await processingStore.mayIndex())throw new ModelFault("DERIVATIVE_CAPACITY","not_sent");
