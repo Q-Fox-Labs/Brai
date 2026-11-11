@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import instructions, images
 from identity.skills import catalog_files
+from identity import skills as system_skills
 from identity.synthesize import synthesize_file
 from identity.media import command as media_command
 from identity.profiles import native_profile
@@ -26,6 +27,49 @@ class SystemTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_system_policy_ignores_personal_path_and_disabled_overrides(self):
+        aliases = {'common', 'creative/common'}
+        utils = NS(get_disabled_skill_names=lambda platform=None: {'common', 'creative/common', 'private'},
+                   is_disabled_entry=lambda entry, disabled: entry['name'] in disabled,
+                   ESSENTIAL_SKILLS=frozenset({'hermes-agent'}))
+        package = ModuleType('agent')
+        package.skill_utils = utils
+        with patch.dict(sys.modules, agent=package), patch.dict(os.environ, HERMES_HOME=str(self.root)), \
+             patch.object(system_skills, 'protected_root'), \
+             patch.object(system_skills, 'system_aliases', side_effect=lambda value: set(aliases)):
+            system_skills.install_policy()
+            roots = utils.get_skill_search_roots(self.root / 'malicious')
+            self.assertEqual(roots[0], (-2, system_skills.SYSTEM_SKILLS))
+            self.assertEqual(roots[-1][1], self.root / 'usercustom/userdata/skills')
+            self.assertNotIn(self.root / 'malicious', [path for _, path in roots])
+            self.assertEqual(utils.get_skill_create_dir(), self.root / 'usercustom/userdata/skills')
+            self.assertEqual(utils.get_disabled_skill_names(), {'private'})
+            self.assertFalse(utils.is_disabled_entry({'root': system_skills.SYSTEM_SKILLS, 'name': 'common'}, {'common'}))
+            self.assertTrue(utils.is_disabled_entry({'root': roots[-1][1], 'name': 'private'}, {'private'}))
+            aliases.add('private')
+            self.assertEqual(utils.get_disabled_skill_names(), set())
+
+    def test_unprotected_system_root_is_rejected(self):
+        with self.assertRaises(PermissionError):
+            system_skills.protected_root(self.root)
+
+    def test_shared_instruction_is_read_fresh_without_changing_base_instructions(self):
+        base = self.root / 'base'
+        shared = self.root / 'system-skills'
+        for name in instructions.FILES:
+            path = base / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Base ' + name)
+        skill = shared / instructions.SKILL
+        skill.parent.mkdir(parents=True)
+        skill.write_text('---\nname: context-gifs\n---\nFirst system text')
+        self.assertIn('First system text', instructions.read_context(base, shared))
+        skill.write_text('---\nname: context-gifs\n---\nUpdated system text')
+        self.assertIn('Updated system text', instructions.read_context(base, shared))
+        skill.unlink()
+        with self.assertRaises(FileNotFoundError):
+            instructions.read_context(base, shared)
 
     def test_system_catalog_retains_bundled_assets_and_product_routes(self):
         bundled, product = self.root / 'bundled', self.root / 'instructions/skills'
@@ -216,7 +260,7 @@ class SystemTests(unittest.TestCase):
         self.assertTrue(config['streaming']['enabled'])
         self.assertTrue(config['display']['platforms']['telegram']['streaming'])
         self.assertTrue(config['display']['platforms']['telegram']['interim_assistant_messages'])
-        self.assertEqual(config['skills']['external_dirs'], ['/opt/brai-profile/skills'])
+        self.assertEqual(config['skills']['external_dirs'], ['/opt/brai-profile/system-skills/skills', '/opt/brai-profile/skills'])
         self.assertEqual(config['skills']['create_dir'], '/profiles/one/usercustom/userdata/skills')
         provider = config['tts']['providers']['silero']
         self.assertIn('-m identity.synthesize', provider['command'])

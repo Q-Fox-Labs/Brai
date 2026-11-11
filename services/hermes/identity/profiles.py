@@ -139,7 +139,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                        '-B -m identity.synthesize --input {input_path} --output {output_path}',
             'output_format': 'ogg', 'voice_compatible': True,
             'timeout': 200, 'max_text_length': 900}}},
-        'skills': {'external_dirs': ['/opt/brai-profile/skills'],
+        'skills': {'external_dirs': ['/opt/brai-profile/system-skills/skills', '/opt/brai-profile/skills'],
                    'create_dir': home + '/usercustom/userdata/skills'},
         # AIDEV-NOTE: Дочерние инструменты остаются в PrivateNetwork и должны
         # пользоваться тем же trusted relay; credentials в allowlist не входят.
@@ -200,7 +200,7 @@ def profile_for_user(user, *, profile_root):
 
 def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
                 broker_socket, egress_socket, memory_socket, instance='dev',
-                site_packages=None, instructions_root=None):
+                site_packages=None, instructions_root=None, system_skills_root=None, skill_script_dirs=()):
     """Задать отдельные UID и сеть, открыв лишь личный home и read-only software."""
     for value in (profile['home'], engine_root, runtime_root, python,
                   broker_socket, egress_socket, memory_socket):
@@ -209,6 +209,12 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         _path(site_packages)
     if instructions_root is not None:
         _path(instructions_root)
+    if system_skills_root is not None:
+        _path(system_skills_root)
+    for relative in skill_script_dirs:
+        _path('/' + relative)
+        if not instructions_root or not system_skills_root or str(PurePosixPath(relative)) != relative or PurePosixPath(relative).is_absolute() or '..' in PurePosixPath(relative).parts:
+            raise ValueError('Invalid skill script mount')
     if type(ingress_uid) is not int or ingress_uid < 0:
         raise ValueError('Invalid ingress UID')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', instance):
@@ -295,4 +301,9 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
     if instructions_root:
         lines.extend(['Environment=HERMESCUSTOM_ROOT=/opt/brai-profile/instructions',
                       'BindReadOnlyPaths=' + instructions_root + ':/opt/brai-profile/instructions'])
+    if system_skills_root:
+        lines.append('BindReadOnlyPaths=' + system_skills_root + ':/opt/brai-profile/system-skills')
+        for relative in skill_script_dirs:
+            lines.append('BindReadOnlyPaths=' + instructions_root + '/skill-scripts/' + relative +
+                         ':/opt/brai-profile/system-skills/skills/' + relative)
     return '\n'.join(lines + ['[Install]', 'WantedBy=multi-user.target', ''])

@@ -64,6 +64,21 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan_users('123', 'original-owner', [{'telegramId': '456'}], profile_root='/profiles')
 
+    def test_system_documents_and_code_helpers_are_bound_read_only(self):
+        args = dict(engine_root='/software/engine', runtime_root='/software/runtime',
+                    python='/software/python/bin/python3.14', ingress_uid=995,
+                    broker_socket='/run/broker.sock', memory_socket='/run/memory.sock',
+                    egress_socket='/run/egress.sock', instructions_root='/software/instructions',
+                    system_skills_root='/shared/system-skills')
+        value = worker_unit(self.profile(), **args, skill_script_dirs=['media/example/scripts'])
+        self.assertIn('BindReadOnlyPaths=/shared/system-skills:/opt/brai-profile/system-skills', value)
+        self.assertIn('BindReadOnlyPaths=/software/instructions/skill-scripts/media/example/scripts:'
+                      '/opt/brai-profile/system-skills/skills/media/example/scripts', value)
+        self.assertNotIn('BindPaths=/shared/system-skills', value)
+        for relative in ('../foreign/scripts', 'scripts\nEnvironment=BAD=yes', '/absolute/scripts', 'bad%u/scripts'):
+            with self.subTest(relative=relative), self.assertRaises(ValueError):
+                worker_unit(self.profile(), **args, skill_script_dirs=[relative])
+
     def test_worker_unit_hides_shared_state_and_uses_installed_python(self):
         value = worker_unit(self.profile(), engine_root='/software/engine', runtime_root='/software/runtime',
                             python='/software/python/bin/python3.14', ingress_uid=995,
@@ -145,7 +160,7 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn('--no-sandbox', value)
         self.assertNotIn('docker.sock', value)
         with self.assertRaises(ValueError):
-            browser_unit(profile, chrome_root='/software/chrome\\nUser=root')
+            browser_unit(profile, chrome_root='/software/chrome\nUser=root')
 
     def test_worker_unit_rejects_operator_path_injection(self):
         with self.assertRaises(ValueError):

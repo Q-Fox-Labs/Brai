@@ -625,6 +625,8 @@ async def run(config_path):
     from .tool_client import broker_call
     # У файлового bootstrap только привязанный по UID broker; старый fixed-owner порт запрещён.
     os.environ['BRAI_IDENTITY_MODE'] = 'worker'
+    from .skills import install_policy
+    install_policy()
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)

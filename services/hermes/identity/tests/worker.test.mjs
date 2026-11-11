@@ -41,3 +41,11 @@ for (const pattern of ['test_chat_journal.py', 'test_shared_search.py', 'test_de
     assert.equal(result.status, 0, result.stderr || result.error?.message || 'Boundary tests failed');
   });
 }
+
+test('native system skills remain shared across two users', {
+  skip: process.getuid?.() !== 0 || !process.env.BRAI_NATIVE_ENGINE
+}, () => {
+  const result = spawnSync(process.env.PYTHON || 'python3', ['-B', join(here, 'test_system_skills_native.py')],
+    {encoding: 'utf8', timeout: 30000});
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+});

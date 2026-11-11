@@ -323,6 +323,7 @@
     "tools/connect.py",
     "tools/git_readonly.py",
     "tools/prepare_user_data.py",
+    "tools/skill_docs.py",
     "tools/verify_runtime.py"
   ]
 }

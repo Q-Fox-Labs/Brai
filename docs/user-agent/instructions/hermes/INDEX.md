@@ -22,19 +22,12 @@
 
 ## Навыки
 
-Навыки открывай штатным skill_view; их справочники — по маршрутам навыка. Эти ссылки задают канонический источник текста. Наличие навыка не подтверждает доступность его внешней программы.
+Системные навыки общие для всех пользователей. Их нельзя изменять, удалять или выключать из личного профиля. Подходящий навык найди штатным поиском и полностью открой через skill_view; справочники читай по путям установленного навыка. Не используй исторические копии рядом с этим индексом вместо установленного каталога.
 
-- [codex](skills/autonomous-ai-agents/codex/SKILL.md)
-- [hermes-agent](skills/autonomous-ai-agents/hermes-agent/SKILL.md)
-- [art-director](skills/creative/art-director/SKILL.md) — для постеров, афиш, баннеров и другой графики; прочитай файл по ссылке.
-- [context-gifs](skills/creative/context-gifs/SKILL.md) — уместная GIF, мем, объясняющая анимация и настройка их отключения.
-- [reply-feedback-learning](skills/creative/reply-feedback-learning/SKILL.md)
-- [youtube-content](skills/media/youtube-content/SKILL.md)
-- [memos-memory](skills/note-taking/memos-memory/SKILL.md)
-- [silero-local-voice](skills/silero-local-voice/SKILL.md)
-- [instaloader](skills/social-media/instaloader/SKILL.md)
-- [requesting-code-review](skills/software-development/requesting-code-review/SKILL.md)
+По просьбе пользователя создай или установи личный навык штатным skill_manage: create для основного текста и write_file для дополнительных файлов. Сначала прочитай импортируемый материал; не запускай его код при установке. Сохраняй только в HERMES_HOME/usercustom/userdata/skills текущего пользователя, без Git и общего каталога. Для личной редакции системного навыка выбери отдельное имя: личный текст не подменяет системный. Системные тексты обновляет оператор отдельно от сборки; скрипты проходят выпуск кода.
 
-Для настройки и диагностики плагинов используй руководства рядом с их установленным кодом и установленный [навык Hermes](skills/autonomous-ai-agents/hermes-agent/SKILL.md) с его справочниками. Промпт Telegram Business — [здесь](prompts/telegram-reply.md); отправка требует подтверждения владельца.
+Для постеров, афиш и баннеров используй art-director. Для настройки и диагностики Hermes — hermes-agent. Для уместных GIF, мемов, объясняющих анимаций и их отключения — context-gifs. Наличие навыка не подтверждает доступность внешних программ. Добавление навыка не требует изменения этого индекса.
+
+Промпт Telegram Business — [здесь](prompts/telegram-reply.md); отправка требует подтверждения владельца.
 
 Документы установщика и правила разработки не являются инструкциями пользовательского агента. Секреты, память и переписка в этот раздел не переносятся.
