@@ -21,7 +21,24 @@
 .tg-conversation { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }.tg-timeline { max-width: 56rem; margin: auto; padding: 1.75rem 2rem 2rem; }.tg-message { width: fit-content; max-width: min(85%, 42rem); margin: .65rem auto .65rem 0; padding: .8rem 1rem; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 1rem 1rem 1rem .25rem; background: var(--card); }.tg-message[data-direction="in"] { margin-left: auto; margin-right: 0; background: color-mix(in srgb, var(--primary) 17%, var(--card)); border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); border-radius: 1rem 1rem .25rem 1rem; }.tg-message-meta { display: flex; align-items: baseline; gap: .55rem; margin-bottom: .38rem; font-size: .7rem; color: var(--muted-foreground); }.tg-message-meta strong { color: var(--foreground); font-size: .8rem; }.tg-message[data-direction="out"] .tg-message-meta strong { color: var(--primary); }
 .tg-rich { overflow-wrap: anywhere; }.tg-rich p { white-space: pre-wrap; }.tg-rich pre { white-space: pre-wrap; }.tg-rich-table { overflow-x: auto; }.tg-rich table { border-collapse: collapse; }.tg-rich td { border: 1px solid var(--border); padding: .3rem .5rem; }
 .tg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.tg-attachments { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: .75rem; }.tg-attachments figure { margin: 0; max-width: min(100%, 21rem); }.tg-attachments img, .tg-attachments video { display: block; max-width: min(100%, 20rem); max-height: 20rem; border-radius: .4rem; object-fit: contain; }.tg-attachments audio { max-width: 100%; }.tg-attachments figcaption { padding: .4rem .2rem .1rem; font-size: .75rem; overflow-wrap: anywhere; }.tg-attachments a { color: var(--primary); }
+.tg-attachments { display: flex; flex-direction: column; gap: .75rem; margin-top: .65rem; min-width: 0; }
+.tg-attachments .tg-attachment { margin: 0; width: 22rem; max-width: 100%; min-width: 0; }
+.tg-media-preview { display: block; }
+.tg-attachments img, .tg-attachments video { display: block; width: 100%; max-height: 24rem; border-radius: .65rem; object-fit: contain; background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.tg-attachments audio { display: block; width: 100%; max-width: 100%; height: 3rem; }
+.tg-attachments figcaption { padding: 0; }
+.tg-file-card { display: flex; align-items: center; gap: .7rem; padding: .7rem; min-width: 0; border-radius: .65rem; color: var(--foreground); text-decoration: none; background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.tg-attachment > :not(figcaption) + figcaption { margin-top: .45rem; }
+.tg-file-card:hover { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.tg-file-card:focus-visible, .tg-media-preview:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.tg-file-icon { display: grid; place-items: center; width: 2.7rem; height: 2.7rem; flex: none; border-radius: .65rem; color: var(--primary); background: color-mix(in srgb, var(--primary) 13%, transparent); }
+.tg-file-copy { flex: 1; min-width: 0; display: grid; gap: .2rem; }
+.tg-file-copy strong { font-size: .8rem; font-weight: 550; overflow-wrap: anywhere; }
+.tg-file-copy > span { color: var(--muted-foreground); font-size: .72rem; }
+.tg-file-download { display: grid; justify-items: center; gap: .15rem; flex: none; color: var(--primary); font-size: .65rem; }
+.tg-media-error { padding: .5rem 0; font-size: .8rem; color: var(--muted-foreground); }
+.tg-media-error button { color: var(--primary); text-decoration: underline; }
+
 .tg-muted, .tg-error { color: var(--muted-foreground); font-size: .75rem; }.tg-error { padding: .6rem 1.5rem; margin: 0; }.tg-older, .tg-new { border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); padding: .45rem .8rem; font-size: .75rem; cursor: pointer; }.tg-older { display: block; margin: 0 auto 1rem; }.tg-new { position: absolute; right: 1.5rem; bottom: 1.5rem; box-shadow: 0 .2rem .8rem rgb(0 0 0 / .15); }
 .tg-empty { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; text-align: center; }.tg-empty-mark { color: var(--primary); font-size: 2rem; }.tg-empty h2 { margin: .5rem 0; font-size: 1.05rem; }.tg-empty p { margin: 0; color: var(--muted-foreground); font-size: .8rem; }
 @media (max-width: 720px) { .tg-sidebar { width: 100%; }.tg-sidebar[data-visible="false"] { display: none; }.tg-main[data-list-visible="true"] { display: none; }.tg-back { display: block; }.tg-timeline { padding: 1rem 1.1rem; }.tg-message { max-width: 94%; } }

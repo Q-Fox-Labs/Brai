@@ -4,9 +4,22 @@ import { createHash } from "node:crypto";
 import { GatewayError } from "./gateway";
 type Descriptor = { artifactId: string; filename: string; mimeType: string; sizeBytes: number; sha256: string };
 /** Проверяет descriptor и ограничивает поток размером и контрольной суммой владельца. */
-export async function adminDownload(value: unknown, artifactId: unknown, signal: AbortSignal, preview = false): Promise<Response> {
+export async function adminDownload(value: unknown, artifactId: unknown, signal: AbortSignal, preview = false, rangeHeader: string | null = null): Promise<Response> {
  const file = value as Partial<Descriptor> | null;
  if (!file || typeof artifactId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artifactId) || file.artifactId !== artifactId || typeof file.filename !== "string" || typeof file.mimeType !== "string" || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes! < 0 || file.sizeBytes! > 2 * 1024 ** 3 || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) throw new GatewayError(502, "BAD_REPLY");
+ const mime = file.mimeType.toLowerCase().split(";", 1)[0].trim();
+ const inline = preview && ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "audio/ogg", "audio/opus", "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/webm", "audio/wav", "audio/x-wav", "audio/flac", "video/mp4", "video/webm", "video/ogg"].includes(mime);
+ let range: { start: number; end: number } | null = null;
+ if (inline && rangeHeader) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+  const size = file.sizeBytes!;
+  const first = match?.[1] ? Number(match[1]) : null, last = match?.[2] ? Number(match[2]) : null;
+  const start = first ?? Math.max(0, size - (last ?? 0)), end = first === null ? size - 1 : Math.min(last ?? size - 1, size - 1);
+  if (!match || first === null && !last || first !== null && !Number.isSafeInteger(first) || last !== null && !Number.isSafeInteger(last) || start >= size || start > end) {
+   return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes", "Cache-Control": "no-store" } });
+  }
+  range = { start, end };
+ }
  let base: URL;
  try { base = new URL(process.env.WEB_ADMIN_ARTIFACTS_BASE_URL ?? ""); } catch { throw new GatewayError(503, "ARTIFACTS_NOT_CONFIGURED"); }
  if (!/^https?:$/.test(base.protocol) || base.username || base.password || base.pathname !== "/" || base.search || base.hash) throw new GatewayError(503, "ARTIFACTS_NOT_CONFIGURED");
@@ -14,24 +27,37 @@ export async function adminDownload(value: unknown, artifactId: unknown, signal:
  if (upstream.status !== 200 || !upstream.body || (upstream.headers.has("content-length") && upstream.headers.get("content-length") !== String(file.sizeBytes))) { await upstream.body?.cancel().catch(() => {}); throw new GatewayError(503, "ARTIFACT_UNAVAILABLE"); }
  const reader = upstream.body.getReader(), hash = createHash("sha256");
  let size = 0, finished = false;
+ let finalChunk: Uint8Array | null = null;
  const body = new ReadableStream<Uint8Array>({
   async pull(controller) {
    try {
-    const part = await reader.read();
-    if (part.done) {
-     finished = true;
-     if (size !== file.sizeBytes || hash.digest("hex") !== file.sha256) throw new Error("ARTIFACT_INTEGRITY");
-     controller.close(); reader.releaseLock(); return;
+    // AIDEV-NOTE: Range выдаём из полного проверяемого потока: частичный upstream
+    // не позволяет сверить SHA-256 оригинала. Пропущенные байты не храним в памяти.
+    while (true) {
+     const part = await reader.read();
+     if (part.done) {
+      finished = true;
+      if (size !== file.sizeBytes || hash.digest("hex") !== file.sha256) throw new Error("ARTIFACT_INTEGRITY");
+      if (finalChunk) controller.enqueue(finalChunk);
+      controller.close(); reader.releaseLock(); return;
+     }
+     const offset = size;
+     size += part.value.byteLength;
+     if (size > file.sizeBytes!) throw new Error("ARTIFACT_SIZE");
+     hash.update(part.value);
+     const chunk = range ? part.value.subarray(Math.max(0, range.start - offset), Math.max(0, Math.min(part.value.byteLength, range.end + 1 - offset))) : part.value;
+     if (chunk.byteLength) {
+      // Последние байты удерживаем до сверки: Content-Length не должен позволить
+      // браузеру завершить файл раньше проверки размера и SHA-256.
+      if (size >= (range ? range.end + 1 : file.sizeBytes!)) { finalChunk = chunk; continue; }
+      controller.enqueue(chunk); return;
+     }
     }
-    size += part.value.byteLength;
-    if (size > file.sizeBytes!) throw new Error("ARTIFACT_SIZE");
-    hash.update(part.value); controller.enqueue(part.value);
    } catch (error) { if (!finished) await reader.cancel().catch(() => {}); reader.releaseLock(); controller.error(error); }
   },
   async cancel() { await reader.cancel().catch(() => {}); },
  });
  const name = file.filename.replace(/[\u0000-\u001f\u007f/\\]/g, "_").slice(0, 180).toWellFormed() || "download";
  const encoded = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
- const inline = preview && ["image/png", "image/jpeg", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm", "audio/wav", "video/mp4", "video/webm"].includes(file.mimeType);
- return new Response(body, { headers: { "Content-Type": inline ? file.mimeType : "application/octet-stream", "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="download"; filename*=UTF-8''${encoded}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin" } });
+ return new Response(body, { status: range ? 206 : 200, headers: { "Content-Length": String(range ? range.end - range.start + 1 : file.sizeBytes), ...(inline ? { "Accept-Ranges": "bytes" } : {}), ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${file.sizeBytes}` } : {}), "Content-Type": inline ? mime : "application/octet-stream", "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="download"; filename*=UTF-8''${encoded}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin" } });
 }

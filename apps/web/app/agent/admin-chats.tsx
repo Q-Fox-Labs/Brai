@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import WorkspaceFrame from "../shell/workspace-frame";
 import TelegramRichMessage from "./telegram-rich";
-import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, selectedChatUnavailable, type AdminChat, type ChatMessage, type ChatOwner } from "./admin-chat-client";
+import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, selectedChatUnavailable, type AdminChat, type ChatMessage, type ChatAttachment, type ChatOwner } from "./admin-chat-client";
 import "./telegram-observer.css";
 
 type History = { key: string; messages: ChatMessage[]; cursor: string | null; updatesCursor?: string };
@@ -23,20 +23,42 @@ function ParticipantAvatar({ chat }: { chat: AdminChat }) {
     : Array.from(chat.participant?.name || chat.participant?.username || chat.owner.name || "П")[0]}</span>;
 }
 
+function fileSize(bytes: number | undefined): string {
+  if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} Б`;
+  const unit = bytes < 1024 ** 2 ? 1 : bytes < 1024 ** 3 ? 2 : 3;
+  return `${new Intl.NumberFormat("ru", { maximumFractionDigits: 1 }).format(bytes / 1024 ** unit)} ${["", "КБ", "МБ", "ГБ"][unit]}`;
+}
+
+/** Показывает оригинал медиа и отдельную ссылку на скачивание через проверку доступа. */
+function MessageAttachment({ file, owner }: { file: ChatAttachment; owner: string }) {
+  const [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0);
+  const download = "/api/admin?" + new URLSearchParams({ operation: "admin-artifacts-download", userId: owner, artifactId: file.artifactId });
+  const preview = download + "&preview=1";
+  const mime = file.mimeType.toLowerCase().split(";", 1)[0].trim();
+  const image = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif"].includes(mime);
+  const audio = ["audio/ogg", "audio/opus", "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/webm", "audio/wav", "audio/x-wav", "audio/flac"].includes(mime);
+  const video = ["video/mp4", "video/webm", "video/ogg"].includes(mime);
+  const type = image ? "Изображение" : audio ? "Аудиозапись" : video ? "Видео" : (/\.([a-z0-9]{1,8})$/i.exec(file.filename)?.[1].toUpperCase() || "Файл");
+  return <figure className="tg-attachment">
+    {!failed && image && <a className="tg-media-preview" href={download + "&preview=1"} target="_blank" rel="noopener noreferrer" aria-label={`Открыть изображение ${file.filename}`}><img key={attempt} src={preview} alt={file.filename} loading="lazy" onError={() => setFailed(true)} /></a>}
+    {!failed && audio && <audio key={attempt} controls preload="metadata" src={preview} aria-label={`Аудиозапись ${file.filename}`} onError={() => setFailed(true)} />}
+    {!failed && video && <video key={attempt} controls playsInline preload="metadata" src={preview} aria-label={`Видео ${file.filename}`} onError={() => setFailed(true)} />}
+    {failed && <div className="tg-media-error" role="status">Не удалось открыть медиа. Можно скачать файл или <button type="button" onClick={() => { setFailed(false); setAttempt(value => value + 1); }}>повторить</button>.</div>}
+    <figcaption><a className="tg-file-card" href={download} download={file.filename} aria-label={`Скачать ${file.filename}`}>
+      <span className="tg-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8Z" /><path d="M14 3v5h5M8 13h8M8 17h5" /></svg></span>
+      <span className="tg-file-copy"><strong>{file.filename}</strong><span>{[type, fileSize(file.sizeBytes)].filter(Boolean).join(" · ")}</span></span>
+      <span className="tg-file-download" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4" /></svg><span>Скачать</span></span>
+    </a></figcaption>
+  </figure>;
+}
+
 /** Показывает фактический text/caption Telegram без Markdown и преобразований строки. */
 export function AdminMessageBody({ message, owner }: { message: ChatMessage; owner: string }) {
-  const files = message.attachments ?? [], asDocument = message.messageType === "document";
-  const fileUrl = (id: string, preview = false) => "/api/admin?" + new URLSearchParams({
-    operation: "admin-artifacts-download", userId: owner, artifactId: id, ...(preview ? { preview: "1" } : {})
-  });
+  const files = message.attachments ?? [];
   return <>{message.richMessage ? <TelegramRichMessage value={message.richMessage} hasAttachments={files.length > 0} /> : message.text.length > 0 && <div className="tg-text">{message.text}</div>}
-    {files.length > 0 && <div className="tg-attachments">{files.map(file => <figure key={file.artifactId}>
-      {!asDocument && file.mimeType.startsWith("image/") && <a href={fileUrl(file.artifactId, true)} target="_blank" rel="noopener noreferrer"><img src={fileUrl(file.artifactId, true)} alt={file.filename} loading="lazy" /></a>}
-      {!asDocument && file.mimeType.startsWith("audio/") && <audio controls preload="none" src={fileUrl(file.artifactId, true)} />}
-      {!asDocument && file.mimeType.startsWith("video/") && <video controls preload="metadata" src={fileUrl(file.artifactId, true)} />}
-      {(asDocument || !file.mimeType.startsWith("image/") && !file.mimeType.startsWith("audio/")) && <figcaption><a href={fileUrl(file.artifactId)} download>{file.filename}</a></figcaption>}
-    </figure>)}</div>}
-    {!files.length && message.attachmentState === "pending" && <p className="tg-muted">Вложение пока недоступно.</p>}
+    {files.length > 0 && <div className="tg-attachments">{files.map(file => <MessageAttachment key={file.artifactId} file={file} owner={owner} />)}</div>}
+    {!files.length && message.attachmentState === "pending" && <p className="tg-muted" role="status">Вложение пока недоступно.</p>}
   </>;
 }
 

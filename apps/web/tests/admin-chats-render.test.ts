@@ -48,3 +48,19 @@ test("actual RichMessage blocks retain text, tables and formatting without inter
  assert.match(html,/<strong>ответ<\/strong>/);assert.match(html,/<table>/);assert.match(html,/Колонка/);
  assert.ok(html.includes("&lt;script&gt;literal&lt;/script&gt;"));assert.ok(!html.includes("href="));assert.ok(!html.includes("<script>"));
 });
+
+test("every attachment has a named direct download card and a readable size",()=>{
+ for(const mimeType of ["image/png","audio/ogg","video/mp4","application/pdf","image/svg+xml"]){
+  const html=render({messageType:"document",attachments:[{artifactId:id,filename:"Отчёт.pdf",mimeType,sizeBytes:1536}]});
+  assert.match(html,/class="tg-file-card"/);assert.match(html,/download="Отчёт.pdf"/);
+  assert.ok(html.includes('aria-label="Скачать Отчёт.pdf"'));assert.ok(html.includes("1,5 КБ"));
+  if(mimeType==="image/svg+xml")assert.ok(!html.includes("<img"));
+  if(mimeType==="image/png")assert.ok(html.includes("<img"));
+ }
+});
+test("voice metadata and unsupported media retain a download without fake players",()=>{
+ const voice=render({messageType:"voice",attachments:[{artifactId:id,filename:"voice.ogg",mimeType:"audio/ogg"}]});
+ assert.match(voice,/<audio[^>]*controls/);assert.match(voice,/Аудиозапись/);assert.match(voice,/Скачать/);
+ const unsupported=render({attachments:[{artifactId:id,filename:"clip.mov",mimeType:"video/quicktime"}]});
+ assert.ok(!unsupported.includes("<video"));assert.match(unsupported,/Скачать clip.mov/);
+});

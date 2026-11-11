@@ -50,7 +50,7 @@ async function handle(request: Request) {
   if (operation === "admin-artifacts-download" && reply.data.byteLength > 710000) throw new Error("BAD_REPLY");
   const result = JSON.parse(Buffer.from(reply.data).toString()) as { status: number; body: unknown; setCookies: string[] };
   if (!Number.isInteger(result.status) || result.status < 200 || result.status > 599 || !Array.isArray(result.setCookies) || !result.setCookies.every(item => typeof item === "string" && !/[\r\n]/.test(item))) throw new Error("BAD_REPLY");
-  if (operation === "admin-artifacts-download" && result.status === 200) return await adminDownload(result.body, input.artifactId, request.signal, preview === "1");
+  if (operation === "admin-artifacts-download" && result.status === 200) return await adminDownload(result.body, input.artifactId, request.signal, preview === "1", request.headers.get("range"));
   return authResponse(result);
  } catch (error) { return failure(error instanceof GatewayError ? error : new GatewayError(503, "ADMIN_UNAVAILABLE")); }
 }

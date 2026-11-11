@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createChatRead, Control } from '../control.mjs';
 
 test('Telegram source preserves exact text and media; changes update old messages without a model fallback', async () => {
+ mkdirSync(join(process.cwd(),'tmp'),{recursive:true});
  const root=mkdtempSync(join(process.cwd(),'tmp/exact-telegram-')), pid='11111111-1111-4111-8111-111111111111';
  const home=join(root,'worker'), journal=join(root,'journals'), directory=join(journal,pid);
  mkdirSync(home);mkdirSync(directory,{recursive:true});
@@ -27,6 +28,15 @@ test('Telegram source preserves exact text and media; changes update old message
  const input={artifactId:'33333333-3333-4333-8333-333333333333',filename:'photo.bin',mimeType:'image/png',localPath:'/private/not-public'};
  filesDb.prepare('INSERT INTO items VALUES(?,?,?,?)').run(input.artifactId,JSON.stringify(input),JSON.stringify({platform:'telegram',chat:'123',thread:'topic',messageId:'59'}),0);
  filesDb.prepare('INSERT INTO items VALUES(?,?,?,?)').run(ref.artifactId,JSON.stringify(ref),JSON.stringify({platform:'telegram',chat:'456',thread:'topic',messageId:'59'}),0);
+ const addFile=(source,id)=>filesDb.prepare('INSERT INTO items VALUES(?,?,?,?)').run(id,JSON.stringify({artifactId:id,filename:'voice.ogg',mimeType:'audio/ogg'}),JSON.stringify(source),1);
+ // Настоящий личный FileStore сохраняет только itemId, без messageId.
+ const personal={platform:'telegram',chat:'123',thread:'topic',itemId:'58:0'};
+ addFile(personal,'44444444-4444-4444-8444-444444444444');
+ for(const [index,source] of [
+   {...personal,chat:'456'}, {...personal,thread:'other'}, {...personal,platform:'discord'},
+   {...personal,itemId:'580:0'}, {...personal,itemId:'58:0wrong'}, {...personal,itemId:'58:'},
+   {...personal,messageId:'57'}, {...personal,itemId:'58:-1'}
+ ].entries())addFile(source,`55555555-5555-4555-8555-${String(index).padStart(12,'0')}`);
  filesDb.close();
  const native=new DatabaseSync(join(home,'state.db'));
  native.exec("CREATE TABLE sessions(id TEXT,source TEXT,chat_id TEXT,thread_id TEXT,title TEXT,display_name TEXT,last_activity_at INTEGER);CREATE TABLE messages(id INTEGER,session_id TEXT,role TEXT,content TEXT,timestamp INTEGER);INSERT INTO sessions VALUES('native','telegram','123','older','Историческая тема','Имя из Telegram',1);INSERT INTO messages VALUES(1,'native','assistant','Your request was not processed.',1)");
@@ -46,6 +56,9 @@ test('Telegram source preserves exact text and media; changes update old message
   assert.deepEqual(all.messages.at(-1).attachments,[ref]);
   assert.equal(all.messages.at(-2).attachments[0].artifactId,input.artifactId);
   assert.equal(all.messages.at(-2).attachments.length,1);
+  assert.equal(all.messages.find(m=>m.id==='58').attachmentState,'ready');
+  assert.deepEqual(all.messages.find(m=>m.id==='58').attachments.map(file=>file.artifactId),['44444444-4444-4444-8444-444444444444']);
+  assert.deepEqual(all.messages.find(m=>m.id==='57').attachments.map(file=>file.artifactId),['55555555-5555-4555-8555-000000000006']);
   assert.ok(!JSON.stringify(all).includes('/private/'));
   assert.ok(!JSON.stringify(all).includes('Your request'));
   db.prepare("UPDATE messages SET text='  исправлено  ',edited='2026-01-02' WHERE id=1").run();
