@@ -173,10 +173,10 @@ class Store:
     def delivered(self, identity, message_id=None):
         """Arm a question only after its normal assistant response was delivered successfully."""
         self.db._execute_write(lambda c: c.execute(
-            "UPDATE brai_consent SET delivered_at=?,question_message_id=?,updated_at=? WHERE id=? AND status='pending'",
+            "UPDATE brai_consent SET delivered_at=?,question_message_id=?,updated_at=? WHERE id=? AND status='pending' AND delivered_at IS NULL",
             (time.time(),str(message_id) if message_id is not None else None,time.time(),identity)))
 
-    def answer(self, key, owner, message_id, text, received_at, reply_to=None):
+    def answer(self, key, owner, message_id, text, received_at, reply_to=None, *, expected_id=None):
         """Accept an unambiguous fresh answer from the same authenticated owner, once."""
         normalized = text.strip().casefold().rstrip(".! ")
         choice = "authorized" if normalized in _YES else "denied" if normalized in _NO else None
@@ -184,6 +184,10 @@ class Store:
             row = conn.execute("SELECT * FROM brai_consent WHERE scope=? AND status='pending'", (key,)).fetchone()
             if not row or row["owner"] != owner:
                 return None
+            if expected_id is not None and row["id"] != expected_id:
+                return "stale"
+            if choice is None:
+                return "ambiguous"
             if not row["delivered_at"] or str(message_id)==row["input_id"]:
                 return "stale"
             numeric_order=bool(row["question_message_id"] and str(message_id).isdigit() and row["question_message_id"].isdigit())
@@ -194,8 +198,6 @@ class Store:
                 return "stale"
             if reply_to is not None and row["question_message_id"] is not None and str(reply_to) != row["question_message_id"]:
                 return "stale"
-            if choice is None:
-                return "ambiguous"
             count = conn.execute("""UPDATE brai_consent SET status=?,answer_id=?,updated_at=?
                 WHERE id=? AND status='pending' AND answer_id IS NULL""",
                 (choice,str(message_id),time.time(),row["id"])).rowcount
@@ -277,8 +279,10 @@ def review_action(descriptor, scope, *, call=None, clock=time.monotonic, prior_r
     from tools.approval_context import _get_approval_config
     timeout = float(_get_task_timeout("approval"))
     deadline = clock()+timeout
+    # AIDEV-NOTE: Уточнение может поступить после начала работающего хода.
+    requests = Store(scope.db).requests(scope.key,scope.owner) if scope and scope.db else []
     evidence = {"action":descriptor,"authenticated_request":scope.instruction if scope else "", "prior_refusal":prior_refusal,
-                "authenticated_conversation_requests":scope.authorizations if scope else [],
+                "authenticated_conversation_requests":requests,
                 "runtime_bound_parent_authorization":existing_authorization}
     policy = str(_get_approval_config().get("conversation_policy",_get_approval_config().get("smart_policy",""))).replace("Ответ строго APPROVE, DENY или ESCALATE.","")
     messages=[{"role":"system","content":_POLICY+"\nOperator rules:\n"+str(policy)},
@@ -400,7 +404,7 @@ def _gate(command, description="", *, cwd=None, backend=None):
             action["consent_fingerprint"]=fingerprint
             return {"approved":True,"message":None,"user_approved":True}
         return _result("execution_unknown","Согласованное действие уже передано на выполнение.")
-    if row and row["status"]=="pending":
+    if row and row["status"]=="pending" and row["fingerprint"]==fingerprint:
         scope.pending=row
         return _result("needs_consent",row["question"],request_id=row["id"])
     review_started=time.monotonic()
@@ -544,13 +548,16 @@ def gateway_input(runner, event, original_event):
         reply_to=getattr(event,"reply_to_message_id",None)
         if reply_to is None:
             reply_to=getattr(event,"reply_to_id",None)
-        answer=store.answer(key,owner,event.message_id,event.text or "",timestamp,reply_to)
+        answer=store.answer(key,owner,event.message_id,event.text or "",timestamp,reply_to,expected_id=row["id"])
         if answer=="authorized":
             return None
         if answer=="denied":
             return "Хорошо, это действие отменено."
         if answer=="stale":
             return "Этот ответ не относится к текущему вопросу. Ответьте на него ещё раз.\n"+row["question"]
+        if answer=="ambiguous" and command:
+            store.invalidate(row["id"])
+            return None
         return "Уточните, разрешаете ли вы именно это действие.\n"+row["question"]
     return None
 
@@ -647,8 +654,10 @@ def cli_turn(cli, turn, message):
             answer=store.answer(scope.key,scope.owner,scope.input_id,str(message),time.time())
             if answer=="denied":
                 scope.reply_only="Хорошо, это действие отменено."
+            elif answer=="ambiguous":
+                store.invalidate(row["id"])
             elif answer!="authorized":
-                scope.reply_only="Уточните, разрешаете ли вы именно это действие.\n"+row["question"]
+                scope.reply_only="Этот ответ не относится к текущему вопросу.\n"+row["question"]
         note=resume_note(scope)
         if note:
             cli.agent._gateway_turn_context_notes=getattr(cli.agent,"_gateway_turn_context_notes","")+"\n"+note
