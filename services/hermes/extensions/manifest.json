@@ -315,6 +315,7 @@
     "provenance.json",
     "scripts/context_gif.py",
     "scripts/silero_voice.py",
+    "skill-scripts/data/spreadsheets/scripts/xlsx.py",
     "skill-scripts/media/youtube-content/scripts/fetch_transcript.py",
     "skill-scripts/media/youtube-content/scripts/video_workflow.py",
     "skill-scripts/note-taking/memos-memory/scripts/memos_client.py",
