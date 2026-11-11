@@ -7,7 +7,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 
-SOURCE = Path(__file__).resolve().parents[1] / 'skill-scripts/data/spreadsheets/scripts/xlsx.py'
+SOURCE = Path(__file__).resolve().parents[1] / 'skill-scripts/office/spreadsheets/scripts/xlsx.py'
 spec = importlib.util.spec_from_file_location('xlsx_writer', SOURCE)
 writer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(writer)

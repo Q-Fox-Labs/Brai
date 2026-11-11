@@ -4,7 +4,7 @@ description: Создавать и присылать файлы Excel XLSX, в 
 ---
 
 Для создания обычной книги Excel уже есть готовый помощник
-`${HERMESCUSTOM_ROOT}/skill-scripts/data/spreadsheets/scripts/xlsx.py`.
+`${HERMESCUSTOM_ROOT}/skill-scripts/office/spreadsheets/scripts/xlsx.py`.
 Он работает на стандартном Python без openpyxl, xlsxwriter и установки пакетов.
 Отсутствие этих библиотек не означает, что создание XLSX недоступно.
 
@@ -16,7 +16,7 @@ execute_code позволяет сразу передать данные без 
 ```python
 import os, runpy
 from pathlib import Path
-writer = runpy.run_path(str(Path(os.environ['HERMESCUSTOM_ROOT']) / 'skill-scripts/data/spreadsheets/scripts/xlsx.py'))
+writer = runpy.run_path(str(Path(os.environ['HERMESCUSTOM_ROOT']) / 'skill-scripts/office/spreadsheets/scripts/xlsx.py'))
 receipt = writer['create_workbook'](
     {'sheets': [{'name': 'Тест', 'rows': [['Товар', 'Количество'], ['Пример', 2]]}]},
     Path.cwd() / 'test.xlsx')

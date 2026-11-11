@@ -4,8 +4,8 @@ Node ESM программы соединяют нативный Hermes с дей
 
 ## Создание Excel
 
-Системный навык [spreadsheets](../../docs/user-agent/instructions/hermes/skills/data/spreadsheets/SKILL.md)
-использует готовый stdlib helper из extensions/skill-scripts/data/spreadsheets/scripts/xlsx.py.
+Системный навык [spreadsheets](../../docs/user-agent/instructions/hermes/skills/office/spreadsheets/SKILL.md)
+использует готовый stdlib helper из extensions/skill-scripts/office/spreadsheets/scripts/xlsx.py.
 Вход — листы с рядами типизированных значений; выход — настоящий XLSX для обычной
 публикации через Artifacts. Формулы, макросы и редактирование существующих книг
 не поддерживаются. Пакеты Python и внешний сервис не требуются.
