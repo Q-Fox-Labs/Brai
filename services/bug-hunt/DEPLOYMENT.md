@@ -167,3 +167,23 @@ inputHash/text остаётся необязательным исключени�
 неизменность оригиналов и отсутствие новых invoke при replay.
 Суточные бюджеты сохраняются: оставшийся backfill продолжится после UTC rollover.
 Изменение только flags/политики не требует перезапуска runtime.
+
+## Verification v3
+
+Миграция 005 применяется owner-программой без изменения originals/v1/v2.
+Поставка включает workflow bundle, worker, runner, schemas и recipes.
+Dispatch включается после приёмки immutable поставки, replay и qualification
+существующего Codex. Новых профилей авторизации Codex не требуется.
+Защищённый registry закрепляет existing Unix endpoint, server/schema generation,
+source/recipe hashes, Temporal queue/identity и runner socket.
+
+Worker и runner запускаются отдельно от intake/API и worker v2. Worker видит
+существующий native socket, runner — собственные inputs/state и immutable код.
+Users/groups, ACL и limits задаёт установщик экземпляра. Процесс с полномочиями
+агента не заменяет отдельный runner. Credentials не входят в evidence.
+
+Перед остановкой/откатом выключить verification dispatch и сверить свои
+in-flight bindings. Backup БД дополняется native state, runner tombstones,
+protected inputs и согласованной Temporal history. Потеря истории не разрешает
+новый dispatch вслепую; таблицы и совместимый worker сохраняются.
+Подробности: [VERIFICATION.md](VERIFICATION.md).

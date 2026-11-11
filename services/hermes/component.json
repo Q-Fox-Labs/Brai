@@ -232,7 +232,8 @@
       "services/hermes/identity/telegram-chat-read.mjs",
       "services/hermes/identity/ingress.openrpc.json",
       "services/hermes/identity/pause_preseed.py",
-      "services/hermes/identity/schemas/pause-preseed.schema.json"
+      "services/hermes/identity/schemas/pause-preseed.schema.json",
+      "services/bug-hunt/schemas/verification-v3.schema.json"
     ],
     "checks": [
       "services/hermes/extensions/config/network-timeouts.json",

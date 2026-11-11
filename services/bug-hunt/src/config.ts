@@ -5,11 +5,14 @@ import {GENERATION,EXTERNAL_PROJECTION_POLICY,prepareExternalProjection} from ".
 import type {Observation} from "./contracts.js";
 import {generationPattern} from "./generations.js";
 import {isAbsolute} from "node:path";
+import {type VerificationPolicy} from "./verification.js";
 
 export interface Config {
  databaseURL:string;installationId:string;cursorKey:string;
  nats:{servers:string[];user?:string;password?:string;credsFile?:string;inboxPrefix:string};
  mcp:{host:string;port:number;allowedHosts:string[];allowedOrigins:string[];principalsFile:string;maxConnections:number};
+ verification?:VerificationPolicy;
+ verificationRuntime?:unknown;
  processing?:ProcessingConfig;
  maxReports:number;reportsPerMinute:number;maxDatabaseBytes:number;artifactsEnabled:boolean;
 }
