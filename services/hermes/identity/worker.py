@@ -738,6 +738,17 @@ async def run(config_path):
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
     worker = Worker(ingress, owner, telegram, publish_delivery_file)
     relay = await start_relay(egress, port=18080)
+    browser_relay = None
+    try:
+        browser_egress = os.environ.get('BRAI_IDENTITY_BROWSER_EGRESS')
+        if browser_egress:
+            if browser_egress != '/run/brai-profile/browser-egress.sock':
+                raise ValueError('Invalid browser egress socket')
+            browser_relay = await start_relay(browser_egress, port=18081)
+    except BaseException:
+        relay.close()
+        await relay.wait_closed()
+        raise
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -752,6 +763,9 @@ async def run(config_path):
     finally:
         exited.cancel()
         await asyncio.gather(exited, return_exceptions=True)
+        if browser_relay is not None:
+            browser_relay.close()
+            await browser_relay.wait_closed()
         relay.close()
         await relay.wait_closed()
     if worker.exit_code:

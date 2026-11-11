@@ -1,6 +1,9 @@
 # ABOUTME: Переносит проверенные inode между профилем и привилегированным Artifacts.
 # ABOUTME: Владелец поступает из SO_PEERCRED; root cache недоступен worker.
 import hashlib
+import io
+import importlib.util
+import math
 import json
 import os
 from pathlib import Path
@@ -8,6 +11,7 @@ import shutil
 import stat
 import tempfile
 import uuid
+import zipfile
 
 MAX_FILE = 64 * 1024 * 1024
 
@@ -276,6 +280,91 @@ class OwnerFiles:
             value = self.materialize(uid, profile, result)
             name = value['filename'].replace('\\','\\\\').replace('[','\\[').replace(']','\\]')
             value['markdown'] = '[' + name + '](artifact:' + value['artifactId'] + ')'
+            return value
+        finally:
+            shutil.rmtree(folder)
+
+    async def create_structured(self, uid, profile, params, kind):
+        """Публиковать только проверенный DOCX/XLSX из ограниченного JSON."""
+        if kind not in ('document', 'workbook') or type(params) is not dict or set(params) != {'filename', 'requestId', kind}:
+            raise ValueError('Invalid structured artifact')
+        name, request_id, spec = params['filename'], params['requestId'], params[kind]
+        extension = '.docx' if kind == 'document' else '.xlsx'
+        if (type(name) is not str or not 1 <= len(name) <= 180 or name in ('.', '..')
+                or Path(name).name != name or not name.lower().endswith(extension)
+                or any(ord(c) < 32 or c in '/\\' for c in name)
+                or type(request_id) is not str or not 1 <= len(request_id) <= 256):
+            raise ValueError('Invalid structured artifact name or request')
+        try:
+            raw_spec = json.dumps(spec, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+        except (TypeError, ValueError, UnicodeError, OverflowError) as exc:
+            raise ValueError('Invalid structured artifact data') from exc
+        if len(raw_spec) > 1024 * 1024:
+            raise ValueError('Structured artifact too large')
+        if kind == 'workbook':
+            if type(spec) is not dict or set(spec) != {'sheets'} or type(spec['sheets']) is not list or not 1 <= len(spec['sheets']) <= 20:
+                raise ValueError('Invalid workbook')
+            count = 0
+            for sheet in spec['sheets']:
+                if type(sheet) is not dict or set(sheet) != {'name', 'rows'} or type(sheet['name']) is not str or type(sheet['rows']) is not list or not 1 <= len(sheet['rows']) <= 1000:
+                    raise ValueError('Invalid sheet')
+                for row in sheet['rows']:
+                    if type(row) is not list or len(row) > 100:
+                        raise ValueError('Invalid row')
+                    count += len(row)
+                    if count > 20000:
+                        raise ValueError('Too many cells')
+                    for cell in row:
+                        if cell is not None and type(cell) not in (str, int, float, bool):
+                            raise ValueError('Invalid cell')
+                        if type(cell) is float and not math.isfinite(cell):
+                            raise ValueError('Invalid cell')
+                        if type(cell) is str and len(cell.encode('utf-8')) > 65536:
+                            raise ValueError('Cell too large')
+        base = Path(__file__).resolve().parent
+        helper = (base / 'document.py' if kind == 'document' else
+                  base.parent / 'extensions/skill-scripts/office/spreadsheets/scripts/xlsx.py')
+        module_spec = importlib.util.spec_from_file_location('_brai_structured_' + kind, helper)
+        if module_spec is None or module_spec.loader is None:
+            raise RuntimeError('Structured writer unavailable')
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        if kind == 'document':
+            data = module.docx_bytes(spec)
+        stage = Path(self.runtime(uid, profile)['stagingRoot'])
+        checked = open_directory(stage, 0)
+        os.close(checked)
+        folder = Path(tempfile.mkdtemp(prefix='structured-', dir=stage))
+        try:
+            path = folder / name
+            if kind == 'workbook':
+                intermediate = folder / 'source'
+                intermediate.mkdir(mode=0o700)
+                source_path = intermediate / name
+                module.create_workbook(spec, source_path)
+                data = source_path.read_bytes()
+            # Stable archive bytes preserve the requestId contract across retries.
+            canonical = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(data), 'r') as source, zipfile.ZipFile(canonical, 'w') as target:
+                for entry in source.infolist():
+                    info = zipfile.ZipInfo(entry.filename, (1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    target.writestr(info, source.read(entry))
+            data = canonical.getvalue()
+            if len(data) > 8 * 1024 * 1024:
+                raise ValueError('Structured output too large')
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            result = await self.control.call('artifacts.publish', {'uid': uid, 'path': str(path),
+                'requestId': request_id}, timeout=1800)
+            if result.get('filename') != name or result.get('sizeBytes') != len(data) or result.get('sha256') != hashlib.sha256(data).hexdigest():
+                raise PermissionError('Structured artifact bytes changed')
+            value = self.materialize(uid, profile, result)
+            safe_name = value['filename'].replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
+            value['markdown'] = '[' + safe_name + '](artifact:' + value['artifactId'] + ')'
             return value
         finally:
             shutil.rmtree(folder)

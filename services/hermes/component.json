@@ -32,7 +32,11 @@
     "services/hermes/identity/network.py",
     "services/hermes/identity/search.py",
     "services/hermes/identity/native_policy.py",
-    "services/hermes/identity/pause_preseed.py"
+    "services/hermes/identity/pause_preseed.py",
+    "services/hermes/identity/guest_tools.py",
+    "services/hermes/identity/guest_browser.py",
+    "services/hermes/files/generated.py",
+    "services/hermes/identity/guest_generation.py"
   ],
   "inputs": {
     "build": [],
@@ -235,7 +239,13 @@
       "services/hermes/identity/telegram-chat-read.mjs",
       "services/hermes/identity/ingress.openrpc.json",
       "services/hermes/identity/pause_preseed.py",
-      "services/hermes/identity/schemas/pause-preseed.schema.json"
+      "services/hermes/identity/schemas/pause-preseed.schema.json",
+      "services/hermes/identity/guest_tools.py",
+      "services/hermes/identity/guest_browser.py",
+      "services/hermes/identity/browser-defaults.json",
+      "services/hermes/files/document.py",
+      "services/hermes/files/generated.py",
+      "services/hermes/identity/guest_generation.py"
     ],
     "checks": [
       "services/hermes/extensions/config/network-timeouts.json",
@@ -323,7 +333,16 @@
       "services/hermes/identity/tests/test_memory_checkpoint_integration.py",
       "services/hermes/identity/tests/test_relay_lifetime.py",
       "services/hermes/identity/tests/test_pause_preseed.py",
-      "services/hermes/identity/tests/pause_preseed.test.mjs"
+      "services/hermes/identity/tests/pause_preseed.test.mjs",
+      "services/hermes/identity/tests/test_guest_browser_egress.py",
+      "services/hermes/identity/tests/test_guest_browser_guard.py",
+      "services/hermes/identity/tests/test_guest_browser_runtime.py",
+      "services/hermes/identity/tests/test_guest_generation.py",
+      "services/hermes/identity/tests/test_guest_tools.py",
+      "services/hermes/identity/tests/guest_tools.test.mjs",
+      "services/hermes/files/tests/test_document.py",
+      "services/hermes/files/tests/test_structured.py",
+      "services/hermes/files/tests/test_generated_files.py"
     ]
   },
   "dependencies": [
@@ -626,7 +645,13 @@
       "services/hermes/identity/telegram-chat-read.mjs",
       "services/hermes/identity/ingress.openrpc.json",
       "services/hermes/identity/pause_preseed.py",
-      "services/hermes/identity/schemas/pause-preseed.schema.json"
+      "services/hermes/identity/schemas/pause-preseed.schema.json",
+      "services/hermes/identity/guest_tools.py",
+      "services/hermes/identity/guest_browser.py",
+      "services/hermes/identity/guest_generation.py",
+      "services/hermes/identity/browser-defaults.json",
+      "services/hermes/files/document.py",
+      "services/hermes/files/generated.py"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

@@ -113,7 +113,8 @@ def _authority(value, default_port=None):
         raise Rejected()
     try:
         parsed = urlsplit("//" + value)
-        host, port = parsed.hostname, parsed.port or default_port
+        host = parsed.hostname
+        port = parsed.port if parsed.port is not None else default_port
         if not host or not port or not 1 <= port <= 65535:
             raise ValueError()
         return host, port
@@ -573,7 +574,7 @@ async def _search_response(reader, writer, uid, config, body, search):
         await asyncio.gather(operation, disconnected, return_exceptions=True)
 
 
-async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search):
+async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search, public_only=False):
     upstream = None
     response_started = False
     try:
@@ -585,20 +586,23 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
             raise Rejected(503)
         denied = set(config.get("deniedAddresses", []))
         method, target, headers, body = await _read_request(reader)
-        if profile.get("role") == "guest" and not (target.startswith("/model/") or target.startswith("/image/") or target.startswith("/gif/")):
+        if not public_only and profile.get("role") == "guest" and not (target.startswith("/model/") or target.startswith("/image/") or target.startswith("/gif/") or target == "/search/v1/query"):
             raise Rejected(403)
         if method == "CONNECT":
             host, port = _authority(target)
             if port != 443 or body:
                 raise Rejected(403)
-            source, upstream = await dial(host, port, False, _browser_denied(host, port, config, denied))
+            connect_denied = denied if public_only else _browser_denied(host, port, config, denied)
+            source, upstream = await dial(host, port, False, connect_denied)
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
             response_started = True
             await _duplex(reader, writer, source, upstream)
             return
         parsed = urlsplit(target)
-        if target.startswith("/model/"):
+        if public_only:
+            model_target = None
+        elif target.startswith("/model/"):
             model_target = target
         elif parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost") and parsed.path.startswith("/model/"):
             model_target = parsed.path + (("?" + parsed.query) if parsed.query else "")
@@ -609,6 +613,8 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
         request_path = target if target.startswith('/') else (
             parsed.path + (('?' + parsed.query) if parsed.query else '')
             if parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost') else '')
+        if public_only:
+            request_path = ''
         if request_path.startswith('/search/'):
             if request_path != '/search/v1/query':
                 raise Rejected(403)
@@ -733,7 +739,7 @@ async def _watch_access(uid, registry_loader, authorize):
 
 
 async def start_server(socket_path, registry_loader, config_loader, authorize, dial=_dial,
-                       resolve_provider=None):
+                       resolve_provider=None, *, public_only=False):
     """Открыть UDS; доступ к каждому потоку регулярно подтверждает Auth."""
     semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
     active = set()
@@ -767,7 +773,7 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
                     writer.write(b"HTTP/1.1 403 Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
                     await writer.drain()
                     return
-                operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search))
+                operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search, public_only=public_only))
                 watcher = asyncio.create_task(_watch_access(uid, registry_loader, authorize))
                 done, _ = await asyncio.wait((operation, watcher), return_when=asyncio.FIRST_COMPLETED)
                 if watcher in done and operation not in done:
@@ -834,19 +840,24 @@ async def _main():
             return False
         return await _authorize_socket(current, uid)
 
-    server = await start_server(args.socket, lambda: _protected_json(args.registry),
-                                lambda: _protected_json(args.config), authorize)
+    servers = []
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stopped.set)
     try:
+        servers.append(await start_server(args.socket, lambda: _protected_json(args.registry),
+                                          lambda: _protected_json(args.config), authorize))
+        servers.append(await start_server(args.socket + '.browser', lambda: _protected_json(args.registry),
+                                          lambda: _protected_json(args.config), authorize, public_only=True))
         _notify_ready()
         await stopped.wait()
     finally:
-        server.close()
-        await server.wait_closed()
-        tasks = list(server.active_connections)
+        for server in servers:
+            server.close()
+        for server in servers:
+            await server.wait_closed()
+        tasks = [task for server in servers for task in server.active_connections]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

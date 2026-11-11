@@ -87,6 +87,8 @@
 | `brai_telegram_unlink_account` | Да | Да | Да | Нет |
 | `publish_file` | Да | Да | Да | Нет |
 | `fetch_file` | Да | Да | Да | Да |
+| `create_document_file` | Да | Да | Да | Да, ограниченный DOCX |
+| `create_spreadsheet_file` | Да | Да | Да | Да, ограниченный XLSX |
 | `create_text_file` | Да | Да | Да | Да |
 | `read_text_file` | Да | Да | Да | Да |
 
@@ -98,30 +100,30 @@
 
 | Имя | creator | admin | user | guest |
 | --- | --- | --- | --- | --- |
-| `browser_back` | Да | Да | Да | Нет |
+| `browser_back` | Да | Да | Да | Да, ограниченные аргументы |
 | `browser_cdp` | Да | Да | Да | Нет |
-| `browser_click` | Да | Да | Да | Нет |
+| `browser_click` | Да | Да | Да | Да, ограниченные аргументы |
 | `browser_console` | Да | Да | Да | Нет |
-| `browser_dialog` | Да | Да | Да | Нет |
+| `browser_dialog` | Да | Да | Да | Да, ограниченные аргументы |
 | `browser_exec` | Да | Да | Да | Нет |
-| `browser_get_images` | Да | Да | Да | Нет |
-| `browser_navigate` | Да | Да | Да | Нет |
-| `browser_press` | Да | Да | Да | Нет |
-| `browser_scroll` | Да | Да | Да | Нет |
-| `browser_snapshot` | Да | Да | Да | Нет |
-| `browser_type` | Да | Да | Да | Нет |
+| `browser_get_images` | Да | Да | Да | Да, ограниченные аргументы |
+| `browser_navigate` | Да | Да | Да | Да, ограниченные аргументы |
+| `browser_press` | Да | Да | Да | Да, ограниченные аргументы |
+| `browser_scroll` | Да | Да | Да | Да, ограниченные аргументы |
+| `browser_snapshot` | Да | Да | Да | Да, ограниченные аргументы |
+| `browser_type` | Да | Да | Да | Да, ограниченные аргументы |
 | `browser_vault_enter_code` | Да | Да | Да | Нет |
 | `browser_vault_fill` | Да | Да | Да | Нет |
 | `browser_vault_list` | Да | Да | Да | Нет |
 | `browser_vault_save_login` | Да | Да | Да | Нет |
 | `browser_vault_unlock` | Да | Да | Да | Нет |
-| `browser_vision` | Да | Да | Да | Нет |
+| `browser_vision` | Да | Да | Да | Да, ограниченные аргументы |
 | `clarify` | Да | Да | Да | Нет |
 | `computer_use` | Да | Да | Да | Нет |
 | `cronjob_manage` | Да | Да | Да | Нет |
 | `delegate_task` | Да | Да | Да | Нет |
 | `execute_code` | Да | Да | Да | Нет |
-| `image_generate` | Да | Да | Да | Нет |
+| `image_generate` | Да | Да | Да | Да, ограниченные аргументы |
 | `kanban_attach` | Да | Да | Да | Нет |
 | `kanban_attach_url` | Да | Да | Да | Нет |
 | `kanban_attachments` | Да | Да | Да | Нет |
@@ -153,11 +155,11 @@
 | `skill_view` | Да | Да | Да | Нет |
 | `skills_list` | Да | Да | Да | Нет |
 | `terminal` | Да | Да | Да | Нет |
-| `text_to_speech` | Да | Да | Да | Нет |
+| `text_to_speech` | Да | Да | Да | Да, ограниченные аргументы |
 | `todo_list` | Да | Да | Да | Нет |
 | `vision_analyze` | Да | Да | Да | Нет |
 | `web_extract` | Да | Да | Да | Нет |
-| `web_search` | Да | Да | Да | Нет |
+| `web_search` | Да | Да | Да | Да, ограниченные аргументы |
 | `write_file` | Да | Да | Да | Нет |
 
 ## Служебные границы
@@ -177,3 +179,23 @@ Native SDK при отложенной выдаче схем используе�
 | `tool_call` | Да, если включён режим | Да, если включён режим | Да, если включён режим | Нет |
 
 Метаинструменты используют уже подключённые MCP-серверы; права и владелец каждого фактического вызова повторно проверяются соответствующим портом. Источники закреплённого native SDK: `model_tools.py` и `tools/tool_search.py`; настройки роли — `profiles.py`.
+
+Гостевой браузер использует отдельный заблокированный Unix-аккаунт и отдельный
+каталог вне HOME worker. Chrome получает только публичный proxy18081: внутренние
+адреса, смешанные DNS-ответы и внутренние маршруты model/search/image запрещены.
+Поиск `web_search` использует отдельный типизированный Root-порт поиска.
+CDP закреплён за личным Chrome; browser_exec, browser_cdp, browser_console,
+vault и произвольные сочетания клавиш гостю не выдаются.
+
+`create_document_file({filename,document,requestId})` и
+`create_spreadsheet_file({filename,workbook,requestId})` создают DOCX/XLSX
+из ограниченного JSON (до1МиБ, 20000ячеек) в Root staging и публикуют точные байты.
+Пути, шаблоны, программы и формулы не принимаются. Текстовый writer также
+создаёт Markdown/CSV/JSON/HTML как буквальный UTF-8 без исполнения.
+
+`image_generate` принимает только prompt/aspect_ratio;
+`text_to_speech` — text до900символов, speed и instructions без output_path.
+Результат генератора/снимок браузера передаётся через одноразовый Root-билет
+на фиксированный файл и затем Artifacts. Билет ограничивает путь, владельца,
+поколение и снимок байтов; он не является аттестацией происхождения против
+скомпрометированного worker. Общая публикация произвольного пути гостю закрыта.

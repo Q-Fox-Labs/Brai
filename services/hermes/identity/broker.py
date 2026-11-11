@@ -22,8 +22,10 @@ from .memory_registry import load_registry
 from .lifecycle import LifecycleRunner
 try:
     from ..files.identity import OwnerFiles
+    from ..files.generated import GeneratedFiles
 except ImportError:
     from files.identity import OwnerFiles
+    from files.generated import GeneratedFiles
 
 TOOL_POLICY = json.loads((Path(__file__).with_name('tool-policy.json')).read_text())
 
@@ -221,6 +223,7 @@ class Broker:
         self.unlink_offers = {}
         self.login_locks, self.login_state = {}, None
         self.files = OwnerFiles(config, control, protected_json)
+        self.generated = GeneratedFiles(self.files,self.authorize)
 
     def delivery_state(self):
         """Открыть постоянные квитанции из защищённой операторской конфигурации."""
@@ -596,7 +599,7 @@ class Broker:
                 catalog = await self.control.call('tools.list', {'uid': peer_uid})
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if state['role'] == 'guest' else short in (
-                    'create_text_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
             current = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
             return {'allowed': allowed and current == state, 'role': state['role'], 'generation': state['generation']}
         profile = await self.authorize(peer_uid)
@@ -610,15 +613,27 @@ class Broker:
                 catalog = await self.control.call('tools.list', {'uid': peer_uid})
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if profile['role'] == 'guest' else short in (
-                    'create_text_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
             current = await self.authorize(peer_uid)
             if any(current[key] != profile[key] for key in ('role','generation')):
                 allowed = False
             return {'allowed': allowed, 'role': profile['role'], 'generation': profile['generation']}
         if profile['role'] == 'guest' and method in ('login.send','telegram.link','telegram.unlink','artifacts.publish'):
             raise PermissionError('Role denied')
+        if method in ('generated.begin','generated.finish','generated.abort'):
+            if profile['role'] != 'guest':
+                raise PermissionError('Generation port unavailable')
+            action = getattr(self.generated,method.split('.')[1])
+            return await action(peer_uid,profile,params)
         if method == 'files.create-text':
             result = await self.files.create_text(peer_uid, profile, params)
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                raise PermissionError('Access changed')
+            return result
+        if method in ('files.create-document','files.create-spreadsheet'):
+            result = await self.files.create_structured(peer_uid,profile,params,
+                'document' if method == 'files.create-document' else 'workbook')
             current = await self.authorize(peer_uid)
             if any(current[key] != profile[key] for key in ('role','generation')):
                 raise PermissionError('Access changed')
@@ -821,8 +836,13 @@ PARAMETERS = {
     'permissions.get': (set(), set()),
     'native.authorize': ({'name'}, set()),
     'native.catalog': ({'name'}, set()),
+    'generated.begin': ({'kind'}, set()),
+    'generated.finish': ({'ticket','sizeBytes','sha256'}, set()),
+    'generated.abort': ({'ticket'}, set()),
     'files.create-text': ({'filename','content','requestId'}, set()),
     'files.read-text': ({'artifactId'}, set()),
+    'files.create-document': ({'filename','document','requestId'}, set()),
+    'files.create-spreadsheet': ({'filename','workbook','requestId'}, set()),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
     'ingress.profiles': (set(), set()),
@@ -1002,6 +1022,11 @@ async def serve(config):
     broker = Broker(config, control)
     lifecycle = (asyncio.create_task(LifecycleRunner(control, config['accessCommand']).run())
                  if config.get('accessCommand') else None)
+    async def reap_generated():
+        while True:
+            await asyncio.sleep(30)
+            await broker.generated.reap()
+    generation_reaper = asyncio.create_task(reap_generated())
     slots = asyncio.Semaphore(32)
     # AIDEV-NOTE: tools.call может ждать обратной авторизации обработчика; общий бюджет дал бы взаимную блокировку.
     personal_slots = asyncio.Semaphore(64)
@@ -1087,6 +1112,9 @@ async def serve(config):
         if lifecycle is not None:
             lifecycle.cancel()
             await asyncio.gather(lifecycle, return_exceptions=True)
+        generation_reaper.cancel()
+        await asyncio.gather(generation_reaper,return_exceptions=True)
+        await broker.generated.close()
         await control.close()
         if broker.login_state is not None:
             broker.login_state.close()

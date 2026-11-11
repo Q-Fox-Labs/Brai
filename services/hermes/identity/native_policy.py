@@ -16,6 +16,7 @@ _role = None
 _suspended = False
 _startup_state = None
 _execution_state = ContextVar('brai_native_invocation', default=None)
+_tool_invocation = ContextVar('brai_native_tool', default=None)
 
 
 def guest_mode():
@@ -127,6 +128,20 @@ def grant_current(before):
         return False
 
 
+
+def current_tool():
+    """Фактический разрешённый producer в текущем потоке исполнения."""
+    return _tool_invocation.get()
+
+
+def arguments_permitted(name, args, state):
+    """Проверить реальные аргументы перед эффектом."""
+    if state.get('role') != 'guest':
+        return True
+    from .guest_tools import validate
+    return validate(name,args)
+
+
 def install_executor_guard():
     """Закрыть общий executor и direct API, включая inline/delegation до Registry."""
     from agent import tool_executor, agent_runtime_helpers, inline_tool_executors
@@ -142,7 +157,7 @@ def install_executor_guard():
     def guarded_common(agent, state, ref, *, execute, scope_block, display_index,
                        begin_execution, authorization_gate):
         before = execution_grant(ref.name)
-        if before is None:
+        if before is None or not arguments_permitted(ref.name,getattr(ref,'args',{}),before):
             state.blocked = True
             if begin_execution is not None:
                 begin_execution()
@@ -150,10 +165,15 @@ def install_executor_guard():
             return denied
         def guarded_execute(*args, **kwargs):
             # Hooks, approval и middleware могли ожидать после первоначального grant.
-            if execution_grant(ref.name) != before:
+            if execution_grant(ref.name) != before or not arguments_permitted(
+                    ref.name, args[0] if args else getattr(ref,'args',{}), before):
                 state.blocked = True
                 raise RevokedInvocation()
-            result = execute(*args, **kwargs)
+            tool_token = _tool_invocation.set(ref.name)
+            try:
+                result = execute(*args, **kwargs)
+            finally:
+                _tool_invocation.reset(tool_token)
             if not grant_current(before):
                 state.blocked = True
                 raise RevokedInvocation()
@@ -174,7 +194,7 @@ def install_executor_guard():
         return result
     def guarded_invoke(agent, function_name, function_args, *args, **kwargs):
         before = execution_grant(function_name)
-        if before is None:
+        if before is None or not arguments_permitted(function_name,function_args,before):
             return denied
         token = invocation.set(before)
         try:
@@ -192,10 +212,15 @@ def install_executor_guard():
         if execute is None:
             return None
         def guarded_inline(*args, **kwargs):
-            if before is None or execution_grant(name) != before:
+            if (before is None or execution_grant(name) != before or not arguments_permitted(
+                    name,args[1] if len(args)>1 else kwargs.get('function_args',{}),before)):
                 # Не возвращать строку в SDK: иначе он вызовет post hooks после отзыва.
                 raise RevokedInvocation()
-            result = execute(*args, **kwargs)
+            tool_token = _tool_invocation.set(name)
+            try:
+                result = execute(*args, **kwargs)
+            finally:
+                _tool_invocation.reset(tool_token)
             if not grant_current(before):
                 raise RevokedInvocation()
             return result
@@ -263,23 +288,44 @@ def install():
                         'memory','context_engine','model-providers','cron_providers','computer_use'}))
         plugins.PluginManager._collect_directory_manifests = manifests
         plugins.PluginManager._scan_entry_points = lambda self: original_entrypoints(self) if active_configuration() else []
+    if _guest:
+        # Config/provider discovery уже закреплены до импорта браузера и producer-модулей.
+        from .guest_browser import install as install_browser
+        install_browser()
     from tools.registry import ToolRegistry
     definitions, dispatch = ToolRegistry.get_definitions, ToolRegistry.dispatch
     def guarded_definitions(self, tool_names, quiet=False):
-        return definitions(self, {name for name in tool_names if catalog_permitted(name)}, quiet=quiet)
+        rows = definitions(self, {name for name in tool_names if catalog_permitted(name)}, quiet=quiet)
+        if guest_mode():
+            from .guest_tools import definitions as guest_definitions
+            return guest_definitions(rows)
+        return rows
     def guarded_dispatch(self, name, args, **kwargs):
         grant = broker_call('native.authorize', {'name': name})
         before = principal()
         expected = _execution_state.get()
         if ((expected is not None and expected != before) or grant.get('allowed') is not True
-                or any(grant.get(key) != before.get(key) for key in ('role','generation'))):
+                or any(grant.get(key) != before.get(key) for key in ('role','generation'))
+                or not arguments_permitted(name,args,before)):
             return json.dumps({'error': 'Это действие недоступно для вашей роли.'}, ensure_ascii=False)
-        result = dispatch(self, name, args, **kwargs)
+        token = _tool_invocation.set(name)
+        try:
+            result = dispatch(self,name,args,**kwargs)
+        finally:
+            _tool_invocation.reset(token)
         if principal() != before:
             return json.dumps({'error': 'Права доступа изменились. Результат не выдан.'}, ensure_ascii=False)
         return result
     ToolRegistry.get_definitions, ToolRegistry.dispatch = guarded_definitions, guarded_dispatch
     install_executor_guard()
+    if _guest:
+        import brai_files
+        from .guest_generation import install as install_generation, trusted_silero
+        install_generation(role=lambda: _role, allowed=lambda name: current_tool() == name,
+            operation=lambda: brai_files.operation_for({}), broker_call=broker_call,
+            resolve_artifact=brai_files.resolve_artifact,
+            trusted_tts=trusted_silero('/opt/brai-profile/runtime'))
+
     _installed = True
     if _suspended or state.get('staged') is True:
         from gateway.run import GatewayRunner

@@ -169,11 +169,13 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         'creator': ' Ваша роль — создатель. Административные возможности доступны; исполнитель разработки появится на этапе 2. Нового серверного доступа эта роль не даёт.',
         'admin': ' Ваша роль — администратор. Отдельный Docker администратора ещё не установлен.',
         'user': ' Ваша роль — пользователь.',
-        'guest': ' Ваша роль — гость. Доступны диалог, личная память и собственные артефакты. Для точного текстового файла используй mcp__brai__create_text_file; для чтения — mcp__brai__read_text_file. Исполнение кода, браузер, задания, настройка плагинов и вход на сайт недоступны. Не предлагай обход ограничений или подтверждение запрещённой операции.',
+        'guest': ' Ваша роль — гость. Доступны диалог, личная память, поиск web_search, публичный браузер и собственные артефакты. Документы DOCX и книги XLSX создавай через mcp__brai__create_document_file и mcp__brai__create_spreadsheet_file; изображения — image_generate, голос — text_to_speech. Не задавай локальные пути или настройки генераторов. Для точного текстового файла используй mcp__brai__create_text_file; для чтения — mcp__brai__read_text_file. Исполнение кода, проекты, навыки, произвольная запись на диск, задания, настройка плагинов и вход на наш сайт недоступны. Не предлагай обход ограничений или подтверждение запрещённой операции.',
     }[role]
     if role == 'guest':
         config['agent']['system_prompt'] = config['agent']['system_prompt'].replace(
             'По просьбе войти на наш сайт Brai вызови mcp__brai__brai_login: сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.', '')
+        config['browser'] = {'backend': 'off', 'cdp_url': 'http://127.0.0.1:19364'}
+        config['web'] = {'search_backend': 'codex-cli'}
         config['tools'] = {'tool_search': {'enabled': 'off'}}
         config['skills'] = {'external_dirs': [], 'disabled': True}
         config['cron'] = {'enabled': False}
@@ -258,7 +260,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         '[Unit]', 'Description=Brai personal Hermes ' + profile['profileId'],
         'After=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
         'Requires=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
-        *([] if profile.get('role') == 'guest' else ['Wants=brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service']),
+        'Wants=brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service',
         '[Service]', 'Type=simple', 'User=' + user, 'Group=' + user,
         'WorkingDirectory=' + home + '/workspace',
         'Environment=HOME=' + home, 'Environment=HERMES_HOME=' + home,
@@ -274,6 +276,10 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=HTTP_PROXY=http://127.0.0.1:18080',
         'Environment=HTTPS_PROXY=http://127.0.0.1:18080',
         'Environment=BU_CDP_URL=http://127.0.0.1:19364',
+        *(['Environment=BROWSER_CDP_URL=http://127.0.0.1:19364',
+           'Environment=AGENT_BROWSER_CONFIG=/opt/brai-profile/browser-defaults.json',
+           'Environment=BRAI_IDENTITY_BROWSER_EGRESS=/run/brai-profile/browser-egress.sock']
+          if profile.get('role') == 'guest' else []),
         # AIDEV-NOTE: HOME с UUID превышает AF_UNIX sun_path. /tmp отдельный у
         # каждого worker; SHARED сохраняет отдельный сокет для каждого BU_NAME.
         'Environment=BH_RUNTIME_DIR=/tmp/brai-browser',
@@ -313,6 +319,9 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'BindReadOnlyPaths=' + broker_socket + ':/run/brai-profile/control.sock',
         'BindReadOnlyPaths=' + memory_socket + ':/run/brai-profile/memory.sock',
         'BindReadOnlyPaths=' + egress_socket + ':/run/brai-profile/egress.sock',
+        *(['BindReadOnlyPaths=' + egress_socket + '.browser:/run/brai-profile/browser-egress.sock',
+           'BindReadOnlyPaths=' + runtime_root + '/services/hermes/identity/browser-defaults.json:/opt/brai-profile/browser-defaults.json']
+          if profile.get('role') == 'guest' else []),
         'KillMode=control-group', 'TimeoutStopSec=70', 'LimitNOFILE=4096',
         'TasksMax=256', 'MemoryHigh=2G', 'MemoryMax=4G',
     ]

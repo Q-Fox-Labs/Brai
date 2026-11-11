@@ -20,7 +20,9 @@
   "guestClient": [
     "create_text_file",
     "read_text_file",
-    "fetch_file"
+    "fetch_file",
+    "create_document_file",
+    "create_spreadsheet_file"
   ],
   "guestNative": [
     "memos_search",
@@ -28,7 +30,20 @@
     "memos_read",
     "memos_forget",
     "memos_status",
-    "memos_replace"
+    "memos_replace",
+    "web_search",
+    "image_generate",
+    "text_to_speech",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_get_images",
+    "browser_vision",
+    "browser_dialog"
   ],
   "adminTools": [
     "local_ai_models_install",
