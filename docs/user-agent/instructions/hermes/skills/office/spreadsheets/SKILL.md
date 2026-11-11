@@ -12,11 +12,12 @@ description: Создавать и присылать файлы Excel XLSX, в 
 Можно передать несколько листов. Ячейки: строки, числа, true/false и null.
 Создавай временный файл в рабочем каталоге текущего поручения. Вызов через
 execute_code позволяет сразу передать данные без промежуточного JSON:
+Его окружение может не содержать HERMESCUSTOM_ROOT; используй штатный путь namespace как запасное значение, как в примере.
 
 ```python
 import os, runpy
 from pathlib import Path
-writer = runpy.run_path(str(Path(os.environ['HERMESCUSTOM_ROOT']) / 'skill-scripts/office/spreadsheets/scripts/xlsx.py'))
+writer = runpy.run_path(str(Path(os.environ.get('HERMESCUSTOM_ROOT', '/opt/brai-profile/instructions')) / 'skill-scripts/office/spreadsheets/scripts/xlsx.py'))
 receipt = writer['create_workbook'](
     {'sheets': [{'name': 'Тест', 'rows': [['Товар', 'Количество'], ['Пример', 2]]}]},
     Path.cwd() / 'test.xlsx')
