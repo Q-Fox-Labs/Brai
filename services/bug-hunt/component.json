@@ -33,7 +33,22 @@
       "services/bug-hunt/DEPLOYMENT.md",
       "deploy/compose.bug-hunt.yml",
       "services/bug-hunt/asyncapi.json",
-      "services/bug-hunt/contracts/agent-guide.json"
+      "services/bug-hunt/contracts/agent-guide.json",
+      "services/bug-hunt/src/projection.ts",
+      "services/bug-hunt/src/system-contracts.ts",
+      "services/bug-hunt/src/system-store.ts",
+      "services/bug-hunt/src/processing.ts",
+      "services/bug-hunt/src/processing-store.ts",
+      "services/bug-hunt/src/model-ports.ts",
+      "services/bug-hunt/migrations/002.sql",
+      "services/bug-hunt/migrations/003.sql",
+      "services/bug-hunt/schemas/v2.schema.json",
+      "services/bug-hunt/SYSTEMATIZATION.md",
+      "services/bug-hunt/asyncapi-v2.json",
+      "services/bug-hunt/src/processing-api.ts",
+      "services/bug-hunt/schemas/processing-v2.schema.json",
+      "services/bug-hunt/src/generations.ts",
+      "services/bug-hunt/migrations/004.sql"
     ],
     "checks": [
       "services/bug-hunt/tests/contracts.test.mjs",
@@ -48,10 +63,42 @@
       "services/bug-hunt/tests/integration/restore.test.mjs",
       "services/bug-hunt/tests/mcp.test.mjs",
       "services/bug-hunt/tests/process-group.mjs",
-      "services/bug-hunt/tests/process-group.test.mjs"
+      "services/bug-hunt/tests/process-group.test.mjs",
+      "services/bug-hunt/tests/projection.test.mjs",
+      "services/bug-hunt/tests/system-contracts.test.mjs",
+      "services/bug-hunt/tests/processing.test.mjs",
+      "services/bug-hunt/tests/processing-config.test.mjs",
+      "services/bug-hunt/tests/integration/system-store.test.mjs",
+      "services/bug-hunt/tests/integration/processing-store.test.mjs",
+      "services/bug-hunt/tests/model-preflight.mjs",
+      "services/bug-hunt/tests/model-probe.mjs",
+      "services/bug-hunt/tests/integration/model-quality.mjs",
+      "services/bug-hunt/tests/integration/runtime-models.test.mjs",
+      "services/bug-hunt/tests/integration/load-benchmark.mjs",
+      "services/bug-hunt/tests/processing-api.test.mjs",
+      "services/bug-hunt/tests/integration/generations.test.mjs"
     ]
   },
-  "dependencies": [],
+  "dependencies": [
+    {
+      "id": "local-ai",
+      "inputs": [
+        "services/local-ai/schemas/messages.schema.json"
+      ],
+      "delivery": [
+        "services/local-ai/schemas/messages.schema.json"
+      ]
+    },
+    {
+      "id": "providers",
+      "inputs": [
+        "services/providers/schemas/v1.schema.json"
+      ],
+      "delivery": [
+        "services/providers/schemas/v1.schema.json"
+      ]
+    }
+  ],
   "commands": {
     "build": "npm run build",
     "check": "node --test tests/*.test.mjs"
@@ -67,7 +114,9 @@
       "services/bug-hunt/DEPLOYMENT.md",
       "deploy/compose.bug-hunt.yml",
       "services/bug-hunt/asyncapi.json",
-      "services/bug-hunt/contracts"
+      "services/bug-hunt/contracts",
+      "services/bug-hunt/SYSTEMATIZATION.md",
+      "services/bug-hunt/asyncapi-v2.json"
     ],
     "entrypoints": [
       "services/bug-hunt/dist/main.js",

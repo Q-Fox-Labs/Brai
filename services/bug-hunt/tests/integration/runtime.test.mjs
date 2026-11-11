@@ -16,12 +16,29 @@ test('real MCP + NATS + Auth acceptance',async t=>{
  try{
   const request={request_id:randomUUID(),observation};let receipt;
   await t.test('MCP discovery, report and replay use the authenticated owner',async()=>{
-   const tools=(await f.client.listTools()).tools;assert.deepEqual(tools.map(t=>t.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list']);
+   const tools=(await f.client.listTools()).tools;assert.deepEqual(tools.map(t=>t.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list','bug_hunt_search','bug_hunt_similar','bug_hunt_enrichment','bug_hunt_groups_list','bug_hunt_groups_get']);
    const first=await f.client.callTool({name:'bug_hunt_report',arguments:request});assert.equal(first.isError,undefined);receipt=first.structuredContent;
    const replay=await f.client.callTool({name:'bug_hunt_report',arguments:request});assert.equal(replay.structuredContent.case_id,receipt.case_id);assert.equal(replay.structuredContent.replayed,true);
    assert.equal((await web('get',{case_id:receipt.case_id})).case.owner_id,f.user.id);
    const denied=await f.client.callTool({name:'bug_hunt_review',arguments:{}});assert.equal(denied.isError,true);
    const response=await fetch(f.runtime.mcp.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});assert.equal(response.status,401);
+  });
+  await t.test('v2 uses the authenticated scope, preserves v1 and exposes bounded local coverage',async()=>{
+   await f.runtime.systemStore.reconcileLocal(50);
+   const searched=await f.client.callTool({name:'bug_hunt_search',arguments:{query:'Fixture'}});
+   assert.equal(searched.isError,undefined);assert.ok(searched.structuredContent.items.some(item=>item.case_id===receipt.case_id));
+   const enrichment=await f.client.callTool({name:'bug_hunt_enrichment',arguments:{case_id:receipt.case_id}});
+   assert.equal(enrichment.isError,undefined);assert.equal(enrichment.structuredContent.case_id,receipt.case_id);
+   assert.ok(enrichment.structuredContent.processing.branches.every(b=>b.state==='pending'));
+   const similar=await f.client.callTool({name:'bug_hunt_similar',arguments:{case_id:receipt.case_id}});
+   assert.equal(similar.isError,true);
+   assert.equal(JSON.parse(similar.content[0].text).code,'INDEX_NOT_READY');
+   assert.equal((await web('get',{case_id:receipt.case_id})).report.id,receipt.report_id);
+   const status=await f.call('brai.bug_hunt.v2.processing.status',{});
+   assert.equal(status.paused,false);assert.equal(typeof status.limits.dailyLimits.embedding.global,'number');
+   const paused=await f.call('brai.bug_hunt.v2.processing.pause',{request_id:randomUUID(),paused:true,reason:'Synthetic control check'});
+   assert.equal(paused.paused,true);
+   await f.call('brai.bug_hunt.v2.processing.pause',{request_id:randomUUID(),paused:false,reason:'Synthetic control restored'});
   });
   await t.test('Web NATS path applies the same rules and current Auth reviewer permission',async()=>{
    const own=await web('report',{request_id:randomUUID(),observation});
@@ -43,6 +60,8 @@ test('real MCP + NATS + Auth acceptance',async t=>{
    const result=await control.invokeTool(uid,'bug_hunt_report',input);
    assert.equal((await web('get',{case_id:result.case_id})).case.owner_id,f.user.id);
    assert.equal((await control.invokeTool(uid,'bug_hunt_report',input)).report_id,result.report_id);
+   const read=await control.invokeTool(uid,'bug_hunt_search',{query:'Fixture'});
+   assert.equal(read.isError,undefined,JSON.stringify(read.content??[]));assert.ok(Array.isArray(read.items));
    await assert.rejects(control.invokeTool(uid,'bug_hunt_review',{}));
    await assert.rejects(control.invokeTool(uid,'bug_hunt_report',{...input,owner_id:'foreign'}));
   });

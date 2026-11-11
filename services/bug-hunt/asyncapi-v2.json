@@ -1,0 +1,665 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {
+    "title": "Brai bug-hunt systematization",
+    "version": "2.0.0",
+    "description": "NATS Services brai_bug_hunt_v2 queue brai_bug_hunt_v2. V1 remains independent. See SYSTEMATIZATION.md."
+  },
+  "defaultContentType": "application/json",
+  "channels": {
+    "reply": {
+      "address": null,
+      "description": "Request/reply supplied private inbox; errors use both NATS Services error headers.",
+      "messages": {
+        "error": {
+          "name": "error",
+          "headers": {
+            "type": "object",
+            "required": [
+              "Nats-Service-Error",
+              "Nats-Service-Error-Code"
+            ],
+            "properties": {
+              "Nats-Service-Error": {
+                "type": "string"
+              },
+              "Nats-Service-Error-Code": {
+                "type": "string",
+                "pattern": "^[45][0-9]{2}$"
+              }
+            }
+          },
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/error"
+          }
+        },
+        "search": {
+          "name": "search_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/searchResponse"
+          }
+        },
+        "similar": {
+          "name": "similar_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/similarResponse"
+          }
+        },
+        "enrichment": {
+          "name": "enrichment_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/enrichmentResponse"
+          }
+        },
+        "groups_list": {
+          "name": "groups-list_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/groups-listResponse"
+          }
+        },
+        "groups_get": {
+          "name": "groups-get_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/groups-getResponse"
+          }
+        },
+        "membership_update": {
+          "name": "membership-update_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/membership-updateResponse"
+          }
+        },
+        "proposal_resolve": {
+          "name": "proposal-resolve_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/proposal-resolveResponse"
+          }
+        },
+        "classification_override": {
+          "name": "classification-override_response",
+          "payload": {
+            "$ref": "schemas/v2.schema.json#/definitions/classification-overrideResponse"
+          }
+        },
+        "processing_status": {
+          "name": "processing_status_response",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/statusResponse"
+          }
+        },
+        "processing_pause": {
+          "name": "processing_pause_response",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/pauseResponse"
+          }
+        },
+        "processing_retry": {
+          "name": "processing_retry_response",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/retryResponse"
+          }
+        },
+        "processing_activate_generation": {
+          "name": "processing_activate_generation_response",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/activate-generationResponse"
+          }
+        }
+      }
+    },
+    "search": {
+      "address": "brai.bug_hunt.v2.search",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "search_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/search"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "similar": {
+      "address": "brai.bug_hunt.v2.similar",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "similar_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/similar"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "enrichment": {
+      "address": "brai.bug_hunt.v2.enrichment",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "enrichment_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/enrichment"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "groups_list": {
+      "address": "brai.bug_hunt.v2.groups-list",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "groups-list_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/groups-list"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "groups_get": {
+      "address": "brai.bug_hunt.v2.groups-get",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "groups-get_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/groups-get"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "membership_update": {
+      "address": "brai.bug_hunt.v2.membership-update",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "membership-update_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/membership-update"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "proposal_resolve": {
+      "address": "brai.bug_hunt.v2.proposal-resolve",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "proposal-resolve_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/proposal-resolve"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "classification_override": {
+      "address": "brai.bug_hunt.v2.classification-override",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "classification-override_request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "$ref": "schemas/messages.schema.json#/definitions/context"
+              },
+              "input": {
+                "$ref": "schemas/v2.schema.json#/definitions/classification-override"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      }
+    },
+    "processing_status": {
+      "address": "brai.bug_hunt.v2.processing.status",
+      "description": "Operator ACL only. No user context, owner or role in input. Fixed installation scope.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "processing_status_request",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/status"
+          }
+        }
+      }
+    },
+    "processing_pause": {
+      "address": "brai.bug_hunt.v2.processing.pause",
+      "description": "Operator ACL only. No user context, owner or role in input. Fixed installation scope.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "processing_pause_request",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/pause"
+          }
+        }
+      }
+    },
+    "processing_retry": {
+      "address": "brai.bug_hunt.v2.processing.retry",
+      "description": "Operator ACL only. No user context, owner or role in input. Fixed installation scope.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "processing_retry_request",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/retry"
+          }
+        }
+      }
+    },
+    "processing_activate_generation": {
+      "address": "brai.bug_hunt.v2.processing.activate-generation",
+      "description": "Closed operator-only covered generation activation. No Web/Hermes/MCP/model context.",
+      "bindings": {
+        "nats": {
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "messages": {
+        "request": {
+          "name": "processing_activate_generation_request",
+          "payload": {
+            "$ref": "schemas/processing-v2.schema.json#/definitions/activate-generation"
+          }
+        }
+      }
+    }
+  },
+  "operations": {
+    "search": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/search"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/search/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/search"
+          }
+        ]
+      }
+    },
+    "similar": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/similar"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/similar/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/similar"
+          }
+        ]
+      }
+    },
+    "enrichment": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/enrichment"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/enrichment/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/enrichment"
+          }
+        ]
+      }
+    },
+    "groups_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/groups_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/groups_list/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/groups_list"
+          }
+        ]
+      }
+    },
+    "groups_get": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/groups_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/groups_get/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/groups_get"
+          }
+        ]
+      }
+    },
+    "membership_update": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/membership_update"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/membership_update/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/membership_update"
+          }
+        ]
+      }
+    },
+    "proposal_resolve": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/proposal_resolve"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/proposal_resolve/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/proposal_resolve"
+          }
+        ]
+      }
+    },
+    "classification_override": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/classification_override"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/classification_override/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/classification_override"
+          }
+        ]
+      }
+    },
+    "processing_status": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/processing_status"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/processing_status/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/processing_status"
+          }
+        ]
+      }
+    },
+    "processing_pause": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/processing_pause"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/processing_pause/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/processing_pause"
+          }
+        ]
+      }
+    },
+    "processing_retry": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/processing_retry"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/processing_retry/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/processing_retry"
+          }
+        ]
+      }
+    },
+    "processing_activate_generation": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/processing_activate_generation"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/processing_activate_generation/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/processing_activate_generation"
+          }
+        ]
+      }
+    }
+  }
+}

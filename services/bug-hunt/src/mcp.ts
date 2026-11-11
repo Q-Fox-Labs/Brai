@@ -1,4 +1,4 @@
-// ABOUTME: Предоставляет справку и три пользовательских инструмента через stateless Streamable HTTP.
+// ABOUTME: Предоставляет справку и пользовательские инструменты через stateless Streamable HTTP.
 // ABOUTME: Аутентификация выполняется заново для каждого запроса; review модели не предоставляется.
 import {createServer} from "node:http";
 import {readFileSync} from "node:fs";
@@ -6,6 +6,7 @@ import {Server} from "@modelcontextprotocol/sdk/server/index.js";
 import {StreamableHTTPServerTransport} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {CallToolRequestSchema,ListToolsRequestSchema} from "@modelcontextprotocol/sdk/types.js";
 import {Fault,failure,limits,schemas,type Operation,type Principal} from "./contracts.js";
+import {systemSchemas,systemFailure,type SystemOperation} from "./system-contracts.js";
 import type {Config} from "./config.js";
 import type {WorkContext,createGate} from "./load.js";
 
@@ -17,9 +18,18 @@ export const toolDefinitions=[
  {name:"bug_hunt_get",description:"Прочитать доступную карточку и ограниченную страницу ручных решений. Чужая и отсутствующая карточки неразличимы.",inputSchema:schemas.get},
  {name:"bug_hunt_list",description:"Прочитать свою страницу наблюдений с фиксированными фильтрами.",inputSchema:schemas.list},
 ];
+export const systemToolDefinitions=[
+ {name:"bug_hunt_search",description:"Найти наблюдения по тексту и кодам; ответ сообщает покрытие индекса.",inputSchema:systemSchemas.search},
+ {name:"bug_hunt_similar",description:"Прочитать похожие наблюдения по сохранённым Gemma embeddings. Сходство не подтверждает баг.",inputSchema:systemSchemas.similar},
+ {name:"bug_hunt_enrichment",description:"Прочитать группы, предварительные метки и состояния обработки своей карточки.",inputSchema:systemSchemas.enrichment},
+ {name:"bug_hunt_groups_list",description:"Прочитать страницу своих групп одинаковых проявлений.",inputSchema:systemSchemas["groups-list"]},
+ {name:"bug_hunt_groups_get",description:"Прочитать ограниченную страницу участников своей группы.",inputSchema:systemSchemas["groups-get"]},
+].map(tool=>({...tool,annotations:{readOnlyHint:true,idempotentHint:true}}));
+type SystemExecute=(op:SystemOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 type Execute=(op:Operation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 /** Запускает stateless listener с закрытой проверкой credential и ограниченными ресурсами. */
-export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute){
+export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute){
+ const definitions=executeSystem?[...toolDefinitions,...systemToolDefinitions]:toolDefinitions;
  let connections=0;
  const http=createServer(async(req,res)=>{
   if(req.url!=="/mcp"||req.method!=="POST"){res.writeHead(req.url==="/mcp"?405:404).end();return;}
@@ -41,9 +51,9 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
     if(!body||typeof body!=="object"||Array.isArray(body))throw new Fault("INVALID_ARGUMENT");
     server=new Server({name:"brai-bug-hunt",version:"1.0.0"},{capabilities:{tools:{}},instructions:agentInstructions});
     transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true,enableDnsRebindingProtection:true,allowedHosts:config.allowedHosts,allowedOrigins:config.allowedOrigins});
-    server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:toolDefinitions}));
+    server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:definitions}));
     server.setRequestHandler(CallToolRequestSchema,async request=>{
-     const found=toolDefinitions.find(t=>t.name===request.params.name);
+     const found=definitions.find(t=>t.name===request.params.name);
      if(!found)return {isError:true,content:[{type:"text",text:JSON.stringify(failure(new Fault("FORBIDDEN")))}]};
      if(found.name==="bug_hunt_help"){
       if(Object.keys(request.params.arguments??{}).length)return {isError:true,content:[{type:"text",text:JSON.stringify(failure(new Fault("INVALID_ARGUMENT")))}]};
@@ -51,11 +61,14 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
      }
      const op=found.name.slice("bug_hunt_".length) as Operation;
      try {
-      const value=await execute(op,p,request.params.arguments??{},ctx);
+      const systemOp=found.name.slice("bug_hunt_".length).replaceAll("_","-") as SystemOperation;
+      const value=systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
+       ?await executeSystem(systemOp,p,request.params.arguments??{},ctx)
+       :await execute(op,p,request.params.arguments??{},ctx);
       const result={content:[],structuredContent:value as Record<string,unknown>};
       if(Buffer.byteLength(JSON.stringify({jsonrpc:"2.0",id:body.id,result}))>limits.responseBytes)throw new Fault("RESULT_TOO_LARGE");
       return result;
-     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(failure(error,op==="report"))}]};}
+     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"))}]};}
     });
     await server.connect(transport);
     await transport.handleRequest(req,res,body);

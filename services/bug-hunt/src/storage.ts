@@ -3,9 +3,10 @@
 import {createHash,createHmac,randomUUID,timingSafeEqual} from "node:crypto";
 import type {Pool,PoolClient} from "pg";
 import {Fault,canonical,type Principal,type ReportInput,type ReviewInput,type GetInput,type ListInput} from "./contracts.js";
+import {enqueueProcessing} from "./processing-store.js";
 import {assertReviewTransition,type Store} from "./domain.js";
 
-interface Options {installationId:string;cursorKey:string;maxReports:number;reportsPerMinute:number;deadlineAt?:number;maxDatabaseBytes?:number}
+interface Options {targetGeneration?:()=>string;installationId:string;cursorKey:string;maxReports:number;reportsPerMinute:number;deadlineAt?:number;maxDatabaseBytes?:number}
 interface Cursor {at:string;id:string;binding:string}
 const digest=(value:unknown)=>createHash("sha256").update(canonical(value)).digest("hex");
 const columns="id,owner_id,installation_id,title,component_id,source,review_state,verification_status,revision,registered_at,updated_at";
@@ -96,6 +97,7 @@ export function createStore(pool:Pool,options:Options):Store {
     const caseId=randomUUID(),reportId=randomUUID(),registered=new Date().toISOString();
     await db.query("INSERT INTO bug_case(id,owner_id,installation_id,title,component_id,source,registered_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$7)",[caseId,p.ownerId,installationId,input.observation.title,input.observation.component_id??"unknown",p.source,registered]);
     await db.query("INSERT INTO report(id,case_id,owner_id,installation_id,actor_id,observation,registered_at) VALUES($1,$2,$3,$4,$5,$6,$7)",[reportId,caseId,p.ownerId,installationId,p.actorId,input.observation,registered]);
+    await enqueueProcessing(db,{id:reportId,case_id:caseId,owner_id:p.ownerId,installation_id:installationId,observation:input.observation},"new",options.targetGeneration?.());
     return {request_id:input.request_id,report_id:reportId,case_id:caseId,registered_at:registered,review_state:"new",verification_status:"unverified"};
    });
   },

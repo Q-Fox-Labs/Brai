@@ -25,7 +25,7 @@ for(const [key,path] of [['ownerURL','/brai_bug_hunt_test'],['appURL','/brai_bug
 }
 if(new URL(fixture.natsURL).hostname!=='127.0.0.1'||new URL(fixture.origin).hostname!=='127.0.0.1')throw new Error('Loopback fixture required');
 /** Запускает реальные адаптеры fixture и возвращает контролируемый cleanup. */
-export async function startFixture(){
+export async function startFixture(options={}){
  const tempRoot=fileURLToPath(new URL('../../../../tmp/',import.meta.url));await mkdir(tempRoot,{recursive:true});
  const temp=await mkdtemp(join(tempRoot,'bug-hunt-runtime-'));
  const authCfg={origin:fixture.origin,trustedOrigins:[fixture.origin],secret,identityMode:'telegram',emailFrom:'',resendKey:'',natsServers:[fixture.natsURL],natsUser:'auth',natsPassword:'fixture-auth'};
@@ -47,11 +47,11 @@ export async function startFixture(){
   if(msg.headers?.has('Nats-Service-Error')||msg.headers?.has('Nats-Service-Error-Code'))throw Object.assign(new Error(value.code??msg.headers.get('Nats-Service-Error')),{code:value.code??msg.headers.get('Nats-Service-Error'),outcome:value.outcome,headers:msg.headers});
   return value;
  };
- const user=await provision(authPool,secret,{requestId:randomUUID(),telegramId:String(120020000+Math.floor(Math.random()*900000)),userId:randomUUID(),profileId:'fixture-'+randomUUID(),name:'Fixture reporter',role:'user',status:'active'});
+ const user=await provision(authPool,secret,{requestId:randomUUID(),telegramId:String(options.telegramId??(120020000+Math.floor(Math.random()*900000))),userId:options.userId??randomUUID(),profileId:options.profileId??('fixture-'+randomUUID()),name:'Fixture reporter',role:options.role??'user',status:'active'});
  const token='synthetic-bughunt-'+randomUUID(),principalsPath=join(temp,'principals.json');
  const entry={tokenSha256:createHash('sha256').update(token).digest('hex'),ownerId:user.id,principalId:user.id,enabled:true};
  await writeFile(principalsPath,JSON.stringify([entry]),{mode:0o600});
- const cfg={databaseURL:fixture.appURL,installationId:'fixture-runtime',cursorKey:'fixture-runtime-cursor-key-more-than-32-bytes',nats:{servers:[fixture.natsURL],user:'bughunt',password:'fixture-bughunt',inboxPrefix:'_INBOX.bughunt'},mcp:{host:'127.0.0.1',port:fixture.mcpPort,allowedHosts:['127.0.0.1:'+fixture.mcpPort],allowedOrigins:[fixture.origin],principalsFile:principalsPath,maxConnections:24},maxReports:10000,reportsPerMinute:1000,maxDatabaseBytes:1073741824,artifactsEnabled:false};
+ const cfg={databaseURL:fixture.appURL,installationId:options.installationId??'fixture-runtime',cursorKey:'fixture-runtime-cursor-key-more-than-32-bytes',nats:{servers:[fixture.natsURL],user:'bughunt',password:'fixture-bughunt',inboxPrefix:'_INBOX.bughunt'},mcp:{host:'127.0.0.1',port:fixture.mcpPort,allowedHosts:['127.0.0.1:'+fixture.mcpPort],allowedOrigins:[fixture.origin],principalsFile:principalsPath,maxConnections:24},maxReports:10000,reportsPerMinute:1000,maxDatabaseBytes:1073741824,artifactsEnabled:false};
  let runtime=await startRuntime(cfg);
  const client=new Client({name:'bug-hunt-fixture',version:'1.0.0'},{capabilities:{}});
  await client.connect(new StreamableHTTPClientTransport(new URL(runtime.mcp.url),{requestInit:{headers:{authorization:'Bearer '+token}}}));
@@ -65,7 +65,7 @@ export async function startFixture(){
  return {temp,fixture,cfg,nc,brokerNc,call,authPool,client,user,cookie,adminCookie,principalsPath,entry,token,
   get runtime(){return runtime;},
   async restart(){await runtime.stop();runtime=await startRuntime(cfg);},
-  async browserCode(){const issued=await issueCode(authPool,secret,'120010001');return issued.code;},
+  async browserCode(){const issued=await issueCode(authPool,secret,options.browserAsReporter?user.telegramId:'120010001');if(!issued)throw new Error('Fixture code unavailable');return issued.code;},
   async close(){await client.close().catch(()=>{});await runtime.stop();await authRuntime.stop();await Promise.all([nc.drain(),brokerNc.drain(),authNc.drain()]);await authPool.end();await rm(temp,{recursive:true,force:true});},
  };
 }
