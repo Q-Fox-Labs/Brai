@@ -3,6 +3,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {randomUUID} from "node:crypto";
+import {readFileSync} from "node:fs";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import {investigationTools} from "../dist/verification-engine.js";
 import {codexExecutor,providersExecutor,parseProvidersCandidate} from "../dist/verification-models.js";
 import {VerificationFault as VF} from "../dist/verification.js";
 const profile={socketUrl:"ws+unix:///synthetic.sock:",generation:"fixture-generation",serverVersion:"0.166.0",cwd:"/work",schema_sha256:"a".repeat(64),filesystem_isolation_verified:true,qualified_models:["gpt-6.1-sol"],tool_policy_version:"no-environment-scoped-tools-v2"};
@@ -10,7 +14,7 @@ const intent=()=>({id:randomUUID(),scope:{installation_id:"fixture",owner_id:"ow
 function fixture(options={}){
  const calls=[],sent=[],listeners=new Set();let tools=0,reserves=0,closed=false,interrupted=false;
  const emit=p=>{for(const fn of listeners)fn(p);};
- const rpc={async connect(){},close(){closed=true;},subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},send(p){sent.push(p);},
+ const rpc={async connect(){},close(){closed=true;},subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);},send(p){sent.push(p);if(options.toolCount&&p.id>=93&&p.id<93+options.toolCount){const next=p.id+1;emit(next<93+options.toolCount?{id:next,method:"item/tool/call",params:{threadId:"own-thread",turnId:"own-turn",callId:"own-"+next,tool:"evidence_list",arguments:{}}}:{method:"turn/completed",params:{threadId:"own-thread",turn:{id:"own-turn",status:"completed"}}});}},
  async call(method,params){calls.push({method,params});
   if(method==="initialize")return {userAgent:"codex/0.166.0 (linux)"};
   if(method==="account/read")return {account:options.noAuth?null:{type:"chatgpt"}};
@@ -26,7 +30,7 @@ function fixture(options={}){
     for(let n=0;n<200;n++)emit({method:"item/agentMessage/delta",params:{threadId:"own-thread",turnId:"own-turn",delta:"partial"}});
     emit({method:"item/tool/call.delta",params:{threadId:"own-thread",turnId:"own-turn",argumentsDelta:"partial"}});
     emit({id:93,method:options.approval?"item/commandExecution/requestApproval":"item/tool/call",params:{threadId:"own-thread",turnId:"own-turn",callId:"own",tool:"evidence_list",arguments:{}}});
-    emit({method:"turn/completed",params:{threadId:"own-thread",turn:{id:"own-turn",status:"completed"}}});
+    if(!options.toolCount)emit({method:"turn/completed",params:{threadId:"own-thread",turn:{id:"own-turn",status:"completed"}}});
    },5);
    return {turn:{id:"own-turn"}};
   }
@@ -79,11 +83,11 @@ test("lost interrupt ACK keeps unexpected native request unknown until terminal 
  assert.equal(f.calls.filter(c=>c.method==="turn/start").length,1);
 });
 
-function providerFixture({lostAck=false,invalid=false}={}){
+function providerFixture({lostAck=false,invalid=false,toolRounds=1}={}){
  const requests=[],operations=new Map();let gets=0,tools=0,reserves=0;
  const result=(text,toolCalls=[])=>({partial:false,actualModel:"deepseek/deepseek-v3.2",finishReason:toolCalls.length?"tool_calls":"stop",text,toolCalls,usage:{inputTokens:2,outputTokens:3}});
- const client={async chat(input){requests.push(structuredClone(input));const op={operationId:input.operationId,phase:"succeeded",result:requests.length===1&&!invalid?result("",[{id:"tool-original",name:"evidence_list",arguments:{}}]):result(invalid?"not JSON":'{"verdict":"insufficient_evidence"}')};operations.set(input.operationId,op);if(lostAck&&requests.length===1)throw Error("Lost accepted ACK");return op;},async get(id){gets++;return operations.get(id);},async cancel(){throw Error("not used");}};
- const dispatch={tools:()=>[],allowed:async()=>true,remainingMs:()=>90000,reserve:async()=>{reserves++;},call:async(id,name,args)=>{assert.equal(id,"tool-original");tools++;return {items:[]};}};
+ const client={async chat(input){requests.push(structuredClone(input));const op={operationId:input.operationId,phase:"succeeded",result:requests.length<=toolRounds&&!invalid?result("",[{id:toolRounds===1?"tool-original":"tool-"+requests.length,name:"evidence_list",arguments:{}}]):result(invalid?"not JSON":'{"verdict":"insufficient_evidence"}')};operations.set(input.operationId,op);if(lostAck&&requests.length===1)throw Error("Lost accepted ACK");return op;},async get(id){gets++;return operations.get(id);},async cancel(){throw Error("not used");}};
+ const dispatch={tools:()=>[],allowed:async()=>true,remainingMs:()=>90000,reserve:async()=>{reserves++;},call:async(id,name,args)=>{assert.equal(id,toolRounds===1?"tool-original":"tool-"+requests.length);tools++;return {items:[]};}};
  return {executor:providersExecutor(null,"owner",{connectionId:"fixture",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"fixture",inboxPrefix:"_INBOX."},dispatch,client),requests,get gets(){return gets;},get tools(){return tools;},get reserves(){return reserves;}};
 }
 test("Providers completes exactly one tool round per durable Activity and preserves continuation IDs",async()=>{
@@ -126,4 +130,35 @@ test("Providers resumes a persisted complete result after upstream expiry withou
  const result=await executor.inspectStep(i,saved,async()=>{});assert.equal(result.state,"completed");assert.equal(chats,1);assert.equal(gets,0);assert.equal((await executor.cancelStep(i,saved)).state,"failed");assert.equal(gets,0);
  const foreign={...saved,native:{...saved.native,operationId:randomUUID()}};
  assert.equal((await executor.inspectStep(i,foreign,async()=>{})).state,"unknown");assert.equal(gets,1);assert.equal(chats,1);
+});
+
+test("native Codex completes 400 sequential dynamic tool calls within one owned turn",async()=>{
+ const f=fixture({toolCount:400}),cp=await f.executor.startStep(intent(),async()=>{});
+ assert.equal(cp.state,"completed");assert.equal(f.tools,400);assert.equal(f.reserves,1);
+ assert.equal(f.sent.filter(p=>p.id>=93&&p.id<493).length,400);
+ assert.equal(f.calls.filter(p=>p.method==="turn/start").length,1);
+});
+test("Providers continues for 400 persisted tool rounds without a step counter limit",async()=>{
+ const f=providerFixture({toolRounds:400}),i=intent();let cp=await f.executor.startStep(i,async()=>{});
+ for(let round=1;round<=400;round++){
+  assert.equal(cp.state,"running");assert.equal(cp.native.round,round);
+  cp=await f.executor.inspectStep(i,JSON.parse(JSON.stringify(cp)),async()=>{});
+  assert.equal(f.requests[round].continuation.operationId,f.requests[round-1].operationId);
+  assert.equal(f.requests[round].toolResults[0].id,"tool-"+round);
+ }
+ assert.equal(cp.state,"completed");assert.equal(f.tools,400);assert.equal(f.reserves,401);assert.equal(f.gets,0);
+ assert.equal(Object.keys(cp.native.usage_totals).length,401);
+});
+
+test("Providers request with the real investigation tools satisfies its public chatRequest contract",async()=>{
+ const schema=JSON.parse(readFileSync(new URL("../../providers/schemas/v1.schema.json",import.meta.url),"utf8")),ajv=new Ajv({strict:false});addFormats(ajv);ajv.addSchema(schema,"providers-v1");
+ const valid=ajv.getSchema("providers-v1#/definitions/chatRequest");assert.ok(valid);
+ let errors=null,requests=0;
+ const client={chat:async input=>{
+  requests++;const wire={...input,ownerId:"owner",connectionId:"fixture",streamInbox:"_INBOX.fixture."+randomUUID().replaceAll("-","")};
+  const accepted=valid(wire);errors=structuredClone(valid.errors);assert.ok(accepted,JSON.stringify(errors));
+  return {operationId:input.operationId,phase:"succeeded",result:{partial:false,actualModel:"deepseek/deepseek-v3.2",finishReason:"tool_calls",text:"",usage:null,toolCalls:[{id:"finish",name:"verification_finish",arguments:{json:'{"verdict":"insufficient_evidence"}'}}]}};
+ },get:async()=>{throw Error();},cancel:async()=>{throw Error();}};
+ const executor=providersExecutor(null,"owner",{connectionId:"fixture",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"fixture",inboxPrefix:"_INBOX."},{tools:investigationTools,allowed:async()=>true,reserve:async()=>{},call:async()=>{throw Error();}},client);
+ const cp=await executor.startStep(intent(),async()=>{});assert.equal(cp.state,"completed",JSON.stringify(errors));assert.equal(requests,1);
 });

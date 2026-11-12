@@ -102,6 +102,7 @@
       "services/bug-hunt/tests/integration/verification-preflight.mjs",
       "services/bug-hunt/tests/verification.test.mjs",
       "services/bug-hunt/tests/verification-models.test.mjs",
+      "services/bug-hunt/tests/verification-step-limits.test.mjs",
       "services/bug-hunt/tests/native-contract-inspect.mjs",
       "services/bug-hunt/tests/native-server-inspect.mjs",
       "services/bug-hunt/tests/native-live-qualification.mjs",

@@ -8,7 +8,7 @@ import {Pool} from "pg";
 import {migrate} from "../../dist/migrate.js";
 import {createStore} from "../../dist/storage.js";
 import {createVerificationStore,verificationHash as hash} from "../../dist/verification-store.js";
-import {verificationPolicy,VerificationFault as VF} from "../../dist/verification.js";
+import {verificationPolicy,validateResult,VerificationFault as VF} from "../../dist/verification.js";
 import {createVerificationEngine} from "../../dist/verification-engine.js";
 const fixture=JSON.parse(readFileSync(new URL("../../../../tmp/bug-hunt-test.json",import.meta.url),"utf8"));
 for(const k of ["ownerURL","appURL"]){const u=new URL(fixture[k]);assert.equal(u.hostname,"127.0.0.1");assert.equal(u.pathname,"/brai_bug_hunt_test");}
@@ -68,6 +68,31 @@ test("v3 admission, timer, immutable data, fencing, ACL and replay use one scope
     assert.equal(Number((await owner.query("SELECT tokens FROM verification_budget WHERE installation_id=$1 AND owner_id=$2 AND day=$3",[installationId,p.ownerId,day])).rows[0].tokens),before+130);
    });
   });
+  await t.test("evidence after the first fifty remains readable, paged and usable as positive proof",async()=>{
+   await store.guard(investigation,async r=>{
+    const scope={installation_id:installationId,owner_id:p.ownerId,investigation_id:r.id};
+    const evidence=(kind,text,provenance={},late=false)=>({id:(late?"ffffffff-ffff-4fff-8fff-":"00000000-0000-4000-8000-")+randomUUID().slice(-12),scope,kind,text,sha256:hash(text),provenance,availability:"available",external_allowed:true});
+    for(let n=0;n<60;n++)await store.putEvidence(r,evidence("diagnostic","Synthetic prior evidence "+n));
+    const provenance={source_id:r.snapshot.source.id,commit:r.snapshot.source.commit,blob_sha256:hash("blob")};
+    const requirement=evidence("requirement","Accept zero",{...provenance,path:"CONTRACT.md"},true),source=evidence("source","Rejects zero",{...provenance,path:"src/fixture.ts"},true);
+    await store.putEvidence(r,requirement);await store.putEvidence(r,source);
+    const oracle={requirement_id:requirement.id,requirement_sha256:requirement.sha256,expected:"accepted",version:"fixture",confirms_claim:"Valid zero rejected"};
+    const receipt={execution_id:randomUUID(),scope,recipe_id:"fixture",recipe_version:"1",source_commit:r.snapshot.source.commit,source_sha256:source.provenance.blob_sha256,source_tree_sha256:hash("tree"),node_sha256:hash("node"),dependencies_sha256:hash("deps"),spec_sha256:hash("spec"),oracle_sha256:hash(oracle),started_at:"2026-11-11T00:00:00Z",finished_at:"2026-11-11T00:00:01Z",exit_code:0,outcome:"reproduced",assertions:[{name:"zero",expected:"accepted",actual:"rejected",passed:false}],log_sha256:hash("log"),fidelity:"synthetic",substituted_boundaries:["network"],cleanup:"done",state:"completed"};
+    const runner=evidence("runner",JSON.stringify(receipt),{execution_id:receipt.execution_id},true);await store.putEvidence(r,runner);
+    const all=await store.evidenceAll(r),refs=[requirement.id,source.id,runner.id];
+    for(const id of refs)assert.ok(all.findIndex(e=>e.id===id)>=50);
+    const seen=[];let cursor=null;
+    do{const page=await store.evidencePage(r,cursor,20);assert.ok(page.items.length<=20);assert.ok(page.items.every(item=>!Object.hasOwn(item,"text")));seen.push(...page.items.map(e=>e.id));cursor=page.next_cursor;}while(cursor);
+    assert.deepEqual(seen,all.map(e=>e.id));assert.equal(new Set(seen).size,seen.length);
+    assert.equal((await store.evidenceByIds(r,[runner.id]))[0].text,runner.text);
+    assert.deepEqual(await store.evidenceByIds({...r,owner_id:foreign.ownerId},refs),[]);
+    assert.equal((await store.evidenceSource(r,"requirement",r.snapshot.source.id,"CONTRACT.md",provenance.blob_sha256)).id,requirement.id);
+    assert.equal(await store.evidenceSource(r,"requirement","foreign","CONTRACT.md",provenance.blob_sha256),null);
+    const candidate={claim:oracle.confirms_claim,expected:oracle.expected,facts:["Synthetic receipt rejects zero"],verdict:"confirmed",reproduction_outcome:"reproduced",observed_failure:"verified",requirement_id:requirement.id,source_id:source.id,runner_id:runner.id,evidence_ids:refs,missing:[],limitations:["Synthetic"]};
+    const candidateHash=hash(candidate),review={accepted:true,candidate_sha256:candidateHash,evidence_ids:refs,limitations:[]};
+    assert.equal(validateResult({scope,snapshot:r.snapshot,candidate,candidateHash,review,evidence:await store.evidenceByIds(r,refs),receipt,oracle,hash}).verdict,"confirmed");
+   });
+  });
   await t.test("manual review history remains readable with full Unicode explanations",async()=>{
    for(let revision=0;revision<13;revision++)await store.review({...p,reviewer:true},{request_id:randomUUID(),investigation_id:investigation,expected_revision:revision,verdict:"insufficient_evidence",explanation:"😀".repeat(4000)});
    const first=await store.get(p,investigation);assert.equal(first.reviews.length,10);assert.equal(first.next_review_revision,4);assert.ok(Buffer.byteLength(JSON.stringify(first))<258048);
@@ -104,7 +129,7 @@ test("v3 admission, timer, immutable data, fencing, ACL and replay use one scope
    const admitted=await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipt.case_id}}),id=admitted.investigation_ids[0],sourceText="source",requirementText="requirement";
    await store.guard(id,async r=>{
     await store.set(r,"running",null,r.stage,{id:"synthetic-model",effort:null,catalog_revision:"fixture",resolver_version:"fixture"});
-    for(const [kind,path,text]of [["source","index.mjs",sourceText],["requirement","CONTRACT.md",requirementText]])await store.putEvidence(r,{id:randomUUID(),scope:{installation_id:installationId,owner_id:p.ownerId,investigation_id:id},kind,text,sha256:hash(text),provenance:{path,blob_sha256:hash(text)},availability:"available",external_allowed:true});
+    for(const [kind,path,text]of [["source","index.mjs",sourceText],["requirement","CONTRACT.md",requirementText]])await store.putEvidence(r,{id:randomUUID(),scope:{installation_id:installationId,owner_id:p.ownerId,investigation_id:id},kind,text,sha256:hash(text),provenance:{source_id:"fixture",commit:"c".repeat(40),path,blob_sha256:hash(text)},availability:"available",external_allowed:true});
    });
    let starts=0,first,second,block=crash==="before_dispatch";
    const guarded={...store,checkpoint:async(r,id,cp)=>{if(block&&cp.state==="dispatching"&&(await store.effects(r)).some(e=>e.id===id&&e.kind==="runner")){block=false;throw new VF("SYNTHETIC_CRASH","unknown");}return store.checkpoint(r,id,cp);}};

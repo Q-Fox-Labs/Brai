@@ -163,12 +163,12 @@ export function parseProvidersCandidate(text:string){
 }
 const finishTool:Tool={type:"function",function:{name:"verification_finish",description:"Finish this phase by submitting the complete final JSON object matching input.output_schema; no further investigation follows.",parameters:{type:"object",properties:{json:{type:"string",description:"A complete serialized JSON object; copy evidence IDs and candidate_sha256 exactly from the input/tool results."}},required:["json"],additionalProperties:false}}};
 export interface ProvidersProfile {connectionId:string;provider:string;model:string;revision:string;inboxPrefix:string}
-/** Providers выполняет до 8 полных ходов; recovery использует get прежнего operationId. */
+/** Один Providers exchange на Activity без предела числа продолжений; recovery читает прежний operationId. */
 export function providersExecutor(nc:NatsConnection,ownerId:string,profile:ProvidersProfile,dispatch:Dispatch,client:Pick<ReturnType<typeof createProvidersClient>,"chat"|"get"|"cancel">=createProvidersClient(nc,{ownerId,connectionId:profile.connectionId,inboxPrefix:profile.inboxPrefix})):InvestigationExecutor{
  async function loop(intent:ModelIntent,cp:ModelCheckpoint,save:(v:ModelCheckpoint)=>Promise<void>,recover:boolean):Promise<ModelCheckpoint>{
   try{
    const until=Date.now()+Math.max(0,Math.min(90000,dispatch.remainingMs?.()??90000));
-   for(let round=Number(cp.native.round??0);round<8;round++){
+   const round=Number(cp.native.round??0);
     if(Date.now()>=until&&!(recover&&cp.native.operationId))return failed(cp,"MODEL_DEADLINE","failed");
     if(!recover&&!await dispatch.allowed())return failed(cp,"POLICY_REVOKED","blocked");
     let op:any;
@@ -197,8 +197,6 @@ export function providersExecutor(nc:NatsConnection,ownerId:string,profile:Provi
     }
     if(result.finishReason!=="stop"||result.toolCalls.length)return failed(cp,"PROVIDERS_INCOMPLETE","failed");
     let candidate;try{candidate=parseProvidersCandidate(result.text);}catch{return failed(cp,"MODEL_OUTPUT_INVALID","failed");}cp={...cp,state:"completed",result:candidate,code:null};await save(cp);return cp;
-   }
-   return failed(cp,"MODEL_STEP_LIMIT","failed");
   }catch(e){return failed(cp,e instanceof VF?e.code:"PROVIDERS_UNAVAILABLE",cp.state==="not_sent"||e instanceof VF&&e.code==="BUDGET_EXHAUSTED"?"blocked":"unknown");}
  }
  return {async preflight(){return {ready:profile.revision!=="unprepared",code:profile.revision==="unprepared"?"PROVIDERS_PROFILE_UNPREPARED":null,models:[],catalog_revision:profile.revision};},startStep:(i,s)=>loop(i,initial(),s,false),inspectStep:(i,c,s)=>["completed","failed"].includes(c.state)?Promise.resolve(c):loop(i,c,s,true),async cancelStep(i,c){const saved=c.native.last_chat_result as ChatResult|undefined;if(!c.native.operationId||c.native.last_chat_operation_id===c.native.operationId&&saved?.partial===false&&saved?.actualModel===profile.model)return failed(c,"CANCELLED","failed");await client.cancel(String(c.native.operationId));const op=await client.get(String(c.native.operationId));return failed(c,["succeeded","failed","cancelled"].includes(op.phase)?"CANCELLED":"PROVIDERS_CANCEL_PENDING",["succeeded","failed","cancelled"].includes(op.phase)?"failed":"unknown");}};

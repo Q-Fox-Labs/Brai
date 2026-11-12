@@ -17,7 +17,10 @@ test("configuration defaults, one executor switch and atomic invalid reload",()=
  let raw={...first,enabled:true,revision:"one"},reader=policyReader(()=>raw);
  raw={...raw,executor:"providers",revision:"two"};assert.equal(reader.get().executor,"providers");
  raw={...raw,schedule:{...raw.schedule,maxInvestigationsPerRun:100}};assert.equal(reader.get().revision,"two");assert.equal(reader.status().config_error,"CONFIG_ERROR");
- for(const field of [{executor:"automatic"},{schedule:{manualEnabled:1}},{profiles:{providers:{model:"foreign"}}},{budgets:{toolCalls:25}}])assert.throws(()=>verificationPolicy(field));
+ assert.equal(first.budgets.toolCalls,null);
+ assert.equal(verificationPolicy({budgets:{toolCalls:400}}).budgets.toolCalls,400);
+ assert.equal(verificationPolicy({budgets:{toolCalls:24}}).budgets.toolCalls,24);
+ for(const field of [{executor:"automatic"},{schedule:{manualEnabled:1}},{profiles:{providers:{model:"foreign"}}},{budgets:{toolCalls:-1}},{budgets:{toolCalls:1.5}}])assert.throws(()=>verificationPolicy(field));
 });
 test("closed API refuses model/owner injection and validates Unicode",()=>{
  for(const target of [{kind:"case",id:randomUUID()},{kind:"pending"}])assert.doesNotThrow(()=>validateVerification("run-request",{request_id:"one",target}));

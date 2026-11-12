@@ -171,7 +171,18 @@ export function createVerificationStore(pool:Pool,options:Options){
    const updated=await db.query("UPDATE verification_effect e SET checkpoint=$5,updated_at=now() FROM verification_investigation i WHERE e.investigation_id=i.id AND e.id=$1 AND i.id=$2 AND i.installation_id=$3 AND i.fence=$4",[id,r.id,installation,r.fence,checkpoint]);if(!updated.rowCount)throw new VF("STALE_FENCE");
   });},
   async effects(r:Investigation){return (await pool.query("SELECT * FROM verification_effect WHERE investigation_id=$1 AND installation_id=$2 AND owner_id=$3 ORDER BY registered_at",[r.id,installation,r.owner_id])).rows;},
-  async evidenceAll(r:Investigation):Promise<Evidence[]>{return (await pool.query("SELECT payload FROM verification_evidence WHERE investigation_id=$1 AND installation_id=$2 AND owner_id=$3 ORDER BY id LIMIT 50",[r.id,installation,r.owner_id])).rows.map(x=>x.payload);},
+  async evidenceAll(r:Investigation):Promise<Evidence[]>{return (await pool.query("SELECT payload FROM verification_evidence WHERE investigation_id=$1 AND installation_id=$2 AND owner_id=$3 ORDER BY id",[r.id,installation,r.owner_id])).rows.map(x=>x.payload);},
+  /** Возвращает страницу только метаданных; cursor не ограничивает последующее чтение по ID. */
+  async evidencePage(r:Investigation,after:string|null=null,limit=20){
+   const rows=(await pool.query("SELECT id,kind,sha256,payload->>'availability' AS availability,payload->'external_allowed' AS external_allowed FROM verification_evidence WHERE investigation_id=$1 AND installation_id=$2 AND owner_id=$3 AND ($4::uuid IS NULL OR id>$4::uuid) ORDER BY id LIMIT $5",[r.id,installation,r.owner_id,after,limit+1])).rows;
+   return {items:rows.slice(0,limit),next_cursor:rows.length>limit?rows[limit-1].id:null};
+  },
+  /** Читает все запрошенные scoped IDs без усечения по позиции в inventory. */
+  async evidenceByIds(r:Investigation,ids:string[]):Promise<Evidence[]>{if(!ids.length)return [];return (await pool.query("SELECT payload FROM verification_evidence WHERE investigation_id=$1 AND installation_id=$2 AND owner_id=$3 AND id=ANY($4::uuid[]) ORDER BY id",[r.id,installation,r.owner_id,ids])).rows.map(x=>x.payload);},
+  /** Находит свидетельство принятого recipe по точному immutable происхождению. */
+  async evidenceSource(r:Investigation,kind:string,sourceId:string,path:string,blobHash:string):Promise<Evidence|null>{
+   return (await pool.query("SELECT payload FROM verification_evidence WHERE investigation_id=$1 AND installation_id=$2 AND owner_id=$3 AND kind=$4 AND payload#>>'{provenance,source_id}'=$5 AND payload#>>'{provenance,path}'=$6 AND payload#>>'{provenance,blob_sha256}'=$7 ORDER BY id LIMIT 1",[r.id,installation,r.owner_id,kind,sourceId,path,blobHash])).rows[0]?.payload??null;
+  },
   async putEvidence(r:Investigation,e:Evidence){if(e.scope.investigation_id!==r.id||e.scope.owner_id!==r.owner_id||e.scope.installation_id!==installation||verificationHash(e.text)!==e.sha256||Buffer.byteLength(e.text)>65536)throw new VF("EVIDENCE_INTEGRITY");await tx(async db=>{await capacity(db,r.policy);const old=(await db.query("SELECT sha256,payload FROM verification_evidence WHERE id=$1",[e.id])).rows[0];if(old){if(verificationHash(old.payload)!==verificationHash(e))throw new VF("EVIDENCE_CONFLICT");return;}await db.query("INSERT INTO verification_evidence(id,investigation_id,installation_id,owner_id,kind,sha256,payload) SELECT $1,$2,$3,$4,$5,$6,$7 FROM verification_investigation WHERE id=$2 AND installation_id=$3 AND owner_id=$4 AND fence=$8",[e.id,r.id,installation,r.owner_id,e.kind,e.sha256,e,r.fence]);});},
   async reserve(r:Investigation,tokens:number){return tx(async db=>{await lock(db);await capacity(db,r.policy);const day=new Date().toISOString().slice(0,10),p=options.policy();
    const own=(await db.query("SELECT calls,tokens FROM verification_budget WHERE installation_id=$1 AND owner_id=$2 AND day=$3",[installation,r.owner_id,day])).rows[0]??{calls:0,tokens:0};
