@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "recipes": [
+    {
+      "id": "dto-contract",
+      "version": "1",
+      "harness": "dto-contract.mjs",
+      "scope": "JSON Schema acceptance of the pinned schema only"
+    },
+    {
+      "id": "regression",
+      "version": "1",
+      "harness": "regression.mjs",
+      "scope": "explicit accepted evaluate fixture against immutable module"
+    },
+    {
+      "id": "transport-lifecycle",
+      "version": "1",
+      "harness": "lifecycle.mjs",
+      "scope": "explicit fault fixture, no shared services"
+    }
+  ],
+  "generatedScriptsAllowed": false,
+  "networkAllowed": false
+}

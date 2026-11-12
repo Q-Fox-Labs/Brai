@@ -4,6 +4,7 @@
 import {useEffect,useRef,useState} from "react";
 import {Button} from "@/components/ui/button";
 import "./styles.css";
+import Verification from "./verification";
 type State="new"|"triaged"|"archived";
 type Summary={id:string;title:string;component_id:string;source:string;review_state:State;revision:number;registered_at:string};
 type Review={id:string;explanation:string;new_state:State;registered_at:string};
@@ -57,7 +58,7 @@ export default function BugHuntScreen({userId,onUnauthorized}:{userId:string;onU
  };
  const fields=[["operation","Действие"],["expected","Ожидалось"],["observed","Произошло"],["steps","Условия"],["component_version","Версия компонента"],["commit_sha","Коммит"],["deployment_revision","Версия установки"],["error_code","Код ошибки"],["diagnostic_text","Диагностика"]];
  return <main className="bug-hunt">
-  <header className="bug-hunt-heading"><div><h1>Наблюдения о сбоях</h1><p>Сообщения агентов. Каждое наблюдение пока не проверено.</p></div>{reviewer&&<label><input type="checkbox" checked={operator} disabled={busy||!!pending} onChange={e=>setOperator(e.target.checked)}/> Все пользователи</label>}</header>
+  <header className="bug-hunt-heading"><div><h1>Наблюдения о сбоях</h1><p>Наблюдения, предварительные сведения и отдельные результаты проверки.</p></div>{reviewer&&<label><input type="checkbox" checked={operator} disabled={busy||!!pending} onChange={e=>setOperator(e.target.checked)}/> Все пользователи</label>}</header>
   <Systematization userId={userId} reviewer={reviewer} caseId={detail?.case.id??null} filters={{...(state?{review_state:state}:{}),...(component?{component_id:component}:{}),...(source?{source}:{}),...(from?{registered_from:new Date(from).toISOString()}:{}),...(to?{registered_to:new Date(to).toISOString()}:{})}} onOpen={id=>void open(id)} onUnauthorized={onUnauthorized}/>
   <form className="bug-hunt-filters" onSubmit={e=>{e.preventDefault();void load();}}>
    <label>Состояние<select value={state} onChange={e=>setState(e.target.value)}><option value="">Все</option>{Object.entries(labels).map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
@@ -74,9 +75,10 @@ export default function BugHuntScreen({userId,onUnauthorized}:{userId:string;onU
   </section>
   <section aria-label="Карточка обращения" aria-busy={busy}>{!detail?<p className="bug-hunt-empty">Выберите обращение в списке.</p>:<>
    <div className="bug-hunt-card-heading"><h2>{detail.case.title}</h2><Button variant="ghost" disabled={busy} onClick={()=>void open(detail.case.id)}>Обновить</Button></div>
-   <p>{labels[detail.case.review_state]} · Не проверено · Версия {detail.case.revision}</p>
+   <p>{labels[detail.case.review_state]} · Исходная регистрация: не проверено · Версия {detail.case.revision}</p>
    <dl>{fields.map(([key,label])=>detail.report.observation[key]?<div key={key}><dt>{label}</dt><dd>{String(detail.report.observation[key])}</dd></div>:null)}</dl>
    {Array.isArray(detail.report.observation.evidence_artifact_ids)&&detail.report.observation.evidence_artifact_ids.length>0&&<div><h3>Доказательства</h3><p>Доступность файлов может измениться.</p><ul>{detail.report.observation.evidence_artifact_ids.map((id:string)=><li key={id}><EvidenceLink caseId={detail.case.id} artifactId={id} userId={userId}/></li>)}</ul></div>}
+   <Verification key={userId+":"+detail.case.id} userId={userId} caseId={detail.case.id} reviewer={reviewer} onUnauthorized={onUnauthorized}/>
    <h3>Ручной разбор</h3>{!detail.reviews.items.length&&<p>Решений пока нет.</p>}<ol className="bug-hunt-audit">{detail.reviews.items.map(item=><li key={item.id}><strong>{labels[item.new_state]}</strong> · <time dateTime={item.registered_at}>{new Date(item.registered_at).toLocaleString("ru-RU")}</time><p>{item.explanation}</p></li>)}</ol>
    {detail.reviews.next_cursor&&<Button variant="outline" disabled={busy} onClick={()=>void open(detail.case.id,true)}>Ещё решения</Button>}
    {reviewer&&<div className="bug-hunt-review"><label>Объяснение решения<textarea value={explanation} disabled={busy||!!pending} onChange={e=>setExplanation(e.target.value)}/><span>{[...explanation].length} / 4000 знаков</span></label>

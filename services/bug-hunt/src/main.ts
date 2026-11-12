@@ -19,6 +19,10 @@ import {createModelPorts} from "./model-ports.js";
 import {createSystemStore} from "./system-store.js";
 import {invokeSystem,systemFailure,systemOperations,SystemFault,type SystemOperation} from "./system-contracts.js";
 
+import {policyReader} from "./verification.js";
+import {createVerificationStore} from "./verification-store.js";
+import {invokeVerification,verificationOperations,verificationFailure,validateVerification,type VerificationOperation} from "./verification-api.js";
+
 const statusCodes:Record<string,number>={INVALID_ARGUMENT:400,REQUEST_TOO_LARGE:413,RESULT_TOO_LARGE:413,UNAUTHENTICATED:401,FORBIDDEN:403,NOT_FOUND:404,IDEMPOTENCY_CONFLICT:409,REVISION_CONFLICT:409,BUSY:429,DATABASE_UNAVAILABLE:503,DEPENDENCY_UNAVAILABLE:503,DEADLINE_EXCEEDED:504,INTERNAL:500};
 /** Подключает NATS только с явными runtime inputs; не загружает .env. */
 export async function connectNats(cfg:Config):Promise<NatsConnection>{
@@ -41,6 +45,7 @@ export async function startRuntime(cfg=loadConfig()){
  let processor:ReturnType<typeof createProcessor>|undefined;
  const gate=createGate();
  let nc:NatsConnection|undefined,mcp:Awaited<ReturnType<typeof startMcp>>|undefined,service:Awaited<ReturnType<NatsConnection["services"]["add"]>>|undefined;
+ let verificationService:Awaited<ReturnType<NatsConnection["services"]["add"]>>|undefined;
  let systemService:Awaited<ReturnType<NatsConnection["services"]["add"]>>|undefined;
  const counters:Record<string,number>={accepted:0,replayed:0,IDEMPOTENCY_CONFLICT:0,FORBIDDEN:0,BUSY:0,DATABASE_UNAVAILABLE:0};
  try{
@@ -80,6 +85,12 @@ export async function startRuntime(cfg=loadConfig()){
   };
   const makeSystemStore=(deadlineAt?:number)=>createSystemStore(pool,{installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,deadlineAt});
   const systemStore=makeSystemStore();
+  const verificationPolicies=policyReader(()=>(refreshFromFile?loadConfig():cfg).verification);
+  const verificationStore=createVerificationStore(pool,{installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,policy:()=>verificationPolicies.get()});
+  const executeVerification=async(op:VerificationOperation,p:Principal,input:unknown,ctx:WorkContext)=>{
+   if(ctx.signal.aborted||Date.now()>=ctx.deadlineAt)throw new Fault("DEADLINE_EXCEEDED");
+   return invokeVerification(verificationStore,op,p,input);
+  };
   const processingStore=createProcessingStore(backgroundPool,{target:()=>readProcessing().targetGeneration,installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,leaseMs:initialProcessing.leaseMs,intakeReserveBytes:initialProcessing.intakeReserveBytes,maxDerivativeBytes:initialProcessing.maxDerivativeBytes,dailyLimits:initialProcessing.dailyLimits,policy:()=>({...readProcessing(),maxDatabaseBytes:cfg.maxDatabaseBytes})});
   const externalProjection=async(job:ProcessingJob)=>approvedProjection(readProcessing(),job.owner_id,job.input_hash,job.observation);
   const models=createModelPorts({connection:nc});
@@ -161,11 +172,24 @@ export async function startRuntime(cfg=loadConfig()){
     },
    });
   }
-  mcp=await startMcp(cfg.mcp,gate,authorization=>codexPrincipal(wire,cfg.mcp.principalsFile,authorization),execute,executeSystem);
+  verificationService=await nc.services.add({name:"brai_bug_hunt_v3",version:"3.0.0",queue:"brai_bug_hunt_v3"});
+  for(const endpoint of [...verificationOperations,"status","pause"]){
+   verificationService.addEndpoint(endpoint.replaceAll("-","_"),{subject:"brai.bug_hunt.v3.verification."+endpoint.replaceAll("-","."),queue:"brai_bug_hunt_v3",handler:(err,msg)=>{
+    if(err)return;const mutation=["run-request","cancel","review","pause"].includes(endpoint);
+    void gate.run(async ctx=>{
+     if(msg.data.length>limits.requestBytes+4096)throw new Fault("REQUEST_TOO_LARGE");
+     let body:any;try{body=JSON.parse(new TextDecoder("utf8",{fatal:true}).decode(msg.data));}catch{throw new Fault("INVALID_ARGUMENT");}
+     if(endpoint==="status"||endpoint==="pause"){validateVerification(endpoint,body);return endpoint==="status"?{...await verificationStore.status(),config:verificationPolicies.status()}:verificationStore.pause(body);}
+     if(!body||Array.isArray(body)||Object.keys(body).some(k=>!["context","input"].includes(k))||!("context" in body)||!("input" in body))throw new Fault("INVALID_ARGUMENT");
+     return executeVerification(endpoint as VerificationOperation,await natsPrincipal(wire,body.context),body.input,ctx);
+    },mutation).then(value=>msg.respond(Buffer.from(JSON.stringify(value))),error=>{const dto=verificationFailure(error,mutation);msg.respondError(statusCodes[dto.code]??400,dto.code,Buffer.from(JSON.stringify(dto)));});
+   }});
+  }
+  mcp=await startMcp(cfg.mcp,gate,authorization=>codexPrincipal(wire,cfg.mcp.principalsFile,authorization),execute,executeSystem,executeVerification);
   let stopping:Promise<void>|undefined;
-  return {pool,backgroundPool,nc,service,systemService,systemStore,processingStore,processor,mcp,counters,
-   stop(){return stopping??=(async()=>{gate.stop();await processor!.stop();await Promise.all([service!.stop(),systemService!.stop(),mcp!.close()]);await gate.drain();await nc!.drain();await Promise.all([pool.end(),backgroundPool.end()]);})();}};
- }catch(error){gate.stop();await processor?.stop().catch(()=>{});await mcp?.close().catch(()=>{});await service?.stop().catch(()=>{});await systemService?.stop().catch(()=>{});await gate.drain();await nc?.drain().catch(()=>{});await Promise.all([pool.end(),backgroundPool.end()]);throw error;}
+  return {pool,backgroundPool,nc,service,systemService,systemStore,processingStore,verificationStore,verificationPolicies,processor,mcp,counters,
+   stop(){return stopping??=(async()=>{gate.stop();await processor!.stop();await Promise.all([service!.stop(),systemService!.stop(),verificationService!.stop(),mcp!.close()]);await gate.drain();await nc!.drain();await Promise.all([pool.end(),backgroundPool.end()]);})();}};
+ }catch(error){gate.stop();await processor?.stop().catch(()=>{});await mcp?.close().catch(()=>{});await service?.stop().catch(()=>{});await systemService?.stop().catch(()=>{});await verificationService?.stop().catch(()=>{});await gate.drain();await nc?.drain().catch(()=>{});await Promise.all([pool.end(),backgroundPool.end()]);throw error;}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
  try{const runtime=await startRuntime();console.log(JSON.stringify({service:"bug-hunt",outcome:"ready"}));

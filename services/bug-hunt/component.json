@@ -9,7 +9,9 @@
   "executableSources": [
     "services/bug-hunt/src/main.ts",
     "services/bug-hunt/src/health.ts",
-    "services/bug-hunt/src/migrate.ts"
+    "services/bug-hunt/src/migrate.ts",
+    "services/bug-hunt/src/verification-worker.ts",
+    "services/bug-hunt/src/verification-runner.ts"
   ],
   "inputs": {
     "build": [
@@ -48,7 +50,28 @@
       "services/bug-hunt/src/processing-api.ts",
       "services/bug-hunt/schemas/processing-v2.schema.json",
       "services/bug-hunt/src/generations.ts",
-      "services/bug-hunt/migrations/004.sql"
+      "services/bug-hunt/migrations/004.sql",
+      "services/bug-hunt/src/verification.ts",
+      "services/bug-hunt/src/verification-store.ts",
+      "services/bug-hunt/src/verification-api.ts",
+      "services/bug-hunt/src/verification-sources.ts",
+      "services/bug-hunt/src/verification-models.ts",
+      "services/bug-hunt/src/verification-runner.ts",
+      "services/bug-hunt/src/verification-engine.ts",
+      "services/bug-hunt/src/verification-worker.ts",
+      "services/bug-hunt/src/verification-process.ts",
+      "services/bug-hunt/src/verification-workflows.ts",
+      "services/bug-hunt/src/verification-bundle.ts",
+      "services/bug-hunt/migrations/005.sql",
+      "services/bug-hunt/schemas/verification-v3.schema.json",
+      "services/bug-hunt/VERIFICATION.md",
+      "services/bug-hunt/asyncapi-v3.json",
+      "services/bug-hunt/runner.openrpc.json",
+      "services/bug-hunt/recipes/dto-contract.mjs",
+      "services/bug-hunt/recipes/regression.mjs",
+      "services/bug-hunt/recipes/lifecycle.mjs",
+      "services/bug-hunt/recipes/manifest.json",
+      "services/bug-hunt/README.md"
     ],
     "checks": [
       "services/bug-hunt/tests/contracts.test.mjs",
@@ -77,7 +100,23 @@
       "services/bug-hunt/tests/integration/runtime-models.test.mjs",
       "services/bug-hunt/tests/integration/load-benchmark.mjs",
       "services/bug-hunt/tests/processing-api.test.mjs",
-      "services/bug-hunt/tests/integration/generations.test.mjs"
+      "services/bug-hunt/tests/integration/generations.test.mjs",
+      "services/bug-hunt/tests/integration/verification-preflight.mjs",
+      "services/bug-hunt/tests/verification.test.mjs",
+      "services/bug-hunt/tests/verification-models.test.mjs",
+      "services/bug-hunt/tests/verification-step-limits.test.mjs",
+      "services/bug-hunt/tests/verification-process.test.mjs",
+      "services/bug-hunt/tests/native-contract-inspect.mjs",
+      "services/bug-hunt/tests/native-server-inspect.mjs",
+      "services/bug-hunt/tests/native-live-qualification.mjs",
+      "services/bug-hunt/tests/integration/verification-store.test.mjs",
+      "services/bug-hunt/tests/integration/verification-temporal.mjs",
+      "services/bug-hunt/tests/integration/verification-runner.mjs",
+      "services/bug-hunt/tests/integration/verification-flow.mjs",
+      "services/bug-hunt/tests/providers-live-qualification.mjs",
+      "services/bug-hunt/tests/integration/verification-restore.mjs",
+      "services/bug-hunt/tests/integration/browser-stage3.mjs",
+      "services/bug-hunt/tests/native-scope-qualification.mjs"
     ]
   },
   "dependencies": [
@@ -93,10 +132,14 @@
     {
       "id": "providers",
       "inputs": [
-        "services/providers/schemas/v1.schema.json"
+        "services/providers/schemas/v1.schema.json",
+        "services/providers/src/index.ts",
+        "services/providers/src/client.ts"
       ],
       "delivery": [
-        "services/providers/schemas/v1.schema.json"
+        "services/providers/schemas/v1.schema.json",
+        "services/providers/dist",
+        "services/providers/package.json"
       ]
     }
   ],
@@ -117,12 +160,18 @@
       "services/bug-hunt/asyncapi.json",
       "services/bug-hunt/contracts",
       "services/bug-hunt/SYSTEMATIZATION.md",
-      "services/bug-hunt/asyncapi-v2.json"
+      "services/bug-hunt/asyncapi-v2.json",
+      "services/bug-hunt/VERIFICATION.md",
+      "services/bug-hunt/asyncapi-v3.json",
+      "services/bug-hunt/runner.openrpc.json",
+      "services/bug-hunt/recipes"
     ],
     "entrypoints": [
       "services/bug-hunt/dist/main.js",
       "services/bug-hunt/dist/migrate.js",
-      "services/bug-hunt/dist/health.js"
+      "services/bug-hunt/dist/health.js",
+      "services/bug-hunt/dist/verification-worker.js",
+      "services/bug-hunt/dist/verification-runner.js"
     ],
     "smokeImports": [],
     "systemRequirements": [
@@ -141,7 +190,8 @@
   },
   "npm": {
     "workspaces": [
-      "services/bug-hunt"
+      "services/bug-hunt",
+      "services/providers"
     ]
   }
 }

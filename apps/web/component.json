@@ -284,7 +284,8 @@
       "services/bug-hunt/schemas/messages.schema.json",
       "apps/web/server/bug-hunt-evidence.ts",
       "apps/web/app/api/bug-hunt/evidence/route.ts",
-      "apps/web/app/agent/telegram-rich.tsx"
+      "apps/web/app/agent/telegram-rich.tsx",
+      "apps/web/app/bug-hunt/verification.tsx"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
