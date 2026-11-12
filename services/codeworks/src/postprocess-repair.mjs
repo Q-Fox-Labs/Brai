@@ -22,7 +22,7 @@ export function createPostprocessRepairAdapter(configFile=process.env.CODEWORKS_
   const argv=JSON.parse(readFileSync(configFile,'utf8')).postprocess_repair_command;
   if(!Array.isArray(argv)||!argv.length||typeof argv[0]!=='string'||!path.isAbsolute(argv[0])||path.normalize(argv[0])!==argv[0]||argv[0]==='/'||argv.some(arg=>typeof arg!=='string'||arg.includes('\0')))throw Error('POSTPROCESS_REPAIR_ADAPTER_INVALID');
   const invoke=async(prefix,args)=>{
-    const result=await command(argv[0],[...argv.slice(1),...prefix,...args],{timeout:600000});
+    const result=await command(argv[0],[...argv.slice(1),...prefix,...args],{timeout:1800000});
     return JSON.parse(result.stdout);
   };
   const args=(deploymentId,repairId,requestKey,runtime,digest)=>{
