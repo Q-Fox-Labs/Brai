@@ -30,7 +30,12 @@ digest, paths/modes и delivery contract. Полный CI recipe fingerprint о�
 закрепляет принятый workflow и его средства проверки; смена recipe требует
 приёмки. Только `web` различает `BRAI_WEB_VARIANT=development/production`.
 DEV/PROD сам по себе не входит в generic key. Next standalone отключён;
-production closure готовит общий упаковщик.
+production closure готовит общий упаковщик. OCI context сначала копирует каждый
+корневой или вложенный `node_modules` отдельным слоем, затем только first-party
+пути. Изменение кода не включает прежние npm bytes в новый слой; manifest и
+рабочие пути внутри `/app` сохраняются. Перед manifest из копии файлов снимается group/world write;
+executable bits и исходный checkout сохраняются. Build umask не создаёт новую
+идентичность, а полная immutable поставка пригодна для общего content store.
 
 `ghcr.io/<owner>/<repo>-components/<id>` содержит `build-<sha256(build key + CI recipe)>` с prebuilt
 first-party outputs и seal, `input-<artifact input key>` с полным runtime и

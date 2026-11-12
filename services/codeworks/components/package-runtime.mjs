@@ -101,6 +101,19 @@ function inventory(directory, prefix = '') {
   return files.sort((a, b) => compare(a.path, b.path));
 }
 
+// AIDEV-NOTE: Права build umask не должны создавать разные mutable payloads.
+// Меняем только staging-копию; исполняемые биты и исходные файлы сохраняются.
+function sealPayloadModes(directory) {
+  for (const name of readdirSync(directory)) {
+    const path = join(directory, name), info = lstatSync(path);
+    if (info.isDirectory()) {
+      chmodSync(path, (info.mode & 0o777) & ~0o022);
+      sealPayloadModes(path);
+    } else if (info.isFile()) chmodSync(path, (info.mode & 0o777) & ~0o022);
+    else if (!info.isSymbolicLink()) fail(`UNSUPPORTED_PAYLOAD_FILE: ${path}`);
+  }
+}
+
 function payloadHash(files, runtime, runtimePackages) {
   return hash(JSON.stringify({files,runtime,runtimePackages}));
 }
@@ -147,6 +160,7 @@ function prepareOutput(root, outputRoot) {
  * Собрать готовую поставку по описанию компонента без установки и сборки.
  * Пути delivery и npm.workspaces относительны root; outputRoot находится в root/tmp.
  * Для OCI delivery.command заменяет стандартный CMD node <первый entrypoint> без shell.
+ * В staging снимает group/world write; исходные права и executable bits сохраняет.
  * Возвращает manifest с абсолютным path. При неполной поставке или конфликте lock бросает ошибку.
  * Повторный вызов возвращает существующую поставку лишь после проверки её файлов и manifest.
  */
@@ -169,9 +183,26 @@ export async function packageComponent(root, component, outputRoot) {
       if (!Array.isArray(command) || !command.length || command.some(value => typeof value !== 'string' || !value || value.includes('\0'))) fail('INVALID_DELIVERY_COMMAND');
       const toolchainPath=join(root,'services/codeworks/ci/toolchain.json');
       const base=existsSync(toolchainPath)?json(toolchainPath).nodeBase:'node:24.22.1-bookworm-slim';
-      writeFileSync(join(stage, 'Dockerfile'), `FROM ${base}\nWORKDIR ${JSON.stringify(`/app/${component.directory}`)}\nCOPY . /app\nCMD ${JSON.stringify(command)}\n`);
+      // AIDEV-NOTE: Неизменные зависимости остаются в отдельном OCI слое.
+      // Повторное копирование всего context снова включило бы их в слой кода.
+      const dependencyRoots=[...new Set([...packages.keys()].map(key=>{
+        const parts=key.split('/');return parts.slice(0,parts.indexOf('node_modules')+1).join('/');
+      }))].sort(compare);
+      const dependencyLayers=dependencyRoots.map(name=>`COPY ${JSON.stringify([name+'/',`/app/${name}/`])}\n`).join('');
+      const roots=[];
+      const selectCode=(directory='')=>{
+        for(const name of readdirSync(join(stage,directory)).sort(compare)){
+          const key=directory?directory+'/'+name:name;
+          if(dependencyRoots.includes(key)||key==='Dockerfile')continue;
+          if(dependencyRoots.some(root=>root.startsWith(key+'/')))selectCode(key);else roots.push(key);
+        }
+      };
+      selectCode();roots.push('Dockerfile',manifestName);
+      const codeLayers=roots.sort(compare).map(name=>`COPY ${JSON.stringify([name,`/app/${name}`])}\n`).join('');
+      writeFileSync(join(stage, 'Dockerfile'), `FROM ${base}\n${dependencyLayers}WORKDIR ${JSON.stringify(`/app/${component.directory}`)}\n${codeLayers}CMD ${JSON.stringify(command)}\n`);
       chmodSync(join(stage, 'Dockerfile'), 0o644);
     }
+    sealPayloadModes(stage);
     await validateRuntime(stage, component);
     const files = inventory(stage);
     const runtimePackages = [...packages.values()].map(({ key, entry, version, target }) => ({ lockKey: key, version, ...(entry.integrity ? { integrity: entry.integrity } : {}), ...(target ? { link: true, target } : {}) })).sort((a, b) => compare(a.lockKey, b.lockKey));

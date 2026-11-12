@@ -2,7 +2,7 @@
 // ABOUTME: Использует небольшие временные репозитории без сети и установки пакетов.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { packageComponent } from './package-runtime.mjs';
@@ -45,6 +45,29 @@ test('deterministic payloads preserve layout and mode; existing payload is verif
   writeFileSync(join(executable.path, 'services/example/main.mjs'), 'export const value = 0;\n');
   await assert.rejects(build(), /IMMUTABLE_OUTPUT_MISMATCH/);
   assert.match(readFileSync(join(executable.path, 'services/example/main.mjs'), 'utf8'), /value = 0/);
+});
+
+test('build umask does not change immutable identity and source modes stay intact', async t => {
+  const {root,write,component,build}=fixture(t);
+  const app={name:'@brai/example',version:'1.0.0',type:'module',dependencies:{tool:'1.0.0'}};
+  write('services/example/package.json',app);
+  write('node_modules/tool/package.json',{name:'tool',version:'1.0.0',type:'module',exports:'./index.js'});
+  write('node_modules/tool/index.js','export const value=1;');
+  write('node_modules/tool/bin.js','#!/usr/bin/env node\n');
+  write('package-lock.json',{lockfileVersion:3,packages:{'services/example':app,'node_modules/tool':{version:'1.0.0'}}});
+  component.delivery.files.push('services/example/package.json');component.npm={workspaces:['services/example']};
+  for(const file of ['services/example/main.mjs','node_modules/tool/index.js'])chmodSync(join(root,file),0o664);
+  chmodSync(join(root,'node_modules/tool/bin.js'),0o775);
+  chmodSync(join(root,'node_modules/tool'),0o775);
+  const first=await build();
+  assert.ok(first.files.every(file=>file.symlink || !(file.mode & 0o022)));
+  assert.equal(first.files.find(file=>file.path==='services/example/main.mjs').mode,0o644);
+  assert.equal(first.files.find(file=>file.path==='node_modules/tool/bin.js').mode,0o755);
+  assert.equal(lstatSync(join(root,'services/example/main.mjs')).mode & 0o777,0o664);
+  assert.equal(lstatSync(join(root,'node_modules/tool/bin.js')).mode & 0o777,0o775);
+  for(const file of ['services/example/main.mjs','node_modules/tool/index.js'])chmodSync(join(root,file),0o644);
+  chmodSync(join(root,'node_modules/tool/bin.js'),0o755);chmodSync(join(root,'node_modules/tool'),0o755);
+  assert.equal((await build()).payloadHash,first.payloadHash);
 });
 
 test('npm closure preserves workspace-local and nested lock paths and omits dev packages', async t => {
@@ -146,7 +169,8 @@ test('OCI context uses only copied files and starts the selected entrypoint', as
   const result = await build();
   const docker = readFileSync(join(result.path, 'Dockerfile'), 'utf8');
   assert.match(docker, /FROM node:24\.22\.1-bookworm-slim/);
-  assert.match(docker, /COPY \. \/app/);
+  assert.doesNotMatch(docker, /COPY \. \/app/);
+  assert.match(docker, /COPY \["artifact-manifest.json","\/app\/artifact-manifest.json"\]/);
   assert.match(docker, /CMD \["node","main.mjs"\]/);
   assert.doesNotMatch(docker, /RUN|npm|tsc/);
   component.delivery.command = ['node', '../../node_modules/next/dist/bin/next', 'start'];
@@ -201,4 +225,30 @@ test('personal documentation is rejected even through a selected parent director
   write('docs/user-agent/usercustom/personal.md','local only');
   component.delivery.files.push('docs/user-agent');
   await assert.rejects(build(), /FORBIDDEN_DELIVERY_FILE: docs\/user-agent\/usercustom/);
+});
+
+
+test('code-only changes keep root and nested dependency COPY layers unchanged', async t => {
+  for (const dependencyRoot of ['node_modules', 'services/example/node_modules']) await t.test(dependencyRoot, async t => {
+    const {write,component,build}=fixture(t);
+    const pkg={name:'@brai/example',version:'1.0.0',type:'module',dependencies:{tiny:'1.0.0'}};
+    write('services/example/package.json',pkg);
+    write(`${dependencyRoot}/tiny/package.json`,{name:'tiny',version:'1.0.0',type:'module',exports:'./index.js'});
+    write(`${dependencyRoot}/tiny/index.js`,'export const dependency=42;');
+    write('package-lock.json',{lockfileVersion:3,packages:{'services/example':pkg,[`${dependencyRoot}/tiny`]:{version:'1.0.0',integrity:'sha512-fixture'}}});
+    component.npm={workspaces:['services/example']};
+    component.delivery.files.push('services/example/package.json');
+    component.delivery.kind='oci-context';
+    const first=await build();
+    write('services/example/main.mjs','export const value=43;');
+    const second=await build();
+    const copies=result=>readFileSync(join(result.path,'Dockerfile'),'utf8').split('\n').filter(line=>line.startsWith('COPY ')).map(line=>JSON.parse(line.slice(5)));
+    const before=copies(first),after=copies(second);
+    assert.deepEqual(before,after);
+    assert.deepEqual(before[0],[dependencyRoot+'/',`/app/${dependencyRoot}/`]);
+    assert.ok(before.slice(1).every(([source])=>source!=='.'&&!dependencyRoot.startsWith(source.replace(/\/$/,'')+'/')));
+    const manifest=JSON.parse(readFileSync(join(second.path,'artifact-manifest.json'),'utf8'));
+    assert.ok(manifest.files.some(row=>row.path===`${dependencyRoot}/tiny/index.js`));
+    assert.notEqual(first.payloadHash,second.payloadHash);
+  });
 });
