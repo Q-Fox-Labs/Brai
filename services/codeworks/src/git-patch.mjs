@@ -5,7 +5,7 @@ import path from 'node:path';
 /** Узнаёт попытку git apply для отказа до записи, даже когда сам патч не поддержан. */
 export function gitApplyDirectory(command,cwd) {
   if(typeof command!=='string')return null;
-  const match=/^(?:RTK_DISABLED=1 )?git(?: -C ('[^'\n]+'|\/[A-Za-z0-9_./-]+))?(?: -c codeworks.kind=(?:feature|hotfix))? apply(?:\s|$)/.exec(command);
+  const match=/^(?:RTK_DISABLED=1 )?git(?: -C ('[^'\n]+'|\/[A-Za-z0-9_./-]+))?(?: -c [^ \n]+)* apply(?:\s|$)/.exec(command);
   if(!match)return null;
   const directory=match[1]?.startsWith("'")?match[1].slice(1,-1):match[1];
   return directory??cwd;
@@ -14,8 +14,16 @@ export function gitApplyDirectory(command,cwd) {
 /** Возвращает проверенные цели и замену только каталога; остальные байты сохраняются. */
 export function gitPatch(command) {
   if (typeof command !== 'string') return null;
-  const match = /^(?:RTK_DISABLED=1 )?git -C ('[^'\n]+'|\/[A-Za-z0-9_./-]+)(?: -c codeworks.kind=(feature|hotfix))? apply --whitespace=nowarn <<'([A-Z][A-Z0-9_]{0,63})'\n([\s\S]*)\n\3\n?$/.exec(command);
+  const match = /^(?:RTK_DISABLED=1 )?git -C ('[^'\n]+'|\/[A-Za-z0-9_./-]+)((?: -c codeworks\.(?:kind|workspace)=[a-z0-9-]+){0,2}) apply --whitespace=nowarn <<'([A-Z][A-Z0-9_]{0,63})'\n([\s\S]*)\n\3\n?$/.exec(command);
   if (!match) return null;
+  const selectors=new Map();
+  for(const option of match[2].matchAll(/ -c codeworks\.(kind|workspace)=([a-z0-9-]+)/g)){
+    if(selectors.has(option[1]))return null;
+    selectors.set(option[1],option[2]);
+  }
+  const kind=selectors.get('kind'),workspaceKey=selectors.get('workspace');
+  if(kind&&!['feature','hotfix'].includes(kind))return null;
+  if(workspaceKey&&(workspaceKey.length>64||!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(workspaceKey)||/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(workspaceKey)||/^[0-9a-f]{12,}$/i.test(workspaceKey)))return null;
   const directory = match[1].startsWith("'") ? match[1].slice(1,-1) : match[1];
   if (!path.isAbsolute(directory) || path.normalize(directory) !== directory || directory.includes('..')) return null;
   const patch = match[4], targets = [];
@@ -37,5 +45,5 @@ export function gitPatch(command) {
     } else if (!/^(?:index [0-9a-f]+\.\.[0-9a-f]+(?: 100644)?|@@ .*@@.*|[ +\-\\].*|)$/.test(line)) return null;
   }
   if (!targets.length || new Set(targets).size !== targets.length) return null;
-  return {directory,kind:match[2], targets:targets.map(p=>path.join(directory,p)), rewrite:root=>command.replace(match[1],"'"+root.replaceAll("'","'\\''")+"'")};
+  return {directory,kind,workspaceKey, targets:targets.map(p=>path.join(directory,p)), rewrite:root=>command.replace(match[1],"'"+root.replaceAll("'","'\\''")+"'")};
 }

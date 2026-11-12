@@ -1,6 +1,7 @@
 // ABOUTME: Проверяет HTTP-отказы catalog, общую квоту и независимость CI proofs на тестовой PostgreSQL.
 // ABOUTME: Настоящие GitHub/OCI адаптеры подключены только к локальному HTTP-стенду; внешние запросы запрещены.
 import test from 'node:test';
+import {Pool} from 'pg';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
@@ -109,8 +110,8 @@ async function startHTTPFixture({repository,sha,recipe}) {
 }
 
 test('real HTTP quota/catalog failures preserve verified CI with durable PG retry and bounded requests',{skip:!configured},async t=>{
-  const f=await setup({git:createGit({flowGit:createFlowGit({localRemote:true,requireLock:()=>{}})})}),repository='fixture/repository',sha='a'.repeat(40),recipe='b'.repeat(64);
-  const http=await startHTTPFixture({repository,sha,recipe});
+  const f=await setup({strictVerifier:true,git:createGit({flowGit:createFlowGit({localRemote:true,requireLock:()=>{}})})}),repository='fixture/repository',sha='a'.repeat(40),recipe='b'.repeat(64);
+  const http=await startHTTPFixture({repository,sha,recipe}),verifier=new Pool({connectionString:f.config.verifier_url,max:1});
   try{
     const project=await f.project({github:{repository,required_checks:[{name:'Codeworks components',app_id:42}]}}),{privateKey,publicKey}=generateKeyPairSync('ed25519');
     const keyFile=join(dirname(project.repo_path),'catalog-key.pem');
@@ -124,9 +125,9 @@ test('real HTTP quota/catalog failures preserve verified CI with durable PG retr
     const check=await registry.publishJSON('probe','check-123','fixture.json',{check:'fixture'},metadata('check','2'.repeat(64)));
     const composition={format:'brai-release-composition-v1',repository,source:sha,runId:'123',attempt:'1',workflow:'.github/workflows/codeworks.yml',recipe,billing:{state:'hard-stop-confirmed'},components:[{id:'probe',keys:{artifact:'1'.repeat(64),checks:'2'.repeat(64)},artifact,check}]};
     const published=await registry.publishJSON('release','run-123-1','release.json',composition,metadata('composition','3'.repeat(64)));
-    const proof={published,composition},store=createCIEvidence(f.app);await store.save(project,proof);
+    const proof={published,composition},store=createCIEvidence(verifier);await store.save(project,proof);
     let time=Date.parse('2026-11-11T12:00:00Z');t.mock.method(Date,'now',()=>time);
-    const adapter=()=>createGitHub({run:http.runBridge,fetcher:http.fetcher,evidenceStore:createCIEvidence(f.app),catalogKeyFile:keyFile,now:()=>time});
+    const adapter=()=>createGitHub({run:http.runBridge,fetcher:http.fetcher,evidenceStore:store,catalogKeyFile:keyFile,now:()=>time});
     const pass=()=>reconcileCatalogPublication(f.app,project.id,{github:adapter(),now:()=>new Date(time)});
     const verify=async()=>{const rows=await adapter().checks(project,sha);assert.equal(rows[0].ci_state,'CI_VERIFIED');assert.equal(rows[0].ci_verified,true);assert.equal(rows[0].ci_evidence.composition_digest,published.digest);};
     http.reset();await verify();assert.equal(http.state.counts.api,4);assert.equal(http.state.counts.catalogAuth,0);assert.equal(http.state.counts.catalogWrites,0);
@@ -207,5 +208,5 @@ test('real HTTP quota/catalog failures preserve verified CI with durable PG retr
     const legacyCount=http.state.counts.all;assert.equal((await pass()).state,'idle');assert.equal(http.state.counts.all,legacyCount);
     await assert.rejects(f.app.query("UPDATE codeworks.verified_ci SET proof='{}'"),{code:'42501'});
     assert.deepEqual(http.failures,[]);
-  }finally{await http.close();await f.close();}
+  }finally{await http.close();await verifier.end();await f.close();}
 });

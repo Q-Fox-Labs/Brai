@@ -77,3 +77,15 @@ test('inline environment and unsupported Git options cannot write a patch into t
     assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
   }
 });
+
+
+test('one-shot task selector is strict and preserved while only the directory is rewritten',()=>{
+ for(const selectors of [' -c codeworks.workspace=creator-development',' -c codeworks.kind=feature -c codeworks.workspace=creator-development',' -c codeworks.workspace=creator-development -c codeworks.kind=feature']){
+  const cmd=command('/test/source').replace(' apply ',selectors+' apply '),parsed=gitPatch(cmd);
+  assert.equal(parsed.workspaceKey,'creator-development');assert.equal(parsed.rewrite('/test/other'),cmd.replace('/test/source','/test/other'));
+ }
+ for(const selectors of [' -c codeworks.workspace=bad--key',' -c codeworks.workspace=ABC',' -c codeworks.workspace=123',' -c codeworks.workspace=creator -c codeworks.workspace=other',' -c codeworks.kind=feature -c codeworks.kind=hotfix',' -c codeworks.workspace=../escape',' -c core.hooksPath=/tmp']){
+  const cmd=command('/test/source').replace(' apply ',selectors+' apply ');assert.equal(gitPatch(cmd),null,selectors);
+  assert.deepEqual(writePaths({tool_name:'Bash',cwd:'/test/source',tool_input:{command:cmd}}),['/test/source']);
+ }
+});

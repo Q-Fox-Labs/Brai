@@ -80,7 +80,7 @@ test('only completed ordinary Git shell calls finish writer accounting',async()=
 test('unreadable target fails closed before contacting Codeworks',async()=>{const f=fixture();f.options.resolveTarget=()=>{throw Object.assign(new Error('private path'),{code:'EACCES'});};const result=await runHook(patch(valid),f.options);assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);assert.doesNotMatch(JSON.stringify(result),/private path/);});
 
 test('foreground checks and read-only pipelines finish but background and opaque commands stay protected',async()=>{
- for(const command of ['node --test services/codeworks/tests/hook.test.mjs','node services/codeworks/components/cli.mjs build codeworks','node services/codeworks/components/cli.mjs check codeworks','node services/codeworks/components/cli.mjs package codeworks','node services/codeworks/components/cli.mjs run codeworks','rg -n pattern src | head -n 10','sed -n 1,20p src/file && git status --short']) {
+ for(const command of ['node --test services/codeworks/tests/hook.test.mjs','node services/codeworks/components/cli.mjs build codeworks','node services/codeworks/components/cli.mjs check codeworks','node services/codeworks/components/cli.mjs package codeworks','node services/codeworks/components/cli.mjs run codeworks']) {
   const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'Chunk ID: test\nWall time: 1\nProcess exited with code 0\nOutput:\n'},f.options);assert.equal(f.calls[0]?.method,'write.finish',command);
  }
  for(const command of ['node --test tests/a &','nohup node --test tests/a','node script.mjs','node -e evil','node services/codeworks/components/cli.mjs run codeworks &','rg word src | sh','sed -n 1w/tmp/out src/file']) {
@@ -326,4 +326,23 @@ test('only RTK_DISABLED=1 prefix preserves safe admission and terminal identity'
  assert.deepEqual(await runHook(event('RTK_DISABLED=1 git diff --check'),{config:cfg,env,connect}),{});assert.equal(calls.length,0);
  for(const command of ['RTK_DISABLED=1 node --test --test-isolation=none tests/a','RTK_DISABLED=1 node services/codeworks/components/cli.mjs run codeworks','RTK_DISABLED=1 git add -A']){calls.length=0;const e=event(command);assert.equal((await runHook(e,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');assert.equal(calls.find(c=>c.method==='write.begin').args.original_input_sha256,canonicalHash(e.tool_input));assert.equal(calls.find(c=>c.method==='write.admit').args.completion_input_sha256,canonicalHash(e.tool_input));await runHook({...e,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).args.canonical_input_sha256,canonicalHash(e.tool_input));}
  for(const command of ['PATH=/tmp git status','LD_PRELOAD=/tmp/evil git status','GIT_CONFIG=/tmp/c git status','NODE_OPTIONS=--inspect node --test tests/a','RTK_DISABLED=0 git diff --check','RTK_DISABLED=1 NODE_OPTIONS=--inspect node --test tests/a']){calls.length=0;assert.equal((await runHook(event(command),{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'deny',command);assert.equal(calls.length,0);}
+});
+
+
+test('compound reads never select a workspace or produce a completion notice',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+ for(const command of ["rtk rg -n 'creator|admin|user|guest|generation|revoke|revocation' services/auth/src/identity-types.ts services/auth/src/identity.ts services/auth/src/identity-record.ts services/auth/src/admin.ts services/auth/ROLES.md services/auth/tests/integration/email-role-generation.test.mjs services/auth/tests/integration/roles-revocation.test.mjs; rg --files | rg 'stage.?1|roles-and-guest|acceptance|приёмк|результат' | head -80; rtk rg -n 'creator|admin|user|guest|generation|role changes revoke|role revocation' services/auth/src/identity-types.ts services/auth/src/identity.ts services/auth/src/admin.ts services/auth/ROLES.md",`cd '${root}' && sed -n 1,20p src/file && git status --short`]){
+  for(const hook_event_name of ['PreToolUse','PostToolUse']){
+   const f=fixture();f.options.connect=()=>assert.fail('read contacted backend');
+   const result=await runHook({...patch(valid),cwd:root,hook_event_name,tool_name:'Bash',tool_input:{command},tool_response:{exit_code:0}},f.options);
+   assert.deepEqual(result,{});assert.equal(f.calls.length,0);
+  }
+ }
+});
+test('checks retain writer accounting without choosing the session workspace',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const f=fixture();f.options.config.projects=[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}];
+ f.options.connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'other-task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ const result=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'node --test tests/a'}},f.options);
+ assert.equal(result.hookSpecificOutput.permissionDecision,'allow');assert.equal(calls.find(x=>x.method==='write.begin').args.select_workspace,false);assert(calls.some(x=>x.method==='write.admit'));
 });
