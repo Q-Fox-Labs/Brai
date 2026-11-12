@@ -6,7 +6,7 @@ import {execFileSync} from "node:child_process";
 import {mkdtempSync,mkdirSync,rmSync,readFileSync,readdirSync} from "node:fs";
 import {fileURLToPath} from "node:url";
 import path from "node:path";
-const root=fileURLToPath(new URL("../../../",import.meta.url));
+const root=fileURLToPath(new URL("../../../../",import.meta.url));
 test("v3 source compiles with the prepared dependency set",()=>{
  execFileSync(process.execPath,[path.join(root,"node_modules/typescript/bin/tsc"),"-p",path.join(root,"services/bug-hunt/tsconfig.json"),"--noEmit"],{cwd:root,stdio:"inherit"});
 });

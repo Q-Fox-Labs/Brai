@@ -161,6 +161,7 @@ export function parseProvidersCandidate(text:string){
  if(!value||typeof value!=="object"||Array.isArray(value))throw new VF("MODEL_OUTPUT_INVALID");
  return value;
 }
+const finishTool:Tool={type:"function",function:{name:"verification_finish",description:"Finish this phase by submitting the complete final JSON object matching input.output_schema; no further investigation follows.",parameters:{type:"object",properties:{json:{type:"string",description:"A complete serialized JSON object; copy evidence IDs and candidate_sha256 exactly from the input/tool results."}},required:["json"],additionalProperties:false}}};
 export interface ProvidersProfile {connectionId:string;provider:string;model:string;revision:string;inboxPrefix:string}
 /** Providers выполняет до 8 полных ходов; recovery использует get прежнего operationId. */
 export function providersExecutor(nc:NatsConnection,ownerId:string,profile:ProvidersProfile,dispatch:Dispatch,client:Pick<ReturnType<typeof createProvidersClient>,"chat"|"get"|"cancel">=createProvidersClient(nc,{ownerId,connectionId:profile.connectionId,inboxPrefix:profile.inboxPrefix})):InvestigationExecutor{
@@ -171,9 +172,9 @@ export function providersExecutor(nc:NatsConnection,ownerId:string,profile:Provi
     if(Date.now()>=until&&!(recover&&cp.native.operationId))return failed(cp,"MODEL_DEADLINE","failed");
     if(!recover&&!await dispatch.allowed())return failed(cp,"POLICY_REVOKED","blocked");
     let op:any;
-    if(recover&&cp.native.operationId){op=await client.get(String(cp.native.operationId));recover=false;}
+    if(recover&&cp.native.operationId){op=cp.native.last_chat_operation_id===cp.native.operationId&&cp.native.last_chat_result?{operationId:cp.native.operationId,phase:"succeeded",result:cp.native.last_chat_result}:await client.get(String(cp.native.operationId));recover=false;}
     else{
-     const input:ChatInput={operationId:randomUUID(),provider:profile.provider,model:profile.model,deadlineAt:new Date(until).toISOString(),messages:round?[]:[{role:"system",content:investigationInstructions},{role:"user",content:JSON.stringify(intent.input)}],tools:dispatch.tools(intent.phase),maxTokens:2048,toolChoice:"auto",...(cp.native.previous?{continuation:{operationId:String(cp.native.previous)},toolResults:cp.native.toolResults as any}: {})};
+     const input:ChatInput={operationId:randomUUID(),provider:profile.provider,model:profile.model,deadlineAt:new Date(until).toISOString(),messages:round?[]:[{role:"system",content:investigationInstructions+"\nPhase: "+intent.phase+". Batch independent tool reads together. Read each required item at most once. Do not narrate your reasoning. Finish with exactly one verification_finish tool call containing the final serialized JSON matching input.output_schema; do not return prose. "+(intent.phase==="reviewer"?"Audit the supplied candidate and evidence; do not repeat the investigation. Read the required evidence once, then accept or reject the candidate.":"Investigate the snapshot using the listed specs and evidence. Never invent evidence IDs.")},{role:"user",content:JSON.stringify(intent.input)}],tools:[...dispatch.tools(intent.phase),finishTool],maxTokens:2048,toolChoice:"auto",...(cp.native.previous?{continuation:{operationId:String(cp.native.previous)},toolResults:cp.native.toolResults as any}: {})};
      await dispatch.reserve();cp={...cp,state:"dispatching",native:{...cp.native,round,operationId:input.operationId,input}};await save(cp);
      if(!await dispatch.allowed())return failed({...cp,native:{...cp.native,last_not_sent:{operationId:input.operationId,input},operationId:null,input:null}},"POLICY_REVOKED","blocked");
      op=await client.chat(input);
@@ -182,8 +183,15 @@ export function providersExecutor(nc:NatsConnection,ownerId:string,profile:Provi
     const result=op.result as ChatResult;
     if(!result||result.partial!==false||result.actualModel!==profile.model)return failed(cp,"PROVIDERS_RESULT_INVALID","failed");
     const totals=cp.native.usage_totals as Record<string,any>??{};totals[op.operationId]=result.usage;
-    cp={...cp,state:"running",result,usage:result.usage,native:{...cp.native,usage_totals:totals}};await save(cp);
+    cp={...cp,state:"running",result,usage:result.usage,native:{...cp.native,usage_totals:totals,last_chat_result:result,last_chat_operation_id:op.operationId}};await save(cp);
     if(result.finishReason==="tool_calls"){
+     const finish=result.toolCalls.filter(call=>call.name==="verification_finish");
+     if(finish.length){
+      const args=finish[0].arguments;
+      if(result.toolCalls.length!==1||Object.keys(args).length!==1||typeof args.json!=="string")return failed(cp,"MODEL_OUTPUT_INVALID","failed");
+      let candidate;try{candidate=JSON.parse(args.json);if(!candidate||typeof candidate!=="object"||Array.isArray(candidate)||Buffer.byteLength(args.json)>32768)throw Error();}catch{return failed(cp,"MODEL_OUTPUT_INVALID","failed");}
+      cp={...cp,state:"completed",result:candidate,code:null};await save(cp);return cp;
+     }
      const replies=[];for(const call of result.toolCalls){if(Date.now()>=until)return failed(cp,"MODEL_DEADLINE","failed");let value;try{value=await dispatch.call(call.id,call.name,call.arguments);}catch(e){if(!(e instanceof VF)||e.outcome==="unknown")throw e;value={error:{code:e.code}};}replies.push({id:call.id,content:JSON.stringify(value)});}
      cp={...cp,native:{...cp.native,round:round+1,previous:op.operationId,toolResults:replies,operationId:null,input:null}};await save(cp);return cp;
     }
@@ -193,5 +201,5 @@ export function providersExecutor(nc:NatsConnection,ownerId:string,profile:Provi
    return failed(cp,"MODEL_STEP_LIMIT","failed");
   }catch(e){return failed(cp,e instanceof VF?e.code:"PROVIDERS_UNAVAILABLE",cp.state==="not_sent"||e instanceof VF&&e.code==="BUDGET_EXHAUSTED"?"blocked":"unknown");}
  }
- return {async preflight(){return {ready:profile.revision!=="unprepared",code:profile.revision==="unprepared"?"PROVIDERS_PROFILE_UNPREPARED":null,models:[],catalog_revision:profile.revision};},startStep:(i,s)=>loop(i,initial(),s,false),inspectStep:(i,c,s)=>["completed","failed"].includes(c.state)?Promise.resolve(c):loop(i,c,s,true),async cancelStep(i,c){if(!c.native.operationId)return failed(c,"CANCELLED","failed");await client.cancel(String(c.native.operationId));const op=await client.get(String(c.native.operationId));return failed(c,["succeeded","failed","cancelled"].includes(op.phase)?"CANCELLED":"PROVIDERS_CANCEL_PENDING",["succeeded","failed","cancelled"].includes(op.phase)?"failed":"unknown");}};
+ return {async preflight(){return {ready:profile.revision!=="unprepared",code:profile.revision==="unprepared"?"PROVIDERS_PROFILE_UNPREPARED":null,models:[],catalog_revision:profile.revision};},startStep:(i,s)=>loop(i,initial(),s,false),inspectStep:(i,c,s)=>["completed","failed"].includes(c.state)?Promise.resolve(c):loop(i,c,s,true),async cancelStep(i,c){if(!c.native.operationId||c.native.last_chat_operation_id===c.native.operationId&&c.native.last_chat_result?.partial===false&&c.native.last_chat_result?.actualModel===profile.model)return failed(c,"CANCELLED","failed");await client.cancel(String(c.native.operationId));const op=await client.get(String(c.native.operationId));return failed(c,["succeeded","failed","cancelled"].includes(op.phase)?"CANCELLED":"PROVIDERS_CANCEL_PENDING",["succeeded","failed","cancelled"].includes(op.phase)?"failed":"unknown");}};
 }

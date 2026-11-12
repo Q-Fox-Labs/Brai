@@ -99,7 +99,7 @@
       "services/bug-hunt/tests/integration/load-benchmark.mjs",
       "services/bug-hunt/tests/processing-api.test.mjs",
       "services/bug-hunt/tests/integration/generations.test.mjs",
-      "services/bug-hunt/tests/verification-preflight.test.mjs",
+      "services/bug-hunt/tests/integration/verification-preflight.mjs",
       "services/bug-hunt/tests/verification.test.mjs",
       "services/bug-hunt/tests/verification-models.test.mjs",
       "services/bug-hunt/tests/native-contract-inspect.mjs",

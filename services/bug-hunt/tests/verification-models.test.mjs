@@ -111,3 +111,19 @@ test("terminal Providers presentation wrapper preserves complete JSON and refuse
  assert.deepEqual(parseProvidersCandidate("Комментарий вне результата.\n\n"+String.fromCharCode(96).repeat(3)+"json\n"+json+"\n"+String.fromCharCode(96).repeat(3)),value);
  for(const text of ["not JSON",json+" extra",String.fromCharCode(96).repeat(3)+"json\n"+json,Array(2).fill(String.fromCharCode(96).repeat(3)+"json\n"+json+"\n"+String.fromCharCode(96).repeat(3)).join("\n"),"[]","null"])assert.throws(()=>parseProvidersCandidate(text),e=>e.code==="MODEL_OUTPUT_INVALID");
 });
+
+test("Providers final submission is complete terminal data and never dispatched as an external tool",async()=>{
+ let effects=0,requests=0;const client={chat:async input=>{requests++;return {operationId:input.operationId,phase:"succeeded",result:{partial:false,actualModel:"deepseek/deepseek-v3.2",finishReason:"tool_calls",text:"",usage:null,toolCalls:[{id:"finish",name:"verification_finish",arguments:{json:'{"verdict":"insufficient_evidence"}'}}]}};},get:async()=>{throw Error();},cancel:async()=>{throw Error();}};
+ const executor=providersExecutor(null,"owner",{connectionId:"fixture",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"fixture",inboxPrefix:"_INBOX."},{tools:()=>[],allowed:async()=>true,reserve:async()=>{},call:async()=>{effects++;throw Error();}},client);
+ const cp=await executor.startStep(intent(),async()=>{});assert.equal(cp.state,"completed");assert.equal(cp.result.verdict,"insufficient_evidence");assert.equal(effects,0);assert.equal(requests,1);
+});
+
+test("Providers resumes a persisted complete result after upstream expiry without get or new chat",async()=>{
+ let chats=0,gets=0,saved;const client={chat:async input=>{chats++;return {operationId:input.operationId,phase:"succeeded",result:{partial:false,actualModel:"deepseek/deepseek-v3.2",finishReason:"tool_calls",text:"",usage:null,toolCalls:[{id:"finish",name:"verification_finish",arguments:{json:'{"verdict":"insufficient_evidence"}'}}]}};},get:async()=>{gets++;throw Error("expired");},cancel:async()=>{throw Error();}};
+ const executor=providersExecutor(null,"owner",{connectionId:"fixture",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"fixture",inboxPrefix:"_INBOX."},{tools:()=>[],allowed:async()=>true,reserve:async()=>{},call:async()=>{throw Error("not an external tool");}},client),i=intent();
+ await executor.startStep(i,async cp=>{if(cp.native.last_chat_result&&!saved){saved=structuredClone(cp);throw Error("process stopped after durable save");}});
+ assert.equal(saved.native.last_chat_operation_id,saved.native.operationId);
+ const result=await executor.inspectStep(i,saved,async()=>{});assert.equal(result.state,"completed");assert.equal(chats,1);assert.equal(gets,0);assert.equal((await executor.cancelStep(i,saved)).state,"failed");assert.equal(gets,0);
+ const foreign={...saved,native:{...saved.native,operationId:randomUUID()}};
+ assert.equal((await executor.inspectStep(i,foreign,async()=>{})).state,"unknown");assert.equal(gets,1);assert.equal(chats,1);
+});
