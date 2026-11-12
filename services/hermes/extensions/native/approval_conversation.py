@@ -17,7 +17,7 @@ import uuid
 logger = logging.getLogger(__name__)
 _scope = ContextVar("brai_consent_scope", default=None)
 _action = ContextVar("brai_consent_action", default=None)
-_YES = frozenset(("да", "да, разрешаю", "разрешаю", "подтверждаю", "согласен", "согласна", "yes", "approve"))
+_YES = frozenset(("да", "да, разрешаю", "разрешаю", "разрешаю это действие", "подтверждаю", "согласен", "согласна", "yes", "approve"))
 _NO = frozenset(("нет", "не разрешаю", "отмена", "отмени", "не надо", "no", "deny", "cancel"))
 _NOTICE = "Сейчас не удалось проверить безопасность действия. Оно не выполнено. Попробуйте продолжить позже."
 _CHANGED = "Состояние беседы изменилось. Старое действие не выполнено."
@@ -600,7 +600,22 @@ def record_transcripts(runner, event, transcripts):
 
 async def gateway_input_prepared(runner, event, original_event):
     """Принять голосовой ответ через штатный STT и проверить вопрос после ожидания."""
+    if getattr(original_event, "_brai_consent_prepared", False) and event is not original_event:
+        if (conversation_key(event.source)!=conversation_key(original_event.source)
+                or str(event.source.user_id)!=str(original_event.source.user_id)):
+            return ""
+        # AIDEV-NOTE: Native plugin может создать dataclasses.replace(event).
+        # Переносим только доверенный контекст и уже выполненный STT, без нового чтения текста.
+        for name in ("_brai_consent_delivery","_brai_chat_generation",
+                "_gateway_pending_stt_text","_gateway_pending_stt_transcripts","_gateway_pending_stt_echoed"):
+            if hasattr(original_event,name):
+                setattr(event,name,getattr(original_event,name))
+        event._brai_consent_prepared=True
+    if getattr(event, "_brai_consent_prepared", False):
+        return None
     reply = gateway_input(runner, event, original_event)
+    if getattr(event, "_brai_consent_delivery", None):
+        event._brai_consent_prepared = original_event._brai_consent_prepared = True
     expected = getattr(event, "_brai_consent_expected_question", None)
     if reply is not None or expected is None:
         return reply
@@ -685,7 +700,9 @@ def brand_response(event, response):
     return brand_text(response)
 
 def record_delivery(event, response, success, message_id=None):
-    """Arm only the actual plain question after the transport confirms successful delivery."""
+    """Учесть обычную отправку вне IPC worker, где квитанцией владеет adapter."""
+    if os.environ.get("BRAI_IDENTITY_MODE")=="worker":
+        return
     binding=getattr(event,"_brai_consent_delivery",None)
     if not binding or not success or not isinstance(response,str):
         return
@@ -695,23 +712,23 @@ def record_delivery(event, response, success, message_id=None):
     if row and row["owner"]==owner and row["status"]=="pending" and row["question"] in response:
         store.delivered(row["id"],message_id)
 
-def record_stream_delivery(runner, turn, response, message_id):
-    """Arm the same question after native confirms final streaming delivery, before suppressing send."""
-    if (not enabled() or not isinstance(response,str) or not response or not message_id
-            or message_id=="__no_edit__"):
-        return
-    source=turn.source
-    if getattr(source,"is_bot",False) or not source.user_id or not turn.session_key:
-        return
-    db=runner.session_store._db_for_key(turn.session_key)
+def pending_delivery(runner, source, response):
+    """Связать текущий вопрос с отправкой до ожидания транспортной квитанции."""
+    if (runner is None or not enabled() or not isinstance(response,str) or not response
+            or getattr(source,"is_bot",False) or not source.user_id):
+        return None
+    db=runner.session_store._db_for_key(runner._session_key_for_source(source))
     if not db:
-        return
+        return None
     store=Store(db)
     row=store.query(conversation_key(source))
-    if (row and row["owner"]==str(source.user_id) and row["session_id"]==str(turn.session_id or "")
-            and row["input_id"]==str(turn.inbound_message_id or "")
-            and row["status"]=="pending" and row["question"] in response):
-        store.delivered(row["id"],message_id)
+    generation=getattr(runner,"_brai_consent_generation",None)
+    if (row and row["owner"]==str(source.user_id) and row["status"]=="pending"
+            and row["question"] in response
+            and (not callable(generation) or row["generation"]==generation(source))):
+        return store,row["id"]
+    return None
+
 
 def resume_note(scope):
     """Give the agent the exact authorized invocation, never a model-created approval token."""

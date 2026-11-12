@@ -13,6 +13,7 @@ ROOT=Path(__file__).resolve().parents[4]
 ENGINE=os.environ.get("BRAI_NATIVE_ENGINE")
 if ENGINE:
     sys.path.insert(0,ENGINE)
+    sys.path.insert(0,str(ROOT/'services/hermes'))
     from hermes_state import SessionDB
     from tools import approval
     from tools import approval_conversation as consent
@@ -131,32 +132,135 @@ class NativeConsentTests(unittest.TestCase):
                 self.assertTrue(self.invoke()["approved"])
         self.assertIsNone(consent.Store(self.db).query(consent.conversation_key(self.source)))
 
-    def test_native_stream_suppression_records_delivered_consent(self):
-        from gateway.run_turn import GatewayTurnMixin
-        store=consent.Store(self.db)
-        scope=consent.Scope(self.db,consent.conversation_key(self.source),"alice","test-session","Посчитай","1")
-        row=store.prepare(scope,{"command":"create synthetic file"},{"decision":"needs_consent"},"Создать файл?")
-        runner=GatewayTurnMixin()
-        runner.session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db)
-        stream=types.SimpleNamespace(final_response_sent=True,final_content_delivered=False,message_id="10",
-            delivered_final_matches=lambda text:text==row["question"])
-        ctx=types.SimpleNamespace(source=self.source,session_key="key",session_id="test-session",inbound_message_id="1",stream_consumer_holder=[stream])
-        asyncio.run(runner._run_agent_mark_streamed_delivery({"failed":True,"final_response":row["question"]},ctx))
-        self.assertIsNone(store.query(scope.key)["delivered_at"])
-        response={"final_response":row["question"]}
-        asyncio.run(runner._run_agent_mark_streamed_delivery(response,ctx))
-        self.assertTrue(response["already_sent"])
-        self.assertEqual(store.query(scope.key)["question_message_id"],"10")
-    def test_busy_and_idle_ingress_use_same_durable_answer(self):
-        store=consent.Store(self.db)
-        scope=consent.Scope(self.db,consent.conversation_key(self.source),"alice","test-session","Проверь папку","1")
-        row=store.prepare(scope,{"command":"remove trip"},{"decision":"needs_consent"},"Удалить фотографии?")
-        store.delivered(row["id"],"10")
-        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"test-session",session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+    def _ipc_fixture(self, *, result=None, before_reply=None):
+        """Собрать настоящий IPC adapter с временным FileStore и локальным transport port."""
+        from gateway.config import Platform, PlatformConfig
+        from files import native
+        from files.tests.test_files import Backend
+        from identity.adapter import make_adapter
+        root=Path(self.temp.name)
+        native.configure({'ownerId':'owner','account':'fixture','stateRoot':str(root/'files-state'),
+            'resultRoot':str(root/'files-cache'),'readRoots':[str(root)]},Backend(root/'backend'))
+        stub=patch.dict(sys.modules,{'brai_files':native})
+        stub.start()
+        self.addCleanup(stub.stop)
+        calls=[]
+        async def send(method, params):
+            calls.append(params)
+            if before_reply is not None:
+                before_reply()
+            return result if result is not None else {'success':True,'message_id':str(10+len(calls))}
+        adapter=make_adapter(PlatformConfig(),Platform.TELEGRAM,
+            types.SimpleNamespace(call=send),None)
+        self.source.platform=Platform.TELEGRAM
+        self.source.user_id='123'
+        self.source.chat_type='dm'
+        self.source.chat_name=''
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:'key',
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db),
+            _brai_consent_generation=lambda _:0)
+        adapter.gateway_runner=runner
+        adapter.bind_source(self.source)
+        return adapter,runner,calls
+
+    def test_stream_receipt_arms_question_before_turn_completion(self):
+        from gateway.stream_consumer import GatewayStreamConsumer,StreamConsumerConfig
         import time
-        event=types.SimpleNamespace(source=self.source,internal=False,allow_gateway_control=False,message_id="11",text="да",timestamp=time.time()+1,reply_to_message_id="10")
-        self.assertIsNone(consent.gateway_input(runner,event,event))
-        self.assertEqual(store.query(scope.key)["status"],"authorized")
+        adapter,runner,calls=self._ipc_fixture()
+        store=consent.Store(self.db)
+        scope=consent.Scope(self.db,consent.conversation_key(self.source),'123',
+            'test-session','Проверь папку','1',generation=0)
+        row=store.prepare(scope,{'command':'remove synthetic file'},
+            {'decision':'needs_consent'},'Папка: файл будет удалён. Разрешаете это действие?')
+        async def run():
+            stream=GatewayStreamConsumer(adapter,self.source.chat_id,
+                config=StreamConsumerConfig(edit_interval=.001,transport='edit'),
+                metadata={'thread_id':self.source.thread_id})
+            stream.on_delta(row['question'])
+            stream.finish(row['question'])
+            await asyncio.wait_for(stream.run(),5)
+            self.assertTrue(stream.final_response_sent)
+            self.assertEqual(store.query(scope.key)['question_message_id'],stream.message_id)
+            self.assertEqual(store.answer(scope.key,'123','99','Разрешаю это действие',
+                time.time()+1,stream.message_id,generation=0),'authorized')
+        asyncio.run(run())
+        self.assertEqual(sum(call['action']=='send' for call in calls),1)
+
+    def test_worker_records_busy_clarification_before_native_dispatch(self):
+        from identity.worker import Worker
+        from unittest.mock import AsyncMock
+        adapter,runner,calls=self._ipc_fixture()
+        worker=Worker(os.getuid()+1,'owner','123',None)
+        worker.chat_snapshot_ready=True
+        worker.chat_states[(self.source.chat_id,self.source.thread_id)]={
+            'paused':False,'generation':0,'recoveryBlocked':False}
+        worker.runner=runner
+        worker.ensure_tools=AsyncMock()
+        worker.ensure_user_policy=AsyncMock()
+        from gateway.session import SessionSource
+        data=dict(source={'platform':'telegram','user_id':'123','chat_id':self.source.chat_id,
+            'thread_id':self.source.thread_id,'chat_type':'dm','profile':'dev'},
+            text='Долю сделай 10%',message_id='2',chat_generation=0)
+        actual_source=SessionSource.from_dict(data['source'])
+        key=adapter._source_session_key(actual_source)
+        runner._session_key_for_source=lambda _:key
+        received=[]
+        async def busy(message, session_key):
+            self.assertEqual(session_key,key)
+            received.extend(consent.Store(self.db).requests(
+                consent.conversation_key(message.source),'123',0))
+            message._gateway_accepted=True
+            return True
+        async def run():
+            adapter.set_message_handler(AsyncMock(side_effect=AssertionError('idle path')))
+            adapter.set_busy_session_handler(busy)
+            adapter._active_sessions[key]=asyncio.Event()
+            worker.adapter=adapter
+            return await worker.dispatch(data,'owner')
+        self.assertTrue(asyncio.run(run())['accepted'])
+        self.assertEqual(received,[{'message_id':'2','text':'Долю сделай 10%'}])
+
+    def test_transport_failure_missing_receipt_and_foreign_topic_do_not_arm_question(self):
+        result={'success':False,'message_id':'11'}
+        adapter,runner,calls=self._ipc_fixture(result=result)
+        store=consent.Store(self.db)
+        scope=consent.Scope(self.db,consent.conversation_key(self.source),'123',
+            'test-session','Проверь папку','1',generation=0)
+        row=store.prepare(scope,{'command':'remove synthetic file'},
+            {'decision':'needs_consent'},'Папка: удалить файл?')
+        async def run():
+            await adapter.send(self.source.chat_id,row['question'],metadata={'thread_id':self.source.thread_id})
+            self.assertIsNone(store.query(scope.key)['delivered_at'])
+            result.clear()
+            result['success']=True
+            await adapter.send(self.source.chat_id,row['question'],metadata={'thread_id':self.source.thread_id})
+            self.assertIsNone(store.query(scope.key)['delivered_at'])
+            result['message_id']='12'
+            await adapter.send(self.source.chat_id,row['question'],metadata={'thread_id':'other'})
+            await adapter.edit_message(self.source.chat_id,'12',row['question'],finalize=False)
+            self.assertIsNone(store.query(scope.key)['delivered_at'])
+            await adapter.send(self.source.chat_id,row['question'],metadata={'thread_id':self.source.thread_id})
+            self.assertEqual(store.query(scope.key)['question_message_id'],'12')
+        asyncio.run(run())
+
+    def test_question_replaced_during_send_cannot_inherit_receipt(self):
+        replacement=[]
+        store=consent.Store(self.db)
+        def replace():
+            store.invalidate(row['id'])
+            replacement.append(store.prepare(scope,{'command':'other action'},
+                {'decision':'needs_consent'},row['question']))
+        adapter,runner,calls=self._ipc_fixture(before_reply=replace)
+        scope=consent.Scope(self.db,consent.conversation_key(self.source),'123',
+            'test-session','Проверь папку','1',generation=0)
+        row=store.prepare(scope,{'command':'remove synthetic file'},
+            {'decision':'needs_consent'},'Папка: удалить файл?')
+        asyncio.run(adapter.send(self.source.chat_id,row['question'],
+            metadata={'thread_id':self.source.thread_id}))
+        current=store.query(scope.key)
+        self.assertEqual(current['id'],replacement[0]['id'])
+        self.assertIsNone(current['delivered_at'])
+
     def test_direct_wait_has_no_transport_or_five_minute_block(self):
         from tools.approval_gateway_wait import _await_gateway_decision
         notifier=unittest.mock.Mock(side_effect=AssertionError("legacy notification"))
