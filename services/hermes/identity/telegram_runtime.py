@@ -178,9 +178,12 @@ async def admit_update(update, adapter):
     invitation = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+(?:invite_)?([A-Za-z0-9_-]{16,128})', raw.strip())
     if str(getattr(chat, 'id', '')) == telegram and invitation:
         try:
-            await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
+            redeemed = await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
-            await _notice(adapter, telegram, message, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
+            text = 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь.'
+            if redeemed.get('user', {}).get('role') in ('creator', 'admin', 'user'):
+                text += ' Для входа на сайт попросите меня прислать код.'
+            await _notice(adapter, telegram, message, text)
         except Exception:
             await _notice(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False

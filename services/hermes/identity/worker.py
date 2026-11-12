@@ -352,6 +352,7 @@ class Worker:
             await self.ensure_tools()
         from .native_policy import role_state
         return {'role': role_state(), 'rolePolicyVersion': 1, 'ready': True, 'operational': self.operational.is_set(),
+                'policyReady': self.policy_ready.is_set() and self.policy_error is None and not self.policy_stopping,
                 'userId': self.user_id, 'telegramId': self.telegram_id}
 
     async def interactive(self, update, owner, scope_id, actor_telegram_id, chat_generation=None):

@@ -364,6 +364,7 @@
             "userId",
             "telegramId",
             "operational",
+            "policyReady",
             "role",
             "rolePolicyVersion"
           ],
@@ -379,6 +380,10 @@
             },
             "operational": {
               "type": "boolean"
+            },
+            "policyReady": {
+              "type": "boolean",
+              "description": "Пользовательская настройка завершена без ошибки, остановка не начата; также требуются operational и актуальный Auth."
             },
             "role": {
               "type": "string",

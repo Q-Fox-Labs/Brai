@@ -142,6 +142,22 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop_runtime()
 
+    async def test_policy_readiness_is_distinct_from_operational(self):
+        worker = await self.worker()
+        try:
+            worker.operational.set()
+            worker.policy_ready.clear()
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.policy_ready.set()
+            self.assertTrue((await worker.health())['policyReady'])
+            worker.policy_error = PermissionError('Synthetic startup failure')
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.policy_error = None
+            worker.policy_stopping = True
+            self.assertFalse((await worker.health())['policyReady'])
+        finally:
+            await worker.stop_runtime()
+
     async def test_bootstrap_does_not_start_tools_or_recovery(self):
         worker = await self.worker()
         try:
