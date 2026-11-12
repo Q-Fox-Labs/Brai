@@ -52,6 +52,7 @@ class GuestBrowserGuardTest(unittest.TestCase):
 
     def test_install_locks_cdp_and_disables_lookup_fallback(self):
         tools = ModuleType('tools')
+        tools.browser_tool = SimpleNamespace()
         tools.browser_tool_cdp = SimpleNamespace()
         tools.browser_tool_install = SimpleNamespace()
         tools.browser_tool_lightpanda_fallback = SimpleNamespace()
@@ -86,6 +87,14 @@ class GuestBrowserGuardTest(unittest.TestCase):
                     self.assertEqual(json.loads(payload),[[command,'@e1',text]])
         self.assertEqual(guest_browser.data_arguments(original,'/trusted/agent-browser',
             'snapshot',['--compact']),('snapshot',['--compact'],None))
+
+    def test_url_preflight_requires_public_syntax_without_worker_dns(self):
+        import socket
+        with patch.object(socket, 'getaddrinfo', side_effect=AssertionError('worker DNS forbidden')):
+            self.assertTrue(guest_browser.public_url('https://example.com/path'))
+            for url in ('http://127.0.0.1:19364', 'http://10.0.0.1', 'file:///etc/passwd',
+                        'https://user:password@example.com', 'http://x.internal'):
+                self.assertFalse(guest_browser.public_url(url))
 
     def test_spawn_refuses_unsafe_or_missing_cdp(self):
         original = lambda *args: args

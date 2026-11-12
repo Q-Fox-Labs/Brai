@@ -69,9 +69,15 @@ def data_arguments(original, argv0, command, args):
     return original(argv0,command,args)
 
 
+def public_url(url):
+    """Worker не имеет DNS; все адреса проверяет Root public egress перед connect."""
+    from .guest_tools import validate
+    return validate('browser_navigate', {'url': url})
+
+
 def install():
     """Закрыть fallback и подмену окружения до использования native browser tools."""
-    from tools import (browser_tool_cdp, browser_tool_install, browser_tool_session,
+    from tools import (browser_tool, browser_tool_cdp, browser_tool_install, browser_tool_session,
                        browser_tool_lightpanda_fallback, browser_tool_real_profile)
     for key in list(os.environ):
         if key.startswith('AGENT_BROWSER_'):
@@ -79,6 +85,8 @@ def install():
     os.environ['AGENT_BROWSER_CONFIG'] = CONFIG
     os.environ['BROWSER_CDP_URL'] = CDP_URL
     browser_tool_cdp._get_cdp_override_raw = lambda: CDP_URL
+    # Синтаксис/literal IP проверяются здесь, DNS/redirect/private network — на Root proxy.
+    browser_tool._is_safe_url = public_url
     browser_tool_install._find_agent_browser = accepted_binary
     browser_tool_session._agent_browser_command_env = command_env
     original_arguments = browser_tool_session._shim_safe_args
