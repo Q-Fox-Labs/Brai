@@ -1,5 +1,6 @@
 # ABOUTME: Проверяет закрепление guest browser client за принятым PM и чистым config.
 # ABOUTME: Не запускает браузер и не устанавливает пакеты.
+import json
 import os
 from pathlib import Path
 import sys
@@ -56,7 +57,8 @@ class GuestBrowserGuardTest(unittest.TestCase):
         tools.browser_tool_lightpanda_fallback = SimpleNamespace()
         tools.browser_tool_real_profile = SimpleNamespace()
         tools.browser_tool_session = SimpleNamespace(_dispatch_browser_command=lambda *a: a,
-            _popen_agent_browser=lambda *a: a, _create_cdp_session=lambda task, url: (task, url))
+            _popen_agent_browser=lambda *a: a, _create_cdp_session=lambda task, url: (task, url),
+            _shim_safe_args=lambda argv0, command, args: (command,args,None))
         with patch.dict(sys.modules, {'tools': tools}), patch.dict(os.environ,
                 {'AGENT_BROWSER_CONFIG': '/evil', 'AGENT_BROWSER_ARGS': '--evil'}, clear=True):
             guest_browser.install()
@@ -71,6 +73,19 @@ class GuestBrowserGuardTest(unittest.TestCase):
                 {'session_name': 'fake', 'cdp_url': None}, '/bin/fake', 'open', [], 1, 'lightpanda')
             self.assertEqual(dispatched[1]['cdp_url'], guest_browser.CDP_URL)
             self.assertEqual(dispatched[-1], 'auto')
+
+    def test_typed_text_cannot_become_a_global_client_option(self):
+        original = lambda argv0, command, args: (command,args,None)
+        for command in ('fill','type'):
+            for text in ('--allow-file-access','--auto-connect','--ignore-https-errors',
+                         '--config=/untrusted.json','Кириллица\n100% literal'):
+                with self.subTest(command=command,text=text):
+                    actual, args, payload = guest_browser.data_arguments(
+                        original,'/trusted/agent-browser',command,['@e1',text])
+                    self.assertEqual((actual,args),('batch',[]))
+                    self.assertEqual(json.loads(payload),[[command,'@e1',text]])
+        self.assertEqual(guest_browser.data_arguments(original,'/trusted/agent-browser',
+            'snapshot',['--compact']),('snapshot',['--compact'],None))
 
     def test_spawn_refuses_unsafe_or_missing_cdp(self):
         original = lambda *args: args

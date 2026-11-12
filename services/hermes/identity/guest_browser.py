@@ -1,6 +1,7 @@
 # ABOUTME: Закрепляет гостевой browser client за принятым PM и личным CDP.
 # ABOUTME: Не устанавливает программы и не читает пользовательскую конфигурацию браузера.
 """Устанавливается только для подтверждённого гостевого worker до вызовов browser tools."""
+import json
 import os
 from pathlib import Path
 import stat
@@ -59,6 +60,15 @@ def guarded_spawn(original, argv, env, socket_dir, tag, stdin_payload=None):
     return original(argv, command_env(socket_dir), socket_dir, tag, stdin_payload)
 
 
+
+def data_arguments(original, argv0, command, args):
+    """Передавать введённый текст как JSON-данные, не как глобальные флаги CLI."""
+    if command in ('fill','type'):
+        # agent-browser 0.26 batch не перечитывает global Flags из отдельных JSON-команд.
+        return 'batch', [], json.dumps([[command,*args]],ensure_ascii=False).encode('utf-8')
+    return original(argv0,command,args)
+
+
 def install():
     """Закрыть fallback и подмену окружения до использования native browser tools."""
     from tools import (browser_tool_cdp, browser_tool_install, browser_tool_session,
@@ -71,6 +81,10 @@ def install():
     browser_tool_cdp._get_cdp_override_raw = lambda: CDP_URL
     browser_tool_install._find_agent_browser = accepted_binary
     browser_tool_session._agent_browser_command_env = command_env
+    original_arguments = browser_tool_session._shim_safe_args
+    browser_tool_session._shim_safe_args = lambda argv0, command, args: (
+        data_arguments(original_arguments,argv0,command,args))
+
     browser_tool_session._create_session_for_key = lambda task_id, force_local: (
         browser_tool_session._create_cdp_session(task_id, CDP_URL))
     browser_tool_session._browser_command_preflight = lambda: {'browser_cmd': accepted_binary()}
