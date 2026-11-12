@@ -1,0 +1,236 @@
+{
+  "asyncapi": "2.6.0",
+  "info": {
+    "title": "Brai bug-hunt verification",
+    "version": "3.0.0"
+  },
+  "defaultContentType": "application/json",
+  "channels": {
+    "brai.bug_hunt.v3.verification.run.request": {
+      "description": "Owner and identity from authenticated context; input cannot select owner.",
+      "subscribe": {
+        "operationId": "verification-run-request",
+        "message": {
+          "name": "run-request",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "object"
+              },
+              "input": {
+                "$ref": "schemas/verification-v3.schema.json#/definitions/run-request"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.run.request",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.get": {
+      "description": "Owner and identity from authenticated context; input cannot select owner.",
+      "subscribe": {
+        "operationId": "verification-get",
+        "message": {
+          "name": "get",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "object"
+              },
+              "input": {
+                "$ref": "schemas/verification-v3.schema.json#/definitions/get"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.get",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.list": {
+      "description": "Owner and identity from authenticated context; input cannot select owner.",
+      "subscribe": {
+        "operationId": "verification-list",
+        "message": {
+          "name": "list",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "object"
+              },
+              "input": {
+                "$ref": "schemas/verification-v3.schema.json#/definitions/list"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.list",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.evidence.get": {
+      "description": "Owner and identity from authenticated context; input cannot select owner.",
+      "subscribe": {
+        "operationId": "verification-evidence-get",
+        "message": {
+          "name": "evidence-get",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "object"
+              },
+              "input": {
+                "$ref": "schemas/verification-v3.schema.json#/definitions/evidence-get"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.evidence.get",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.cancel": {
+      "description": "Owner and identity from authenticated context; input cannot select owner.",
+      "subscribe": {
+        "operationId": "verification-cancel",
+        "message": {
+          "name": "cancel",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "object"
+              },
+              "input": {
+                "$ref": "schemas/verification-v3.schema.json#/definitions/cancel"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.cancel",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.review": {
+      "description": "Owner and identity from authenticated context; input cannot select owner.",
+      "subscribe": {
+        "operationId": "verification-review",
+        "message": {
+          "name": "review",
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "object"
+              },
+              "input": {
+                "$ref": "schemas/verification-v3.schema.json#/definitions/review"
+              }
+            },
+            "required": [
+              "context",
+              "input"
+            ]
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.review",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.status": {
+      "description": "Operator ACL only; no model context.",
+      "subscribe": {
+        "operationId": "verification-status",
+        "message": {
+          "name": "status",
+          "payload": {
+            "$ref": "schemas/verification-v3.schema.json#/definitions/status"
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.status",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "brai.bug_hunt.v3.verification.pause": {
+      "description": "Operator ACL only; no model context.",
+      "subscribe": {
+        "operationId": "verification-pause",
+        "message": {
+          "name": "pause",
+          "payload": {
+            "$ref": "schemas/verification-v3.schema.json#/definitions/pause"
+          }
+        }
+      },
+      "bindings": {
+        "nats": {
+          "subject": "brai.bug_hunt.v3.verification.pause",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {},
+    "messages": {}
+  }
+}
