@@ -4,6 +4,7 @@ import ast
 import base64
 import dataclasses
 import importlib.util
+from inspect import unwrap
 import asyncio
 from contextlib import nullcontext, suppress
 import json
@@ -107,7 +108,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(result=result):
                 run, ports = self.loop(lambda *args, **kwargs: dict(result))
                 closed = []
-                run.__globals__['_close_durable_failed_turn'] = lambda a, r: closed.append(r)
+                unwrap(run).__globals__['_close_durable_failed_turn'] = lambda a, r: closed.append(r)
                 with patch.dict(sys.modules, ports):
                     actual = run(SimpleNamespace(session_id='no-text', platform='telegram'), 'test album')
                 self.assertEqual({k:v for k,v in actual.items() if k!='user_intervened'}, result)
