@@ -53,6 +53,40 @@ export async function attestNativeCompletion({sourcePath,call,project,workspace}
  if(matched.length!==1)fail();
  return {version:1,write_call_id:call.id,project_id:call.project_id,workspace_id:call.workspace_id,executor_id:call.executor_id,session_id:call.session_id,turn_id:call.turn_id,tool_use_id:call.tool_use_id,tool_name:call.tool_name,payload_sha256:call.payload_sha256,rewritten_sha256:call.rewritten_sha256,exit_code:item.exit_code,native_event_sha256:hash(item.line),native_thread_id:session.id,parent_thread_id:parent,lineage_sha256:hash(sessionLine)};
 }
+/** Подготавливает отдельное решение owner по точному вызову и явному отказу; пробел журнала не является доказательством. */
+export async function attestOwnerCompletion({sourcePath,manifest,call,project,workspace}){
+ if(!manifest||manifest.version!==1||manifest.reviewed!==true||manifest.reviewer!=='owner'||!['operator_reviewed_nested_patch','operator_reviewed_process_start_failure'].includes(manifest.provenance)||!Number.isFinite(Date.parse(manifest.reviewed_at))||Date.parse(manifest.reviewed_at)<Date.parse(call?.admitted_at)||!Number.isSafeInteger(manifest.source_prefix_bytes)||manifest.source_prefix_bytes<=0||manifest.source_prefix_bytes>MAX_SOURCE||!manifest.tool_input||typeof manifest.cwd!=='string')fail();
+ const {manifest_sha256,...review}=manifest;
+ if(canonicalHash(review)!==manifest_sha256||!call||call.executor_id!=='codex'||call.project_id!==project?.id||call.workspace_id!==workspace?.id||!call.admitted_at||!['in_flight','uncertain'].includes(call.state)||((manifest.provenance==='operator_reviewed_nested_patch')!==(call.tool_name==='apply_patch'))||!['Bash','apply_patch'].includes(call.tool_name))fail();
+ const {bytes}=await readExact(sourcePath,MAX_SOURCE),prefix=bytes.subarray(0,manifest.source_prefix_bytes);
+ if(prefix.length!==manifest.source_prefix_bytes||prefix.at(-1)!==10||hash(prefix)!==manifest.source_prefix_sha256)fail();
+ let meta,input,output,currentTurn=null,inputTurn=null,outputTurn=null;
+ for(const line of prefix.toString('utf8').split(/(?<=\n)/)){
+  if(!line)continue;
+  let event;try{event=JSON.parse(line);}catch{fail();}
+  if(event.type==='session_meta'){if(meta)fail();meta=event.payload;}
+  if(event.type==='event_msg'&&event.payload?.type==='task_started')currentTurn=event.payload.turn_id;
+  if(hash(line)===manifest.input_line_sha256){if(input)fail();input=event;inputTurn=currentTurn;}
+  if(hash(line)===manifest.output_line_sha256){if(output)fail();output=event;outputTurn=currentTurn;}
+ }
+ if(!meta||!input||!output||inputTurn!==call.turn_id||outputTurn!==call.turn_id||!Number.isFinite(Date.parse(input.timestamp))||!Number.isFinite(Date.parse(output.timestamp))||Date.parse(input.timestamp)<Date.parse(call.admitted_at)||Date.parse(output.timestamp)<Date.parse(input.timestamp))fail();
+ const spawn=meta.source?.subagent?.thread_spawn;
+ if(meta.id===call.session_id){if(meta.parent_thread_id!=null||spawn?.parent_thread_id)fail();}
+ else if(meta.parent_thread_id!==call.session_id||spawn?.parent_thread_id!==call.session_id||spawn.depth!==1)fail();
+ const i=input.payload,o=output.payload;
+ if(input.type!=='response_item'||output.type!=='response_item'||!['function_call','custom_tool_call'].includes(i?.type)||!['function_call_output','custom_tool_call_output'].includes(o?.type)||i.call_id!==manifest.outer_tool_use_id||o.call_id!==i.call_id||typeof o.output!=='string'||Date.parse(output.timestamp)<Date.parse(call.admitted_at))fail();
+ const raw=typeof i.arguments==='string'?i.arguments:i.input;
+ const needle=typeof manifest.tool_input==='string'?manifest.tool_input:call.tool_name==='Bash'?manifest.tool_input.command??manifest.tool_input.cmd:manifest.tool_input.patch??manifest.tool_input.command;
+ if(typeof raw!=='string'||typeof needle!=='string'||!needle.length||(!raw.includes(needle)&&!raw.includes(JSON.stringify(needle).slice(1,-1))))fail();
+ const message=o.output;
+ const startup=/^\s*(?:Script error:\s*)?(?:Error:\s*)?(?:Failed to create unified exec process|Failed to spawn|Failed to start process|Failed to launch process|Process creation failed)/.test(message);
+ const patch=/^\s*(?:Script error:\s*)?(?:Error:\s*)?(?:Error parsing function call|Invalid patch|Failed to parse patch|apply_patch verification failed)/.test(message);
+ if(!(call.tool_name==='Bash'?startup:patch)||/Process exited with code|Session ID:|Script running with cell ID/.test(message))fail();
+ const payload={tool_name:call.tool_name,tool_input:manifest.tool_input,cwd:manifest.cwd,project_id:call.project_id,workspace_id:call.workspace_id};
+ if(hash(JSON.stringify(manifest.tool_input))!==call.rewritten_sha256||hash(JSON.stringify(payload))!==call.payload_sha256||(call.completion_input_sha256&&canonicalHash(manifest.tool_input)!==call.completion_input_sha256))fail();
+ const receipt={version:2,provenance:manifest.provenance,outcome:'error',reviewer:'owner',reviewed_at:manifest.reviewed_at,write_call_id:call.id,project_id:call.project_id,workspace_id:call.workspace_id,executor_id:call.executor_id,session_id:call.session_id,turn_id:call.turn_id,tool_use_id:call.tool_use_id,tool_name:call.tool_name,payload_sha256:call.payload_sha256,rewritten_sha256:call.rewritten_sha256,outer_tool_use_id:manifest.outer_tool_use_id,review_manifest_sha256:manifest_sha256,source_prefix_sha256:manifest.source_prefix_sha256,source_prefix_bytes:manifest.source_prefix_bytes,input_line_sha256:manifest.input_line_sha256,output_line_sha256:manifest.output_line_sha256};
+ return validateCompletionReceipt(receipt);
+}
 /** Проверяет root-owned неизменяемые предки и не следует символическим ссылкам. */
 export async function assertRootDirectory(directory){
  if(!path.isAbsolute(directory)||path.normalize(directory)!==directory||await realpath(directory)!==directory)fail();

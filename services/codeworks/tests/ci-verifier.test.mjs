@@ -70,7 +70,7 @@ test('GitHub adapter exposes unavailable verifier as awaiting CI, never a succes
     if(args[0]==='auth')throw Error('auth unavailable');
     return {stdout:JSON.stringify({total_count:1,check_runs:[f.check]})};
   }});
-  const rows=await adapter.checks(f.project,f.sha);assert.equal(rows[0].conclusion,null);assert.equal(rows[0].ci_state,'CI_VERIFICATION_UNAVAILABLE');assert.equal(rows[0].ci_verified,false);
+  const rows=await adapter.checks(f.project,f.sha);assert.equal(rows[0].conclusion,null);assert.equal(rows[0].ci_state,'GITHUB_AUTH_REQUIRED');assert.equal(rows[0].ci_verified,false);
 });
 test('separate canonical push suites select the latest exact run and immutable proof, never an older success',async t=>{
   for(const state of ['success','queued','failure','wrong-workflow','same-run','duplicate-id','wrong-url','wrong-job','wrong-digest'])await t.test(state,async()=>{
@@ -263,4 +263,29 @@ test('full policy change or a new attempt invalidates durable recipe reuse',asyn
   f.project.github.ci.recipe_sha256=digestFiles(root,recipeFiles);
   f.run.run_attempt=2;calls.length=0;
   assert.equal((await f.verify()).state,'CI_COMPOSITION_IDENTITY_MISMATCH');assert(calls.some(c=>c.startsWith('contents/')));
+});
+
+test('verified proof remains verified when derived catalog signing or publication is unavailable',async()=>{
+  const f=fixture();f.project.github.ci.reuse_public_key='unavailable-public-key';
+  let saves=0,publishes=0;
+  const adapter=createGitHub({catalogKeyFile:'/unavailable-fixture-key',evidenceStore:{read:async()=>f.proof,save:async()=>{saves++;},catalog:async()=>{publishes++;throw Error('registry unavailable');}},registryFactory:()=>f.ports.registry,run:async(_exe,args)=>{
+    if(args[0]==='auth')return {stdout:'fixture'};
+    const endpoint=args.at(-1).slice(('repos/'+f.project.github.repository+'/').length);
+    return {stdout:JSON.stringify(endpoint.startsWith('commits/')?{total_count:1,check_runs:[f.check]}:await f.ports.api(endpoint))};
+  }});
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,true);
+  await assert.rejects(adapter.publishCatalog(f.project));
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,true);
+  assert.equal(saves,2);assert.equal(publishes,0);
+});
+
+test('malformed digest proof has a distinct safe failure category',async()=>{
+  const f=fixture();
+  const adapter=createGitHub({evidenceStore:{read:async()=>{throw Error('CI_PROOF_DIGEST_MISMATCH');}},registryFactory:()=>f.ports.registry,run:async(_exe,args)=>{
+    if(args[0]==='auth')return {stdout:'fixture'};
+    const endpoint=args.at(-1).slice(('repos/'+f.project.github.repository+'/').length);
+    return {stdout:JSON.stringify(endpoint.startsWith('commits/')?{total_count:1,check_runs:[f.check]}:await f.ports.api(endpoint))};
+  }});
+  const row=(await adapter.checks(f.project,f.sha))[0];
+  assert.equal(row.ci_state,'CI_PROOF_INVALID');assert.equal(row.ci_verified,false);assert.equal(row.conclusion,null);
 });

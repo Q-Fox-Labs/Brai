@@ -2,7 +2,7 @@
 // ABOUTME: Не сливает через REST без target guard, не создаёт статусы CI и не меняет защиту веток.
 import { command } from './git.mjs';
 import {executionFetch,executionContext} from './execution-context.mjs';
-import { Fault } from './errors.mjs';
+import { Fault,githubFailure,ciFailure } from './errors.mjs';
 import { verifyCI,downloadProof } from './ci-verifier.mjs';
 import { createRegistry } from '../ci/registry.mjs';
 import {readCatalogKey,publishCatalog} from './ci-evidence.mjs';
@@ -12,9 +12,9 @@ const transientReadFailure=stderr=>{
   return /TLS handshake timeout|\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN)\b|i\/o timeout|connection reset by peer|temporary failure in name resolution|unexpected EOF/i.test(stderr??'');
 };
 /** Подключает gh с существующей operator auth; stdout/stderr с секретами наружу не передаются. */
-export function createGitHub({run=command,registryFactory=createRegistry,evidenceStore,catalogKeyFile=process.env.CODEWORKS_REUSE_PRIVATE_KEY_FILE}={}) {
+export function createGitHub({run=command,registryFactory=createRegistry,evidenceStore,catalogKeyFile=process.env.CODEWORKS_REUSE_PRIVATE_KEY_FILE,fetcher=executionFetch,now=Date.now}={}) {
   // One operation owns this adapter. Cache only content addressed reads, never live CI state.
-  const immutableReads=new Map(),publishedCatalogs=new Set();
+  const immutableReads=new Map();
   const immutable=async(key,read)=>{
     if(!immutableReads.has(key)) {
       if(immutableReads.size>=1024)return read();
@@ -24,22 +24,58 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
     }
     return structuredClone(await immutableReads.get(key));
   };
-  async function api(project,endpoint,{method='GET',body}={}) {
-    const args=['api','--method',method,'-H','Accept: application/vnd.github+json','repos/'+project.github.repository+'/'+endpoint];
-    if(body)args.push('--input','-');
-    let result;
-    try{
-      const deadline=Date.now()+120000;
-      for(let attempt=0;attempt<2;attempt++) {
-        const remaining=deadline-Date.now();
-        if(remaining<=0)throw Error('READ_BUDGET_EXHAUSTED');
-        result=await run('gh',args,{input:body?JSON.stringify(body):undefined,...(method==='GET'?{allowFailure:true,timeout:remaining}:{})});
-        if(result.code===undefined||result.code===0)break;
-        if(method!=='GET'||attempt===1||!transientReadFailure(result.stderr))throw Error('READ_UNAVAILABLE');
-      }
+  async function gate(project) {
+    executionContext()?.signal?.throwIfAborted();
+    const retry=await evidenceStore?.githubRetry?.(project);
+    if(retry?.github_retry_at&&new Date(retry.github_retry_at).getTime()>now()) {
+      const error=new Fault('GITHUB_RATE_LIMITED');error.retryAt=new Date(retry.github_retry_at).toISOString();throw error;
     }
-    catch{throw new Fault('GITHUB_UNAVAILABLE','GitHub response unavailable; reconcile the recorded intent.');}
-    try{return JSON.parse(result.stdout);}catch{throw new Fault('GITHUB_UNAVAILABLE');}
+  }
+  async function failed(project,error) {
+    executionContext()?.signal?.throwIfAborted();
+    if(error.code==='GITHUB_RATE_LIMITED')await evidenceStore?.deferGitHub?.(project,error.retryAt);
+    throw error;
+  }
+  const guardedFetch=project=>async(input,options)=>{
+    await gate(project);
+    let response;
+    try{response=await fetcher(input,options);}
+    catch(error){return failed(project,ciFailure(error));}
+    if(!response.ok&&response.status!==404) {
+      const body=response.status===403?await response.clone().text():'';
+      return failed(project,githubFailure({status:response.status,headers:response.headers,body,now:now()}));
+    }
+    return response;
+  };
+  async function registryFor(project) {
+    await gate(project);
+    let auth;
+    try{auth=await run('gh',['auth','token']);}
+    catch(error){executionContext()?.signal?.throwIfAborted();throw new Fault('GITHUB_AUTH_REQUIRED');}
+    if(auth.code||!auth.stdout?.trim())throw new Fault('GITHUB_AUTH_REQUIRED');
+    const token=auth.stdout.trim();
+    return {registry:registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token,fetcher:guardedFetch(project)}),readProof:artifact=>downloadProof({repository:project.github.repository,token},artifact,{fetcher:guardedFetch(project)})};
+  }
+  async function api(project,endpoint,{method='GET',body}={}) {
+    const args=['api','--include','--method',method,'-H','Accept: application/vnd.github+json','repos/'+project.github.repository+'/'+endpoint];
+    if(body)args.push('--input','-');
+    const deadline=now()+120000;
+    for(let attempt=0;attempt<2;attempt++) {
+      await gate(project);
+      let result;
+      try{result=await run('gh',args,{input:body?JSON.stringify(body):undefined,allowFailure:true,timeout:Math.max(1,deadline-now())});}
+      catch(error){return failed(project,ciFailure(error));}
+      const raw=result.stdout??'',match=raw.match(/^HTTP\/\S+ (\d{3})[^\r\n]*\r?\n([\s\S]*?)\r?\n\r?\n([\s\S]*)$/);
+      const headers={};
+      if(match)for(const line of match[2].split(/\r?\n/)){const at=line.indexOf(':');if(at>0)headers[line.slice(0,at).toLowerCase()]=line.slice(at+1).trim();}
+      const content=match?match[3]:raw,status=match?Number(match[1]):Number(result.stderr?.match(/\bHTTP ([1-5][0-9]{2})\b/i)?.[1])||undefined;
+      if((result.code===undefined||result.code===0)&&(!status||status<400)) {
+        try{return JSON.parse(content);}catch{throw new Fault('GITHUB_UNAVAILABLE');}
+      }
+      const error=githubFailure({status,headers,body:content+' '+(result.stderr??''),now:now()});
+      if(error.code==='GITHUB_UNAVAILABLE'&&method==='GET'&&attempt===0&&now()<deadline&&(status>=500||transientReadFailure(result.stderr)))continue;
+      return failed(project,error);
+    }
   }
   /** Separate branch pushes may create multiple suites for one SHA; only canonical runs can be ordered. */
   async function canonicalChecks(project,sha,checks) {
@@ -62,6 +98,12 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
     return checks.filter(c=>!candidates.includes(c)||c===selected);
   }
   return {
+    /** Publishes derived reusable evidence independently from the live CI verdict. */
+    async publishCatalog(project) {
+      const {registry}=await registryFor(project);
+      const key=readCatalogKey(catalogKeyFile,project.github.ci.reuse_public_key);
+      return publishCatalog(project,evidenceStore,registry,key);
+    },
     /** Ищет единственный PR в выбранном состоянии по всем страницам. */
     async find(project,leg,{state='open',head}={}) {
       const owner=project.github.repository.split('/')[0];
@@ -90,8 +132,7 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
           checks=await canonicalChecks(project,sha,checks);
           rows=checks.map(c=>({name:c.name,app_id:c.app?.id,sha:c.head_sha,status:c.status,conclusion:c.conclusion}));
           // AIDEV-NOTE: Токен остаётся в памяти owner process; не аргумент команды и не часть результата.
-          const auth=await run('gh',['auth','token']);
-          const rawRegistry=registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token:auth.stdout.trim(),fetcher:executionFetch});
+          const {registry:rawRegistry,readProof}=await registryFor(project);
           const scope=project.github.repository;
           const registry={...rawRegistry,
             lookup:(id,ref)=>/^sha256:[0-9a-f]{64}$/.test(ref)?immutable(JSON.stringify([scope,'lookup',id,ref]),()=>rawRegistry.lookup(id,ref)):rawRegistry.lookup(id,ref),
@@ -101,19 +142,16 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
             if(!/^contents\/.+\?ref=[0-9a-f]{40}$/.test(endpoint))return api(project,endpoint);
             return immutable(JSON.stringify([scope,'contents',endpoint]),()=>api(project,endpoint));
           };
-          verification=await verifyCI(project,sha,checks,{api:read,registry,readProof:artifact=>downloadProof({repository:project.github.repository,token:auth.stdout.trim()},artifact,{fetcher:executionFetch}),readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
-          if(verification.verified&&evidenceStore&&project.github.ci.reuse_public_key) {
-            const identity=JSON.stringify([project.id,scope,project.github.ci,verification.evidence]);
-            if(!publishedCatalogs.has(identity)) {
-              const key=readCatalogKey(catalogKeyFile,project.github.ci.reuse_public_key);
-              await publishCatalog(project,evidenceStore,registry,key);
-              publishedCatalogs.add(identity);
-            }
-          }
-        }catch{executionContext()?.signal?.throwIfAborted();verification={verified:false,state:'CI_VERIFICATION_UNAVAILABLE'};}
+          verification=await verifyCI(project,sha,checks,{api:read,registry,readProof,readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
+        }catch(error){
+          executionContext()?.signal?.throwIfAborted();
+          const fault=ciFailure(error);
+          verification={verified:false,state:fault.code==='GITHUB_UNAVAILABLE'?'CI_VERIFICATION_UNAVAILABLE':fault.code,retryAt:fault.retryAt};
+        }
         const policy=project.github.ci;
         for(const row of rows)if(row.name===policy.check_name&&row.app_id===policy.app_id) {
           row.ci_verified=verification.verified;row.ci_state=verification.state;
+          if(verification.retryAt)row.ci_retry_at=verification.retryAt;
           if(verification.verified)row.ci_evidence=verification.evidence;
           else row.conclusion=null;
         }

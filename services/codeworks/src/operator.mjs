@@ -1,4 +1,4 @@
-// ABOUTME: Принимает проверенный манифест исторической очистки в реестр Codeworks.
+// ABOUTME: Принимает только фиксированные операторские команды очистки и восстановления Codeworks.
 // ABOUTME: Проверяет фактические снимки и не удаляет ресурсы и не запускает старый workflow.
 import {readFile,realpath} from 'node:fs/promises';
 import {readFileSync,constants} from 'node:fs';
@@ -8,12 +8,13 @@ import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {Pool} from 'pg';
 import {createGit,command,assertCleanupRoot} from './git.mjs';
+import {runOperatorDispatch} from './operator-command.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
 import {verifyFilesystemPreservation} from './filesystem-preservation.mjs';
 import {createBranchCleanup} from './branch-cleanup.mjs';
-import {attestNativeCompletion,assertRootDirectory,verifyCompletionReceipt,importNativeCompletion} from './write-completion.mjs';
+import {attestOwnerCompletion,attestNativeCompletion,assertRootDirectory,verifyCompletionReceipt,importNativeCompletion} from './write-completion.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 /** Канонический JSON сортирует ключи рекурсивно; массивы сохраняют порядок. */
@@ -177,8 +178,10 @@ export function parseArgs(args){
 /** Разбирает только owner-команды и не позволяет подменять политику UID. */
 export function parseCompletionArgs(args){
  const method=args[0];if(!['write-completion-attest','write-completion-import'].includes(method))throw Error('INVALID_ARGUMENT');const out={method};
- for(let i=1;i<args.length;i++){const key=args[i];if(!['--call','--source','--receipt'].includes(key)||out[key]!==undefined||!args[i+1]||args[i+1].startsWith('--'))throw Error('INVALID_ARGUMENT');out[key]=args[++i];}
- if(!path.isAbsolute(out['--receipt']??'')||method==='write-completion-attest'&&(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(out['--call']??'')||!path.isAbsolute(out['--source']??''))||method==='write-completion-import'&&(out['--call']||out['--source']))throw Error('INVALID_ARGUMENT');return out;
+ for(let i=1;i<args.length;i++){const key=args[i];if(!['--call','--source','--receipt','--review-manifest'].includes(key)||out[key]!==undefined||!args[i+1]||args[i+1].startsWith('--'))throw Error('INVALID_ARGUMENT');out[key]=args[++i];}
+ if(!path.isAbsolute(out['--receipt']??'')||method==='write-completion-attest'&&(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(out['--call']??'')||!path.isAbsolute(out['--source']??''))||method==='write-completion-import'&&(out['--call']||out['--source']))throw Error('INVALID_ARGUMENT');
+ if(out['--review-manifest']&&(method!=='write-completion-attest'||!path.isAbsolute(out['--review-manifest'])||path.normalize(out['--review-manifest'])!==out['--review-manifest']))throw Error('INVALID_ARGUMENT');
+ return out;
 }
 /** Root проверяет известный журнал и создаёт отдельную неизменяемую receipt только один раз. */
 export async function createCompletionReceipt(pool,args,{allowedRepositories}={}){
@@ -187,7 +190,15 @@ export async function createCompletionReceipt(pool,args,{allowedRepositories}={}
  const project=(await pool.query('SELECT config FROM codeworks.projects WHERE id=$1',[call.project_id])).rows[0]?.config;
  const workspace=(await pool.query('SELECT * FROM codeworks.workspaces WHERE id=$1 AND project_id=$2',[call.workspace_id,call.project_id])).rows[0];
  if(!project||!workspace||!allowedRepositories?.includes(project.repo_path))throw Error('NATIVE_COMPLETION_UNVERIFIED');
- const proof=await attestNativeCompletion({sourcePath:args['--source'],call,project,workspace}),target=args['--receipt'];
+ let proof;
+ if(args['--review-manifest']){
+  await assertRootDirectory(path.dirname(args['--review-manifest']));
+  const review=await open(args['--review-manifest'],constants.O_RDONLY|constants.O_NOFOLLOW);
+  let manifest;
+  try{const info=await review.stat();if(!info.isFile()||info.uid!==0||(info.mode&0o077)||info.size>65536)throw Error('OWNER_REVIEW_MANIFEST_INVALID');manifest=JSON.parse(await review.readFile('utf8'));}finally{await review.close();}
+  proof=await attestOwnerCompletion({sourcePath:args['--source'],manifest,call,project,workspace});
+ }else proof=await attestNativeCompletion({sourcePath:args['--source'],call,project,workspace});
+ const target=args['--receipt'];
  if(!path.isAbsolute(target)||path.normalize(target)!==target)throw Error('INVALID_ARGUMENT');await assertRootDirectory(path.dirname(target));
  let handle;try{handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);}catch(error){
   if(error.code!=='EEXIST')throw error;
@@ -200,12 +211,20 @@ export async function createCompletionReceipt(pool,args,{allowedRepositories}={}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   let pool;try{
-    const raw=process.argv.slice(2),completion=raw[0]?.startsWith('write-completion-'),args=completion?parseCompletionArgs(raw):parseArgs(raw);
+    const raw=process.argv.slice(2),completion=raw[0]?.startsWith('write-completion-');
+    const repair=['cleanup-resume-preflight','cleanup-resume','postprocess-preflight','postprocess-repair','workflow-repair'].includes(raw[0]);
+    const repairModule=repair?await import('./repair-operator.mjs'):null;
+    const args=repair?repairModule.parseRepairArgs(raw):completion?parseCompletionArgs(raw):parseArgs(raw);
     const databaseURL=process.env.CODEWORKS_DATABASE_URL??JSON.parse(readFileSync(process.env.CODEWORKS_DATABASE_CONFIG_FILE,'utf8')).app_url;
     pool=new Pool({connectionString:databaseURL,max:3,connectionTimeoutMillis:3000,statement_timeout:10000});
-    const allowedRepositories=JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]');let result;
-    if(completion){result=args.method==='write-completion-attest'?await createCompletionReceipt(pool,args,{allowedRepositories}):await importNativeCompletion(pool,args['--receipt'],{allowedRepositories});}
+    const allowedRepositories=JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]');
+    const result=await runOperatorDispatch(raw[0],async()=>{
+    let result;
+    if(repair){result=await repairModule.runRepairOperator(pool,args,{allowedRepositories});}
+    else if(completion){result=args.method==='write-completion-attest'?await createCompletionReceipt(pool,args,{allowedRepositories}):await importNativeCompletion(pool,args['--receipt'],{allowedRepositories});}
     else{const manifest=JSON.parse(await readFile(args['--manifest'],'utf8'));result=await importCleanup(pool,args['--project'],manifest,{git:{...createGit(),inspectBranchResources:createBranchCleanup().inspect},codeIndex:createCodeIndex(pool),dryRun:args.dryRun||args.preflight,preflight:args.preflight,allowedRepositories});}
+    return result;
+    });
     console.log(JSON.stringify(result));
   }catch(error){console.error('Owner operation failed: '+(/^[A-Z_]+$/.test(error.message)?error.message:'UNAVAILABLE'));process.exitCode=1;}finally{await pool?.end();}
 }

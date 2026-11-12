@@ -14,10 +14,16 @@ export function createCIEvidence(db) {
     },
     async save(project,proof) {
       const c=proof.composition;
-      await db.query('INSERT INTO codeworks.verified_ci(project_id,run_id,attempt,policy_sha256,proof) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',[project.id,c.runId,c.attempt,policyHash(project),proof]);
+      await db.query('INSERT INTO codeworks.verified_ci(project_id,run_id,attempt,policy_sha256,proof,catalog_state) VALUES($1,$2,$3,$4,$5,\'pending\') ON CONFLICT DO NOTHING',[project.id,c.runId,c.attempt,policyHash(project),proof]);
       const saved=await this.read(project,c.runId,c.attempt);
       // jsonb меняет порядок ключей: сравниваются канонические JSON значения.
       if(JSON.stringify(canonical(saved))!==JSON.stringify(canonical(proof)))throw Error('CI_DURABLE_PROOF_CONFLICT');
+    },
+    async githubRetry(project) {
+      return (await db.query('SELECT github_retry_at,github_reason_code FROM codeworks.execution_control WHERE project_id=$1',[project.id])).rows[0]??null;
+    },
+    async deferGitHub(project,retryAt) {
+      await db.query("UPDATE codeworks.execution_control SET github_retry_at=GREATEST(github_retry_at,$2::timestamptz),github_reason_code='GITHUB_RATE_LIMITED' WHERE project_id=$1",[project.id,retryAt]);
     },
     async catalog(project) {
       const rows=(await db.query('SELECT proof FROM codeworks.verified_ci WHERE project_id=$1 AND policy_sha256=$2 ORDER BY created_at,run_id,attempt',[project.id,policyHash(project)])).rows;

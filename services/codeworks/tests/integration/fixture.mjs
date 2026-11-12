@@ -33,15 +33,25 @@ export async function readConfig() {
 /** Применяет owner migrations только в указанной test DB и создаёт реальные Git fixtures. */
 export async function setup({git=createGit(),command=runCommand,strictVerifier=false}={}) {
   const config=await readConfig();
-  const owner=new Pool({connectionString:config.owner_url,max:4}),app=new Pool({connectionString:config.app_url,max:8});
   if(strictVerifier){
     if(!config.verifier_role||!config.verifier_url)throw new Error('VERIFIER_FIXTURE_REQUIRED');
     const verifier=new URL(config.verifier_url),appUrl=new URL(config.app_url);
     if(!['postgres:','postgresql:'].includes(verifier.protocol)||verifier.pathname!==appUrl.pathname||verifier.hostname!==appUrl.hostname||verifier.port!==appUrl.port||decodeURIComponent(verifier.username)!==config.verifier_role||config.verifier_role===config.app_role)throw new Error('DISPOSABLE_VERIFIER_REQUIRED');
   }
-  await migrate(owner,config.app_role,strictVerifier?config.verifier_role:undefined);
-  await migrate(owner,config.app_role,strictVerifier?config.verifier_role:undefined);
-  await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
+  const owner=new Pool({connectionString:config.owner_url,max:4}),app=new Pool({connectionString:config.app_url,max:8});
+  let lease,leased=false,closing;
+  const leaseKey='codeworks:disposable-fixture:'+new URL(config.owner_url).pathname;
+  try{
+    lease=await owner.connect();
+    // AIDEV-NOTE: Другой тестовый процесс не может мигрировать или TRUNCATE, пока этот fixture жив.
+    await lease.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[leaseKey]);leased=true;
+    await migrate(owner,config.app_role,strictVerifier?config.verifier_role:undefined);
+    await migrate(owner,config.app_role,strictVerifier?config.verifier_role:undefined);
+    await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
+  }catch(error){
+    if(lease){if(leased)await lease.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[leaseKey]).catch(()=>{});lease.release();}
+    await Promise.allSettled([owner.end(),app.end()]);throw error;
+  }
   const allowedRepositories=[];
   const h=createHandlers(createStore(app),git,{allowedRepositories});
   const temporary=[];
@@ -86,9 +96,10 @@ export async function setup({git=createGit(),command=runCommand,strictVerifier=f
       await command('git',['-C',repo,'update-ref','refs/remotes/origin/dev',base]);
       await command('git',['-C',repo,'update-ref','refs/remotes/origin/main',base]);
       const common=path.join(repo,'.git');
-      const sourceCommon=(await command('git',['rev-parse','--path-format=absolute','--git-common-dir'])).stdout;
+      let sourcePreparer=process.env.CODEWORKS_TEST_PREPARER;
+      if(!sourcePreparer){const sourceCommon=(await command('git',['rev-parse','--path-format=absolute','--git-common-dir'])).stdout;sourcePreparer=path.join(sourceCommon,'hooks/prepare-brai-worktree');}
       const preparer=path.join(common,'hooks/prepare-brai-worktree');
-      await copyFile(process.env.CODEWORKS_TEST_PREPARER??path.join(sourceCommon,'hooks/prepare-brai-worktree'),preparer);await chmod(preparer,0o755);
+      await copyFile(sourcePreparer,preparer);await chmod(preparer,0o755);
       const project={id:'test_'+randomUUID(),repo_path:repo,common_dir:common,workspace_root:areas,allowed_paths:['.'],excluded_paths:['.git','node_modules','.env'],executors:['codex','hermes'],git_flow:{feature_base:'refs/remotes/origin/dev',hotfix_base:'refs/remotes/origin/main',feature_prefix:'feature/',hotfix_prefix:'hotfix/'},preparer_path:preparer,node_version:'24.22.1',platform:process.platform+'-'+process.arch};
       if(codeIndexDisabled)project.code_index_policy={enabled:false};
       if(github){
@@ -111,10 +122,19 @@ export async function setup({git=createGit(),command=runCommand,strictVerifier=f
       return result;
     },
     /** Закрывает только созданные fixtures и собственные строки тестовой БД. */
-    async close() {
-      await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
-      await Promise.all([owner.end(),app.end()]);
-      for(const root of temporary)await rm(root,{recursive:true,force:true});
+    async close({preserve=false}={}) {
+      if(closing)return closing;
+      closing=(async()=>{
+        try{
+          await app.end();
+          if(!preserve)await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
+          if(!preserve)for(const root of temporary)await rm(root,{recursive:true,force:true});
+        }finally{
+          if(leased){await lease.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[leaseKey]).catch(()=>{});leased=false;}
+          lease.release();await owner.end();
+        }
+      })();
+      return closing;
     },
   };
 }
