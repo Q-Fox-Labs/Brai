@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { validateConfig } from '../config.mjs';
 import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { createBraiTools, connectPorts } from '../runtime.mjs';
+import dialoguesTools from './dialogues-tools.json' with { type: 'json' };
 import { createHistoryCatalog } from './history.mjs';
 import { createBugHuntCatalog } from './bug-hunt.mjs';
 import { createOwnerTranscription } from './transcription.mjs';
@@ -128,6 +129,8 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
       ...ports,
       async list(name){
        if(name==='history')return history.list();
+       // Публичные схемы нужны до active; чтение данных по-прежнему требует active Auth.
+       if(name==='dialogues'&&phase==='provisioning')return structuredClone(dialoguesTools);
        if(name==='transcription'&&transcription)return transcription.list();
        return ports.list(name);
       },
@@ -144,6 +147,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    return {
     async listTools(){return [...(await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name)),...(bugHunt?.list()??[])];},
     async callTool(name,args,signal){
+     if(phase==='provisioning')invalid();
      if(['publish_file','fetch_file'].includes(name))invalid();
      if(name.startsWith('bug_hunt_')){if(!bugHunt)invalid();return bugHunt.call(name,args,signal);}
      // Личный broker принимает тот же короткий голосовой ввод, что и MCP.

@@ -149,3 +149,32 @@ test('production factory restores catalog and transcription with private scope a
   assert.deepEqual(closed,['u1']);
  }finally{await adapters.close();await f.adapters.close();}
 });
+
+
+test('provisioning discovers Dialogues metadata without authorizing data and active runtime rechecks the service',async()=>{
+ const f=fixture(),listed=[],called=[],closed=[];
+ f.records['/cfg/1'].dialogues={enabled:true,url:'http://dialogues.test/mcp',token:'fixture',userId:'u1',profileId:'p1'};
+ const adapters=createRuntimeAdapters({runtimeProfiles:f.profiles},{
+  readProtected:path=>structuredClone(f.records[path]),verifyDirectory:()=>{},
+  openPorts:async()=>({
+   list:async name=>{listed.push(name);if(name==='dialogues')throw Error('Profile not yet active');return [];},
+   mcp:async(...args)=>{called.push(args);throw Error('Unexpected data request');},
+   request:async()=>({items:[],next_cursor:null}),publish:async()=>{},close:async()=>closed.push(true),
+  }),
+ });
+ try{
+  const pending={...f.profile('1001'),status:'provisioning',bootstrap:true};
+  const bootstrap=await adapters.perUserRuntime(pending);
+  assert.deepEqual((await bootstrap.listTools()).filter(t=>t.name.startsWith('dialogues_')).map(t=>t.name),['dialogues_exchange','dialogues_context_ack']);
+  assert.equal(listed.includes('dialogues'),false);
+  await assert.rejects(bootstrap.callTool('dialogues_exchange',{}),/CONFIG_NOT_READY/);
+  assert.deepEqual(called,[]);
+  await assert.rejects(adapters.perUserRuntime({...pending,userId:'u2'}),/CONFIG_NOT_READY/);
+  const active=await adapters.perUserRuntime(f.profile('1001'));
+  assert.equal(listed.includes('dialogues'),true);
+  assert.equal((await active.listTools()).some(t=>t.name.startsWith('dialogues_')),false);
+  await assert.rejects(active.callTool('dialogues_context_ack',{}),{code:'UPSTREAM_UNAVAILABLE'});
+  assert.deepEqual(called,[]);
+  assert.equal(closed.length,1);
+ }finally{await adapters.close();await f.adapters.close();}
+});
