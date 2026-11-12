@@ -261,13 +261,21 @@ class Broker:
             raise ValueError('Invalid Telegram identity')
         resolved = await self.control.call('identity.resolve', {'telegramId': telegram_id})
         user = resolved.get('user')
-        if not isinstance(user, dict) or user.get('status') != 'active':
-            raise PermissionError('Invitation required')
+        if not isinstance(user, dict):
+            error = PermissionError('Invitation required')
+            error.diagnostic = safe_failure(reason='NOT_FOUND')
+            raise error
+        if user.get('status') != 'active':
+            error = PermissionError('Identity unavailable')
+            error.diagnostic = safe_failure(reason='FORBIDDEN' if user.get('status') == 'blocked' else 'UNAVAILABLE')
+            raise error
         matches = [(uid, p) for uid, p in self.profiles().items()
                    if p['userId'] == user.get('id') and p['profileId'] == user.get('profileId')
                    and str(p['telegramId']) == str(user.get('telegramId')) and p['status'] == 'active']
         if len(matches) != 1:
-            raise PermissionError('Profile unavailable')
+            error = PermissionError('Profile unavailable')
+            error.diagnostic = safe_failure(reason='UNAVAILABLE')
+            raise error
         uid, profile = matches[0]
         return {'uid': uid, **profile, 'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}
 

@@ -17,7 +17,7 @@ import time
 import uuid
 
 from .ingress import Bridge, serve_chat_control
-from .ipc import RpcError
+from .ipc import RpcError, safe_failure
 from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
@@ -49,8 +49,14 @@ async def broker_call(method, params, timeout=15):
         if len(line) > MAX_FRAME:
             raise ValueError('Response too large')
         result = json.loads(line)
-        if result.get('jsonrpc') != '2.0' or result.get('id') != request_id or 'error' in result or 'result' not in result:
+        if (not isinstance(result, dict) or result.get('jsonrpc') != '2.0' or result.get('id') != request_id
+                or ('error' in result) == ('result' in result)):
             raise PermissionError('Broker rejected request')
+        if 'error' in result:
+            error = RpcError(-32001, 'Broker request unavailable')
+            data = result['error'].get('data') if isinstance(result['error'], dict) else None
+            error.diagnostic = safe_failure(**{key: data.get(key) for key in ('reason', 'stage')}) if isinstance(data, dict) else safe_failure()
+            raise error
         return result['result']
     finally:
         writer.close()
@@ -157,8 +163,16 @@ async def admit_update(update, adapter):
                 _logger.warning('BRAI_TELEGRAM_JOURNAL_WRITE_FAILED')
                 return False
         return True
-    except Exception:
-        pass
+    except Exception as error:
+        diagnostic = getattr(error, 'diagnostic', None)
+        reason = diagnostic.get('reason') if isinstance(error, RpcError) and isinstance(diagnostic, dict) else None
+        # Только подтверждённое отсутствие Auth-учётной записи означает onboarding.
+        # Сбой сервиса или временная подготовка уже существующего профиля не отзывают его приглашение.
+        if reason != 'NOT_FOUND':
+            text = ('Доступ к этому аккаунту ограничен. Обратитесь к владельцу сервиса.' if reason == 'FORBIDDEN'
+                    else 'Сейчас не удалось проверить доступ к чату. Попробуйте ещё раз позже.')
+            await _notice(adapter, telegram, message, text)
+            return False
     # Приглашение принимается только из личного сообщения самого нового пользователя.
     raw = getattr(message, 'text', '') or ''
     invitation = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+(?:invite_)?([A-Za-z0-9_-]{16,128})', raw.strip())

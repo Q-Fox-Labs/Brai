@@ -735,3 +735,55 @@ class DraftDeliveryTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(PermissionError):
                 await self.bridge.send('send_draft', self.draft(), scope_id=None)
         self.native.send_draft.assert_not_awaited()
+
+
+class TelegramAdmissionFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_failure_and_unready_existing_account_never_request_an_invitation(self):
+        for reason in ['UNAVAILABLE', 'FORBIDDEN', 'INTERNAL', 'DEADLINE_EXCEEDED', None]:
+            with self.subTest(reason=reason):
+                error = RpcError(-32001, 'private error must not escape') if reason else TimeoutError('private timeout')
+                if reason:error.diagnostic = {'reason': reason, 'stage': 'broker'}
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='hello'),
+                            effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+                notice = AsyncMock()
+                with patch.object(runtime, 'broker_call', AsyncMock(side_effect=error)), patch.object(runtime, '_notice', notice):
+                    self.assertFalse(await runtime.admit_update(update, NS()))
+                text = notice.await_args.args[-1]
+                self.assertNotIn('приглашен', text.casefold())
+                self.assertNotIn('private', text)
+
+    async def test_only_confirmed_missing_account_receives_an_invitation_notice(self):
+        error = RpcError(-32001, 'Request unavailable')
+        error.diagnostic = {'reason': 'NOT_FOUND', 'stage': 'broker'}
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='hello'),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+        notice = AsyncMock()
+        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=error)), patch.object(runtime, '_notice', notice):
+            self.assertFalse(await runtime.admit_update(update, NS()))
+        self.assertIn('приглашение', notice.await_args.args[-1])
+
+    async def test_invite_redemption_is_not_attempted_while_identity_service_is_unavailable(self):
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/start invite_'+'a'*24),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+        broker = AsyncMock(side_effect=TimeoutError('private'))
+        with patch.object(runtime, 'broker_call', broker), patch.object(runtime, '_notice', AsyncMock()):
+            self.assertFalse(await runtime.admit_update(update, NS()))
+        self.assertEqual([call.args[0] for call in broker.await_args_list], ['identity.resolve'])
+
+    async def test_wire_preserves_only_bounded_diagnostics_from_root_broker(self):
+        import json, struct
+        from unittest.mock import Mock
+        wires=[]
+        writer=NS(write=lambda raw:wires.append(json.loads(raw)), drain=AsyncMock(), close=Mock(),
+                  wait_closed=AsyncMock(), get_extra_info=lambda name:NS(getsockopt=lambda *args:struct.pack('3i',123,0,0)))
+        async def reply():
+            return json.dumps({'jsonrpc':'2.0','id':wires[-1]['id'],'error':{'code':-32001,
+                'message':'private upstream text','data':{'reason':'UNAVAILABLE','stage':'broker','secret':'private'}}}).encode()+b'\n'
+        reader=NS(readline=reply)
+        with patch.dict(runtime.os.environ,{'BRAI_IDENTITY_BROKER':'/fixture/broker.sock'}), \
+             patch.object(runtime.asyncio,'open_unix_connection',AsyncMock(return_value=(reader,writer))):
+            with self.assertRaises(RpcError) as caught:
+                await runtime.broker_call('identity.resolve',{'telegramId':'123'})
+        self.assertEqual(caught.exception.diagnostic,{'reason':'UNAVAILABLE','stage':'broker'})
+        self.assertNotIn('private',str(caught.exception))
+        writer.wait_closed.assert_awaited_once()
