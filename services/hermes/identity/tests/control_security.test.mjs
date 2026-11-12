@@ -157,3 +157,18 @@ test('prepared restore exposes only its own bootstrap configuration', async () =
   assert.ok((await call('files.configuration')).error);
   assert.equal(bootstraps, 1);
 });
+
+test('private RPC retains a bounded failure reason without exception contents', async () => {
+  for (const [code, expected] of [['OUTCOME_UNKNOWN','OUTCOME_UNKNOWN'], ['SECRET_VALUE','INTERNAL']]) {
+    const runtime = {control: {invokeTool: async () => {
+      throw Object.assign(new Error('secret-token-and-audio'), {code});
+    }}};
+    const reply = await handlePrivateRpc(runtime, {jsonrpc:'2.0',id:'stt',method:'tools.call',
+      params:{uid:1001,name:'local_ai_invoke_transcribe',args:{}}});
+    assert.equal(reply.error.code, -32603);
+    assert.deepEqual(reply.error.data, {reason:expected,stage:'control'});
+    assert.ok(!JSON.stringify(reply).includes('secret-token'));
+    assert.equal(await handlePrivateRpc(runtime, {jsonrpc:'2.0',method:'tools.call',
+      params:{uid:1001,name:'local_ai_invoke_transcribe',args:{}}}), null);
+  }
+});

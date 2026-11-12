@@ -20,6 +20,7 @@ import uuid
 
 from .memory_registry import load_registry
 from .lifecycle import LifecycleRunner
+from .ipc import safe_failure
 try:
     from ..files.identity import OwnerFiles
 except ImportError:
@@ -163,7 +164,10 @@ class ControlPort:
                 if value.get('jsonrpc') != '2.0' or future is None or future.done():
                     raise ValueError('Invalid control response')
                 if 'error' in value:
-                    future.set_exception(PermissionError('Control rejected request'))
+                    error = PermissionError('Control rejected request')
+                    data = value['error'].get('data') if isinstance(value['error'], dict) else None
+                    error.diagnostic = safe_failure(**{k: data.get(k) for k in ('reason', 'stage')}) if isinstance(data, dict) else safe_failure(stage='control')
+                    future.set_exception(error)
                 elif 'result' in value:
                     future.set_result(value['result'])
                 else:
@@ -882,6 +886,11 @@ async def rpc_request(broker, uid, request):
                     'error': type(error).__name__, 'cause': type(cause).__name__,
                     'errno': getattr(cause, 'errno', None)}) + '\n')
                 response = rpc_error(identifier, -32001, 'Request unavailable')
+                data = getattr(error, 'diagnostic', None)
+                response['error']['data'] = (safe_failure(**{k: data.get(k) for k in ('reason', 'stage')})
+                    if isinstance(data, dict) else safe_failure(
+                        reason='FORBIDDEN' if isinstance(error, PermissionError) else
+                        'DEADLINE_EXCEEDED' if isinstance(error, TimeoutError) else 'INTERNAL'))
     return None if notification else response
 
 

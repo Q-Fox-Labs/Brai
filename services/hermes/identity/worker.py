@@ -134,6 +134,14 @@ class Worker:
             lambda user_id, *args, **kwargs: platform == Platform.TELEGRAM
             and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
         self.runner._brai_identity_recovery_allowed = lambda source: self.route_allowed(source, recovery=True)
+        self.runner._brai_return_notice_state = self.return_notice_state
+        self.runner._brai_consent_generation = lambda source: (
+            self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
+            if self.route_allowed(source) else -1)
+        self.runner._brai_consent_route_current = lambda event: (
+            self.route_allowed(event.source) and
+            getattr(event, '_brai_chat_generation', 0) ==
+            self.chat_states.get(self._chat_route(event.source), {}).get('generation', 0))
         original_admit = getattr(self.runner, '_hm_admit_event', None)
         if callable(original_admit):
             async def paused_admit(event):
@@ -457,6 +465,14 @@ class Worker:
                 or type(state.get('recoveryBlocked')) is not bool):
             raise RpcError(-32602, 'Invalid chat state')
 
+    def return_notice_state(self, chat, thread):
+        """Вернуть известное поколение маршрута без создания нового состояния."""
+        if not self.chat_snapshot_ready:
+            return None
+        route = self._chat_route(SimpleNamespace(chat_id=chat,thread_id=thread))
+        state = self.chat_states.get(route,{})
+        return {'generation': state.get('generation',0), 'paused': bool(state.get('paused'))}
+
     def route_allowed(self, source, *, recovery=False):
         """Закрыть dispatch/recovery при неизвестном snapshot, паузе или незавершённой отмене."""
         if not self.chat_snapshot_ready and (recovery or os.environ.get('BRAI_IDENTITY_MODE') == 'worker'):
@@ -494,6 +510,9 @@ class Worker:
             source = SessionSource.from_dict({'platform': 'telegram', 'chat_id': chat,
                 'chat_type': 'dm', 'thread_id': thread or None, 'user_id': self.telegram_id})
             key = self.adapter._event_session_key(SimpleNamespace(source=source))
+            cancel_consent = getattr(self.runner, '_brai_cancel_consent_for_source', None)
+            if callable(cancel_consent):
+                cancel_consent(source)
             task = self.adapter._session_tasks.get(key)
             tasks = set(self.chat_stopping.get(route, ()))
             if task is not None and not task.done():

@@ -40,6 +40,19 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
         await self.server.wait_closed()
         self.tmp.cleanup()
 
+    async def test_permission_denial_preserves_safe_code_over_real_duplex(self):
+        await self.client.call('echo', {'value':'ready'})
+        calls = []
+        async def denied():
+            calls.append(1)
+            raise PermissionError('private-audio-and-token')
+        self.peers[0].methods['denied'] = denied
+        with self.assertRaises(RpcError) as raised:
+            await self.client.call('denied', {})
+        self.assertEqual(raised.exception.code, -32003)
+        self.assertEqual(str(raised.exception), 'Forbidden')
+        self.assertEqual(calls, [1])
+
     async def test_nested_bidirectional_call(self):
         self.assertEqual(await self.client.call('nested', {}), 'nested')
 

@@ -814,7 +814,19 @@ export async function handlePrivateRpc(runtime, input) {
       return notification ? null : { jsonrpc: '2.0', id: request.id, result };
     } catch (err) {
       const code = err?.message === 'METHOD_NOT_FOUND' ? -32601 : err?.message === 'INVALID_ARGUMENT' ? -32602 : -32603;
-      return notification ? null : { jsonrpc: '2.0', id: request.id, error: { code, message: code === -32601 ? 'Method not found' : code === -32602 ? 'Invalid params' : 'Request failed' } };
+      // AIDEV-NOTE: Категория сохраняется; текст исключения через RPC не передаётся.
+      const reasons = new Set([
+        'FORBIDDEN', 'INVALID_ARGUMENT', 'DEADLINE_EXCEEDED', 'OUTCOME_UNKNOWN',
+        'UPSTREAM_UNAVAILABLE', 'INVALID_UPSTREAM_RESPONSE', 'OWNER_MISMATCH', 'OVERLOADED',
+        'CANCELLED', 'NOT_FOUND', 'CONFLICT', 'REQUEST_TOO_LARGE',
+        'RESULT_TOO_LARGE', 'UNAVAILABLE', 'INTERNAL', 'MODEL_NOT_FOUND',
+        'MODEL_NOT_INSTALLED', 'UNSUPPORTED_OPERATION', 'MODEL_IN_USE', 'INPUT_TOO_LARGE',
+        'BUSY', 'MODEL_LOAD_FAILED', 'ENGINE_UNAVAILABLE', 'ARTIFACT_NOT_AVAILABLE',
+        'DEPENDENCY_UNAVAILABLE', 'INSTALLATION_FAILED', 'REVISION_CONFLICT', 'NOT_SUPPORTED',
+      ]);
+      const candidate = typeof err?.code === 'string' ? err.code : err?.message;
+      const data = {reason: reasons.has(candidate) ? candidate : 'INTERNAL', stage: 'control'};
+      return notification ? null : { jsonrpc: '2.0', id: request.id, error: { code, message: code === -32601 ? 'Method not found' : code === -32602 ? 'Invalid params' : 'Request failed', data } };
     }
   };
   if (!Array.isArray(input)) return one(input);
