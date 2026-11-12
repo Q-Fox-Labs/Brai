@@ -124,6 +124,21 @@ test("v3 admission, timer, immutable data, fencing, ACL and replay use one scope
    await store.guard(id,async r=>{const cancelled=await store.cancel(p,{request_id:randomUUID(),investigation_id:id,reason:"cancel before model review returns"});assert.equal(cancelled.cancel_requested,true);await assert.rejects(store.publish(r,{verdict:"insufficient_evidence"},{}),e=>e.code==="CANCEL_REQUESTED");});
    assert.equal(Number((await owner.query("SELECT count(*) FROM verification_result WHERE investigation_id=$1",[id])).rows[0].count),0);
   });
+  await t.test("lost publication ACK never reopens terminal state or duplicates results after manual review",async()=>{
+   for(const manual of [false,true]){
+    const receipt=await report(p,{request_id:randomUUID(),observation:{title:"Publication ACK "+manual,operation:"publish",expected:"one result",observed:"ACK lost"}});
+    const admitted=await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipt.case_id}}),id=admitted.investigation_ids[0];
+    await store.guard(id,async r=>{
+     if(manual)await store.review({...p,reviewer:true},{request_id:randomUUID(),investigation_id:id,expected_revision:0,verdict:"insufficient_evidence",explanation:"Synthetic prior manual authority"});
+     const result=await store.publish(r,{verdict:"insufficient_evidence"},{fixture:true});
+     await store.set(r,"outcome_unknown","DATABASE_COMMIT_ACK_LOST");
+     assert.equal((await store.get(p,id)).state,"completed");
+     assert.equal(await store.publish(r,{verdict:"insufficient_evidence"},{fixture:true}),result);
+     assert.equal((await store.get(p,id)).manual_revision,manual?1:0);
+    });
+    assert.equal(Number((await owner.query("SELECT count(*) FROM verification_result WHERE investigation_id=$1",[id])).rows[0].count),1);
+   }
+  });
   await t.test("fresh workflow intent is delivered ahead of old blocked workflows",async()=>{const ids=(await owner.query("SELECT id FROM verification_investigation WHERE installation_id=$1 ORDER BY registered_at",[installationId])).rows.map(r=>r.id);for(const id of ids)await store.workflow(id,"active");await store.workflow(investigation,"pending");assert.equal((await store.pending())[0].id,investigation);});
   assert.equal(await digest(),before);
  }finally{await Promise.all([app.end(),owner.end()]);}
