@@ -45,13 +45,22 @@ test('stock nested tools write outside native roots; missing Post recovers and c
   assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.workspaces WHERE project_id=$1',[p.id])).rows[0].n,1,'nested native denial created no workspace');
   assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.write_calls WHERE project_id=$1 AND turn_id=$2',[p.id,denied])).rows[0].n,0);
   const diff='diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+actual stock write\n';
-  const command=`git -C '${p.repo_path}' apply --whitespace=nowarn <<'PATCH'\n${diff}PATCH\n`;
+  const foreignRead=await turn(`text(await tools.exec_command(${JSON.stringify({cmd:`cd '${protectedArea.path}' && rg --files | head -n 5; git -C '${protectedArea.path}' status --short`,workdir:p.repo_path})}));`);
+  assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.write_calls WHERE project_id=$1 AND turn_id=$2',[p.id,foreignRead])).rows[0].n,0);
+  const command=`git -C '${p.repo_path}' -c codeworks.workspace=creator-development apply --whitespace=nowarn <<'PATCH'\n${diff}PATCH\n`;
   const written=await turn(`text(await tools.exec_command(${JSON.stringify({cmd:command,workdir:p.repo_path,sandbox_permissions:'require_escalated',justification:'Write only disposable Codeworks fixture'})}));`);
   const call=(await f.app.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND turn_id=$2',[p.id,written])).rows[0];assert.ok(call);
   const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[call.workspace_id])).rows[0];workflows.push((await f.app.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1',[w.id])).rows[0].workflow_id);
+  const observed=await readExecutorItems(socket,thread,written);assert.ok(observed.data.some(e=>e.item.id===call.tool_use_id&&e.item.status==='completed'));
+  assert.equal(w.workspace_key,'creator-development');
+  const checkTurn=await turn(`text(await tools.exec_command(${JSON.stringify({cmd:`cd '${protectedArea.path}' && node --test`,workdir:p.repo_path,sandbox_permissions:'require_escalated',justification:'Check only disposable foreign fixture'})}));`);
+  const checkCall=(await f.app.query('SELECT select_workspace FROM codeworks.write_calls WHERE project_id=$1 AND turn_id=$2',[p.id,checkTurn])).rows[0];assert.equal(checkCall.select_workspace,false);
+  const more=diff.replaceAll('new.txt','continued.txt');
+  const continued=await turn(`text(await tools.exec_command(${JSON.stringify({cmd:`git -C '${p.repo_path}' apply --whitespace=nowarn <<'PATCH'\n${more}PATCH\n`,workdir:p.repo_path,sandbox_permissions:'require_escalated',justification:'Continue only the selected disposable task'})}));`);
+  assert.equal((await f.app.query('SELECT workspace_id FROM codeworks.write_calls WHERE project_id=$1 AND turn_id=$2',[p.id,continued])).rows[0].workspace_id,w.id);
+  assert.equal(await readFile(w.path+'/continued.txt','utf8'),'actual stock write\n');
   assert.equal(await readFile(w.path+'/new.txt','utf8'),'actual stock write\n');assert.equal(await stat(p.repo_path+'/new.txt').catch(()=>null),null);
   assert.equal(call.state,'in_flight','no Post exists in this fixture');
-  const observed=await readExecutorItems(socket,thread,written);assert.ok(observed.data.some(e=>e.item.id===call.tool_use_id&&e.item.status==='completed'));
   await f.h.call('write.stop',{project_id:p.id,session_id:thread,turn_id:written,event:'Stop'},'codex');
   assert.equal((await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex')).workflow.blocked_reason,'WRITER_OUTCOME_UNKNOWN');
   const reconciler=`codeworks/stock-fixture/${p.id}/reconciler`;workflows.push(reconciler);
@@ -66,7 +75,7 @@ test('stock nested tools write outside native roots; missing Post recovers and c
   assert.equal((await f.app.query('SELECT activation_state FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0].activation_state,'active');
   // Тестовый файл явно отбрасывается обратным настоящим Git patch; полезные пользовательские изменения не затрагиваются.
   const reverse='diff --git a/new.txt b/new.txt\ndeleted file mode 100644\n--- a/new.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-actual stock write';
-  await turn(`text(await tools.exec_command(${JSON.stringify({cmd:`git -C '${w.path}' apply --whitespace=nowarn <<'PATCH'\n${reverse}\nPATCH\n`,workdir:p.repo_path,sandbox_permissions:'require_escalated',justification:'Remove only the generated disposable test file'})}));`);
+  await turn(`text(await tools.exec_command(${JSON.stringify({cmd:`git -C '${w.path}' apply --whitespace=nowarn <<'PATCH'\n${reverse}\n${reverse.replaceAll('new.txt','continued.txt')}\nPATCH\n`,workdir:p.repo_path,sandbox_permissions:'require_escalated',justification:'Remove only the generated disposable test file'})}));`);
   await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:w.id,request_key:'cancel-stock',reason:'Disposable fixture complete'},'codex');
   await until(async()=>(await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex')).workflow.status==='completed');
   const final=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex');assert.equal(final.cleanup.state,'done');assert.equal(await stat(w.path).catch(()=>null),null);

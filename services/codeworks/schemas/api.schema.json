@@ -1555,6 +1555,7 @@
           "maxLength": 255,
           "pattern": "^[^\\u0000-\\u001f]+$"
         },
+        "select_workspace": {"type": "boolean"},
         "workspace_key": {
           "type": "string",
           "minLength": 1,

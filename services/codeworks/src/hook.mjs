@@ -188,8 +188,20 @@ function shellTokens(command) {
 function readOnlyShell(command) {
   if (typeof command !== 'string') return false;
   const tokens = shellTokens(command);
-  if (!tokens.length || tokens.some(t => t.operator || t.dynamic)) return false;
-  const words = tokens.map(t=>t.word);
+  if (!tokens.length || tokens.some(t => t.dynamic)) return false;
+  let segment=[];
+  for (const token of tokens) {
+    if (!token.operator) {segment.push(token.word);continue;}
+    if (![';','&&','|','\n'].includes(token.operator) || !readOnlyArguments(segment)) return false;
+    segment=[];
+  }
+  return readOnlyArguments(segment);
+}
+
+// AIDEV-NOTE: Тот же строгий argv whitelist применяется к каждому звену чтения; redirects не допускаются.
+function readOnlyArguments(input) {
+  const words=[...input];
+  if (!words.length) return false;
   if(words[0]==='RTK_DISABLED=1') words.shift();
   if (words[0] === 'rtk' && words[1] === 'proxy') words.splice(0,2);
   else if(words[0]==='rtk' && ['git','ls','rg','grep'].includes(words[1])) {words.shift();if(words[0]==='grep') words[0]='rg';}
@@ -207,6 +219,12 @@ function readOnlyShell(command) {
     if (action==='rev-parse') return args.length===1 && args[0]==='HEAD';
     return false;
   }
+  if (words[0] === 'cd') return words.length===2 && path.isAbsolute(words[1]);
+  if (words[0] === 'head' || words[0] === 'tail') {
+    for(let i=1;i<words.length;i++){const w=words[i];if(w==='-n'){if(!/^[0-9]+$/.test(words[++i]??''))return false;}else if(w.startsWith('-')&&!/^-(?:n)?[0-9]+$/.test(w))return false;}
+    return true;
+  }
+  if (words[0] === 'sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
   if (words[0] === 'pwd') return words.length===1;
   if (words[0] === 'ls') return words.slice(1).every(w=>!w.startsWith('-') || ['-a','-l','-la','-al','-1','--'].includes(w));
   if (words[0] === 'cat') return words.length > 1 && words.slice(1).every(w=>w !== '-' && !w.startsWith('-'));
@@ -531,7 +549,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   if(project.workspace_kind&&kind!==project.workspace_kind)return deny('WORKSPACE_KIND_CONFLICT: тип записи не соответствует контуру репозитория.');
   if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
-  const key = env.CODEWORKS_WORKSPACE_KEY;
+  const key = patchCommand?.workspaceKey ?? env.CODEWORKS_WORKSPACE_KEY;
   if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Для записи нужны идентификаторы сессии и вызова.');
   let rewrite;
   if (patchCommand) {
@@ -599,10 +617,12 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const status = await client.call('status',{project_id:area.project.id,workspace_id:area.id});
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
-    const requestedKind=shell?gitPatch(input?.command??input?.cmd)?.kind:null;
+    const requestedPatch=shell?gitPatch(input?.command??input?.cmd):null;
+    if(requestedPatch?.workspaceKey && requestedPatch.workspaceKey!==w.workspace_key)return deny('WORKSPACE_KEY_CONFLICT: для выбора новой задачи укажите основной репозиторий, а не чужое дерево.');
+    const requestedKind=requestedPatch?.kind;
     if(requestedKind&&requestedKind!==w.kind)return deny('WORKSPACE_KIND_CONFLICT: продолжите область её исходного типа.');
     const key=w.workspace_key,kind=w.kind;
-    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)||'.'))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,select_workspace:!shell||!!requestedPatch,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)||'.'))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
     result=await client.call('write.begin',{...args,...executorThread(event)});
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
     await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input),completion_input_sha256:canonicalHash(input)});

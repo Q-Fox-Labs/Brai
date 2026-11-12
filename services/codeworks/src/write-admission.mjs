@@ -88,11 +88,17 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
           key=selected.workspace_key;kind=selected.kind;
         }
         if (!key && !args.workspace_id) {
-          const entries=(await db.query(`SELECT c.workspace_key,c.kind,c.workspace_id,w.removed_at,r.lifecycle,r.state AS workflow_state
+          let entries=(await db.query(`SELECT c.workspace_key,c.kind,c.workspace_id,c.state,c.selection_order,w.removed_at,r.lifecycle,r.state AS workflow_state
             FROM codeworks.write_calls c LEFT JOIN codeworks.workspaces w ON w.id=c.workspace_id
             LEFT JOIN codeworks.workflow_registry r ON r.workspace_id=w.id
-            WHERE c.project_id=$1 AND c.executor_id=$2 AND c.session_id=$3 AND
-              ((c.workspace_id IS NULL AND c.state='preparing') OR (c.workspace_id IS NOT NULL AND w.removed_at IS NULL))`,identity.slice(0,3))).rows;
+            WHERE c.project_id=$1 AND c.executor_id=$2 AND c.session_id=$3 AND c.select_workspace
+            ORDER BY c.selection_order DESC NULLS LAST`,identity.slice(0,3))).rows;
+          // AIDEV-NOTE: Sequence выделяется один раз под session lock; поздний retry/prepare/finish не меняет выбор.
+          if(entries[0]?.selection_order!=null){
+            const selected=entries[0];
+            if(!selected.workspace_id&&selected.state!=='preparing')throw new Fault('CONFLICT','Last selected invocation is not ready; select the task explicitly.');
+            entries=selected.removed_at?[]:[selected];
+          }else entries=entries.filter(e=>(!e.workspace_id&&e.state==='preparing')||(e.workspace_id&&!e.removed_at));
           if (entries.some(e=>e.workspace_id && (e.lifecycle && e.lifecycle!=='active' || e.workflow_state && e.workflow_state!=='open'))) throw new Fault('CONFLICT','Previous workspace is closing.');
           const choices=new Map(entries.map(e=>[e.workspace_key+'\0'+e.kind,e]));
           const workspaceIds=new Set(entries.map(e=>e.workspace_id).filter(Boolean));
@@ -110,13 +116,13 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
         }
         if (!key) throw new Fault('INVALID_ARGUMENT');
         kind ??= 'feature';
-        const values=[randomUUID(),...identity,args.tool_name,args.payload_sha256,JSON.stringify(args.targets),key,kind,args.request_key,args.original_input_sha256??null];
-        await db.query(`INSERT INTO codeworks.write_calls(id,project_id,executor_id,session_id,turn_id,tool_use_id,tool_name,payload_sha256,targets,workspace_key,kind,request_key,state,original_input_sha256)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,'preparing',$13)`,values);
+        const values=[randomUUID(),...identity,args.tool_name,args.payload_sha256,JSON.stringify(args.targets),key,kind,args.request_key,args.original_input_sha256??null,args.select_workspace??true];
+        await db.query(`INSERT INTO codeworks.write_calls(id,project_id,executor_id,session_id,turn_id,tool_use_id,tool_name,payload_sha256,targets,workspace_key,kind,request_key,state,original_input_sha256,select_workspace)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,'preparing',$13,$14)`,values);
         if(args.executor_thread_id)await db.query("UPDATE codeworks.write_calls SET tool_result=jsonb_build_object('executor_thread_id',$2::text) WHERE id=$1",[values[0],args.executor_thread_id]);
         found=(await db.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5 FOR UPDATE',identity)).rows[0];
       }
-      if (!found || found.tool_name !== args.tool_name || found.payload_sha256 !== args.payload_sha256 || (found.original_input_sha256??null)!==(args.original_input_sha256??null) || JSON.stringify(found.targets) !== JSON.stringify(args.targets) || (args.workspace_key && found.workspace_key !== args.workspace_key) || (args.kind && found.kind !== args.kind) || found.request_key !== args.request_key) throw new Fault('WRITE_CALL_MISMATCH');
+      if (!found || (found.selection_order!=null&&(found.select_workspace??true)!==(args.select_workspace??true)) || found.tool_name !== args.tool_name || found.payload_sha256 !== args.payload_sha256 || (found.original_input_sha256??null)!==(args.original_input_sha256??null) || JSON.stringify(found.targets) !== JSON.stringify(args.targets) || (args.workspace_key && found.workspace_key !== args.workspace_key) || (args.kind && found.kind !== args.kind) || found.request_key !== args.request_key) throw new Fault('WRITE_CALL_MISMATCH');
       if(found.tool_result?.executor_thread_id&&found.tool_result.executor_thread_id!==args.executor_thread_id)throw new Fault('WRITE_CALL_MISMATCH');
       return found;
     });
