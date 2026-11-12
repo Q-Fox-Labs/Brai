@@ -18,7 +18,7 @@ if(config.githubURL){
   const url=new URL(config.githubURL);
   if(url.hostname!=='127.0.0.1')throw Error('LOCAL_GITHUB_FIXTURE_REQUIRED');
   const call=async(method,data)=>{const response=await fetch(url.href+method,{method:'POST',body:JSON.stringify(data),signal:executionContext()?.signal});return response.json();};
-  github={find:(p,leg)=>call('find',leg),create:(p,leg,body)=>call('create',{...leg,body})};
+  github={find:(p,leg)=>call('find',leg),get:(p,number)=>call('get',{number}),create:(p,leg,body)=>call('create',{...leg,body})};
 }
 const activities=createActivities(pool,{...config,
   execute:async(...args)=>{if(config.failOperation===args[1])throw Error('EXPECTED_FIXTURE_TECHNICAL_FAILURE');return runOperation(...args);},

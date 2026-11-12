@@ -2,7 +2,7 @@
 // ABOUTME: Не принимает внешних поручений и не удаляет ресурсы без проверки владельца.
 import {gitResourcesAbsent,command} from './git.mjs';
 import {verifyDisposition} from './disposition.mjs';
-import {verifyCleanupArchive} from './cleanup-archive.mjs';
+import {verifyCleanupArchive,classifyCleanupArchiveError} from './cleanup-archive.mjs';
 import {canonical} from './contracts.mjs';
 import {recheckPublication} from './publication.mjs';
 import {verifyFilesystemPreservation} from './filesystem-preservation.mjs';
@@ -176,7 +176,12 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(manifest.reviewed!==true||manifest.disposition?.type!=='archived'||obligation.evidence?.archive_authorized!==true||canonical(archive)!==canonical(manifest.disposition.archive))return wait('ARCHIVE_UNVERIFIED');
     if(['inspect','remote','worktree','local_refs','index','verify'].includes(obligation.step)){
       try{await fence();await verifyArchive(project,expected,archive,{manifest});await fence();}
-      catch(error){if(error.message==='CLEANUP_FENCE_LOST')throw error;return wait('ARCHIVE_UNVERIFIED');}
+      catch(error){
+        const kind=classifyCleanupArchiveError(error);
+        if(kind==='decision')return wait('ARCHIVE_UNVERIFIED');
+        if(kind==='retry')return save("state='retry',attempts=attempts+1,blocker='TECHNICAL_RETRY',next_attempt_at=now()+interval '60 seconds'",[]);
+        throw error;
+      }
     }
   }else if(retained?.type==='retained'&&manifest){
     if(retained.target!=='dev'||!flowGit||!retained.target_sha||!retained.refs)return wait('DISPOSITION_PROOF_REQUIRED');

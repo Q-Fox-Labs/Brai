@@ -22,12 +22,14 @@ import {connectionProxy} from './temporal-proxy.mjs';
 import proto from '@temporalio/proto';
 const {temporal}=proto;
 import {setup,configured,prepareWith} from './fixture.mjs';
+import {fixtureTimeout} from './fixture-lifecycle.mjs';
+import {temporalNetworkScenario} from './temporal-network-scenario.mjs';
 import {deliverCommands,createActivities} from '../../src/temporal.mjs';
 import {authorizeCommand,acquireTarget,releaseTarget} from '../../src/lifecycle.mjs';
 import {launchWorker,startRuntime} from '../../src/runtime.mjs';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(work,timeout=60000){const end=Date.now()+timeout;for(;;){if(await work())return;assert.ok(Date.now()<end,'fixture condition timed out');await sleep(100);}}
-test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODEWORKS_TEMPORAL_TEST!=='1',timeout:360000},async t=>{
+test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODEWORKS_TEMPORAL_TEST!=='1',timeout:fixtureTimeout(process.env.CODEWORKS_TEST_TIMEOUT_MS??'360000')},async t=>{
   const f=await setup(),project=await f.project({codeIndexDisabled:true});
   const root=path.join(project.workspace_root,'temporal-fixture');await mkdir(root);
   const config={databaseURL:f.config.app_url,allowedRepositories:[project.repo_path],address:process.env.CODEWORKS_TEMPORAL_ADDRESS??'127.0.0.1:7233',namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE??'brai',taskQueue:'codeworks-fixture-'+randomUUID(),...(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE?{bundle:process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE}:{}),crashOnce:path.join(root,'crashed')};
@@ -216,88 +218,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
       await writeFile(path.join(source,'tmp/codeworks-temporal/self-update.json'),JSON.stringify({workflow_id:ledger.workflow_id,operation_id:id,task_queue:upgradeQueue,previous_artifact:process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT?await import('node:fs/promises').then(m=>m.realpath(process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT)):null,sha:head,artifact_digest:'sha256:'+manifest.payloadHash,receipt:result.receipt},null,2));
     }finally{await ansible('stop');await start();}
   });
-  await t.test('slow GitHub, duplicate Activity and SIGKILL leave admission and independent workspace execution available',{timeout:100000},async()=>{
-    await stop();
-    const p=await f.project({github:{repository:'fixture/repository',required_checks:[{name:'checks',app_id:42}]}});
-    await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'fixture','temporal')",[p.id]);
-    const flowGit=createFlowGit({localRemote:true,requireLock:()=>{}}),adapters=createActivityGit({flowGit});
-    const handlers=createHandlers(createStore(f.app),createGit({flowGit}),{allowedRepositories:[p.repo_path]});
-    const prepareArea=key=>prepareWith(handlers.call,{project_id:p.id,workspace_key:key,request_key:'prepare-'+key},'codex');
-    const remember=async op=>{workflowIds.add((await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[op.operation_id])).rows[0].workflow_id);return op;};
-    let releaseSlow,entered=false,requests=0,pgBlocked=false,pgEntered=false,releasePG;const created=new Map();
-    const pgGate=new Promise(resolve=>{releasePG=resolve;});
-    const gate=new Promise(resolve=>{releaseSlow=resolve;});
-    const server=createServer(async(req,res)=>{
-      let input='';for await(const chunk of req)input+=chunk;
-      const leg=JSON.parse(input);
-      if(req.url==='/find'){
-        if(leg.branch==='feature/slow-github'){entered=true;requests++;await gate;}
-        if(pgBlocked&&leg.branch==='feature/fast-github'){pgEntered=true;await pgGate;}
-        res.end(JSON.stringify(created.get(leg.branch)??null));
-      }else{
-        assert.equal(req.url,'/create');assert.equal(created.has(leg.branch),false,'one PR per admitted synchronization');
-        const pr={number:created.size+1,html_url:'https://fixture.invalid/pr/'+leg.branch,body:leg.body,state:'open',merged:false,head:{sha:leg.head,ref:leg.branch,repo:{full_name:p.github.repository}},base:{ref:leg.target,repo:{full_name:p.github.repository}}};
-        created.set(leg.branch,pr);res.end(JSON.stringify(pr));
-      }
-    });
-    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-    const previousAllowed=config.allowedRepositories;
-    try{
-      config.githubURL='http://127.0.0.1:'+server.address().port+'/';config.allowedRepositories=[...previousAllowed,p.repo_path];
-      await writeFile(configFile,JSON.stringify(config),{mode:0o600});await start();
-      const slow=await remember(await prepareArea('slow-github')),fast=await remember(await prepareArea('fast-github'));
-      await deliverCommands(f.app,client,{taskQueue:config.taskQueue});await until(async()=>await status(slow.operation_id)==='succeeded'&&await status(fast.operation_id)==='succeeded');
-      const sha=(await f.app.query('SELECT base_sha FROM codeworks.workspaces WHERE id=$1',[slow.workspace_id])).rows[0].base_sha;
-      const request={project_id:p.id,workspace_id:slow.workspace_id,commit_sha:sha,request_key:'slow-sync'};
-      const sync=await remember(await handlers.call('sync',request,'codex'));
-      await deliverCommands(f.app,client,{taskQueue:config.taskQueue});await until(()=>entered);
-      const acquired=await command('/usr/bin/flock',['-n',path.join(p.common_dir,'codeworks.lock'),'/usr/bin/true'],{allowFailure:true});assert.equal(acquired.code,0,'network must not own the shared Git lock');
-      assert.deepEqual(await handlers.call('sync',request,'codex'),sync);
-      const accepted=await remember(await prepareArea('admitted-during-network'));
-      const next=await remember(await handlers.call('sync',{...request,workspace_id:fast.workspace_id,request_key:'fast-sync'},'codex'));
-      await deliverCommands(f.app,client,{taskQueue:config.taskQueue});
-      await until(async()=>await status(accepted.operation_id)==='succeeded'&&await status(next.operation_id)==='succeeded');
-      assert.equal(await status(sync.operation_id),'running');
-      const id=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[sync.operation_id])).rows[0].workflow_id;
-      await createActivities(f.app,{allowedRepositories:[p.repo_path],adapters,identity:()=>id}).synchronizeBranch(sync.operation_id,1);
-      assert.equal(requests,1,'duplicate Activity must not repeat an in-flight request');
-      await stop('SIGKILL');await start();releaseSlow();
-      await client.workflow.getHandle(id).signal('commandsAvailable');await until(async()=>await status(sync.operation_id)==='succeeded');
-      assert.equal(created.size,2);assert.deepEqual(await handlers.call('sync',request,'codex'),sync);
-      const history=await client.workflow.getHandle(id).fetchHistory();
-      assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='synchronizeBranch'));
-      await Worker.runReplayHistory({workflowBundle:{codePath:config.bundle}},history,id);
-      await stop();
-      const endpoint=new URL(f.config.app_url),proxy=await connectionProxy(endpoint.hostname,Number(endpoint.port));
-      endpoint.hostname='127.0.0.1';endpoint.port=proxy.address.split(':')[1];
-      const isolated=new Pool({connectionString:endpoint.toString(),max:2,connectionTimeoutMillis:1000});
-      const reconciled=await handlers.call('sync',{...request,workspace_id:fast.workspace_id,request_key:'sync-lost-execution-db'},'codex');
-      const ownId=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[reconciled.operation_id])).rows[0].workflow_id;
-      const network={find:async(_,leg)=>{const r=await fetch(config.githubURL+'find',{method:'POST',body:JSON.stringify(leg),signal:executionContext()?.signal});return r.json();}};
-      const ownActivities=createActivities(isolated,{allowedRepositories:[p.repo_path],adapters:{...adapters,github:network},identity:()=>ownId});
-      try{
-        pgBlocked=true;
-        const interrupted=assert.rejects(ownActivities.synchronizeBranch(reconciled.operation_id,1));
-        await until(()=>pgEntered);proxy.drop();await interrupted;
-        assert.equal(await status(reconciled.operation_id),'running','lost execution session preserves its admitted command');
-        assert.deepEqual(await handlers.call('sync',{...request,workspace_id:fast.workspace_id,request_key:'sync-lost-execution-db'},'codex'),reconciled);
-        proxy.restore();pgBlocked=false;releasePG();
-        await ownActivities.synchronizeBranch(reconciled.operation_id,1);
-        assert.equal(await status(reconciled.operation_id),'succeeded');assert.equal(created.size,2);
-      }finally{releasePG();await isolated.end();await proxy.close();}
-      let readStarted=false,releaseRead;const readGate=new Promise(resolve=>{releaseRead=resolve;});
-      const realGit=createGit({flowGit});
-      const slowAdmission=createHandlers(createStore(f.app),{...realGit,readBase:async(...args)=>{readStarted=true;await readGate;return realGit.readBase(...args);}},{allowedRepositories:[p.repo_path]});
-      const waiting=prepareWith(slowAdmission.call,{project_id:p.id,workspace_key:'slow-base-read',request_key:'slow-base-read'},'codex');
-      try{
-        await until(()=>readStarted);
-        await remember(await prepareArea('admitted-during-base-read'));
-      }finally{releaseRead();await remember(await waiting);}
-    }finally{
-      releaseSlow();releasePG();await stop();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
-      delete config.githubURL;config.allowedRepositories=previousAllowed;await writeFile(configFile,JSON.stringify(config),{mode:0o600});await start();
-    }
-  });
+  await t.test('slow GitHub, duplicate Activity and SIGKILL leave admission and independent workspace execution available',{timeout:240000},()=>temporalNetworkScenario({f,config,configFile,start,stop,client,workflowIds,until}));
   await t.test('handoff imports preparation, CI, partial hotfix, unknown outcome and failed cleanup exactly once',async()=>{
     await stop();
     for(const state of ['preparation','ci','hotfix','unknown','cleanup']){

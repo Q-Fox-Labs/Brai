@@ -2,7 +2,7 @@
 // ABOUTME: Выполняющийся, чужой или отсутствующий item не освобождает писателя.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {executorProof,readExecutorItems} from '../src/executor-completion.mjs';
+import {executorProof,readExecutorItems,recoverExecutorCompletions} from '../src/executor-completion.mjs';
 import {mkdtemp,mkdir,chmod,symlink,rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {WebSocketServer} from 'ws';
@@ -50,4 +50,31 @@ test('nested executor verifies every ancestor and rejects inconsistent, cyclic o
     await assert.rejects(readExecutorItems(socket,'grandchild','turn',null,'parent'),/EXECUTOR_LINEAGE_INVALID/);
     assert.ok(!methods.includes('thread/turns/list'),'unverified descendant items must not be read');
   }
+});
+
+test('bounded recovery drains more than eight calls promptly and parks unknown live writers',async()=>{
+  const rows=Array.from({length:19},(_,i)=>({...call,id:'call-'+i,tool_result:{},due:true}));
+  const reads=[];
+  const pool={query:async(sql,args)=>{
+    if(sql.startsWith('SELECT c.*')){assert.match(sql,/executor_next_retry_at/);return {rows:rows.filter(c=>c.due).slice(0,8)};}
+    if(sql.startsWith('UPDATE')){
+      const row=rows.find(c=>c.id===args[0]);row.due=!!args[1]&&args.length===3;row.tool_result.executor_scan_cursor=args.length===3?args[1]:null;return {rowCount:1};
+    }
+    if(sql.startsWith('SELECT count(*)'))return {rows:[{ready:rows.filter(c=>c.due).length,next_retry:'2026-11-11T00:01:00Z'}]};
+    throw Error(sql);
+  }};
+  const read=async(_socket,_thread,_turn,cursor)=>{reads.push(cursor);return {data:[],nextCursor:null};};
+  const options={socketPath:'/socket',read};
+  assert.equal((await recoverExecutorCompletions(pool,'p',options)).ready,true);
+  assert.equal(reads.length,8);
+  assert.equal((await recoverExecutorCompletions(pool,'p',options)).hasMore,true);
+  assert.equal((await recoverExecutorCompletions(pool,'p',options)).ready,false);
+  assert.equal(reads.length,19);
+  assert.equal((await recoverExecutorCompletions(pool,'p',options)).ready,false);
+  assert.equal(reads.length,19,'unknown live writers must wait before another API read');
+  rows[0].due=true;let page=0;
+  options.read=async(_socket,_thread,_turn,cursor)=>{assert.equal(cursor,page?'page-2':null);page++;return {data:[],nextCursor:page===1?'page-2':null};};
+  assert.equal((await recoverExecutorCompletions(pool,'p',options)).ready,true);
+  assert.equal((await recoverExecutorCompletions(pool,'p',options)).ready,false);
+  assert.equal(page,2,'a ready history page does not wait for the periodic 60 second pass');
 });

@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
-import {attestNativeCompletion,verifyCompletionReceipt,validateCompletionReceipt} from '../src/write-completion.mjs';
+import {attestNativeCompletion,attestOwnerCompletion,verifyCompletionReceipt,validateCompletionReceipt} from '../src/write-completion.mjs';
 import {canonicalHash} from '../src/write-notice.mjs';
 import {parseCompletionArgs} from '../src/operator.mjs';
 const hash=x=>createHash('sha256').update(x).digest('hex');
@@ -81,4 +81,33 @@ test('trusted cwd native and legacy input candidates match all ledger digests',a
 });
 test('trusted cwd rejects foreign and symlink escaped paths',async t=>{
  const f=await fixture(t),outside=f.root+'/outside';await mkdir(outside);await symlink(outside,f.workspace.path+'/escape');for(const cwd of [outside,f.workspace.path+'/escape']){f.event.payload.item.cwd=pathToFileURL(cwd).href;await f.save(f.event);await assert.rejects(attestNativeCompletion({sourcePath:f.file,...f}),/NATIVE_COMPLETION_UNVERIFIED/);}
+});
+
+test('owner preparer binds explicit process creation error, source prefix, exact turn and both input digests',async t=>{
+ const f=await fixture(t),input={command:'git status'};
+ const started={type:'event_msg',payload:{type:'task_started',turn_id:f.call.turn_id}};
+ const source={type:'response_item',timestamp:'2026-01-01T00:00:10Z',payload:{type:'function_call',name:'functions.exec',call_id:'outer',arguments:JSON.stringify(input)}};
+ const output={type:'response_item',timestamp:'2026-01-01T00:00:11Z',payload:{type:'function_call_output',call_id:'outer',output:'Script error: Failed to create unified exec process: executable unavailable'}};
+ const prepare=async()=>{
+  const lines=[f.meta,started,source,output].map(x=>JSON.stringify(x)+'\n'),bytes=lines.join('');
+  await writeFile(f.file,bytes);
+  const review={version:1,reviewed:true,reviewer:'owner',reviewed_at:'2026-01-01T00:02:00Z',provenance:f.call.tool_name==='Bash'?'operator_reviewed_process_start_failure':'operator_reviewed_nested_patch',source_prefix_bytes:Buffer.byteLength(bytes),source_prefix_sha256:hash(bytes),outer_tool_use_id:'outer',input_line_sha256:hash(lines[2]),output_line_sha256:hash(lines[3]),tool_input:input,cwd:f.project.repo_path};
+  const manifest={...review,manifest_sha256:canonicalHash(review)};
+  return attestOwnerCompletion({sourcePath:f.file,manifest,...f});
+ };
+ const proof=await prepare();assert.equal(proof.provenance,'operator_reviewed_process_start_failure');
+ assert.equal('exit_code' in proof,false);assert.equal('native_event_sha256' in proof,false);
+ assert.ok(!JSON.stringify(proof).includes('git status'));
+ for(const text of ['Timeout waiting for tool','Turn completed','No terminal item','Process exited with code 1']){
+  output.payload.output=text;await assert.rejects(prepare(),/NATIVE_COMPLETION_UNVERIFIED/);
+ }
+ output.payload.output='Failed to create unified exec process';
+ started.payload.turn_id='foreign';await assert.rejects(prepare(),/NATIVE_COMPLETION_UNVERIFIED/);
+ started.payload.turn_id=f.call.turn_id;
+ f.call.rewritten_sha256='0'.repeat(64);await assert.rejects(prepare(),/NATIVE_COMPLETION_UNVERIFIED/);
+ delete input.command;input.patch='*** Begin Patch\\n*** End Patch';
+ source.payload.arguments=JSON.stringify(input);output.payload.output='Error parsing function call: invalid patch';
+ f.call.tool_name='apply_patch';f.call.rewritten_sha256=hash(JSON.stringify(input));
+ f.call.payload_sha256=hash(JSON.stringify({tool_name:'apply_patch',tool_input:input,cwd:f.project.repo_path,project_id:f.project.id,workspace_id:f.workspace.id}));
+ assert.equal((await prepare()).provenance,'operator_reviewed_nested_patch');
 });

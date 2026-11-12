@@ -29,7 +29,13 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
     const key=branch?'execution:branch:'+item.project_id+':'+branch:'execution:workspace:'+(item.workspace_id??synthetic.id);
     if(!(await db.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired',[key])).rows[0].acquired)return;
     let targetGuard=false;
+    const assertRun=async()=>{
+      if(!item.workspace_id)return;
+      const registry=(await db.query('SELECT workflow_id,execution_run_id FROM codeworks.workflow_registry WHERE workspace_id=$1',[item.workspace_id])).rows[0];
+      if(registry?.workflow_id===owner&&registry.execution_run_id&&registry.execution_run_id!==executionContext()?.workflowRunId)throw new Fault('FORBIDDEN','WORKFLOW_OWNER_REQUIRED');
+    };
     try{
+      await assertRun();
       if(item.evidence?.publication){
         // AIDEV-NOTE: Тот же ключ берёт acquireTarget; уже занятый DEV нужно дождаться до очистки.
         const targetKey='lane:'+item.project_id+':dev';
@@ -40,7 +46,7 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
       const workspace=item.workspace_id?(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[item.workspace_id])).rows[0]:synthetic;
       const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[item.project_id])).rows[0]?.config;
       if((!workspace&&!branch)||!project||!allowedRepositories.includes(project.repo_path))throw Error('CLEANUP_PROJECT_FORBIDDEN');
-      const guardedCheckpoint=async step=>{signal.throwIfAborted();await checkpoint(step);};
+      const guardedCheckpoint=async step=>{signal.throwIfAborted();await assertRun();await checkpoint(step);signal.throwIfAborted();await assertRun();};
       try{
         const advance=()=>branch?advanceBranchCleanup(db,item,project,{git,checkpoint:guardedCheckpoint}):advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:guardedCheckpoint});
         return item.outcome==='released'&&item.source_operation_id?await measureReleaseStep(item.source_operation_id,'cleanup.advance',advance):await advance();
@@ -92,7 +98,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     if(scoped&&!admission)throw new Fault('FORBIDDEN');
     if(admission){
       const saved=await authorizeCommand(db,op.id,workflowId,generation);
-      if(saved.state!=='pending')return;
+      if(saved.state!=='pending'||(saved.retry_at&&new Date(saved.retry_at).getTime()>Date.now()))return;
       const originalCheckpoint=checkpoint;
       checkpoint=async step=>{const current=await authorizeCommand(db,op.id,workflowId,generation);if(current.state!=='pending')throw new Fault('FORBIDDEN');await originalCheckpoint(step);};
     }else if(ownership?.owner==='temporal')throw new Fault('FORBIDDEN');
@@ -112,8 +118,19 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     const w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[op.workspace_id])).rows[0];
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
     if(op.kind==='release'||op.kind==='rollout')recordReleaseState(op.id,'running',op.step);
-    const finish=async(status,step,result)=>{
-      const updated=await db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=NULL,updated_at=now() WHERE id=$1',[op.id,status,step,result]);
+    const finish=async(status,step,result,fault)=>{
+      let blocked;
+      if(['GITHUB_RATE_LIMITED','GITHUB_AUTH_REQUIRED','CI_PROOF_INVALID'].includes(step)){
+        status='awaiting_reconciliation';blocked=new Fault(step);
+        if(step==='GITHUB_RATE_LIMITED'){
+          const shared=(await db.query('SELECT github_retry_at FROM codeworks.execution_control WHERE project_id=$1',[op.project_id])).rows[0]?.github_retry_at;
+          const retry=shared??fault?.retryAt;
+          blocked.retryAt=retry&&Number.isFinite(new Date(retry).getTime())?new Date(retry).toISOString():new Date(Date.now()+60000).toISOString();
+          await db.query('UPDATE codeworks.commands SET retry_at=$2,technical_attempts=0,updated_at=now() WHERE operation_id=$1',[op.id,blocked.retryAt]);
+        }
+        if(op.kind==='release')await db.query('UPDATE codeworks.releases SET state=$2 WHERE operation_id=$1',[op.id,status]);
+      }
+      const updated=await db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=$5,updated_at=now() WHERE id=$1',[op.id,status,step,result,blocked?.dto()??null]);
       if(op.kind==='release'||op.kind==='rollout')recordReleaseState(op.id,status,step);
       return updated;
     };
@@ -265,6 +282,10 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       await finish('succeeded','ready',{workspace_id:w.id});
     }catch(error){
       if(signal.aborted)throw error;
+      if(['GITHUB_RATE_LIMITED','GITHUB_AUTH_REQUIRED','CI_PROOF_INVALID'].includes(error?.code)){
+        const current=(await db.query('SELECT result FROM codeworks.operations WHERE id=$1',[op.id])).rows[0];
+        await finish('awaiting_reconciliation',error.code,current?.result??op.result,error);return;
+      }
       if(scoped&&error?.code==='BUSY'){
         const reason=/^LOCAL_[A-Z_]+$/.test(error.message)?error.message:'LOCAL_GIT_BUSY';
         await finish('awaiting_execution',reason,op.result);return;

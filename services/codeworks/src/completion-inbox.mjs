@@ -96,7 +96,7 @@ async function processOne(pool,item,{allowedRepositories,git}) {
 
 /** Ограниченный раунд существующего Temporal reconciler; не требует нового события от клиента. */
 export async function processProjectCompletions(pool,projectId,{allowedRepositories,git=createGit(),spoolDirectory,list=scanNotices,ack=ackNotice}={}) {
-  let imported=0,processed=0,deliveryErrors=0;
+  let imported=0,processed=0,deliveryErrors=0,spoolHasMore=false;
   const inbox=createCompletionInbox(pool);
   if(spoolDirectory) {
     const project=(await pool.query('SELECT config FROM codeworks.projects WHERE id=$1',[projectId])).rows[0]?.config;
@@ -105,6 +105,7 @@ export async function processProjectCompletions(pool,projectId,{allowedRepositor
     let scanned;
     try {scanned=await list(spoolDirectory,{projectId,cursor,limit:32});}
     catch {deliveryErrors++;scanned=[];}
+    spoolHasMore=scanned.length===32;
     const batch=scanned.filter(entry=>entry.notice?.request.project_id===projectId);
     deliveryErrors+=scanned.filter(entry=>entry.error).length;
     for(const entry of batch) {
@@ -117,6 +118,7 @@ export async function processProjectCompletions(pool,projectId,{allowedRepositor
       await pool.query('UPDATE codeworks.execution_control SET completion_spool_cursor=$2 WHERE project_id=$1',[projectId,entry.id]);
     }
   }
+  spoolHasMore=spoolHasMore&&imported>0&&deliveryErrors===0;
   const entries=(await pool.query(`SELECT c.write_call_id,w.workspace_id FROM codeworks.write_completions c
     JOIN codeworks.write_calls w ON w.id=c.write_call_id WHERE w.project_id=$1 AND c.state='pending'
     AND (c.next_attempt_at IS NULL OR c.next_attempt_at<=now()) ORDER BY c.updated_at,c.created_at,c.write_call_id LIMIT 32`,[projectId])).rows;
@@ -133,6 +135,7 @@ export async function processProjectCompletions(pool,projectId,{allowedRepositor
     }
   }
   const pending=(await pool.query("SELECT 1 FROM codeworks.write_completions c JOIN codeworks.write_calls w ON w.id=c.write_call_id WHERE w.project_id=$1 AND c.state='pending' AND (c.next_attempt_at IS NULL OR c.next_attempt_at<=now()) LIMIT 1",[projectId])).rowCount>0;
+  const nextRetry=(await pool.query("SELECT min(c.next_attempt_at) AS next_retry FROM codeworks.write_completions c JOIN codeworks.write_calls w ON w.id=c.write_call_id WHERE w.project_id=$1 AND c.state='pending' AND c.next_attempt_at>now()",[projectId])).rows[0]?.next_retry??null;
   if(deliveryErrors)console.error('Codeworks POST_DELIVERY_REQUIRES_RECONCILIATION',JSON.stringify({project_id:projectId,count:deliveryErrors}));
-  return {imported,processed,pending,deliveryErrors};
+  return {imported,processed,pending,deliveryErrors,ready:pending||spoolHasMore,hasMore:pending||spoolHasMore,nextRetry};
 }

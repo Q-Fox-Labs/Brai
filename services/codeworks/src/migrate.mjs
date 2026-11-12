@@ -19,7 +19,7 @@ export async function migrate(pool, appRole, verifierRole) {
     const { rowCount } = await db.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)', [appRole]);
     if (rowCount) throw new Error('APP_ROLE_MEMBERSHIP_FORBIDDEN');
     await db.query('CREATE TABLE IF NOT EXISTS public.codeworks_migrations(version integer PRIMARY KEY, sha256 text NOT NULL)');
-    for(const version of [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]) {
+    for(const version of [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]) {
       const sql=await readFile(new URL('../migrations/'+String(version).padStart(3,'0')+'.sql',import.meta.url),'utf8');
       const sha=createHash('sha256').update(sql).digest('hex');
       const applied=(await db.query('SELECT sha256 FROM public.codeworks_migrations WHERE version=$1',[version])).rows[0];
@@ -42,6 +42,7 @@ export async function migrate(pool, appRole, verifierRole) {
     await db.query(`REVOKE ALL ON FUNCTION codeworks.lock_publication_evidence(text,uuid,uuid) FROM PUBLIC,${quote(appRole)}`);
     await db.query(`GRANT EXECUTE ON FUNCTION codeworks.lock_publication_evidence(text,uuid,uuid) TO ${quote(appRole)}`);
     await db.query(`REVOKE UPDATE ON codeworks.verified_ci,codeworks.pull_requests,codeworks.pull_request_heads FROM ${quote(appRole)}`);
+    await db.query(`GRANT UPDATE (catalog_state,catalog_attempts,catalog_next_attempt_at,catalog_reason_code,catalog_result,catalog_published_at) ON codeworks.verified_ci TO ${quote(appRole)}`);
     if(verifierRole){
       const v=(await db.query('SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1',[verifierRole])).rows[0];
       if(!v||Object.values(v).some(Boolean)||[appRole,owner.role].includes(verifierRole)||(await db.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)',[verifierRole])).rowCount)throw Error('UNSAFE_VERIFIER_ROLE');
@@ -49,6 +50,8 @@ export async function migrate(pool, appRole, verifierRole) {
       await db.query(`GRANT SELECT ON ALL TABLES IN SCHEMA codeworks TO ${quote(verifierRole)}`);
       await db.query(`GRANT INSERT ON codeworks.verified_ci,codeworks.deployment_evidence,codeworks.installed TO ${quote(verifierRole)}`);
       await db.query(`GRANT UPDATE ON codeworks.installed,codeworks.deployments TO ${quote(verifierRole)}`);
+      await db.query(`GRANT UPDATE (github_retry_at,github_reason_code) ON codeworks.execution_control TO ${quote(verifierRole)}`);
+      await db.query(`GRANT UPDATE (catalog_state,catalog_attempts,catalog_next_attempt_at,catalog_reason_code,catalog_result,catalog_published_at) ON codeworks.verified_ci TO ${quote(verifierRole)}`);
       await db.query(`REVOKE INSERT,UPDATE ON codeworks.verified_ci,codeworks.deployment_evidence,codeworks.installed FROM ${quote(appRole)}`);
     }
     await db.query(`REVOKE ALL ON public.codeworks_migrations FROM PUBLIC,${quote(appRole)}`);
@@ -58,6 +61,7 @@ export async function migrate(pool, appRole, verifierRole) {
     Object.assign(comments,{desired_sha:'Закреплённый commit текущего действия превью.',pending_sha:'Последний обнаруженный commit до завершения текущего действия.',pending_cancel:'Закрытие задачи, ожидающее безопасной сверки текущего действия.',deployed_sha:'Точный подтверждённый commit опубликованного веба.',image_reference:'Immutable образ запрошенной версии.',deployed_image_reference:'Immutable образ подтверждённой версии.',ci_proof:'Ссылка на owner proof и идентичность состава.',deployed_generation:'Поколение подтверждённой публикации.',slot_id:'Занятый слот проекта до подтверждённого удаления.',queue_ticket:'Порядок готовности публикации.',published_at:'Время успешной публикации или явного продления.',expires_at:'Конец срока аренды превью.',last_sync_operation_id:'Последний учтённый явный sync.',action:'Сохранённое внешнее намерение.',action_generation:'Поколение внешнего намерения.',backend_changed:'Рабочая ветка содержит изменения серверных компонентов.'});
     Object.assign(comments,{write_call_id:'Точный допущенный native вызов записи.',original_input_sha256:'Канонический хэш исходного входа; применяется только к доказанному отказу до запуска.',completion_input_sha256:'Канонический хэш фактического перенаправленного входа для проверки Post.',completion_spool_cursor:'Сохранённая позиция ограниченного обхода журнала Post без голодания остальных вызовов.',receipt_sha256:'Неизменный хэш метаданных подтверждения.',notification:'Идентификаторы, хэши входа и исход native Post без текста файлов и вывода.'});
     Object.assign(comments,{head_sha:'Точный проверенный SHA, для которого закреплён PR.',repository:'Закреплённый owner/repository в нижнем регистре.',pr_number:'Подтверждённый номер PR; описание не удостоверяет владение.'});
+    Object.assign(comments,{execution_run_id:'Точный run разрешённого восстановления; старые NULL сохраняют совместимость.',github_retry_at:'Общий срок следующего разрешённого обращения GitHub для проекта.',github_reason_code:'Безопасная причина ожидания GitHub без response body.',catalog_state:'Состояние публикации производного каталога отдельно от CI proof.',catalog_attempts:'Количество попыток публикации производного каталога.',catalog_next_attempt_at:'Следующий безопасный повтор публикации.',catalog_reason_code:'Безопасная причина отказа публикации.',catalog_result:'Подтверждённый digest результата публикации каталога.',catalog_published_at:'Время подтверждения производной публикации.'});
     const columns = (await db.query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='codeworks'")).rows;
     for (const column of columns) {
       if(column.column_name==='code_index')comments.code_index='Владение, источник и наблюдаемое состояние необязательного индекса области.';

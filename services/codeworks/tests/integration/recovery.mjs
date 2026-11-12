@@ -34,7 +34,7 @@ if(process.argv[2]==='prepare') {
     await mkdir(temporaryRoot,{recursive:true});
     await writeFile(stateFile,JSON.stringify({project,ciProject,ciProof,ready,release,pending,archived,base_sha:status.git.head})+'\n',{mode:0o600});
     console.log('Recovery fixture prepared: ready workspace, queued release and interrupted Git intent; run operator backup/restore next.');
-  }finally{await Promise.all([f.owner.end(),f.app.end()]);}
+  }finally{await f.close({preserve:true});}
 } else if(process.argv[2]==='verify') {
   const config=await readConfig();
   const state=JSON.parse(await readFile(stateFile,'utf8'));

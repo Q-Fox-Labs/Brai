@@ -5,6 +5,8 @@ function session(db) {
   const one=async(sql,args)=>(await db.query(sql,args)).rows[0];
   return {
     query:(sql,args)=>db.query(sql,args),
+    commandRetry:id=>one('SELECT retry_at FROM codeworks.commands WHERE operation_id=$1',[id]).then(r=>r?.retry_at??null),
+    postprocessFailure:(p,id)=>one("SELECT d.operation_id,d.receipt->>'code' AS code FROM codeworks.deployments d JOIN codeworks.operations o ON o.id=d.operation_id WHERE d.project_id=$1 AND (d.operation_id=$2 OR d.release_operation_id=$2) AND NOT d.archived AND NOT o.archived AND o.status='failed' AND d.receipt->>'runtime_status'='succeeded' AND d.receipt->>'code' IN ('RUNBOOK_POSTPROCESSING_FAILED','RUNBOOK_COMPLETION_MISSING') ORDER BY d.created_at DESC LIMIT 1",[p,id]),
     executionControl:id=>one('SELECT * FROM codeworks.execution_control WHERE project_id=$1',[id]),
     lifecycle:id=>one('SELECT * FROM codeworks.workflow_registry WHERE workspace_id=$1',[id]),
     uncertainWriter:id=>one("SELECT EXISTS(SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state='uncertain') AS present",[id]).then(r=>r.present),
