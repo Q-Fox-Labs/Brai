@@ -256,8 +256,41 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         self.auth_server.close()
         await self.auth_server.wait_closed()
         reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
-        self.assertIn(b"403", await asyncio.wait_for(reader.read(), 1))
+        self.assertIn(b"503", await asyncio.wait_for(reader.read(), 1))
         self.assertEqual(self.received, [])
+        writer.close()
+
+    async def test_auth_timeout_is_temporary_and_next_request_recovers(self):
+        payload = (b"POST /model/v1/responses HTTP/1.1\r\nHost: localhost\r\n"
+                   b"Content-Length: 2\r\n\r\n{}")
+
+        async def slow_authorize(_path, _uid):
+            await asyncio.sleep(1)
+            return True
+
+        with patch.object(egress, "_authorize_socket", slow_authorize):
+            reader, writer = await self.request(payload)
+            self.assertIn(b"503", await asyncio.wait_for(reader.read(), 2))
+            self.assertEqual(self.received, [])
+            writer.close()
+        self.release.set()
+        reader, writer = await self.request(payload)
+        self.assertIn(b"200 OK", await asyncio.wait_for(reader.read(), 2))
+        writer.close()
+
+    async def test_explicit_auth_denial_still_returns_forbidden(self):
+        self.allowed = False
+        reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertIn(b"403", await asyncio.wait_for(reader.read(), 2))
+        self.assertEqual(self.received, [])
+        writer.close()
+
+    async def test_auth_unavailable_closes_an_already_open_stream(self):
+        reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertIn(b"data: first", await asyncio.wait_for(reader.readuntil(b"data: first\n\n"), 2))
+        self.auth_server.close()
+        await self.auth_server.wait_closed()
+        self.assertEqual(await asyncio.wait_for(reader.read(), 2), b"")
         writer.close()
 
     async def test_codex_credentials_are_refreshed_per_request(self):
