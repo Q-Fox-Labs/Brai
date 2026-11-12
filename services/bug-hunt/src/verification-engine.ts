@@ -139,6 +139,7 @@ export function createVerificationEngine(options:Options){
     const effect=await store.effect(r,"model",phase,intent),save=(cp:ModelCheckpoint)=>store.checkpoint(r,effect.id,cp);
     const cp:ModelCheckpoint=effect.fresh||effect.checkpoint.state==="not_sent"||effect.checkpoint.state==="blocked"&&Object.keys(effect.checkpoint.native).length===0?await executor.startStep(intent,save):await executor.inspectStep(intent,effect.checkpoint,save);
     await save(cp);
+    if(cp.state!=="completed"&&cp.code==="POLICY_REVOKED"&&await store.cancelRequested(r)){await store.set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}
     if(cp.state!=="completed"){const state=cp.state==="unknown"?"outcome_unknown":cp.state==="blocked"?"waiting_dependency":cp.state==="failed"?"failed":"running";await store.set(r,state,cp.code);return {terminal:state==="failed",wait_ms:state==="running"&&!cp.native.operationId?1:60000,code:cp.code??"PENDING"};}
     if(phase==="investigator"){
      if(!checkCandidate(cp.result)||Buffer.byteLength(JSON.stringify(cp.result))>32768)throw new VF("CANDIDATE_INVALID");
