@@ -154,6 +154,20 @@ class ConsentTests(unittest.TestCase):
         timestamp=int(self.store.query(self.scope.key)["delivered_at"])
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",timestamp,"10"),"authorized")
 
+    def test_explicit_confirmation_of_this_action_is_consumed_once(self):
+        row=self.prepare()
+        self.store.delivered(row["id"],"10")
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        event=types.SimpleNamespace(source=source(),internal=False,message_id="11",
+            text="Разрешаю это действие",timestamp=time.time()+1,reply_to_message_id="10")
+        self.assertIsNone(consent.gateway_input(runner,event,event))
+        stored=self.store.query(self.scope.key)
+        self.assertEqual(stored["status"],"authorized")
+        self.assertEqual(stored["answer_id"],"11")
+        self.assertTrue(self.store.claim(row["id"],stored["fingerprint"],"once"))
+        self.assertFalse(self.store.claim(row["id"],stored["fingerprint"],"twice"))
+
     def test_no_answer_before_delivery(self):
         row=self.prepare()
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",time.time()+1),"stale")
@@ -261,33 +275,56 @@ class ConsentTests(unittest.TestCase):
         self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
         consent.record_delivery(event,row["question"],True,"10")
         self.assertIsNotNone(self.store.query(self.scope.key)["delivered_at"])
-    def test_confirmed_stream_delivery_arms_exact_question_for_normal_reply(self):
+    def test_worker_normal_completion_cannot_rearm_replaced_question(self):
         row=self.prepare()
-        runner=types.SimpleNamespace(session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
-        turn=types.SimpleNamespace(source=source(),session_key="native-key",session_id="session",inbound_message_id="1")
-        consent.record_stream_delivery(runner,turn,row["question"],"10")
-        stored=self.store.query(self.scope.key)
-        self.assertIsNotNone(stored["delivered_at"])
-        self.assertEqual(stored["question_message_id"],"10")
-        self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",time.time()+1,"10"),"authorized")
-        self.assertTrue(self.store.claim(row["id"],stored["fingerprint"],"execute-once"))
-        self.assertFalse(self.store.claim(row["id"],stored["fingerprint"],"execute-again"))
-
-    def test_stream_receipt_never_arms_other_owner_session_topic_or_preview(self):
-        row=self.prepare()
-        runner=types.SimpleNamespace(session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
-        for actor,session,text,mid in ((source("bob"),"session",row["question"],"10"),
-            (source(thread="other"),"session",row["question"],"10"),
-            (source(),"new-session",row["question"],"10"),
-            (source(),"session","Предварительный ответ","10"),
-            (source(),"session",row["question"],None),
-            (source(),"session",row["question"],"__no_edit__")):
-            turn=types.SimpleNamespace(source=actor,session_key="native-key",session_id=session,inbound_message_id="1")
-            consent.record_stream_delivery(runner,turn,text,mid)
-            self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
-        turn.inbound_message_id="other-input"
-        consent.record_stream_delivery(runner,turn,row["question"],"10")
+        event=types.SimpleNamespace(_brai_consent_delivery=(self.db,self.scope.key,"alice"))
+        self.store.invalidate(row["id"])
+        replacement=self.prepare()
+        with patch.dict(consent.os.environ,BRAI_IDENTITY_MODE="worker"):
+            consent.record_delivery(event,replacement["question"],True,"10")
         self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+
+    def test_transport_receipt_is_bound_before_question_replacement(self):
+        row=self.prepare()
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        pending=consent.pending_delivery(runner,source(),row["question"])
+        self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+        self.store.invalidate(row["id"])
+        replacement=self.prepare()
+        pending[0].delivered(pending[1],"10")
+        self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+        self.assertNotEqual(replacement["id"],row["id"])
+
+    def test_transport_receipt_rejects_other_owner_topic_generation_and_content(self):
+        row=self.prepare()
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        for actor,text in ((source("bob"),row["question"]),
+                (source(thread="other"),row["question"]),(source(),"Предварительный ответ")):
+            self.assertIsNone(consent.pending_delivery(runner,actor,text))
+        runner._brai_consent_generation=lambda _:1
+        self.assertIsNone(consent.pending_delivery(runner,source(),row["question"]))
+
+    def test_prepared_input_is_not_reinterpreted_on_idle_dispatch(self):
+        import asyncio
+        row=self.prepare()
+        self.store.delivered(row["id"],"10")
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        event=types.SimpleNamespace(source=source(),internal=False,message_id="11",
+            text="Разрешаю это действие",timestamp=time.time()+1,reply_to_message_id="10")
+        self.assertIsNone(asyncio.run(consent.gateway_input_prepared(runner,event,event)))
+        # Повторный idle hook не читает даже новое обогащённое представление.
+        event._gateway_pending_stt_text="Разрешаю это действие"
+        event._gateway_pending_stt_transcripts=["Разрешаю это действие"]
+        event._gateway_pending_stt_echoed=1
+        replacement=types.SimpleNamespace(source=event.source,text="Служебное представление")
+        self.assertIsNone(asyncio.run(consent.gateway_input_prepared(runner,replacement,event)))
+        self.assertEqual(replacement._gateway_pending_stt_transcripts,event._gateway_pending_stt_transcripts)
+        self.assertEqual(replacement._gateway_pending_stt_echoed,1)
+        self.assertEqual(self.store.query(self.scope.key)["status"],"authorized")
+        self.assertEqual(self.store.requests(self.scope.key,"alice")[-1]["text"],"Разрешаю это действие")
 
     def test_reviewer_has_budget_context_and_bounded_retry(self):
         auxiliary=types.ModuleType("agent.auxiliary_client")

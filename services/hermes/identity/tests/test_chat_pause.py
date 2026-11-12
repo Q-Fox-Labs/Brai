@@ -119,6 +119,7 @@ class WorkerPauseTest(unittest.IsolatedAsyncioTestCase):
         worker.ensure_tools = AsyncMock()
         event = dict(source=source_data, text='Новый вход', message_id='3', chat_generation=2, delivery_scope='scope')
         modules = {
+            'tools.approval_conversation': SimpleNamespace(gateway_input_prepared=AsyncMock(return_value=None)),
             'gateway.session': SimpleNamespace(SessionSource=SimpleNamespace(from_dict=source)),
             'gateway.platforms.event': SimpleNamespace(MessageType=lambda value: value,
                 MessageEvent=lambda **value: SimpleNamespace(**value, _gateway_accepted=False)),

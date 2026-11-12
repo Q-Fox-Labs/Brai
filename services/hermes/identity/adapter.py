@@ -69,7 +69,7 @@ def make_adapter(config, platform, peer, publish_file):
             if not hasattr(self, '_brai_chats'):
                 self._brai_chats = {}
             self._brai_chats[str(source.chat_id)] = {'name': source.chat_name or '', 'type': source.chat_type}
-            self._delivery_source.set((str(source.chat_id), getattr(source, 'thread_id', None)))
+            self._delivery_source.set((str(source.chat_id), getattr(source, 'thread_id', None), source))
 
         async def get_chat_info(self, chat_id):
             """Вернуть только известный из подтверждённого входа чат."""
@@ -101,12 +101,26 @@ def make_adapter(config, platform, peer, publish_file):
                     and not metadata.get('thread_id') and not metadata.get('message_thread_id')
                     and not metadata.get('direct_messages_topic_id')):
                 payload = {**payload, 'metadata': {**metadata, '_brai_notifications': True}}
+            # AIDEV-NOTE: Учитываем фактическую доставку, включая streaming и ответ
+            # перед очередью. Завершение модельного хода не заменяет квитанцию.
+            pending = None
+            source = self._delivery_source.get()
+            thread = metadata.get('thread_id') or metadata.get('message_thread_id') or metadata.get('direct_messages_topic_id')
+            if (source and getattr(self, 'gateway_runner', None) is not None
+                    and str(payload.get('chat_id')) == source[0]
+                    and str(thread or '') == str(source[1] or '')
+                    and (name == 'send' or (name == 'edit_message' and payload.get('finalize')))):
+                from tools.approval_conversation import pending_delivery
+                pending = pending_delivery(getattr(self, 'gateway_runner', None), source[2], payload.get('content'))
             try:
                 value = await peer.call('send', {'action': name, 'payload': payload, 'scope_id': delivery_scope.get()})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
                     raise ValueError('invalid send result')
                 fields = ('success', 'message_id', 'error', 'raw_response', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind')
-                return SendResult(**{key: value[key] for key in fields if key in value})
+                result = SendResult(**{key: value[key] for key in fields if key in value})
+                if pending and result.success and result.message_id:
+                    pending[0].delivered(pending[1], result.message_id)
+                return result
             except (ConnectionError, TimeoutError, RpcError, ValueError) as error:
                 logging.getLogger(__name__).warning(
                     'identity_delivery_failed action=%s error=%s rpc_code=%s',
