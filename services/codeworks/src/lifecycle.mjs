@@ -1,13 +1,15 @@
 // ABOUTME: Проверяет допуск сохранённых команд, владение workflow и постоянную очередь выпусков.
 // ABOUTME: Никакие параметры сигнала Temporal не разрешают внешнее действие без записи PostgreSQL.
 import {Fault} from './errors.mjs';
+import {executionContext} from './execution-context.mjs';
 import {randomUUID} from 'node:crypto';
 const active=['pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation'];
 /** Проверяет ID фактического workflow, поколение и неизменность поручения перед каждым проходом Activity. */
-export async function authorizeCommand(db,operationId,workflowId,generation) {
-  const row=(await db.query(`SELECT c.*,r.owner,r.state AS workflow_state,r.lifecycle,o.kind AS operation_kind,o.request,o.archived,o.step
+export async function authorizeCommand(db,operationId,workflowId,generation,runId=executionContext()?.workflowRunId) {
+  const row=(await db.query(`SELECT c.*,r.owner,r.state AS workflow_state,r.lifecycle,r.execution_run_id,o.kind AS operation_kind,o.request,o.archived,o.step
     FROM codeworks.commands c JOIN codeworks.workflow_registry r USING(workflow_id) JOIN codeworks.operations o ON o.id=c.operation_id
     WHERE c.operation_id=$1 AND c.workflow_id=$2 AND c.generation=$3 AND r.generation=c.generation`,[operationId,workflowId,generation])).rows[0];
+  if(row?.execution_run_id&&row.execution_run_id!==runId)throw new Fault('FORBIDDEN','WORKFLOW_OWNER_REQUIRED');
   if(!row||row.owner!=='temporal'||row.workflow_state==='completed'||row.archived||row.kind!==row.operation_kind||JSON.stringify(sort(row.request))!==JSON.stringify(sort(row.admitted_request))||row.requested_sha!==(row.request.commit_sha??null))throw new Fault('FORBIDDEN','Activity requires an admitted command owned by this workflow.');
   if(!['prepare','sync','release','cleanup','rollout','release.close','workspace.cancel','workspace.transfer'].includes(row.kind))throw new Fault('FORBIDDEN');
   return row;

@@ -187,3 +187,40 @@ test('недоступный архив не позволяет завершит
   await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace',base_sha:'base'},{git:{inspectResources:async()=>empty},codeIndex:{},verifyFilesystem:async(_p,_w,_proof,{phase})=>{assert.equal(phase,'archive');throw error;}}),{code:'TARGET_CHANGED'});
   assert.equal(changed,false);
 });
+
+test('однократная ошибка чтения архива сохраняет durable retry и прежний шаг до удаления',async()=>{
+  const archive={path:'/backup/area.bundle',sha256:'a'.repeat(64)},expected={branch:{oid:'b'.repeat(40)},remote:{oid:null},tracking:{oid:null},worktree:{head:'b'.repeat(40),pathExists:true,dirty:false}};
+  let item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'worktree',state:'pending',expected,evidence:{archive,archive_authorized:true,manifest:{reviewed:true,protected_task_ids:[],disposition:{type:'archived',archive}}}};
+  let calls=0,deletes=0,retrySQL;
+  const db={query:async(sql,args=[])=>{
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.includes('SELECT 1 FROM codeworks'))return {rowCount:0};
+    if(sql.includes('UPDATE codeworks.cleanup_obligations')){
+      if(sql.includes("state='retry'")){retrySQL=sql;item={...item,state:'retry'};}
+      else item={...item,state:'pending',step:args[3]};
+      return {rowCount:1,rows:[item]};
+    }
+    return {rowCount:0,rows:[]};
+  }};
+  const ports={git:{cleanupStep:async()=>{deletes++;}},verifyArchive:async()=>{if(calls++===0)throw Object.assign(Error('read archive'),{code:'EIO'});}};
+  const first=await advanceCleanup(db,item,{id:'project'},{id:'workspace'},ports);
+  assert.equal(first.state,'retry');assert.equal(first.step,'worktree');assert.equal(deletes,0);assert.match(retrySQL,/next_attempt_at=now\(\)\+interval '60 seconds'/);assert.match(retrySQL,/attempts=attempts\+1/);
+  const second=await advanceCleanup(db,item,{id:'project'},{id:'workspace'},ports);
+  assert.equal(second.state,'pending');assert.equal(second.step,'local_refs');assert.equal(deletes,1);assert.deepEqual(second.expected,expected);
+});
+
+test('ошибка proof остаётся decision, отмена, guard loss и неизвестный сбой пробрасываются',async()=>{
+  for(const error of [Error('ARCHIVE_UNVERIFIED'),new DOMException('cancelled','AbortError'),Error('CLEANUP_FENCE_LOST'),Error('unknown archive bug')]){
+    const archive={path:'/backup/area.bundle'},item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'worktree',state:'pending',expected:{branch:{oid:'head'},worktree:{head:'head',pathExists:true,dirty:false}},evidence:{archive,archive_authorized:true,manifest:{disposition:{type:'archived',archive},reviewed:true}}};
+    let saved=false;
+    const db={query:async sql=>{
+      if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+      if(sql.includes('SELECT 1 FROM codeworks'))return {rowCount:0};
+      if(sql.includes('UPDATE codeworks.cleanup_obligations')){saved=true;return {rowCount:1,rows:[{state:'waiting_decision'}]};}
+      return {rowCount:0,rows:[]};
+    }};
+    const run=()=>advanceCleanup(db,item,{id:'p'},{id:'workspace'},{git:{cleanupStep:async()=>assert.fail('unexpected deletion')},verifyArchive:async()=>{throw error;}});
+    if(error.message==='ARCHIVE_UNVERIFIED'){assert.equal((await run()).state,'waiting_decision');assert.equal(saved,true);}
+    else{await assert.rejects(run,seen=>seen===error);assert.equal(saved,false);}
+  }
+});

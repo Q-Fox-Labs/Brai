@@ -16,6 +16,6 @@ test('real PG CI evidence is durable, append-only and included in own schema',{s
     await assert.rejects(store.save(project,{...proof,published:{digest:'sha256:'+'c'.repeat(64)}}),/CI_DURABLE_PROOF_CONFLICT/);
     assert.deepEqual(await store.read(project,'123','1'),proof);
     const columns=(await f.owner.query("SELECT column_name,col_description('codeworks.verified_ci'::regclass,ordinal_position) AS comment FROM information_schema.columns WHERE table_schema='codeworks' AND table_name='verified_ci'")).rows;
-    assert.equal(columns.length,6);assert(columns.every(c=>c.comment));
+    assert.equal(columns.length,12);assert(columns.every(c=>c.comment));
   }finally{await f.close();}
 });

@@ -210,7 +210,7 @@ test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:fixtureTimeout(p
       assert.equal((await owner.query('SELECT archived FROM codeworks.deployments WHERE operation_id=$1',[freshRollout])).rows[0].archived,false);
       assert.deepEqual((await owner.query('SELECT archived,composition,receipt FROM codeworks.deployments WHERE operation_id=$1',[rollout])).rows[0],{archived:true,composition,receipt});
       assert.deepEqual((await owner.query('SELECT archived,status,step,request FROM codeworks.operations WHERE id=$1',[operation])).rows[0],archived);
-      assert.equal((await owner.query('SELECT count(*)::int AS count FROM public.codeworks_migrations')).rows[0].count,13);
+      assert.deepEqual((await owner.query('SELECT version FROM public.codeworks_migrations WHERE version IN (1,7,16) ORDER BY version')).rows.map(r=>r.version),[1,7,16]);
     }finally{
       await owner.query('DROP SCHEMA IF EXISTS codeworks CASCADE; DROP TABLE IF EXISTS public.codeworks_migrations');
       await owner.end();

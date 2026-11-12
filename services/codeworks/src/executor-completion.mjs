@@ -66,10 +66,11 @@ export function executorProof(call,entry) {
 
 /** Ограниченный проход Temporal; API ошибки сохраняют писателя до следующей сверки. */
 export async function recoverExecutorCompletions(pool,projectId,{socketPath,allowedRepositories,git,read=readExecutorItems}={}) {
-  if(!socketPath)return {recovered:0};
+  if(!socketPath)return {recovered:0,ready:false,hasMore:false,nextRetry:null};
   const calls=(await pool.query(`SELECT c.* FROM codeworks.write_calls c JOIN codeworks.workspaces w ON w.id=c.workspace_id
     WHERE c.project_id=$1 AND c.executor_id='codex' AND c.state IN ('in_flight','uncertain')
     AND c.admitted_at IS NOT NULL AND w.removed_at IS NULL
+    AND (c.tool_result->>'executor_next_retry_at' IS NULL OR (c.tool_result->>'executor_next_retry_at')::timestamptz<=now())
     ORDER BY c.updated_at,c.id LIMIT 8`,[projectId])).rows;
   let recovered=0;
   for(const call of calls){
@@ -79,12 +80,16 @@ export async function recoverExecutorCompletions(pool,projectId,{socketPath,allo
       if(entries.length>1)throw Error('EXECUTOR_ITEM_CONFLICT');
       const proof=entries.length===1?executorProof(call,entries[0]):null;
       if(proof){await importNativeCompletion(pool,null,{allowedRepositories,git,verifyReceipt:async()=>proof});recovered++;}
-      else await pool.query(`UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_scan_cursor',$2::text,'executor_recovery_error',$3::text),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')`,[call.id,page.nextCursor,page.data.length&&!entries.length?'EXECUTOR_ITEM_MISSING':null]);
+      else await pool.query(`UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_scan_cursor',$2::text,'executor_recovery_error',$3::text,'executor_next_retry_at',CASE WHEN $2::text IS NULL THEN now()+interval '60 seconds' ELSE now() END),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')`,[call.id,page.nextCursor,entries.length?'EXECUTOR_ITEM_NOT_TERMINAL':'EXECUTOR_ITEM_MISSING']);
     }catch(error){
       // AIDEV-NOTE: Ни ошибка API, ни отсутствие item не разрешают освобождать ресурсы.
       const reason=['EXECUTOR_LINEAGE_INVALID','EXECUTOR_SOCKET_INVALID','EXECUTOR_READ_TIMEOUT','EXECUTOR_UNAVAILABLE','EXECUTOR_DISCONNECTED','EXECUTOR_READ_INVALID','EXECUTOR_READ_FAILED','EXECUTOR_ITEM_CONFLICT','CLEANUP_BUSY'].includes(error.message)?error.message:'EXECUTOR_RECOVERY_FAILED';
-      await pool.query("UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_recovery_error',$2::text),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')",[call.id,reason]);
+      await pool.query("UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_recovery_error',$2::text,'executor_next_retry_at',now()+interval '60 seconds'),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')",[call.id,reason]);
     }
   }
-  return {recovered};
+  const backlog=(await pool.query(`SELECT count(*) FILTER (WHERE c.tool_result->>'executor_next_retry_at' IS NULL OR (c.tool_result->>'executor_next_retry_at')::timestamptz<=now())::int AS ready,
+    min((c.tool_result->>'executor_next_retry_at')::timestamptz) AS next_retry
+    FROM codeworks.write_calls c JOIN codeworks.workspaces w ON w.id=c.workspace_id WHERE c.project_id=$1 AND c.executor_id='codex'
+    AND c.state IN ('in_flight','uncertain') AND c.admitted_at IS NOT NULL AND w.removed_at IS NULL`,[projectId])).rows[0];
+  return {recovered,ready:backlog.ready>0,hasMore:backlog.ready>0,nextRetry:backlog.next_retry??null};
 }

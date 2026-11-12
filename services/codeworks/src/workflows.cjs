@@ -9,6 +9,9 @@ const wake=defineSignal('commandsAvailable');
 /** Передаёт между runs только поколение и курсор; PostgreSQL хранит доказательства и окончательную дедупликацию. */
 async function codeworksWorkspace(state={generation:1,position:0}) {
   patched('codeworks-ledger-v1');
+  if(patched('codeworks-repaired-run-fence-v1')){
+    for(;;){try{await activities.admitWorkflowRun(state.generation,workflowInfo().continuedFromExecutionRunId??null);break;}catch{await condition(()=>false,1000);}}
+  }
   const continueAfter=Number.isSafeInteger(state.continueAfter)&&state.continueAfter>=2&&state.continueAfter<=500?state.continueAfter:500;
   let notified=true,cycles=0,delay=1000;
   let indexScope,indexPass,nextIndexAt=0;
@@ -66,13 +69,19 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
 exports.codeworksWorkspace=codeworksWorkspace;
 /** Singleton проекта регулярно сверяет сохранённые обязательства и продолжает историю. */
 async function codeworksProjectReconciler(state){
-  let cycles=0,previewPass,nextPreviewAt=0;
+  let cycles=0,previewPass,catalogPass,nextPreviewAt=0,nextCatalogAt=0;
   for(;;){
-    let progressed=false,historicalEnabled=false;
+    let progressed=false,historicalEnabled=false,nextRetry=null;
     if(patched('codeworks-web-preview-v1')&&!previewPass&&Date.now()>=nextPreviewAt){
       nextPreviewAt=Date.now()+60000;
       // AIDEV-NOTE: Публикация отдельно от очистки и не блокирует её длительным ожиданием.
       previewPass=execution.maintainPreviews(state.projectId,state.previewCursor??null).then(result=>{state.previewCursor=result?.cursor??null;}).catch(()=>{}).finally(()=>{previewPass=undefined;});
+    }
+    if(patched('codeworks-catalog-publication-v1')&&!catalogPass&&Date.now()>=nextCatalogAt){
+      nextCatalogAt=Date.now()+60000;
+      catalogPass=execution.maintainCatalog(state.projectId).then(result=>{
+        nextCatalogAt=result?.next_attempt_at?Math.max(Date.now()+1000,new Date(result.next_attempt_at).getTime()):Date.now()+(result?.state==='pending'?1000:60000);
+      }).catch(()=>{}).finally(()=>{catalogPass=undefined;});
     }
     try{
       const cursorEnabled=patched('codeworks-reconciler-cursor-v1');
@@ -81,11 +90,13 @@ async function codeworksProjectReconciler(state){
       const result=historicalEnabled?await activity.reconcileProject(state.projectId,state.adoptionCursor??null,state.historicalCursor??null):cursorEnabled?await activity.reconcileProject(state.projectId,state.adoptionCursor??null):await activity.reconcileProject(state.projectId);
       if(cursorEnabled)state.adoptionCursor=result?.nextCursor??null;
       if(historicalEnabled)state.historicalCursor=result?.nextHistoricalCursor??null;
+      if(patched('codeworks-completion-backlog-v1'))nextRetry=result?.nextRetry??null;
       progressed=result?.state==='pending'||(cursorEnabled&&result?.hasMore===true)||(historicalEnabled&&(result?.historicalHasMore===true||result?.ready===true));
     }catch{}
     const continueAfter=historicalEnabled&&Number.isSafeInteger(state.continueAfter)&&state.continueAfter>=2&&state.continueAfter<=500?state.continueAfter:500;
-    if((workflowInfo().continueAsNewSuggested||++cycles>=continueAfter)&&allHandlersFinished()&&!previewPass)await continueAsNew(state);
-    await condition(()=>false,progressed?1000:60000);
+    if((workflowInfo().continueAsNewSuggested||++cycles>=continueAfter)&&allHandlersFinished()&&!previewPass&&!catalogPass)await continueAsNew(state);
+    const delay=nextRetry?Math.min(60000,Math.max(1000,new Date(nextRetry).getTime()-Date.now())):60000;
+    await condition(()=>false,progressed?1000:delay);
   }
 }
 exports.codeworksProjectReconciler=codeworksProjectReconciler;

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {mkdir,writeFile,chmod,mkdtemp,rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
+import {spawn} from 'node:child_process';
 import {WebSocketServer} from 'ws';
 import {fileURLToPath} from 'node:url';
 import {Connection,Client} from '@temporalio/client';
@@ -21,7 +22,8 @@ import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 import {rawHash,canonicalHash,listNotices} from '../../src/write-notice.mjs';
 import {runHook} from '../../src/hook.mjs';
 import {importNativeCompletion,validateCompletionReceipt} from '../../src/write-completion.mjs';
-import {executorProof} from '../../src/executor-completion.mjs';
+import {executorProof,recoverExecutorCompletions} from '../../src/executor-completion.mjs';
+import {advanceCleanup} from '../../src/cleanup-coordinator.mjs';
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
@@ -140,6 +142,54 @@ test('not-started fences late begin and completes only the exact failed invocati
  assert.equal((await f.h.call('write.finish',post(lost),'codex')).state,'pending');await reconcileProjectLedger(f.app,p.id,'fixture-reconciler');
  const bound=(await f.app.query('SELECT workspace_id,operation_id FROM codeworks.write_calls WHERE id=$1',[callId])).rows[0];assert.equal(bound.workspace_id,w.id);assert.equal(bound.operation_id,operation);
  await processProjectCompletions(f.app,p.id,opts);assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[callId])).rows[0].state,'finished');assert.equal(inspected,0);
+});
+
+
+test('typed not_started closes only its exact call while missing and live sibling items keep cleanup blocked',{timeout:120000},async t=>{
+ assert.ok(configured,'explicit disposable PostgreSQL required');const f=await setup();let liveChild;
+ t.after(async()=>{if(liveChild&&liveChild.exitCode===null&&liveChild.signalCode===null){const exited=new Promise(resolve=>liveChild.once('close',resolve));liveChild.kill('SIGTERM');await exited;}await f.close();});
+ const p=await f.project({codeIndexDisabled:true}),prepared=await f.prepare({project_id:p.id,workspace_key:'not-started-neighbors',request_key:'prepare-not-started-neighbors'});await f.worker(p,prepared.operation_id);
+ const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0],session='same-session',turn='same-turn',calls=[];
+ const writerScript="process.stdin.resume();process.stdin.once('data',()=>require('node:fs').writeFileSync('hello.txt','live writer'));";
+ const liveCommand=process.execPath+' -e '+JSON.stringify(writerScript);
+ for(const [tool,command] of [['failed-dispatch','git add hello.txt'],['missing-item','git add other.txt'],['live-item',liveCommand]]){
+  const input={command},request={project_id:p.id,workspace_id:w.id,workspace_key:w.workspace_key,session_id:session,turn_id:turn,tool_use_id:tool,tool_name:'Bash',payload_sha256:rawHash({tool_name:'Bash',tool_input:input,cwd:p.repo_path,project_id:p.id,workspace_id:w.id}),original_input_sha256:canonicalHash(input),targets:['hello.txt'],request_key:'neighbor-'+tool};
+  const admitted=await f.h.call('write.begin',request,'codex');
+  await f.h.call('write.admit',{project_id:p.id,write_call_id:admitted.write_call_id,rewritten_sha256:rawHash(input),completion_input_sha256:canonicalHash(input)},'codex');
+  calls.push({id:admitted.write_call_id,input,request});
+ }
+ liveChild=spawn(process.execPath,['-e',writerScript],{cwd:w.path,stdio:['pipe','ignore','ignore']});
+ await new Promise((resolve,reject)=>{liveChild.once('spawn',resolve);liveChild.once('error',reject);});
+ await f.h.call('write.stop',{project_id:p.id,session_id:session,turn_id:turn,event:'Stop'},'codex');
+ assert.doesNotThrow(()=>process.kill(liveChild.pid,0),'Stop must not be mistaken for termination of the admitted foreground writer');
+ const owner='fixture/'+randomUUID();
+ await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle) VALUES($1,$2,$3,'temporal','draining','closing')",[owner,p.id,w.id]);
+ const obligation=(await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch) VALUES($1,$2,$3,$4,'cancelled',$5,1) RETURNING *",[randomUUID(),p.id,w.id,'workspace:'+w.id,owner])).rows[0];
+ const db=await f.app.connect();
+ try{assert.equal((await advanceCleanup(db,obligation,p,w,{git:createGit(),codeIndex:createCodeIndex(f.app)})).blocker,'WRITER_OUTCOME_UNKNOWN');}
+ finally{db.release();}
+ const exact=calls[0],notice={project_id:p.id,session_id:session,turn_id:turn,tool_use_id:exact.request.tool_use_id,tool_name:'Bash',input_sha256:rawHash(exact.input),canonical_input_sha256:canonicalHash(exact.input),execution_status:'not_started',outcome:'error'};
+ await assert.rejects(f.h.call('write.finish',{...notice,tool_use_id:calls[1].request.tool_use_id},'codex'),{code:'WRITE_CALL_MISMATCH'});
+ assert.equal((await f.h.call('write.finish',notice,'codex')).state,'pending');
+ let inspected=0;
+ await processProjectCompletions(f.app,p.id,{allowedRepositories:[p.repo_path],git:{...createGit(),inspect:async()=>{inspected++;throw Error('not_started must not inspect or activate workspace');}}});
+ const closed=(await f.app.query('SELECT state,tool_result FROM codeworks.write_calls WHERE id=$1',[exact.id])).rows[0];
+ assert.equal(closed.state,'finished');assert.equal(closed.tool_result.outcome,'error');assert.equal(closed.tool_result.changed,false);
+ assert.equal(closed.tool_result.post_completion.execution_status,'not_started');assert.equal(inspected,0);
+ assert.equal((await f.h.call('write.finish',notice,'codex')).state,'finished','same typed completion remains idempotent');
+ const recovery=await recoverExecutorCompletions(f.app,p.id,{socketPath:'/fixture/read-only-executor',allowedRepositories:[p.repo_path],read:async()=>({
+  data:[{turnId:turn,item:{id:calls[2].request.tool_use_id,type:'commandExecution',status:'inProgress',exitCode:null}}],nextCursor:null,
+ })});
+ assert.doesNotThrow(()=>process.kill(liveChild.pid,0),'read-only reconciliation leaves the matching foreground writer alive');
+ assert.equal(recovery.recovered,0);assert.equal(recovery.ready,false,'live or absent item waits for the bounded retry');
+ const siblings=(await f.app.query('SELECT id,state,finished_at,tool_result FROM codeworks.write_calls WHERE id=ANY($1::uuid[]) ORDER BY tool_use_id',[[calls[1].id,calls[2].id]])).rows;
+ assert.equal(siblings.length,2);
+ for(const sibling of siblings){assert.equal(sibling.state,'uncertain');assert.equal(sibling.finished_at,null);assert.equal(sibling.tool_result?.outcome,undefined);}
+ assert.equal(siblings.find(row=>row.id===calls[1].id).tool_result.executor_recovery_error,'EXECUTOR_ITEM_MISSING');
+ assert.equal(siblings.find(row=>row.id===calls[2].id).tool_result.executor_recovery_error,'EXECUTOR_ITEM_NOT_TERMINAL');
+ assert.deepEqual((await f.app.query('SELECT state,blocker FROM codeworks.cleanup_obligations WHERE id=$1',[obligation.id])).rows[0],{state:'waiting_decision',blocker:'WRITER_OUTCOME_UNKNOWN'});
+ const after=(await f.app.query('SELECT activation_state,removed_at FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0];
+ assert.equal(after.activation_state,w.activation_state);assert.equal(after.removed_at,null);
 });
 
 test('synthetic owner-reviewed receipt v2 uses the guarded PG importer without finishing another writer',{timeout:120000},async t=>{
