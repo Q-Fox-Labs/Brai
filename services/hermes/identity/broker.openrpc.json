@@ -541,6 +541,152 @@
       ]
     },
     {
+      "name": "permissions.bootstrap",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "role",
+            "generation",
+            "backgroundsSuspended",
+            "staged"
+          ],
+          "properties": {
+            "role": {
+              "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityUser/properties/role"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "backgroundsSuspended": {
+              "type": "boolean"
+            },
+            "staged": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "permissions.get",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "role",
+            "generation"
+          ],
+          "properties": {
+            "role": {
+              "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityUser/properties/role"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "native.authorize",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "allowed",
+            "role",
+            "generation"
+          ],
+          "properties": {
+            "allowed": {
+              "type": "boolean"
+            },
+            "role": {
+              "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityUser/properties/role"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
       "name": "tools.list",
       "description": "Worker catalog bound to SO_PEERCRED; owner cannot be supplied.",
       "paramStructure": "by-name",
@@ -550,6 +696,7 @@
         "schema": {
           "type": "object",
           "required": [
+            "role",
             "tools"
           ],
           "properties": {
@@ -558,6 +705,9 @@
               "items": {
                 "type": "object"
               }
+            },
+            "role": {
+              "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityUser/properties/role"
             }
           }
         }
@@ -822,6 +972,117 @@
         "name": "result",
         "schema": {
           "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.create-text",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "filename",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 180
+          }
+        },
+        {
+          "name": "content",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 1048576
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.read-text",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "artifactId",
+            "filename",
+            "content"
+          ],
+          "properties": {
+            "artifactId": {
+              "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+            },
+            "filename": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 180
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 1048576
+            }
+          },
+          "additionalProperties": false
         }
       },
       "errors": [
@@ -1485,6 +1746,323 @@
         "access": "O_RDONLY",
         "singleRequestOnly": true
       }
+    },
+    {
+      "name": "native.catalog",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "allowed",
+            "role",
+            "generation"
+          ],
+          "properties": {
+            "allowed": {
+              "type": "boolean"
+            },
+            "role": {
+              "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityUser/properties/role"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ],
+      "description": "Проверка имени только для discovery подготовленного каталога; не выдаёт право исполнения."
+    },
+    {
+      "name": "files.create-document",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "filename",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 180
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        {
+          "name": "document",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "description": "Ограниченный JSON документа/книги: до 1 МиБ, 20000 ячеек; код, внешние ссылки и пути не принимаются."
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.create-spreadsheet",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "filename",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 180
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        {
+          "name": "workbook",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "description": "Ограниченный JSON документа/книги: до 1 МиБ, 20000 ячеек; код, внешние ссылки и пути не принимаются."
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "generated.begin",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "kind",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "image",
+              "audio",
+              "screenshot"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "ticket": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticket",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "generated.finish",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "ticket",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "sizeBytes",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 67108864
+          }
+        },
+        {
+          "name": "sha256",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "generated.abort",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "ticket",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "aborted": {
+              "const": true
+            }
+          },
+          "required": [
+            "aborted"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
     }
   ],
   "components": {

@@ -6,23 +6,34 @@ import re
 import uuid
 from pathlib import PurePosixPath
 
-from .profiles import _path
+from .profiles import _digest, _path
+
+
+def browser_identity(profile):
+    """Вернуть отдельную личность guest Chrome или прежнюю личность обычного профиля."""
+    home = _path(profile['home'])
+    profile_id = profile['profileId']
+    if not isinstance(profile_id, str) or str(uuid.UUID(profile_id)) != profile_id:
+        raise ValueError('Invalid profile identity')
+    name = profile['username']
+    if not isinstance(name, str) or not re.fullmatch(r'braiu-[0-9a-f]{20}', name):
+        raise ValueError('Invalid profile account')
+    if profile.get('role') == 'guest':
+        name = 'braib-' + _digest(profile['userId'])[:20]
+        home = str(PurePosixPath(home).parent.parent / 'browser-guests' / profile_id)
+    return {'username': name, 'home': home, 'browser': home + '/browser'}
 
 
 def browser_unit(profile, *, chrome_root, instance='dev'):
     """Сформировать unit собственного Chrome в сетевом пространстве worker."""
-    home = _path(profile['home'])
+    identity = browser_identity(profile)
+    home, name, browser = identity['home'], identity['username'], identity['browser']
     root = _path(chrome_root)
-    name = profile['username']
     profile_id = profile['profileId']
-    if not re.fullmatch(r'braiu-[0-9a-f]{20}', name):
-        raise ValueError('Invalid profile account')
-    if not isinstance(profile_id, str) or str(uuid.UUID(profile_id)) != profile_id:
-        raise ValueError('Invalid profile identity')
+    guest = profile.get('role') == 'guest'
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', instance):
         raise ValueError('Invalid instance')
     worker = 'brai-hermes-' + instance + '-user-' + profile_id + '.service'
-    browser = home + '/browser'
     chrome = str(PurePosixPath(root) / 'chrome')
     lines = [
         '[Unit]', 'Description=Brai personal browser ' + profile_id,
@@ -34,8 +45,10 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
         'ExecStart=' + chrome + ' --headless=new --remote-debugging-address=127.0.0.1'
         ' --force-prefers-reduced-motion --remote-debugging-port=19364 --user-data-dir=' + browser + '/profile'
         ' --no-first-run --no-default-browser-check --disable-background-networking'
-        ' --disable-component-update --disable-sync --proxy-server=http://127.0.0.1:18080'
-        ' --proxy-bypass-list=<-loopback> about:blank',
+        ' --disable-component-update --disable-sync'
+        + (' --disable-extensions' if guest else '')
+        + ' --proxy-server=http://127.0.0.1:' + ('18081' if guest else '18080')
+        + ' --proxy-bypass-list=<-loopback> about:blank',
         'UMask=0077', 'Restart=on-failure', 'RestartSec=3',
         'PrivateNetwork=yes', 'PrivateTmp=yes', 'PrivateDevices=yes',
         'NoNewPrivileges=yes', 'CapabilityBoundingSet=', 'AmbientCapabilities=',

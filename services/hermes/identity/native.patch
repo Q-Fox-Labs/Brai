@@ -103,7 +103,7 @@
  def _start_gateway_start_cron_and_housekeeping(runner):
      """Start the cron scheduler thread + gateway housekeeping thread; returns
      ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
-+    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram" or (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and __import__("identity.native_policy", fromlist=["guest_mode"]).guest_mode()):
 +        # Общий gateway не исполняет пользовательские задания и связанные housekeeping jobs.
 +        stop = threading.Event()
 +        class _DisabledCron:
@@ -354,7 +354,7 @@
  ) -> list[Path]:
      """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
      fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
-+    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram" or (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and __import__("identity.native_policy", fromlist=["staging_mode"]).staging_mode()):
 +        # Parent получает только root-owned systemd EnvironmentFile, без HOME override.
 +        return []
      # Process home on purpose (never the per-turn override): a startup .env load must not follow a routed
@@ -490,6 +490,18 @@
 +            task = asyncio.create_task(coro)
          self._background_tasks.add(task)
          task.add_done_callback(self._background_tasks.discard)
+
+--- a/cron/scheduler_tick.py
++++ b/cron/scheduler_tick.py
+@@ -33,2 +33,8 @@
+ def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None):
++    import os
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from identity.native_policy import scheduler_permitted
++        if not scheduler_permitted():
++            return 0
++
+     from hermes_cli.backend_retirement import retirement
 
 --- a/gateway/config.py
 +++ b/gateway/config.py

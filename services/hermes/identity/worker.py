@@ -36,6 +36,11 @@ class Worker:
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
         self.lifecycle_task = None
+        self.policy_task = None
+        self.policy_ready = asyncio.Event()
+        self.policy_ready.set()
+        self.policy_error = None
+        self.policy_stopping = False
         self.activation = asyncio.Event()
         self.exited = asyncio.Event()
         self.exit_code = None
@@ -109,13 +114,21 @@ class Worker:
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import install
+            install()
             self._install_telegram_profile()
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import revalidate_startup
+            revalidate_startup()
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
         self.tools_ready = False
+        self.policy_stopping = False
+        self.policy_error = None
+        self.policy_ready.set()
         self.operational.clear()
         self.activation.clear()
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
@@ -191,7 +204,8 @@ class Worker:
     async def _operational_ready(self, runner):
         """Подтвердить native startup вместе с MCP и scheduler."""
         from tools.registry import registry
-        if registry.get_entry('mcp__brai__brai_login') is None:
+        from .native_policy import guest_mode
+        if not guest_mode() and registry.get_entry('mcp__brai__brai_login') is None:
             raise RpcError(-32603, 'Worker login tool unavailable')
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             human = sys.modules.get('_brai_identity_human')
@@ -209,8 +223,62 @@ class Worker:
             for name in ('mcp__brai__dialogues_exchange', 'mcp__brai__dialogues_context_ack'):
                 if registry.get_entry(name) is None:
                     raise RpcError(-32603, 'Worker Dialogues tool unavailable')
+        if guest_mode():
+            from .native_policy import permitted, catalog_permitted
+            if registry.get_entry('mcp__brai__create_text_file') is None or not catalog_permitted('mcp__brai__create_text_file') or catalog_permitted('terminal') or catalog_permitted('mcp__brai__brai_login'):
+                raise RpcError(-32603, 'Worker role policy unavailable')
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import has_deferred_startup, prepared_principal
+            if has_deferred_startup(runner) and self.policy_task is None:
+                self.policy_ready.clear()
+                self.policy_task = asyncio.create_task(self._activate_user_startup(
+                    runner, self.adapter, prepared_principal()))
         self.tools_ready = True
         self.operational.set()
+
+    async def _activate_user_startup(self, runner, adapter, expected):
+        """Владеть ожиданием Auth и восстановлением; stop_runtime отменяет весь этап."""
+        from .native_policy import principal, activate_deferred_startup
+        def alive():
+            if self.policy_stopping or self.runner is not runner or self.adapter is not adapter:
+                raise asyncio.CancelledError()
+        async def check():
+            alive()
+            current = await asyncio.to_thread(principal)
+            alive()
+            if current != expected:
+                raise PermissionError('Runtime preparation changed')
+        try:
+            while True:
+                alive()
+                try:
+                    current = await asyncio.to_thread(principal)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await asyncio.sleep(.5)
+                    continue
+                alive()
+                if current != expected:
+                    raise PermissionError('Runtime preparation changed')
+                break
+            await activate_deferred_startup(runner, adapter, check)
+            alive()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.policy_error = self.lifecycle_error = error
+            self.exit_code = 1
+            runner._exit_code = 1
+            runner._request_clean_exit('role-activation-failed')
+        finally:
+            self.policy_ready.set()
+
+    async def ensure_user_policy(self):
+        """Не передавать первое событие одновременно с reload/restore пользователя."""
+        await self.policy_ready.wait()
+        if self.policy_stopping or self.policy_error is not None:
+            raise RpcError(-32603, 'Worker startup unavailable')
 
     async def _run_lifecycle(self):
         """Выполнить native daemon lifecycle и сохранить service restart verdict."""
@@ -234,11 +302,21 @@ class Worker:
             self.lifecycle_error = error
             self.exit_code = 1
         finally:
+            if self.policy_error is not None:
+                self.exit_code = 1
             self.operational.clear()
             self.exited.set()
 
     async def stop_runtime(self):
         """Дождаться native drain и внешней обвязки до освобождения peer."""
+        self.policy_stopping = True
+        policy = self.policy_task
+        if policy is not None and not policy.done():
+            policy.cancel()
+        if policy is not None:
+            await asyncio.gather(policy, return_exceptions=True)
+        self.policy_task = None
+        self.policy_ready.set()
         task = self.lifecycle_task
         if task is not None and not self.activation.is_set() and not task.done():
             task.cancel()
@@ -272,7 +350,8 @@ class Worker:
             raise RpcError(-32603, 'Worker not ready')
         if require_tools:
             await self.ensure_tools()
-        return {'ready': True, 'operational': self.operational.is_set(),
+        from .native_policy import role_state
+        return {'role': role_state(), 'rolePolicyVersion': 1, 'ready': True, 'operational': self.operational.is_set(),
                 'userId': self.user_id, 'telegramId': self.telegram_id}
 
     async def interactive(self, update, owner, scope_id, actor_telegram_id, chat_generation=None):
@@ -310,6 +389,7 @@ class Worker:
         self.chat_interactive.setdefault(route, set()).add(active)
         try:
             await self.ensure_tools()
+            await self.ensure_user_policy()
             if not allowed():
                 raise RpcError(-32602, 'Paused or stale interactive action')
             from .scope import delivery_scope
@@ -328,6 +408,9 @@ class Worker:
         from gateway.session import SessionSource
         if owner != self.user_id or not isinstance(event, dict):
             raise RpcError(-32602, 'Invalid owner or event')
+        from .native_policy import guest_mode
+        if guest_mode() and str(event.get('text', '')).lstrip().startswith('/') and str(event.get('text', '')).split()[0].split('@')[0] not in ('/stop', '/cancel'):
+            raise RpcError(-32603, 'Эта команда недоступна для гостя')
         source = SessionSource.from_dict(event['source'])
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise RpcError(-32602, 'Invalid source')
@@ -373,6 +456,7 @@ class Worker:
             before = self.adapter._session_tasks.get(key)
             typing = self.adapter.start_turn_typing(message)
             await self.ensure_tools()
+            await self.ensure_user_policy()
             if generation > self.chat_states.get(route, {}).get('generation', 0):
                 # AIDEV-NOTE: Trusted ingress посылает dispatch только после durable resume.
                 # Новое поколение восстанавливает resume receipt, потерянный при разрыве IPC.
@@ -638,6 +722,28 @@ def load_config(path, environ):
     return config['socketPath'], int(ingress), owner, telegram, egress
 
 
+async def publish_delivery_file(file_path, *, broker=None):
+    """Доставить уже принадлежащий артефакт по ID; guest публикует только admitted input."""
+    if broker is None:
+        from .tool_client import broker_call
+        broker = broker_call
+    import brai_files
+    reference = brai_files.reference_metadata(file_path)
+    if reference is not None:
+        descriptor = await asyncio.to_thread(broker, 'artifacts.fetch', {'artifactId': reference['artifactId']})
+        if descriptor.get('artifactId') != reference['artifactId']:
+            raise PermissionError('Artifact mismatch')
+    else:
+        permissions = await asyncio.to_thread(broker, 'permissions.get', {})
+        if permissions.get('role') not in ('creator', 'admin', 'user', 'guest'):
+            raise PermissionError('Access unavailable')
+        method = 'files.publish' if permissions['role'] == 'guest' else 'artifacts.publish'
+        descriptor = await asyncio.to_thread(broker, method, {'path': file_path, 'requestId': str(uuid.uuid4())})
+    if not isinstance(descriptor, dict) or not isinstance(descriptor.get('artifactId'), str) or not descriptor['artifactId']:
+        raise RuntimeError('Broker returned no artifact')
+    return {'artifact_id': descriptor['artifactId']}
+
+
 async def run(config_path):
     """Запустить relay и worker; остановить оба при штатном SIGTERM."""
     from .network import start_relay
@@ -649,13 +755,19 @@ async def run(config_path):
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
-    async def publish_file(file_path):
-        descriptor = await asyncio.to_thread(broker_call, 'artifacts.publish', {'path': file_path, 'requestId': str(uuid.uuid4())})
-        if not isinstance(descriptor, dict) or not isinstance(descriptor.get('artifactId'), str) or not descriptor['artifactId']:
-            raise RuntimeError('Broker returned no artifact')
-        return {'artifact_id': descriptor['artifactId']}
-    worker = Worker(ingress, owner, telegram, publish_file)
+    worker = Worker(ingress, owner, telegram, publish_delivery_file)
     relay = await start_relay(egress, port=18080)
+    browser_relay = None
+    try:
+        browser_egress = os.environ.get('BRAI_IDENTITY_BROWSER_EGRESS')
+        if browser_egress:
+            if browser_egress != '/run/brai-profile/browser-egress.sock':
+                raise ValueError('Invalid browser egress socket')
+            browser_relay = await start_relay(browser_egress, port=18081)
+    except BaseException:
+        relay.close()
+        await relay.wait_closed()
+        raise
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -670,6 +782,9 @@ async def run(config_path):
     finally:
         exited.cancel()
         await asyncio.gather(exited, return_exceptions=True)
+        if browser_relay is not None:
+            browser_relay.close()
+            await browser_relay.wait_closed()
         relay.close()
         await relay.wait_closed()
     if worker.exit_code:

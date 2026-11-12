@@ -49,12 +49,13 @@ class LifecycleRunner:
         """Ограничить длительность и передать user только через stdin root entrypoint."""
         if operation.get('kind') not in ('prepare', 'stop') or not isinstance(operation.get('user'), dict):
             raise ValueError('Invalid lifecycle operation')
+        payload = json.dumps({'user': {**operation['user'], 'preparingGeneration': operation['generation']}}).encode()
         child = await asyncio.create_subprocess_exec(*self.command, '--action', operation['kind'],
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
             env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'})
         renewal = asyncio.create_task(self.renew(operation))
-        work = asyncio.create_task(child.communicate(json.dumps({'user': operation['user']}).encode()))
+        work = asyncio.create_task(child.communicate(payload))
         try:
             done, _ = await asyncio.wait({work, renewal}, timeout=630,
                                         return_when=asyncio.FIRST_COMPLETED)
@@ -63,7 +64,12 @@ class LifecycleRunner:
                 raise PermissionError('Lifecycle lease lost')
             if work not in done:
                 raise TimeoutError('Lifecycle timeout')
-            await work
+            output, _ = await work
+            if len(output) > 4096:
+                raise ValueError('Invalid lifecycle receipt')
+            receipt = json.loads(output)
+            if receipt != {'rolePolicyVersion': 1, 'role': operation['user']['role']}:
+                raise ValueError('Unconfirmed runtime policy')
             # AIDEV-NOTE: Повторная проверка закрывает окно между health и завершением.
             renewed = await self.control.call('identity.lifecycle-renew', {
                 'operationId': operation['id'], 'leaseToken': operation['leaseToken']}, timeout=12)
@@ -78,7 +84,7 @@ class LifecycleRunner:
 
     async def once(self):
         """Захватить одно задание; неизвестный результат завершения сверяется через Auth."""
-        response = await self.control.call('identity.lifecycle-claim', {'workerId': self.worker_id}, timeout=12)
+        response = await self.control.call('identity.lifecycle-claim', {'workerId': self.worker_id, 'rolePolicyVersion': 1}, timeout=12)
         operation = response.get('operation')
         if operation is None:
             return False

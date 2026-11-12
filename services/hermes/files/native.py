@@ -943,7 +943,8 @@ def final_text(text, operation):
         if explicit:
             raise FileError('MIXED_FILE_SET_FORMAT')
         with files.lock('cache'):
-            value = files.resolve(local_path(path), ['final', operation, path])
+            value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
+                     else files.resolve(local_path(path), ['final', operation, path]))
             index = len(items)
             items.append({'file': files.checked(value), 'caption': caption, 'presentation': presentation(value)})
         replacements.append((match.start(), match.end(), [index]))
@@ -951,7 +952,7 @@ def final_text(text, operation):
     active_sub(_MEDIA, lambda match: add(match, next(v for v in match.groups() if v is not None)), masked)
     def descriptor(match):
         path = match.group('angle') or match.group('plain')
-        if not path.startswith('/') or any(Path(path).resolve().is_relative_to(root) for root in files.service_roots):
+        if not path.startswith('artifact:') and (not path.startswith('/') or any(Path(path).resolve().is_relative_to(root) for root in files.service_roots)):
             return match.group(0)
         label = re.sub(r'\\(.)', r'\1', match.group('label'))
         return add(match, path, label)

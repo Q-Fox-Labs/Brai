@@ -83,3 +83,9 @@ Telegram публикует каждый готовый элемент в Artifa
 Ранние отказы отдельных помощников сохраняются для диагностики; родитель получает сводный итог. Автоматическое техническое уведомление о каждом отказе в Telegram не отправляется. Полезный новый результат обрабатывается обычным ходом, уведомление без новых сведений использует штатное намеренное молчание.
 
 Диагностический footer проверки записи файлов фильтруется также на последней границе результата: движок добавляет его после раннего output transform. Пользователь получает последствия отказа по-русски; пути и коды остаются в сохранённых результатах инструментов.
+
+## Гостевой текстовый артефакт
+
+Private files.create-text принимает filename, content и requestId; без пути и ownerId. До 1 МиБ точных UTF-8 байтов. Публикация использует штатные staging/Artifacts и проверяет имя, размер и SHA-256; код в содержимом не исполняется. Ответ — bounded artifact descriptor с канонической artifact-ссылкой. files.read-text принимает только artifactId и возвращает filename/content после owner/size/hash проверки. Guest-публикация входного файла требует root-owned admission receipt для точного профиля, пути и байтов; общий files.publish модели не выдаётся. [Политика](../identity/ROLES.md), [OpenRPC](../identity/broker.openrpc.json).
+
+Служебный bootstrap допускает только точные readonly `serviceRoots` за пределами HOME: `/opt/brai-profile/engine`, `/opt/brai-profile/runtime`, `/opt/brai-profile/instructions`, `/opt/brai-profile/skills`. Последний соответствует настоящему namespace mount общих навыков. Это не добавляет эти каталоги в пользовательские `readRoots`, `temporaryRoots` или `legacyRoots`; похожие имена и путь `/opt/brai-profile/system-skills` отклоняются.

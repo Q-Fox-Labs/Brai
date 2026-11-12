@@ -123,3 +123,7 @@ FD с обеих сторон; disconnect не означает отмену bac
 исходного запроса, в том числе во время ожидания инструментов. Отказ Bot API
 не запускает повтор без темы. Журнал содержит тип ошибки, номер темы и только
 заранее известную классификацию причины; произвольный текст ошибки не пишется.
+
+## Guest
+
+Перед GatewayRunner устанавливается native_policy; у guest используется readonly гостевой config и только trusted product plugins. MCP discovery остаётся включён. Каталог и dispatch проверяются раздельно. Guest operational readiness требует настоящего зарегистрированного create_text_file и отказа terminal/login. Bootstrap health содержит rolePolicyVersion:1 и роль, но не подтверждает полный операционный сценарий. [Политика](ROLES.md).

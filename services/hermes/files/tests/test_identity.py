@@ -28,7 +28,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.stage = self.root / 'stage' / str(self.uid)
         for path in [self.home / name for name in ('workspace', 'media', 'results')] + [self.cache, self.stage]:
             path.mkdir(parents=True, mode=0o700)
-        self.profile = {'home': str(self.home), 'userId': 'owner'}
+        self.profile = {'home': str(self.home), 'userId': 'owner', 'profileId': 'fixture-profile'}
         self.control = SimpleNamespace(call=self.call)
         self.calls = []
         self.port = identity.OwnerFiles({'artifactCacheRoots': {str(self.uid): str(self.cache)},
@@ -219,6 +219,8 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
                             ('readRoots', '/opt/brai-profile/skills'),
                             ('serviceRoots', '/opt/brai-profile/system-skills-extra'),
                             ('readRoots', '/opt/brai-profile/system-skills'),
+                            ('temporaryRoots', '/opt/brai-profile/skills'),
+                            ('legacyRoots', '/opt/brai-profile/skills'),
                             ('serviceRoots', '/opt/brai-profile/instructions/../engine'),
                             ('readRoots', '/opt/brai-profile/instructions'),
                             ('temporaryRoots', '/opt/brai-profile/instructions'),

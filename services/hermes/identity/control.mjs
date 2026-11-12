@@ -38,8 +38,24 @@ function quarantineProfile(value, artifactOwner) {
 const error = (status, code) => ({ status, body: { error: code }, setCookies: [] });
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 4096;
-const adminTools = new Set(['local_ai_models_install', 'local_ai_models_configure', 'local_ai_models_load', 'local_ai_models_unload', 'local_ai_models_remove', 'local_ai_cancel', 'transcription_settings_set']);
-const permittedTool = (tool, role) => object(tool) && text(tool.name) && !['publish_file','fetch_file'].includes(tool.name) && (!adminTools.has(tool.name) || role === 'admin');
+const toolPolicy = JSON.parse(readFileSync(new URL('./tool-policy.json', import.meta.url), 'utf8'));
+const knownRole = role => toolPolicy.roles.includes(role);
+const manager = role => toolPolicy.managers.includes(role);
+const adminTools = new Set(toolPolicy.adminTools);
+const permittedTool = (tool, role) => knownRole(role) && object(tool) && text(tool.name) &&
+ !['publish_file','fetch_file'].includes(tool.name) &&
+ (role === 'guest' ? toolPolicy.guestRemote.includes(tool.name) : !adminTools.has(tool.name) || manager(role));
+
+function preparedProfile(profile, user, bootstrap = false) {
+ if (!knownRole(user?.role)) return false;
+ const legacy = profile.role === undefined && profile.generation === undefined && ['admin','user'].includes(user.role);
+ if (!legacy && profile.role !== user.role) return false;
+ const staged = bootstrap && profile.status === 'provisioning' && (user.status === 'provisioning' || user.status === 'active');
+ if (!staged && (profile.status !== 'active' || user.status !== 'active')) return false;
+ if (bootstrap && staged && legacy) return false;
+ const expected = user.appliedGeneration ?? user.generation ?? 0;
+ return legacy || (staged ? [user.generation ?? 0, ...(user.status === 'active' ? [expected] : [])].includes(profile.generation) : profile.generation === expected);
+}
 
 /** Политика control с явно переданными доверенными портами. */
 export class Control {
@@ -88,7 +104,7 @@ export class Control {
     if ((idKey && !text(input[idKey])) || (input.query !== undefined && (typeof input.query !== 'string' || input.query.length > 4096)) || (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100))) return error(400, 'INVALID_ARGUMENT');
     try {
       const session = await this.authCall('session', { headers: input.headers, body: {} });
-      if (session?.status !== 200 || !session.body?.session || session.body?.user?.role !== 'admin' || session.body.user.status !== 'active') return error(403, 'FORBIDDEN');
+      if (session?.status !== 200 || !session.body?.session || !manager(session.body?.user?.role) || session.body.user.status !== 'active') return error(403, 'FORBIDDEN');
       const audit = await this.authCall('admin-audit', { headers: input.headers, body: { userId: input.userId, action: entry[0] } });
       if (audit?.status !== 200) return error(audit?.status === 403 ? 403 : 503, audit?.status === 403 ? 'FORBIDDEN' : 'AUTH_UNAVAILABLE');
       let selected;
@@ -199,18 +215,24 @@ export class Control {
     if (!profile || profile.status !== 'active' || !text(profile.userId) || !text(profile.profileId) || !/^\d+$/.test(String(profile.telegramId))) throw new Error('FORBIDDEN');
     const resolved = await this.authCall('identity-get', { userId: profile.userId });
     const user = resolved?.user;
-    if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || String(user.telegramId) !== String(profile.telegramId)) throw new Error('FORBIDDEN');
+    if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || !preparedProfile(profile, user) || String(user.telegramId) !== String(profile.telegramId)) throw new Error('FORBIDDEN');
     signal?.throwIfAborted();
     if (typeof this.perUserRuntime !== 'function') throw new Error('SOURCE_UNAVAILABLE');
     const runtime = await this.perUserRuntime({ ...profile, workerUid: uid, role: user.role });
     if (typeof runtime?.callTool !== 'function' || typeof runtime?.listTools !== 'function') throw new Error('SOURCE_UNAVAILABLE');
     const catalog = await runtime.listTools();
     if (!Array.isArray(catalog) || !catalog.some(tool => tool.name === name && permittedTool(tool, user.role))) throw new Error('FORBIDDEN');
-    if (name.startsWith('history_')) {
-      if (typeof this.historyCall !== 'function') throw new Error('SOURCE_UNAVAILABLE');
-      return this.historyCall({ ...profile, workerUid: uid, role: user.role }, name, args, signal);
-    }
-    return runtime.callTool(name, args, signal);
+    const recheck = async () => {
+      const {user:current} = await this.authCall('identity-get', {userId:profile.userId});
+      if (!current || current.status !== 'active' || current.id !== user.id || current.profileId !== user.profileId || current.role !== user.role || (current.generation ?? 0) !== (user.generation ?? 0)) throw new Error('FORBIDDEN');
+    };
+    await recheck();
+    if (name.startsWith('history_') && typeof this.historyCall !== 'function') throw new Error('SOURCE_UNAVAILABLE');
+    const result = await (name.startsWith('history_')
+      ? this.historyCall({ ...profile, workerUid: uid, role: user.role }, name, args, signal)
+      : runtime.callTool(name, args, signal));
+    await recheck();
+    return result;
   }
 
   /** Проверить текущие аккаунты владельца по Auth, не по автору памяти. */
@@ -224,7 +246,7 @@ export class Control {
     if (identity?.user?.status !== 'active' || identity.user.id !== user.id || identity.user.profileId !== profile.profileId ||
         !Array.isArray(ids) || ids.length < 1 || ids.length > 2 || new Set(ids).size !== ids.length ||
         ids.some(id => !/^[1-9][0-9]{0,19}$/.test(id)) || !ids.includes(telegramId)) return null;
-    return { user, ids };
+    return knownRole(user.role) && user.role !== 'guest' ? { user, ids } : null;
   }
 
   /** Прочитать имена только уже проверенных аккаунтов; ошибки метаданных не меняют доступ. */
@@ -304,7 +326,7 @@ export class Control {
       if (!identity) return { status: 'denied' };
       const selected = phase === 'offer' ? (target === 'current' ? telegramId : identity.ids.find(id => id !== telegramId)) : targetTelegramId;
       if (!selected || !identity.ids.includes(selected) || (target === 'current') !== (selected === telegramId)) return { status: 'denied', reason: 'account-unavailable' };
-      if (identity.user.role === 'admin' && identity.ids.length <= 1) return { status: 'denied', reason: 'admin-last-channel' };
+      if (manager(identity.user.role) && identity.ids.length <= 1) return { status: 'denied', reason: 'admin-last-channel' };
       const [account] = await this.accountNames([selected]);
       if (phase === 'offer') return { status: 'needs_consent', targetTelegramId: selected, account, lastChannel: identity.ids.length === 1 };
       const result = await this.authCall('telegram-unlink', { telegramId, targetTelegramId: selected });
@@ -327,7 +349,7 @@ export class Control {
       if (!profile || profile.status !== 'active' || !text(profile.userId) || !text(profile.profileId)) return { status: 'denied' };
       const resolved = await this.authCall('telegram-resolve', { telegramId: String(telegramId) });
       const user = resolved?.user;
-      if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
+      if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || (!preparedProfile(profile, user) || user.role === 'guest') || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
       const issued = await this.authCall('telegram-code-issue', { telegramId: String(telegramId), requestId });
       if (!/^[0-9A-HJKMNP-TV-Z]{12}$/.test(issued?.code ?? '') || issued.origin !== this.origin || !issued.expiresAt) return { status: 'unavailable' };
       const message = `Для входа откройте ${this.origin} и введите код: ${issued.code}. Код действует 120 секунд.`;
@@ -711,6 +733,10 @@ export async function privateCall(runtime, method, params) {
     const operation = method.slice('identity.'.length);
     return authCall(operation, params);
   }
+  if (method === 'identity.get') {
+    if (Object.keys(params).some(key => key !== 'userId') || !text(params.userId) || params.userId.length > 128) throw new Error('INVALID_ARGUMENT');
+    return authCall('identity-get', {userId:params.userId});
+  }
   if (method === 'identity.resolve') {
     const result = await authCall('telegram-resolve', { telegramId: params.telegramId });
     if (result?.user?.status === 'active') { try { await control.telegramProfiles?.get(params.telegramId); } catch { /* Метаданные не влияют на вход. */ } }
@@ -732,15 +758,15 @@ export async function privateCall(runtime, method, params) {
   }
   if (method === 'tools.call') return control.invokeTool(params.uid, params.name, params.args);
   if (method === 'tools.list') {
-    const user = await privateCall(runtime, 'authorize', { uid: params.uid });
+    const user = await privateCall(runtime, 'permissions.bootstrap', { uid: params.uid });
     const data = await registry();
     const profile = data?.profiles?.[String(params.uid)];
-    if (!profile || profile.userId !== user.userId || profile.status !== 'active' || typeof control.perUserRuntime !== 'function') throw new Error('FORBIDDEN');
-    const ownerRuntime = await control.perUserRuntime({ ...profile, workerUid: params.uid, role: user.role });
+    if (!profile || !['active','provisioning'].includes(profile.status) || typeof control.perUserRuntime !== 'function') throw new Error('FORBIDDEN');
+    const ownerRuntime = await control.perUserRuntime({ ...profile, workerUid: params.uid, role: user.role, bootstrap: profile.status === 'provisioning' });
     if (typeof ownerRuntime?.listTools !== 'function') throw new Error('SOURCE_UNAVAILABLE');
     const tools = await ownerRuntime.listTools();
     if (!Array.isArray(tools)) throw new Error('SOURCE_UNAVAILABLE');
-    return { tools: tools.filter(tool => permittedTool(tool, user.role)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+    return { role: user.role, tools: tools.filter(tool => permittedTool(tool, user.role)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
   }
   if(method==='files.configuration'){
     if(Object.keys(params).some(key=>key!=='uid')||!Number.isSafeInteger(params.uid)||params.uid<=0)throw new Error('INVALID_ARGUMENT');
@@ -773,6 +799,14 @@ export async function privateCall(runtime, method, params) {
     if(method==='artifacts.fetch' && typeof ownerRuntime?.fetchArtifact==='function') return ownerRuntime.fetchArtifact(params.artifactId);
     throw new Error('SOURCE_UNAVAILABLE');
   }
+  if (method === 'permissions.bootstrap') {
+    if (Object.keys(params).some(key => key !== 'uid') || !Number.isSafeInteger(params.uid) || params.uid <= 0) throw new Error('FORBIDDEN');
+    const data = await registry(), profile = data?.version === 1 && data.profiles?.[String(params.uid)];
+    if (!profile || !['provisioning','active'].includes(profile.status)) throw new Error('FORBIDDEN');
+    const {user} = await authCall('identity-get', {userId:profile.userId});
+    if (!preparedProfile(profile, user, true) || user.id !== profile.userId || user.profileId !== profile.profileId) throw new Error('FORBIDDEN');
+    return {role:user.role, generation:user.generation ?? 0, staged:profile.status === 'provisioning', backgroundsSuspended:profile.backgroundsSuspended === true || user.role === 'guest'};
+  }
   if (method === 'authorize' || method === 'identity.revalidate') {
     if (!Number.isSafeInteger(params.uid) || params.uid <= 0) throw new Error('FORBIDDEN');
     const data = await registry();
@@ -783,10 +817,10 @@ export async function privateCall(runtime, method, params) {
     }
     const result = await authCall('identity-get', { userId: profile.userId });
     const user = result?.user;
-    const active = profile.status === 'active' && user?.id === profile.userId && user.profileId === profile.profileId && user.status === 'active' && String(user.telegramId) === String(profile.telegramId);
+    const active = preparedProfile(profile, user) && user?.id === profile.userId && user.profileId === profile.profileId && user.status === 'active' && String(user.telegramId) === String(profile.telegramId);
     const state = { userId: profile.userId, profileId: profile.profileId,
       status: profile.status !== 'active' ? profile.status : active ? 'active' : user?.status === 'blocked' ? 'blocked' : 'unavailable',
-      role: user?.role ?? null };
+      role: user?.role ?? null, ...(user?.generation === undefined ? {} : {generation:user.generation}) };
     runtime.identityStates ??= new Map();
     const previous = runtime.identityStates.get(params.uid);
     if ((!active || previous && JSON.stringify(previous) !== JSON.stringify(state)) && typeof control.onIdentityChanged === 'function') {
@@ -797,7 +831,7 @@ export async function privateCall(runtime, method, params) {
       if (method === 'identity.revalidate') return { active: false };
       throw new Error('FORBIDDEN');
     }
-    return { active: true, userId: profile.userId, profileId: profile.profileId, role: user.role };
+    return { active: true, userId: profile.userId, profileId: profile.profileId, role: user.role, ...(user.generation === undefined ? {} : {generation:user.generation}) };
   }
   throw new Error('METHOD_NOT_FOUND');
 }

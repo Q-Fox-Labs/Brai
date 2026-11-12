@@ -93,9 +93,11 @@ def registry(plan, accounts, *, active=False):
             raise ValueError('Missing or conflicting operating-system account')
         uid = account['uid']
         uids.add(uid)
-        fields = ('userId', 'profileId', 'telegramId', 'username', 'home',
+        fields = ('role', 'userId', 'profileId', 'telegramId', 'username', 'home',
                   'homeScope', 'memoryEpoch', 'authorId', 'cubes')
         result[str(uid)] = {key: profile[key] for key in fields}
+        result[str(uid)]['generation'] = profile.get('generation', 0)
+        result[str(uid)]['backgroundsSuspended'] = profile.get('backgroundsSuspended', profile.get('role') == 'guest')
         result[str(uid)].update(status='active' if active else 'provisioning',
                                 workerSocket=profile['home'] + '/control/worker.sock')
     return {'version': 1, 'profiles': result}
@@ -108,7 +110,7 @@ def stt_config(model):
     if (not isinstance(model, dict) or set(model) != {'modelId', 'revision', 'profileId'}
             or any(not isinstance(value, str) or not value.strip() for value in model.values())):
         raise ValueError('Explicit STT model selector required')
-    command = '/opt/brai-profile/python/bin/python3 -B -m identity.transcribe'
+    command = '/opt/brai-profile/python/bin/python3 -s -P -B -m identity.transcribe'
     for flag, key in [('model-id', 'modelId'), ('revision', 'revision'), ('profile-id', 'profileId')]:
         command += ' --' + flag + ' ' + shlex.quote(model[key])
     command += ' --input {input_path} --output {output_path}'
@@ -136,7 +138,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         'tts': {'provider': 'silero', 'providers': {'silero': {
             'type': 'command',
             'command': 'PYTHONPATH=' + instructions_root + '/services/hermes /usr/bin/python3 '
-                       '-B -m identity.synthesize --input {input_path} --output {output_path}',
+                       '-s -P -B -m identity.synthesize --input {input_path} --output {output_path}',
             'output_format': 'ogg', 'voice_compatible': True,
             'timeout': 200, 'max_text_length': 900}}},
         'skills': {'external_dirs': ['/opt/brai-profile/system-skills/skills', '/opt/brai-profile/skills'],
@@ -150,7 +152,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                     'media_delivery_allow_dirs': [home + '/workspace', home + '/results', home + '/media/downloads']},
         'updates': {'check': False},
         'mcp_servers': {'brai': {'command': '/usr/bin/python3',
-                               'args': [instructions_root + '/services/hermes/identity/tool_client.py'],
+                               'args': ['-s', '-P', instructions_root + '/services/hermes/identity/tool_client.py'],
                                'env': {'BRAI_IDENTITY_BROKER': '/run/brai-profile/control.sock'}}},
         'memory': {'provider': 'memos-rest'},
         'plugins': {'enabled': ['codex-cli-search', 'memos-rest', 'telegram-business', 'groq-voice', 'brai-telegram']},
@@ -160,6 +162,25 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                                   'сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. '
                                   'Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.'},
     }
+    role = profile.get('role', 'user')
+    if role not in ('creator','admin','user','guest'):
+        raise ValueError('Unknown role')
+    config['agent']['system_prompt'] += {
+        'creator': ' Ваша роль — создатель. Административные возможности доступны; исполнитель разработки появится на этапе 2. Нового серверного доступа эта роль не даёт.',
+        'admin': ' Ваша роль — администратор. Отдельный Docker администратора ещё не установлен.',
+        'user': ' Ваша роль — пользователь.',
+        'guest': ' Ваша роль — гость. Доступны диалог, личная память, поиск web_search, публичный браузер и собственные артефакты. Документы DOCX и книги XLSX создавай через mcp__brai__create_document_file и mcp__brai__create_spreadsheet_file; изображения — image_generate, голос — text_to_speech. Не задавай локальные пути или настройки генераторов. Для точного текстового файла используй mcp__brai__create_text_file; для чтения — mcp__brai__read_text_file. Исполнение кода, проекты, навыки, произвольная запись на диск, задания, настройка плагинов и вход на наш сайт недоступны. Не предлагай обход ограничений или подтверждение запрещённой операции.',
+    }[role]
+    if role == 'guest':
+        config['agent']['system_prompt'] = config['agent']['system_prompt'].replace(
+            'По просьбе войти на наш сайт Brai вызови mcp__brai__brai_login: сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.', '')
+        config['browser'] = {'backend': 'off', 'cdp_url': 'http://127.0.0.1:19364'}
+        config['web'] = {'search_backend': 'codex-cli'}
+        config['tools'] = {'tool_search': {'enabled': 'off'}}
+        config['skills'] = {'external_dirs': [], 'disabled': True}
+        config['cron'] = {'enabled': False}
+        config['hooks'] = {}
+        config['delegation'] = {'enabled': False}
     if dialogues:
         config['agent']['system_prompt'] += (
             ' Диалоги обязательны на каждом публичном ходе. До разбора поручения вызови '
@@ -181,7 +202,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
 
 def profile_for_user(user, *, profile_root):
     """Подготовить один профиль приглашения; назначение роли остаётся в Auth."""
-    if not isinstance(user, dict) or user.get('status') != 'provisioning':
+    if not isinstance(user, dict) or user.get('role') not in ('creator','admin','user','guest') or not (user.get('status') == 'provisioning' or user.get('status') == 'active' and user.get('role') in ('creator','admin')):
         raise ValueError('Provisioning user required')
     user_id = _identifier(user.get('id'))
     profile_id = user.get('profileId')
@@ -191,7 +212,7 @@ def profile_for_user(user, *, profile_root):
     if not telegram.isascii() or not telegram.isdecimal() or str(int(telegram)) != telegram or int(telegram) <= 0:
         raise ValueError('Invalid Telegram identity')
     home = _path(profile_root) + '/' + profile_id
-    return {'userId': user_id, 'profileId': profile_id, 'telegramId': telegram,
+    return {'generation': user.get('preparingGeneration', user.get('appliedGeneration', user.get('generation', 0)) if user.get('status') == 'active' else user.get('generation', 0)), 'role': user['role'], 'userId': user_id, 'profileId': profile_id, 'telegramId': telegram,
             'username': 'braiu-' + _digest(user_id)[:20], 'home': home,
             'homeScope': _digest(home),
             'memoryEpoch': _digest(['brai-user-memory-v1', user_id, profile_id]),
@@ -245,6 +266,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=HOME=' + home, 'Environment=HERMES_HOME=' + home,
         'Environment=HERMES_ROOT=/opt/brai-profile/engine',
         'Environment=PYTHONPATH=' + ':'.join(paths),
+        'Environment=PYTHONNOUSERSITE=1', 'Environment=PYTHONSAFEPATH=1',
         'Environment=PYTHONDONTWRITEBYTECODE=1', 'Environment=PYTHONUNBUFFERED=1',
         'Environment=PATH=' + ('/opt/brai-profile/instructions/bin:' if instructions_root else '')
         + '/opt/brai-profile/python/bin:/usr/local/bin:/usr/bin:/bin',
@@ -254,6 +276,10 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=HTTP_PROXY=http://127.0.0.1:18080',
         'Environment=HTTPS_PROXY=http://127.0.0.1:18080',
         'Environment=BU_CDP_URL=http://127.0.0.1:19364',
+        *(['Environment=BROWSER_CDP_URL=http://127.0.0.1:19364',
+           'Environment=AGENT_BROWSER_CONFIG=/opt/brai-profile/browser-defaults.json',
+           'Environment=BRAI_IDENTITY_BROWSER_EGRESS=/run/brai-profile/browser-egress.sock']
+          if profile.get('role') == 'guest' else []),
         # AIDEV-NOTE: HOME с UUID превышает AF_UNIX sun_path. /tmp отдельный у
         # каждого worker; SHARED сохраняет отдельный сокет для каждого BU_NAME.
         'Environment=BH_RUNTIME_DIR=/tmp/brai-browser',
@@ -270,7 +296,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=TELEGRAM_ALLOWED_USERS=' + profile['telegramId'],
         'Environment=TELEGRAM_GROUP_ALLOWED_USERS=' + profile['telegramId'],
         'Environment=BRAI_IDENTITY_PROFILE_ID=' + profile['profileId'],
-        'ExecStart=/opt/brai-profile/python/bin/' + python_name + ' -P -B -m identity.worker --config ' + home + '/worker.json',
+        'ExecStart=/opt/brai-profile/python/bin/' + python_name + ' -s -P -B -m identity.worker --config ' + home + '/worker.json',
         'UMask=0077', 'Restart=always', 'RestartSec=3',
         'PrivateNetwork=yes', 'PrivateTmp=yes', 'PrivateDevices=yes',
         'NoNewPrivileges=yes', 'CapabilityBoundingSet=', 'AmbientCapabilities=',
@@ -293,6 +319,9 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'BindReadOnlyPaths=' + broker_socket + ':/run/brai-profile/control.sock',
         'BindReadOnlyPaths=' + memory_socket + ':/run/brai-profile/memory.sock',
         'BindReadOnlyPaths=' + egress_socket + ':/run/brai-profile/egress.sock',
+        *(['BindReadOnlyPaths=' + egress_socket + '.browser:/run/brai-profile/browser-egress.sock',
+           'BindReadOnlyPaths=' + runtime_root + '/services/hermes/identity/browser-defaults.json:/opt/brai-profile/browser-defaults.json']
+          if profile.get('role') == 'guest' else []),
         'KillMode=control-group', 'TimeoutStopSec=70', 'LimitNOFILE=4096',
         'TasksMax=256', 'MemoryHigh=2G', 'MemoryMax=4G',
     ]

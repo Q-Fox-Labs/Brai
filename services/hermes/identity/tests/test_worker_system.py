@@ -204,12 +204,12 @@ class SystemTests(unittest.TestCase):
     def test_media_launchers_use_sdk_and_only_personal_download_paths(self):
         argv = media_command('yt-dlp', ['-o', '/downloads/%(id)s.mp4', '--', 'https://youtu.be/x'],
                              home='/profiles/one', python='/sdk/python')
-        self.assertEqual(argv[:4], ['/sdk/python', '-B', '-m', 'yt_dlp'])
+        self.assertEqual(argv[:6], ['/sdk/python', '-s', '-P', '-B', '-m', 'yt_dlp'])
         self.assertIn('--ignore-config', argv)
         self.assertIn('/profiles/one/workspace/downloads/%(id)s.mp4', argv)
         self.assertNotIn('/downloads/%(id)s.mp4', argv)
         self.assertEqual(media_command('instaloader', ['--help'], home='/profiles/two', python='/sdk/python'),
-                         ['/sdk/python', '-B', '-m', 'instaloader', '--help'])
+                         ['/sdk/python', '-s', '-P', '-B', '-m', 'instaloader', '--help'])
         with self.assertRaises(ValueError):
             media_command('other', [], home='/profiles/one', python='/sdk/python')
 

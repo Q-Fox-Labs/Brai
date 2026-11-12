@@ -352,7 +352,7 @@
             "type": "boolean",
             "default": false
           },
-          "description": "После active Auth дождаться полного native startup, MCP, scheduler и private plugin."
+          "description": "Дождаться полного native startup и ограниченного каталога; подготовка не разрешает вызовы до active Auth."
         }
       ],
       "result": {
@@ -363,7 +363,9 @@
             "ready",
             "userId",
             "telegramId",
-            "operational"
+            "operational",
+            "role",
+            "rolePolicyVersion"
           ],
           "properties": {
             "ready": {
@@ -377,6 +379,18 @@
             },
             "operational": {
               "type": "boolean"
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "creator",
+                "admin",
+                "user",
+                "guest"
+              ]
+            },
+            "rolePolicyVersion": {
+              "const": 1
             }
           },
           "additionalProperties": false
