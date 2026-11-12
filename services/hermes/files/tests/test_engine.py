@@ -25,10 +25,15 @@ from files.store import FileError
 from files.tests.test_files import Backend
 
 ENGINE = Path(os.environ['HERMES_TEST_ENGINE'])
+budget_spec = importlib.util.spec_from_file_location('files_test_turn_budget', ENGINE / 'agent/brai_turn_budget.py')
+budget_module = importlib.util.module_from_spec(budget_spec)
+sys.modules[budget_spec.name] = budget_module
+budget_spec.loader.exec_module(budget_module)
 
 
 def function(path, names, namespace):
     """Исполнять точные тела patched функций, заменяя только внешние model/channel ports."""
+    namespace.setdefault('os', os)
     tree = ast.parse((ENGINE / path).read_text())
     nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
     if len(nodes) != len(names):
@@ -70,7 +75,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             'agent.turn_context': module(export_current_turn_boundary=lambda a, r, u: r),
             'agent.voice_turn_route': module(end_voice_turn_route=lambda a: None),
             'tools.vision_tools_history_budget': module(native_turn_images=lambda message: nullcontext())}
-        scope = {'_run_conversation_turn': callback, '_close_durable_failed_turn': lambda a, r: None}
+        scope = {'_run_conversation_turn': callback, '_close_durable_failed_turn': lambda a, r: None,
+                 'turn_budget': budget_module.turn_budget}
         function('agent/conversation_loop.py', ['run_conversation'], scope)
         return scope['run_conversation'], ports
 
