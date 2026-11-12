@@ -24,6 +24,7 @@ function fixture(options={}){
   if(method==="thread/start"){if(options.lostThreadAck)throw new VF("NATIVE_RPC_TIMEOUT","unknown");return {thread:{id:"own-thread"},sandbox:{type:"readOnly"},approvalPolicy:"never"};}
   if(method==="turn/start"){
    if(options.lostTurnAck)throw new VF("NATIVE_RPC_TIMEOUT","unknown");
+   if(options.quiet)return {turn:{id:"own-turn"}};
    setTimeout(()=>{
     emit({id:91,method:"item/tool/call",params:{threadId:"foreign-thread",turnId:"own-turn",callId:"foreign",tool:"evidence_list",arguments:{}}});
     emit({id:92,method:"item/tool/call",params:{threadId:"own-thread",turnId:"foreign-turn",callId:"foreign-turn",tool:"evidence_list",arguments:{}}});
@@ -39,7 +40,7 @@ function fixture(options={}){
   if(method==="thread/archive")return {};
   throw Error("Unexpected RPC "+method);
  }};
- const dispatch={tools:()=>[{type:"function",function:{name:"evidence_list",parameters:{type:"object",properties:{},required:[],additionalProperties:false}}}],call:async()=>{tools++;return {items:[]};},reserve:async()=>{reserves++;},allowed:async()=>true};
+ const dispatch={tools:()=>[{type:"function",function:{name:"evidence_list",parameters:{type:"object",properties:{},required:[],additionalProperties:false}}}],call:async()=>{tools++;options.onTool?.(tools);return {items:[]};},reserve:async()=>{reserves++;},allowed:options.allowed??(async()=>true),...(options.remainingMs?{remainingMs:options.remainingMs}:{})};
  return {executor:codexExecutor(profile,dispatch,rpc),calls,sent,get tools(){return tools;},get reserves(){return reserves;},get closed(){return closed;}};
 }
 test("native full tool request is scoped, delta and foreign requests have no effect",async()=>{
@@ -161,4 +162,29 @@ test("Providers request with the real investigation tools satisfies its public c
  },get:async()=>{throw Error();},cancel:async()=>{throw Error();}};
  const executor=providersExecutor(null,"owner",{connectionId:"fixture",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"fixture",inboxPrefix:"_INBOX."},{tools:investigationTools,allowed:async()=>true,reserve:async()=>{},call:async()=>{throw Error();}},client);
  const cp=await executor.startStep(intent(),async()=>{});assert.equal(cp.state,"completed",JSON.stringify(errors));assert.equal(requests,1);
+});
+
+test("native 400 tools survive more than 90 seconds within the admitted attempt deadline",async t=>{
+ const initial=Date.now();let now=initial;t.mock.method(Date,"now",()=>now);
+ const f=fixture({toolCount:400,onTool:n=>{if(n===1)now+=100001;}}),i=intent();
+ i.deadline_at=new Date(initial+900000).toISOString();
+ const cp=await f.executor.startStep(i,async()=>{});
+ assert.equal(cp.state,"completed");assert.equal(f.tools,400);
+ assert.equal(cp.native.call_deadline_at,i.deadline_at);
+ assert.equal(f.calls.filter(c=>c.method==="turn/interrupt").length,0);
+});
+test("native turn still obeys a shorter remaining attempt budget",async()=>{
+ const initial=Date.now(),f=fixture({remainingMs:()=>5000}),i=intent();
+ i.deadline_at=new Date(initial+900000).toISOString();
+ const cp=await f.executor.startStep(i,async()=>{});
+ assert.equal(cp.state,"completed");
+ assert.ok(Date.parse(cp.native.call_deadline_at)<=Date.now()+5000);
+ assert.ok(Date.parse(cp.native.call_deadline_at)>=initial+5000);
+});
+test("native quiet turn notices revoked policy before its long deadline",{timeout:2000},async()=>{
+ let checks=0;const f=fixture({quiet:true,allowed:async()=>++checks<3}),i=intent();
+ i.deadline_at=new Date(Date.now()+900000).toISOString();
+ const cp=await f.executor.startStep(i,async()=>{});
+ assert.equal(cp.state,"failed");assert.equal(cp.code,"POLICY_REVOKED");assert.equal(f.tools,0);
+ assert.deepEqual(f.calls.find(c=>c.method==="turn/interrupt").params,{threadId:"own-thread",turnId:"own-turn"});
 });

@@ -122,11 +122,16 @@ export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc=native
     const unsubscribe=rpc.subscribe(p=>{if(p.params?.threadId!==cp.native.threadId)return;if(p.id===undefined&&!["item/started","item/completed","turn/completed","thread/tokenUsage/updated"].includes(p.method))return;if(queue.length>=32){overflow=true;return;}queue.push(p);});
     try{
      if(!await dispatch.allowed())throw new VF("POLICY_REVOKED");
-     const remaining=Math.min(90000,dispatch.remainingMs?.()??90000);if(remaining<=0)throw new VF("MODEL_DEADLINE");
+     const remaining=Math.min(Date.parse(intent.deadline_at)-Date.now(),dispatch.remainingMs?.()??Infinity);if(!Number.isFinite(remaining)||remaining<=0)throw new VF("MODEL_DEADLINE");
      cp.native.call_deadline_at=new Date(Date.now()+remaining).toISOString();await save(cp);
      const turn=await rpc.call("turn/start",{threadId:cp.native.threadId,model:intent.model.id,effort:intent.model.effort,input:[{type:"text",text:JSON.stringify(intent.input)}],outputSchema:nativeOutputSchema(intent.input.output_schema)});
      cp={...cp,state:"running",native:{...cp.native,turnId:turn.turn.id}};await save(cp);
+     let nextPolicyCheck=0,policyRevoked=false;
      while(Date.now()<Date.parse(String(cp.native.call_deadline_at))&&!completed&&!blocked&&!overflow){
+      if(Date.now()>=nextPolicyCheck){
+       if(!await dispatch.allowed()){policyRevoked=true;break;}
+       nextPolicyCheck=Date.now()+1000;
+      }
       const p=queue.shift();if(!p){await new Promise(r=>setTimeout(r,50));continue;}
       if(p.method==="thread/tokenUsage/updated"&&(!p.params?.turnId||p.params.turnId===cp.native.turnId)){cp.usage=p.params.tokenUsage?.total??null;await save(cp);continue;}
       if(p.params?.turnId!==cp.native.turnId&&p.params?.turn?.id!==cp.native.turnId)continue;
@@ -141,7 +146,7 @@ export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc=native
       }
       if(p.method==="turn/completed")completed=true;
      }
-     if(!completed){cp={...cp,state:"unknown",code:blocked?"NATIVE_UNEXPECTED_REQUEST":overflow?"NATIVE_CAPACITY":"MODEL_DEADLINE",native:{...cp.native,cancel_reason:blocked?"NATIVE_UNEXPECTED_REQUEST":overflow?"NATIVE_CAPACITY":"MODEL_DEADLINE"}};await save(cp);await rpc.call("turn/interrupt",{threadId:cp.native.threadId,turnId:cp.native.turnId}).catch(()=>{});return await inspect(intent,cp,save);}
+     if(!completed){const reason=policyRevoked?"POLICY_REVOKED":blocked?"NATIVE_UNEXPECTED_REQUEST":overflow?"NATIVE_CAPACITY":"MODEL_DEADLINE";cp={...cp,state:"unknown",code:reason,native:{...cp.native,cancel_reason:reason}};await save(cp);await rpc.call("turn/interrupt",{threadId:cp.native.threadId,turnId:cp.native.turnId}).catch(()=>{});return await inspect(intent,cp,save);}
      return await inspect(intent,cp,save);
     }finally{unsubscribe();}
    }catch(e){return failed(cp,e instanceof VF?e.code:"NATIVE_UNAVAILABLE",cp.state==="not_sent"?"blocked":"unknown");}

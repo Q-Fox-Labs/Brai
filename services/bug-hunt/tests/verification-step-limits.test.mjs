@@ -7,7 +7,7 @@ import {createVerificationEngine} from "../dist/verification-engine.js";
 import {verificationPolicy} from "../dist/verification.js";
 function fixture({toolCalls=null,allowed=true,remainingMs=60000}={}){
  const row={id:randomUUID(),installation_id:"synthetic",owner_id:"owner",stage:"investigate",executor:"codex_app_server",cancel_requested:false,deadline_at:new Date(Date.now()+remainingMs),policy:verificationPolicy({budgets:{toolCalls}}),snapshot:{cases:[]},model:{id:"gpt-6.1-sol",effort:"high"}};
- const ledger=new Map(),reads=[];let code=null;
+ const ledger=new Map(),reads=[];let code=null,modelIntent=null;
  const model={id:"model:investigator",kind:"model",step_key:"investigator",intent:{phase:"investigator"},checkpoint:{state:"running",native:{}}};ledger.set(model.id,model);
  const store={
   guard:async(id,run)=>run(row),allowed:async()=>allowed,effects:async()=>[...ledger.values()],
@@ -18,6 +18,7 @@ function fixture({toolCalls=null,allowed=true,remainingMs=60000}={}){
  };
  const candidate={claim:"Synthetic missing evidence",expected:"Known requirement",facts:[],verdict:"insufficient_evidence",reproduction_outcome:"not_attempted",observed_failure:"unknown",requirement_id:null,source_id:null,runner_id:null,evidence_ids:[],missing:["No recipe"],limitations:["Synthetic"]};
  const engine=createVerificationEngine({store,sources:{},runner:{},recipes:[],activeOwner:async()=>true,executor:(r,dispatch)=>({
+  startStep:async intent=>{modelIntent=intent;return {state:"completed",native:{},result:candidate,code:null,usage:null};},
   inspectStep:async()=>{
    await assert.rejects(dispatch.call("malformed","evidence_read",{evidence_id:"missing",offset:0,limit:10}),e=>e.code==="INVALID_TOOL_ARGUMENT");
    for(const args of [{after_id:"missing"},{limit:0},{limit:21},{limit:1.5}])await assert.rejects(dispatch.call("bad-page","evidence_list",args),e=>e.code==="INVALID_TOOL_ARGUMENT");
@@ -27,7 +28,7 @@ function fixture({toolCalls=null,allowed=true,remainingMs=60000}={}){
    return {state:"completed",native:{},result:candidate,code:null,usage:null};
   }
  })});
- return {engine,row,reads,ledger,get code(){return code;}};
+ return {engine,row,reads,ledger,get code(){return code;},get modelIntent(){return modelIntent;}};
 }
 test("default shared dispatcher permits 400 reads and replays a completed tool without another read",async()=>{
  const f=fixture(),result=await f.engine.advance(f.row.id);
@@ -44,4 +45,11 @@ test("removing the step cap preserves deadline and owner-policy checks",async()=
   if(options.remainingMs)f.ledger.clear();
   const result=await f.engine.advance(f.row.id);assert.equal(result.code,expected);assert.equal(f.reads.length,0);
  }
+});
+
+test("fresh model intent inherits the remaining attempt deadline without a 90-second phase cap",async()=>{
+ const f=fixture({remainingMs:900000});f.ledger.clear();
+ const result=await f.engine.advance(f.row.id);
+ assert.equal(result.code,"REVIEW_PENDING");
+ assert.equal(f.modelIntent.deadline_at,f.row.deadline_at.toISOString());
 });

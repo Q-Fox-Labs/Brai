@@ -133,7 +133,7 @@ export function createVerificationEngine(options:Options){
      const evidence=phase==="reviewer"?await store.evidenceByIds(r,[...new Set<string>([...(author?.evidence_ids??[]),author?.requirement_id,author?.source_id,author?.runner_id].filter((id):id is string=>typeof id==="string"))]):[];
      const input={snapshot:{version:3,cases:projections,source:r.snapshot.source,group:r.snapshot.group},evidence:evidence.map(e=>({id:e.id,kind:e.kind,sha256:e.sha256,provenance:e.provenance})),evidence_manifest:{read_via:"evidence_list",page_size:20},available_specs:options.recipes.filter(s=>s.source_commit===r.snapshot.source?.commit&&s.source_id===r.snapshot.source?.id).map(s=>({spec_ref:s.ref,source_path:s.source_path,requirement_path:s.requirement_path,oracle:{expected:s.expected,...(s.confirms_claim?{confirms_claim:s.confirms_claim}:{})},...(s.refutes_claim?{refutes_claim:s.refutes_claim}:{})})),...(phase==="reviewer"?{candidate:author,candidate_sha256:hash(author)}:{}),output_schema:schema.definitions[phase==="reviewer"?"modelReview":"candidate"]};
      if(Buffer.byteLength(JSON.stringify(input))>(r.executor==="providers"?8000:32768))throw new VF("MODEL_INPUT_TOO_LARGE");
-     const body={id:evidenceId([scope,phase,"model"]),scope,phase,executor:r.executor,config_hash:r.config_hash,model:r.model,deadline_at:new Date(Math.min(r.deadline_at!.getTime(),Date.now()+90000)).toISOString(),input};
+     const body={id:evidenceId([scope,phase,"model"]),scope,phase,executor:r.executor,config_hash:r.config_hash,model:r.model,deadline_at:r.deadline_at!.toISOString(),input};
      intent={...body,input_hash:hash(input)} as ModelIntent;
     }
     const effect=await store.effect(r,"model",phase,intent),save=(cp:ModelCheckpoint)=>store.checkpoint(r,effect.id,cp);

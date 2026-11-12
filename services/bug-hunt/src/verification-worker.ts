@@ -51,7 +51,7 @@ export async function startVerificationWorker(cfg:Config=loadConfig()){
  const native=await NativeConnection.connect({address:infra.temporal.address});
  const control=await Connection.connect({address:infra.temporal.address});
  const client=new Client({connection:control,namespace:infra.temporal.namespace});
- const worker=await Worker.create({connection:native,namespace:infra.temporal.namespace,taskQueue:infra.temporal.taskQueue,identity:infra.temporal.identity,workflowBundle:{codePath:fileURLToPath(new URL("./verification-workflow-bundle.cjs",import.meta.url))},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2,maxCachedWorkflows:50,activities:{
+ const worker=await Worker.create({connection:native,namespace:infra.temporal.namespace,taskQueue:infra.temporal.taskQueue,identity:infra.temporal.identity,workflowBundle:{codePath:fileURLToPath(new URL("./verification-workflow-bundle.cjs",import.meta.url))},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2,maxCachedWorkflows:50,shutdownGraceTime:"16 minutes",activities:{
   async advance(id:string){const timer=setInterval(()=>heartbeat({investigation_id:id}),2000);try{if(Context.current().cancellationSignal.aborted)return {terminal:false,wait_ms:60000,code:"ACTIVITY_CANCELLED"};return await engine.advance(id);}finally{clearInterval(timer);}}
  }});
  let stopped=false,pumping=false;

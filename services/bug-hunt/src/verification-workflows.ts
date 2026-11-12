@@ -1,8 +1,8 @@
-// ABOUTME: Продолжает проверку через короткие Activities и долговечные ожидания Temporal.
+// ABOUTME: Продолжает проверку через Activities с heartbeat и долговечные ожидания Temporal.
 // ABOUTME: History содержит только ID и безопасные коды; внешний I/O остаётся в Activities.
 import {proxyActivities,defineSignal,setHandler,condition,continueAsNew} from "@temporalio/workflow";
 interface Activities {advance(id:string):Promise<{terminal:boolean;wait_ms:number;code:string}>}
-const {advance}=proxyActivities<Activities>({startToCloseTimeout:"2 minutes",heartbeatTimeout:"15 seconds",retry:{maximumAttempts:1}});
+const {advance}=proxyActivities<Activities>({startToCloseTimeout:"16 minutes",heartbeatTimeout:"15 seconds",retry:{maximumAttempts:1}});
 export const wake=defineSignal("wake");
 /** Допущенный ID остаётся прежним после retry, restart и Continue-As-New. */
 export async function verificationWorkflow(id:string):Promise<void>{
