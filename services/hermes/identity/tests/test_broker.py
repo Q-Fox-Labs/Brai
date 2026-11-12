@@ -94,6 +94,22 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.broker.login_state.close)
         self.broker.profiles = lambda: {WORKER_UID: self.profile}
 
+    async def test_admission_failure_distinguishes_missing_blocked_and_unready_existing_accounts(self):
+        owner = {'id': self.profile['userId'], 'profileId': self.profile['profileId'],
+                 'telegramId': self.profile['telegramId'], 'status': 'active'}
+        cases = [(None, 'active', 'NOT_FOUND'), ({**owner, 'status': 'blocked'}, 'blocked', 'FORBIDDEN'),
+                 ({**owner, 'status': 'provisioning'}, 'provisioning', 'UNAVAILABLE'),
+                 (owner, 'provisioning', 'UNAVAILABLE')]
+        for user, status, reason in cases:
+            with self.subTest(reason=reason, user=user is not None):
+                self.profile['status'] = status
+                self.control.call = mock.AsyncMock(return_value={'user': user})
+                response = await broker_module.rpc_request(self.broker, INGRESS_UID,
+                    {'jsonrpc': '2.0', 'id': 'resolve', 'method': 'identity.resolve',
+                     'params': {'telegramId': self.profile['telegramId']}})
+                self.assertEqual(response['error']['data'], {'reason': reason, 'stage': 'broker'})
+                self.assertNotIn('result', response)
+
     async def test_invitation_waits_for_queued_installation_beyond_three_minutes(self):
         self.config['accessCommand'] = ['/synthetic/access']
         user = {'id': 'user-a', 'profileId': 'profile-a', 'telegramId': '111222'}
