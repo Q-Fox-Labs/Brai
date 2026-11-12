@@ -92,6 +92,7 @@
       "services/bug-hunt/tests/processing-config.test.mjs",
       "services/bug-hunt/tests/integration/system-store.test.mjs",
       "services/bug-hunt/tests/integration/processing-store.test.mjs",
+      "services/bug-hunt/tests/integration/pending-capacity.test.mjs",
       "services/bug-hunt/tests/model-preflight.mjs",
       "services/bug-hunt/tests/model-probe.mjs",
       "services/bug-hunt/tests/integration/model-quality.mjs",

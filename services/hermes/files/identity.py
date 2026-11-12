@@ -1,12 +1,17 @@
 # ABOUTME: Переносит проверенные inode между профилем и привилегированным Artifacts.
 # ABOUTME: Владелец поступает из SO_PEERCRED; root cache недоступен worker.
 import hashlib
+import io
+import importlib.util
+import math
+import json
 import os
 from pathlib import Path
 import shutil
 import stat
 import tempfile
 import uuid
+import zipfile
 
 MAX_FILE = 64 * 1024 * 1024
 
@@ -79,7 +84,7 @@ def copy_fd(source, target):
     return size, digest.hexdigest()
 
 
-def copy_to_profile(source, home, area, folder, name, uid, expected=None):
+def copy_to_profile(source, home, area, folder, name, uid, expected=None, receipt=None):
     """Атомарно записать личную копию через descriptor каталога."""
     if not isinstance(name, str) or not name or name in ('.', '..') or Path(name).name != name or '\\' in name:
         raise ValueError('Invalid filename')
@@ -105,6 +110,8 @@ def copy_to_profile(source, home, area, folder, name, uid, expected=None):
         finally:
             os.close(target)
         os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        if receipt is not None:
+            receipt.update(sizeBytes=size, sha256=digest)
         return str(Path(home) / area / folder / name)
     finally:
         if directory is not None:
@@ -183,7 +190,33 @@ class OwnerFiles:
         value = {**result, 'localPath': path, 'markdown': marker + '[' + name + '](<' + path + '>)'}
         return {key: value[key] for key in ('artifactId', 'filename', 'mimeType', 'sizeBytes', 'sha256', 'localPath', 'markdown')}
 
-    async def publish(self, uid, profile, params):
+    def input_admission(self, uid, profile, path):
+        """Проверить root-квитанцию точного вложения ingress без выдачи общего файлового доступа."""
+        path = Path(path)
+        relative = path.relative_to(Path(profile['home']) / 'media')
+        if len(relative.parts) != 2 or len(relative.parts[0]) != 32 or any(c not in '0123456789abcdef' for c in relative.parts[0]):
+            raise PermissionError('Input was not admitted')
+        directory = open_directory(path.parent, uid)
+        try:
+            fd = os.open('.brai-admission.json', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size > 4096:
+                    raise PermissionError('Invalid input admission')
+                with os.fdopen(fd, 'rb', closefd=False) as source:
+                    value = json.load(source)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
+        if (value.get('path') != str(path) or value.get('userId') != profile['userId']
+                or value.get('profileId') != profile['profileId'] or type(value.get('sizeBytes')) is not int
+                or not 0 <= value['sizeBytes'] <= MAX_FILE or not isinstance(value.get('sha256'), str)
+                or len(value['sha256']) != 64):
+            raise PermissionError('Invalid input admission')
+        return value
+
+    async def publish(self, uid, profile, params, *, admitted=False):
         """Опубликовать root snapshot с исходным именем и стабильным requestId."""
         if set(params) != {'path', 'requestId'} or not isinstance(params.get('requestId'), str) or not 1 <= len(params['requestId']) <= 256:
             raise ValueError('Invalid publication')
@@ -191,6 +224,7 @@ class OwnerFiles:
         relative = path.relative_to(home)
         if len(relative.parts) < 2 or relative.parts[0] not in ('workspace', 'results', 'media'):
             raise PermissionError('File root denied')
+        expected = self.input_admission(uid, profile, path) if admitted else None
         source = open_file(home / relative.parts[0], path, uid)
         folder = None
         try:
@@ -201,7 +235,9 @@ class OwnerFiles:
             snapshot = folder / path.name
             target = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             try:
-                copy_fd(source, target)
+                size, digest = copy_fd(source, target)
+                if expected is not None and (size != expected['sizeBytes'] or digest != expected['sha256']):
+                    raise PermissionError('Input bytes changed')
             finally:
                 os.close(target)
             result = await self.control.call('artifacts.publish', {'uid': uid, 'path': str(snapshot), 'requestId': params['requestId']}, timeout=1800)
@@ -210,6 +246,148 @@ class OwnerFiles:
             os.close(source)
             if folder is not None:
                 shutil.rmtree(folder)
+
+    async def create_text(self, uid, profile, params):
+        """Публиковать точные UTF-8 байты без произвольного пути или программы."""
+        if (set(params) != {'filename', 'content', 'requestId'}
+                or not isinstance(params['filename'], str) or not 1 <= len(params['filename']) <= 180
+                or params['filename'] in ('.', '..') or Path(params['filename']).name != params['filename']
+                or any(ord(c) < 32 or c in '/\\' for c in params['filename'])
+                or not isinstance(params['content'], str)
+                or not isinstance(params['requestId'], str) or not 1 <= len(params['requestId']) <= 256):
+            raise ValueError('Invalid text artifact')
+        raw = params['content'].encode('utf-8')
+        if len(raw) > 1024 * 1024:
+            raise ValueError('Text artifact too large')
+        stage = Path(self.runtime(uid, profile)['stagingRoot'])
+        checked = open_directory(stage, 0)
+        os.close(checked)
+        folder = Path(tempfile.mkdtemp(prefix='text-', dir=stage))
+        try:
+            path = folder / params['filename']
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                raise
+            result = await self.control.call('artifacts.publish', {'uid': uid, 'path': str(path),
+                'requestId': params['requestId']}, timeout=1800)
+            if result.get('filename') != params['filename'] or result.get('sizeBytes') != len(raw) or result.get('sha256') != hashlib.sha256(raw).hexdigest():
+                raise PermissionError('Text artifact bytes changed')
+            value = self.materialize(uid, profile, result)
+            name = value['filename'].replace('\\','\\\\').replace('[','\\[').replace(']','\\]')
+            value['markdown'] = '[' + name + '](artifact:' + value['artifactId'] + ')'
+            return value
+        finally:
+            shutil.rmtree(folder)
+
+    async def create_structured(self, uid, profile, params, kind):
+        """Публиковать только проверенный DOCX/XLSX из ограниченного JSON."""
+        if kind not in ('document', 'workbook') or type(params) is not dict or set(params) != {'filename', 'requestId', kind}:
+            raise ValueError('Invalid structured artifact')
+        name, request_id, spec = params['filename'], params['requestId'], params[kind]
+        extension = '.docx' if kind == 'document' else '.xlsx'
+        if (type(name) is not str or not 1 <= len(name) <= 180 or name in ('.', '..')
+                or Path(name).name != name or not name.lower().endswith(extension)
+                or any(ord(c) < 32 or c in '/\\' for c in name)
+                or type(request_id) is not str or not 1 <= len(request_id) <= 256):
+            raise ValueError('Invalid structured artifact name or request')
+        try:
+            raw_spec = json.dumps(spec, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+        except (TypeError, ValueError, UnicodeError, OverflowError) as exc:
+            raise ValueError('Invalid structured artifact data') from exc
+        if len(raw_spec) > 1024 * 1024:
+            raise ValueError('Structured artifact too large')
+        if kind == 'workbook':
+            if type(spec) is not dict or set(spec) != {'sheets'} or type(spec['sheets']) is not list or not 1 <= len(spec['sheets']) <= 20:
+                raise ValueError('Invalid workbook')
+            count = 0
+            for sheet in spec['sheets']:
+                if type(sheet) is not dict or set(sheet) != {'name', 'rows'} or type(sheet['name']) is not str or type(sheet['rows']) is not list or not 1 <= len(sheet['rows']) <= 1000:
+                    raise ValueError('Invalid sheet')
+                for row in sheet['rows']:
+                    if type(row) is not list or len(row) > 100:
+                        raise ValueError('Invalid row')
+                    count += len(row)
+                    if count > 20000:
+                        raise ValueError('Too many cells')
+                    for cell in row:
+                        if cell is not None and type(cell) not in (str, int, float, bool):
+                            raise ValueError('Invalid cell')
+                        if type(cell) is float and not math.isfinite(cell):
+                            raise ValueError('Invalid cell')
+                        if type(cell) is str and len(cell.encode('utf-8')) > 65536:
+                            raise ValueError('Cell too large')
+        base = Path(__file__).resolve().parent
+        helper = (base / 'document.py' if kind == 'document' else
+                  base.parent / 'extensions/skill-scripts/office/spreadsheets/scripts/xlsx.py')
+        module_spec = importlib.util.spec_from_file_location('_brai_structured_' + kind, helper)
+        if module_spec is None or module_spec.loader is None:
+            raise RuntimeError('Structured writer unavailable')
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        if kind == 'document':
+            data = module.docx_bytes(spec)
+        stage = Path(self.runtime(uid, profile)['stagingRoot'])
+        checked = open_directory(stage, 0)
+        os.close(checked)
+        folder = Path(tempfile.mkdtemp(prefix='structured-', dir=stage))
+        try:
+            path = folder / name
+            if kind == 'workbook':
+                intermediate = folder / 'source'
+                intermediate.mkdir(mode=0o700)
+                source_path = intermediate / name
+                module.create_workbook(spec, source_path)
+                data = source_path.read_bytes()
+            # Stable archive bytes preserve the requestId contract across retries.
+            canonical = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(data), 'r') as source, zipfile.ZipFile(canonical, 'w') as target:
+                for entry in source.infolist():
+                    info = zipfile.ZipInfo(entry.filename, (1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    target.writestr(info, source.read(entry))
+            data = canonical.getvalue()
+            if len(data) > 8 * 1024 * 1024:
+                raise ValueError('Structured output too large')
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            result = await self.control.call('artifacts.publish', {'uid': uid, 'path': str(path),
+                'requestId': request_id}, timeout=1800)
+            if result.get('filename') != name or result.get('sizeBytes') != len(data) or result.get('sha256') != hashlib.sha256(data).hexdigest():
+                raise PermissionError('Structured artifact bytes changed')
+            value = self.materialize(uid, profile, result)
+            safe_name = value['filename'].replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
+            value['markdown'] = '[' + safe_name + '](artifact:' + value['artifactId'] + ')'
+            return value
+        finally:
+            shutil.rmtree(folder)
+
+    async def read_text(self, uid, profile, params):
+        """Читать ограниченный UTF-8 артефакт после owner-проверки Artifacts."""
+        if set(params) != {'artifactId'}:
+            raise ValueError('Invalid text artifact')
+        aid = str(uuid.UUID(params['artifactId']))
+        result = await self.control.call('artifacts.fetch', {'uid': uid, 'artifactId': aid}, timeout=120)
+        if result.get('artifactId') != aid:
+            raise PermissionError('Artifact mismatch')
+        fd = self.open_cache(uid, result, profile)
+        try:
+            if result['sizeBytes'] > 1024 * 1024:
+                raise ValueError('Text artifact too large')
+            with os.fdopen(fd, 'rb', closefd=False) as stream:
+                raw = stream.read(1024 * 1024 + 1)
+            if len(raw) != result['sizeBytes'] or hashlib.sha256(raw).hexdigest() != result['sha256']:
+                raise PermissionError('Text artifact bytes changed')
+            return {'artifactId': aid, 'filename': result['filename'], 'content': raw.decode('utf-8')}
+        finally:
+            os.close(fd)
 
     async def fetch(self, uid, profile, params, *, ingress=False):
         """Подтвердить owner у Artifacts; ingress получает свою проверенную копию."""
@@ -262,7 +440,20 @@ class OwnerFiles:
                 raise PermissionError('Ingress root denied')
             source = open_file(roots[0], path, self.config['ingressUid'])
             try:
-                copied.append(copy_to_profile(source, profile['home'], 'media', uuid.uuid4().hex, Path(path).name, uid))
+                receipt = {}
+                destination = copy_to_profile(source, profile['home'], 'media', uuid.uuid4().hex,
+                                              Path(path).name, uid, receipt=receipt)
+                folder = open_directory(Path(destination).parent, uid)
+                try:
+                    fd = os.open('.brai-admission.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+                    with os.fdopen(fd, 'w') as marker:
+                        json.dump({**receipt, 'path': destination, 'userId': profile['userId'],
+                                   'profileId': profile['profileId']}, marker)
+                        marker.flush()
+                        os.fsync(marker.fileno())
+                finally:
+                    os.close(folder)
+                copied.append(destination)
             finally:
                 os.close(source)
         return {'paths': copied}

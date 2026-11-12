@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.adapter import make_adapter
-from identity.worker import Worker
+from identity.worker import Worker, publish_delivery_file
 from identity.ingress import Bridge
 from identity.ipc import RpcError
 from identity.scope import delivery_scope
@@ -94,6 +94,18 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         async def publish_file(path):
             return {'artifact_id': self.files.publish(path, 'ipc-publish')['artifactId']}
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
+
+    async def test_forbidden_rpc_is_a_permanent_native_send_result(self):
+        calls = []
+        async def denied(owner, action, payload):
+            calls.append(action)
+            raise RpcError(-32003, 'Forbidden')
+        worker = self.adapter(denied)
+        result = await worker.send('123', 'Brai онлайн', metadata={'thread_id':'77'})
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_kind, 'forbidden')
+        self.assertFalse(result.retryable)
+        self.assertEqual(calls, ['send'])
 
     async def test_final_edit_uses_current_dispatch_topic_without_duplicate_send(self):
         calls = []
@@ -285,6 +297,96 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         transport.assert_not_awaited()
 
+    async def test_delivery_alias_fetches_fresh_descriptor_without_republishing(self):
+        artifact_id = '11111111-1111-4111-8111-111111111111'
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            return {'artifactId': artifact_id, 'filename': 'file.txt'}
+
+        with patch.object(native, 'reference_metadata',
+                          return_value={'artifactId': artifact_id, 'filename': 'file.txt'}):
+            result = await publish_delivery_file('/old/alias.txt', broker=broker)
+        self.assertEqual(result, {'artifact_id': artifact_id})
+        self.assertEqual(calls, [('artifacts.fetch', {'artifactId': artifact_id})])
+
+    async def test_delivery_alias_fetch_failure_never_falls_back_to_publish(self):
+        artifact_id = '11111111-1111-4111-8111-111111111111'
+        for failure in (PermissionError('foreign artifact'), ConnectionError('fetch failed')):
+            calls = []
+
+            def broker(method, params):
+                calls.append((method, params))
+                raise failure
+
+            with self.subTest(failure=type(failure).__name__), patch.object(
+                    native, 'reference_metadata',
+                    return_value={'artifactId': artifact_id, 'filename': 'file.txt'}):
+                with self.assertRaises(type(failure)):
+                    await publish_delivery_file('/old/alias.txt', broker=broker)
+            self.assertEqual(calls, [('artifacts.fetch', {'artifactId': artifact_id})])
+
+    async def test_delivery_alias_rejects_mismatched_fetched_id(self):
+        artifact_id = '11111111-1111-4111-8111-111111111111'
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            return {'artifactId': '22222222-2222-4222-8222-222222222222'}
+
+        with patch.object(native, 'reference_metadata',
+                          return_value={'artifactId': artifact_id, 'filename': 'file.txt'}):
+            with self.assertRaisesRegex(PermissionError, 'Artifact mismatch'):
+                await publish_delivery_file('/old/alias.txt', broker=broker)
+        self.assertEqual(calls, [('artifacts.fetch', {'artifactId': artifact_id})])
+
+    async def test_guest_delivery_without_alias_uses_only_files_publish(self):
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            if method == 'permissions.get':
+                return {'role': 'guest'}
+            return {'artifactId': '11111111-1111-4111-8111-111111111111'}
+
+        with patch.object(native, 'reference_metadata', return_value=None):
+            result = await publish_delivery_file('/tmp/admitted.txt', broker=broker)
+        self.assertEqual(result, {'artifact_id': '11111111-1111-4111-8111-111111111111'})
+        self.assertEqual([method for method, _ in calls],
+                         ['permissions.get', 'files.publish'])
+        self.assertEqual(calls[1][1]['path'], '/tmp/admitted.txt')
+        self.assertTrue(calls[1][1]['requestId'])
+
+    async def test_user_delivery_without_alias_uses_generic_artifact_publish(self):
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            if method == 'permissions.get':
+                return {'role': 'user'}
+            return {'artifactId': '11111111-1111-4111-8111-111111111111'}
+
+        with patch.object(native, 'reference_metadata', return_value=None):
+            result = await publish_delivery_file('/tmp/output.txt', broker=broker)
+        self.assertEqual(result, {'artifact_id': '11111111-1111-4111-8111-111111111111'})
+        self.assertEqual([method for method, _ in calls],
+                         ['permissions.get', 'artifacts.publish'])
+        self.assertEqual(calls[1][1]['path'], '/tmp/output.txt')
+        self.assertTrue(calls[1][1]['requestId'])
+
+    async def test_unknown_delivery_role_is_denied_without_publishing(self):
+        calls = []
+
+        def broker(method, params):
+            calls.append((method, params))
+            return {'role': 'unknown'}
+
+        with patch.object(native, 'reference_metadata', return_value=None):
+            with self.assertRaisesRegex(PermissionError, 'Access unavailable'):
+                await publish_delivery_file('/tmp/output.txt', broker=broker)
+        self.assertEqual(calls, [('permissions.get', {})])
+
     async def test_invalid_voice_flag_and_foreign_route_are_rejected(self):
         bridge = Bridge('owner', '123', 101, '/unused', AsyncMock(), None)
         bridge.routes.add(('123', '77'))
@@ -299,12 +401,18 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         from types import MethodType
         import textwrap
         lines = (Path(__file__).parents[1] / 'native.patch').read_text().splitlines()
-        start = next(i for i, line in enumerate(lines) if line.startswith('+    async def send_typing('))
+        start = next(i for i, line in enumerate(lines)
+                     if line[:1] in ('+', ' ') and line[1:].startswith('    async def send_typing('))
         body = []
         for line in lines[start:]:
-            if not line.startswith('+') or line.startswith('+++'):
+            if line.startswith(('---', '+++', '@@')):
                 break
-            body.append(line[1:])
+            if line.startswith('-'):
+                continue
+            value = line[1:] if line[:1] in ('+', ' ') else line
+            if body and value.startswith('    ') and value.lstrip().startswith(('async def ', 'def ')):
+                break
+            body.append(value)
         scope = {'normalize_telegram_chat_id': int, 'logger': runtime._logger}
         exec('from __future__ import annotations\n' + textwrap.dedent('\n'.join(body)), scope)
         return MethodType(scope['send_typing'], adapter)

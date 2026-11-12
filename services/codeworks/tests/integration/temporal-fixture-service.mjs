@@ -7,6 +7,7 @@ import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {Pool} from 'pg';
 import {verifyPackage} from '../../components/package-runtime.mjs';
+import {copyFixtureTree} from './temporal-fixture-payload.mjs';
 const [action,input,id]=process.argv.slice(2),c=JSON.parse(fs.readFileSync(input));
 const ensure=(v,code)=>{if(!v)throw Error(code);};
 ensure(['prepare','start','upgrade','stop'].includes(action)&&new URL(c.databaseURL).pathname==='/brai_codeworks_temporal_test'&&/^codeworks-fixture-/.test(c.taskQueue),'FIXTURE_REQUIRED');
@@ -38,16 +39,17 @@ async function start(p){
   throw Error('FIXTURE_START_TIMEOUT');
 }
 if(action==='prepare'){
-  const original=fs.realpathSync(c.original);ensure(original.startsWith(fs.realpathSync(c.source)+'/tmp/component-packages/codeworks-'),'FIXTURE_ARTIFACT_REQUIRED');verifyPackage(original,'codeworks');
+  const timings=[],stage=(name,work)=>{const started=Date.now();const value=work();timings.push({stage:name,elapsed_ms:Date.now()-started});write(base+'/prepare-timings.json',timings);return value;};
+  const original=fs.realpathSync(c.original);ensure(original.startsWith(fs.realpathSync(c.source)+'/tmp/component-packages/codeworks-'),'FIXTURE_ARTIFACT_REQUIRED');stage('verify-candidate',()=>verifyPackage(original,'codeworks'));
   const previous=c.previousArtifact?fs.realpathSync(c.previousArtifact):original;
   if(c.previousArtifact)ensure(/^\/opt\/brai-components\/codeworks\/[a-f0-9]{64}$/.test(previous),'INSTALLED_PREVIOUS_ARTIFACT_REQUIRED');
-  verifyPackage(previous,'codeworks');
-  for(const key of ['artifactA','artifactB']){ensure(/^\/tmp\/codeworks-temporal-artifact-[a-f0-9-]{36}-[ab]$/.test(c[key]),'ISOLATED_PAYLOAD_REQUIRED');fs.cpSync(key==='artifactA'?previous:original,c[key],{recursive:true});}
+  if(previous!==original)stage('verify-previous',()=>verifyPackage(previous,'codeworks'));
+  for(const key of ['artifactA','artifactB']){ensure(/^\/tmp\/codeworks-temporal-artifact-[a-f0-9-]{36}-[ab]$/.test(c[key]),'ISOLATED_PAYLOAD_REQUIRED');stage('copy-'+key,()=>copyFixtureTree(key==='artifactA'?previous:original,c[key]));}
   const bundle='services/codeworks/dist/workflows.js';fs.copyFileSync(c.nextBundle,c.artifactB+'/'+bundle);
   const m=json(c.artifactB+'/artifact-manifest.json'),file=m.files.find(v=>v.path===bundle),bytes=fs.readFileSync(c.artifactB+'/'+bundle);
   file.sha256=createHash('sha256').update(bytes).digest('hex');file.size=bytes.length;file.mode=fs.statSync(c.artifactB+'/'+bundle).mode&0o777;
   m.bytes=m.files.reduce((n,v)=>n+v.size,0);m.payloadHash=createHash('sha256').update(JSON.stringify({files:m.files,runtime:m.runtime,runtimePackages:m.runtimePackages})).digest('hex');
-  write(c.artifactB+'/artifact-manifest.json',m);payload(c.artifactA);payload(c.artifactB);
+  write(c.artifactB+'/artifact-manifest.json',m);stage('verify-copy-a',()=>payload(c.artifactA));stage('verify-copy-b',()=>payload(c.artifactB));
 }else if(action==='stop'){await stop();for(const key of ['artifactA','artifactB']){if(fs.existsSync(c[key])){ensure(/^\/tmp\/codeworks-temporal-artifact-[a-f0-9-]{36}-[ab]$/.test(c[key]),'ISOLATED_PAYLOAD_REQUIRED');fs.rmSync(c[key],{recursive:true});}}}
 else if(action==='start')await start(payload(c.artifactA));
 else{

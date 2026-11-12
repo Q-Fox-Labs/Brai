@@ -1,5 +1,5 @@
 // ABOUTME: Хранит scoped задания, intent, бюджеты и результаты обработки bug-hunt.
-// ABOUTME: Все блокировки короткие; модельные вызовы выполняются после освобождения соединения.
+// ABOUTME: Сохранённый pending intent занимает модельный слот; вызовы выполняются вне SQL-транзакции.
 import {createHash,createHmac,timingSafeEqual,randomUUID} from "node:crypto";
 import type {Pool,PoolClient} from "pg";
 import {Fault,canonical,type Observation,type Principal} from "./contracts.js";
@@ -13,7 +13,7 @@ export interface ActivateGenerationInput {request_id:string;generation:string;ex
 export interface ProcessingStoreOptions {
  targetGeneration?:string;target?:()=>string;
  installationId:string;cursorKey:string;leaseMs?:number;maxDatabaseBytes?:number;intakeReserveBytes?:number;maxDerivativeBytes?:number;
- dailyLimits?:{embedding:{owner:number;global:number};classification:{owner:number;global:number}};
+ dailyLimits?:{embedding:{owner:number|null;global:number|null};classification:{owner:number;global:number}};
  policy?:()=>Pick<ProcessingStoreOptions,"dailyLimits"|"maxDatabaseBytes"|"intakeReserveBytes"|"maxDerivativeBytes">;
 }
 const NON_EMBEDDING_GENERATION="gemma2-symmetric-v1";
@@ -44,7 +44,7 @@ export function createProcessingStore(pool:Pool,options:ProcessingStoreOptions):
  const installation=options.installationId,lease=Math.max(1000,Math.min(options.leaseMs??30000,60000));
  const target=()=>{const value=options.target?.()??options.targetGeneration??GENERATION;if(!generationPattern.test(value))throw new Error("INVALID_GENERATION");return value;};
  const limits=options.dailyLimits??{embedding:{owner:100,global:1000},classification:{owner:20,global:100}};
- if(!Object.values(limits).every(v=>Object.values(v).every(n=>Number.isSafeInteger(n)&&n>=0)))throw new Error("INVALID_PROCESSING_BUDGET");
+ if(!Object.entries(limits).every(([branch,v])=>branch==="embedding"&&v.owner===null&&v.global===null||Object.values(v).every(n=>typeof n==="number"&&Number.isSafeInteger(n)&&n>=0)))throw new Error("INVALID_PROCESSING_BUDGET");
  async function tx<T>(work:(db:PoolClient)=>Promise<T>):Promise<T>{
   const db=await pool.connect();
   try{await db.query("BEGIN");await db.query("SET LOCAL statement_timeout='3000ms'");await db.query("SET LOCAL lock_timeout='2000ms'");const value=await work(db);await db.query("COMMIT");return value;}
@@ -57,7 +57,7 @@ export function createProcessingStore(pool:Pool,options:ProcessingStoreOptions):
  function currentPolicy(){
   const policy=options.policy?options.policy():options;
   const dailyLimits=policy.dailyLimits??limits;
-  if(!Object.values(dailyLimits).every(v=>Object.values(v).every(n=>Number.isSafeInteger(n)&&n>=0)))throw new Error("INVALID_PROCESSING_BUDGET");
+  if(!Object.entries(dailyLimits).every(([branch,v])=>branch==="embedding"&&v.owner===null&&v.global===null||Object.values(v).every(n=>typeof n==="number"&&Number.isSafeInteger(n)&&n>=0)))throw new Error("INVALID_PROCESSING_BUDGET");
   return {dailyLimits,maxDatabaseBytes:policy.maxDatabaseBytes??1073741824,intakeReserveBytes:policy.intakeReserveBytes??67108864,maxDerivativeBytes:policy.maxDerivativeBytes??268435456};
  }
  const derivativeTables=["search_document","report_signature","observation_group","group_membership","grouping_decision","group_audit","similarity_proposal","classification","classification_override","processing_job","processing_attempt","processing_budget","processing_control","processing_operator_action","embedding_chunk","v2_mutation","embedding_generation","embedding_generation_control","embedding_generation_activation"];
@@ -128,15 +128,40 @@ export function createProcessingStore(pool:Pool,options:ProcessingStoreOptions):
   async claim(limit=2,branches:Branch[]=["local","embedding","classification"]){
    return tx(async db=>{
     const state=await control(db);const build=target();await prepareGenerations(db,installation,build);
-    const active=await db.query("SELECT branch FROM processing_job WHERE installation_id=$1 AND state='running' AND lease_until>clock_timestamp()",[installation]);
+    // AIDEV-NOTE: Повышение/снятие лимита будит прежний budget job в тех же сутках, сохраняя intent, business ID и расход.
+    if(!state.paused){
+     const daily=currentPolicy().dailyLimits;
+     await db.query(`WITH ready AS (
+      SELECT j.id FROM processing_job j
+      JOIN (VALUES ('embedding',$4::integer,$5::integer),('classification',$6::integer,$7::integer)) AS l(branch,owner_limit,global_limit) ON l.branch=j.branch
+      LEFT JOIN processing_budget g ON g.installation_id=j.installation_id AND g.branch=j.branch AND g.budget_day=(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date AND g.scope='global' AND g.owner_key=''
+      LEFT JOIN processing_budget o ON o.installation_id=j.installation_id AND o.branch=j.branch AND o.budget_day=(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date AND o.scope='owner' AND o.owner_key=j.owner_id
+      WHERE j.installation_id=$1 AND j.pipeline_version=$2 AND j.state='budget_exhausted' AND j.available_at>clock_timestamp()
+       AND (j.branch<>'embedding' OR j.index_generation=$3) AND j.branch=ANY($8::text[])
+       AND (l.global_limit IS NULL OR coalesce(g.reserved_calls,0)<l.global_limit)
+       AND (l.owner_limit IS NULL OR coalesce(o.reserved_calls,0)<l.owner_limit)
+      ORDER BY j.registered_at,j.id LIMIT 50 FOR UPDATE OF j SKIP LOCKED
+     ) UPDATE processing_job SET available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id IN(SELECT id FROM ready)`,
+     [installation,PIPELINE_VERSION,build,daily.embedding.owner,daily.embedding.global,daily.classification.owner,daily.classification.global,branches]);
+    }
+    const active=await db.query("SELECT id,branch FROM processing_job WHERE installation_id=$1 AND state='running' AND lease_until>clock_timestamp()",[installation]);
     const available=Math.min(2-active.rowCount!,2,Math.max(0,limit));
     if(available<=0)return [];
-    const candidates=await db.query("SELECT j.*,r.observation,COALESCE((SELECT max(x.claimed_at) FROM processing_job x WHERE x.installation_id=j.installation_id AND x.owner_id=j.owner_id),'-infinity'::timestamptz) AS owner_last FROM processing_job j JOIN report r ON r.id=j.report_id AND r.case_id=j.case_id AND r.owner_id=j.owner_id AND r.installation_id=j.installation_id WHERE j.installation_id=$1 AND j.pipeline_version=$2 AND (j.branch<>'embedding' OR j.index_generation=$7 OR EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')) AND ((j.state IN('pending','waiting_dependency','budget_exhausted') AND j.available_at<=clock_timestamp()) OR (j.state='running' AND j.lease_until<=clock_timestamp())) AND (NOT $3::boolean OR EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')) AND (j.branch=ANY($5::text[]) OR EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')) AND (j.branch='local' OR NOT(j.branch=ANY($6::text[]))) ORDER BY CASE WHEN $4::boolean THEN (j.priority='backfill') ELSE (j.priority='new') END DESC,owner_last,j.available_at,j.registered_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 16",[installation,PIPELINE_VERSION,state.paused,Number(state.claim_counter)%4===3,branches,active.rows.filter(x=>x.branch!=="local").map(x=>x.branch),build]);
+    const dispatching="EXISTS(SELECT 1 FROM processing_attempt a WHERE a.job_id=j.id AND a.business_attempt_id=j.business_attempt_id AND a.phase='dispatching')";
+    // AIDEV-NOTE: PROVIDER_PENDING освобождает lease, но сохраняет модельный слот до чтения исходного intent.
+    const pending=await db.query("SELECT j.id,j.branch FROM processing_job j WHERE j.installation_id=$1 AND j.branch<>'local' AND j.state IN('pending','running','waiting_dependency') AND "+dispatching,[installation]);
+    const occupied=new Set([...active.rows,...pending.rows].map(j=>j.id));
+    const modelBusy=new Set([...active.rows,...pending.rows].filter(j=>j.branch!=="local").map(j=>j.branch));
+    const candidates=await db.query(`SELECT j.*,r.observation,${dispatching} AS recovering,COALESCE((SELECT max(x.claimed_at) FROM processing_job x WHERE x.installation_id=j.installation_id AND x.owner_id=j.owner_id),'-infinity'::timestamptz) AS owner_last FROM processing_job j JOIN report r ON r.id=j.report_id AND r.case_id=j.case_id AND r.owner_id=j.owner_id AND r.installation_id=j.installation_id WHERE j.installation_id=$1 AND j.pipeline_version=$2 AND (j.branch<>'embedding' OR j.index_generation=$7 OR ${dispatching}) AND ((j.state IN('pending','waiting_dependency','budget_exhausted') AND j.available_at<=clock_timestamp()) OR (j.state='running' AND j.lease_until<=clock_timestamp())) AND (NOT $3::boolean OR ${dispatching}) AND (j.branch=ANY($5::text[]) OR ${dispatching}) AND (j.branch='local' OR NOT(j.branch=ANY($6::text[]))) AND (${dispatching} OR ($8::boolean AND (j.branch='local' OR NOT(j.branch=ANY($9::text[]))))) ORDER BY recovering DESC,CASE WHEN $4::boolean THEN (j.priority='backfill') ELSE (j.priority='new') END DESC,owner_last,j.available_at,j.registered_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 16`,[installation,PIPELINE_VERSION,state.paused,Number(state.claim_counter)%4===3,branches,active.rows.filter(x=>x.branch!=="local").map(x=>x.branch),build,occupied.size<2,[...modelBusy]]);
     const busy=new Set(active.rows.filter(x=>x.branch!=="local").map(x=>x.branch)),selected:ProcessingJob[]=[];
     for(const row of candidates.rows){
      if(selected.length>=available)break;if(row.branch!=="local"&&busy.has(row.branch))continue;
+     if(!row.recovering&&(occupied.size>=2||row.branch!=="local"&&modelBusy.has(row.branch)))continue;
      const claimed=await db.query("UPDATE processing_job SET state='running',fence=fence+1,lease_until=clock_timestamp()+($2::int*interval '1 millisecond'),claimed_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1 RETURNING fence",[row.id,lease]);
-     selected.push({...row,fence:claimed.rows[0].fence});if(row.branch!=="local")busy.add(row.branch);
+     const {recovering,...job}=row;
+     selected.push({...job,fence:claimed.rows[0].fence});
+     if(!recovering){occupied.add(row.id);if(row.branch!=="local")modelBusy.add(row.branch);}
+     if(row.branch!=="local")busy.add(row.branch);
     }
     await db.query("UPDATE processing_control SET claim_counter=claim_counter+1 WHERE installation_id=$1",[installation]);return selected;
    });
@@ -170,7 +195,7 @@ export function createProcessingStore(pool:Pool,options:ProcessingStoreOptions):
     for(const [scope,owner,max] of [["global","",callLimits[branch].global],["owner",job.owner_id,callLimits[branch].owner]] as const){
      await db.query("INSERT INTO processing_budget(installation_id,branch,budget_day,scope,owner_key) VALUES($1,$2,(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date,$3,$4) ON CONFLICT DO NOTHING",[installation,branch,scope,owner]);
      const used=await db.query("SELECT reserved_calls FROM processing_budget WHERE installation_id=$1 AND branch=$2 AND budget_day=(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date AND scope=$3 AND owner_key=$4 FOR UPDATE",[installation,branch,scope,owner]);
-     if(used.rows[0].reserved_calls>=max){await db.query("UPDATE processing_job SET state='budget_exhausted',code='DAILY_CALL_LIMIT',lease_until=NULL,available_at=(date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' WHERE "+fence,key(job));return null;}
+     if(max!==null&&used.rows[0].reserved_calls>=max){await db.query("UPDATE processing_job SET state='budget_exhausted',code='DAILY_CALL_LIMIT',lease_until=NULL,available_at=(date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' WHERE "+fence,key(job));return null;}
     }
     for(const [scope,owner] of [["global",""],["owner",job.owner_id]])await db.query("UPDATE processing_budget SET reserved_calls=reserved_calls+1 WHERE installation_id=$1 AND branch=$2 AND budget_day=(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date AND scope=$3 AND owner_key=$4",[installation,branch,scope,owner]);
     await db.query("UPDATE processing_control SET derivative_bytes=derivative_bytes+$2 WHERE installation_id=$1",[installation,bytes]);

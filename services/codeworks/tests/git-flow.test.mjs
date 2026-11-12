@@ -207,7 +207,7 @@ test('GitHub adapter preserves exact query SHA, app identity and lost API error 
   const calls=[],sha='c'.repeat(40),p={github:{repository:'fixture/repository'}};
   const gh=createGitHub({run:async(exe,args,options)=>{calls.push({exe,args,options});return {stdout:JSON.stringify({total_count:1,check_runs:[{name:'code',app:{id:42},head_sha:sha,status:'completed',conclusion:'success'}]})};}});
   assert.deepEqual(await gh.checks(p,sha),[check(sha)]);assert.equal(calls[0].args.at(-1),'repos/fixture/repository/commits/'+sha+'/check-runs?per_page=100&filter=latest');
-  const failed=createGitHub({run:async()=>{throw new Error('private stderr');}});await assert.rejects(failed.checks(p,sha),{code:'GITHUB_UNAVAILABLE',message:'GitHub response unavailable; reconcile the recorded intent.'});
+  const failed=createGitHub({run:async()=>{throw new Error('private stderr');}});await assert.rejects(failed.checks(p,sha),error=>{assert.equal(error.code,'GITHUB_UNAVAILABLE');assert.equal(error.message,'GITHUB_UNAVAILABLE');assert.equal(error.message.includes('private stderr'),false);return true;});
 });
 test('failed/pending/wrong-SHA checks block target mutation through the actual release port',async t=>{
   const f=await fixture(t);await f.advance();

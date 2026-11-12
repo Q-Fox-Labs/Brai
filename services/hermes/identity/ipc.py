@@ -10,6 +10,23 @@ import uuid
 MAX_FRAME = 1024 * 1024
 MAX_INFLIGHT = 64
 
+# AIDEV-NOTE: Через RPC передаём категории; текст исключения может содержать секреты.
+_FAILURE_REASONS = frozenset((
+    'FORBIDDEN', 'INVALID_ARGUMENT', 'DEADLINE_EXCEEDED', 'OUTCOME_UNKNOWN',
+    'UPSTREAM_UNAVAILABLE', 'INVALID_UPSTREAM_RESPONSE', 'OWNER_MISMATCH', 'OVERLOADED',
+    'CANCELLED', 'NOT_FOUND', 'CONFLICT', 'REQUEST_TOO_LARGE',
+    'RESULT_TOO_LARGE', 'UNAVAILABLE', 'INTERNAL', 'MODEL_NOT_FOUND',
+    'MODEL_NOT_INSTALLED', 'UNSUPPORTED_OPERATION', 'MODEL_IN_USE', 'INPUT_TOO_LARGE',
+    'BUSY', 'MODEL_LOAD_FAILED', 'ENGINE_UNAVAILABLE', 'ARTIFACT_NOT_AVAILABLE',
+    'DEPENDENCY_UNAVAILABLE', 'INSTALLATION_FAILED', 'REVISION_CONFLICT', 'NOT_SUPPORTED',
+))
+
+
+def safe_failure(reason=None, stage=None):
+    """Вернуть ограниченную диагностику ошибки для границы процессов."""
+    return {'reason': reason if isinstance(reason, str) and reason in _FAILURE_REASONS else 'INTERNAL',
+            'stage': stage if stage in ('control', 'broker') else 'broker'}
+
 
 class RpcError(Exception):
     """Ошибка JSON-RPC с кодом, безопасным для удалённой стороны."""
@@ -73,6 +90,8 @@ class Peer:
             reply = {'jsonrpc': '2.0', 'id': ident, 'result': result}
         except RpcError as exc:
             reply = {'jsonrpc': '2.0', 'id': ident, 'error': {'code': exc.code, 'message': str(exc)}}
+        except PermissionError:
+            reply = {'jsonrpc': '2.0', 'id': ident, 'error': {'code': -32003, 'message': 'Forbidden'}}
         except (TypeError, ValueError):
             reply = {'jsonrpc': '2.0', 'id': ident, 'error': {'code': -32602, 'message': 'Invalid params'}}
         except Exception:

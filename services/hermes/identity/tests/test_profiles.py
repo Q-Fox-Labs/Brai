@@ -1,6 +1,11 @@
 # ABOUTME: Проверяет стабильность личных UID-профилей и файловые границы systemd.
 # ABOUTME: Не создаёт системных пользователей и не меняет runtime.
 """Контракт чистого ядра provisioning."""
+import json
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -14,7 +19,7 @@ class ProfileTests(unittest.TestCase):
     """Проверить входы Auth и исключить наследование общей среды."""
 
     def profile(self):
-        return profile_for_user({'id': 'user-a', 'profileId': '11111111-1111-4111-8111-111111111111',
+        return profile_for_user({'id': 'user-a', 'role': 'user', 'profileId': '11111111-1111-4111-8111-111111111111',
                                  'telegramId': '123', 'status': 'provisioning'},
                                 profile_root='/var/lib/brai-dev/identity/profiles')
 
@@ -28,6 +33,52 @@ class ProfileTests(unittest.TestCase):
         value = native_profile(self.profile(), instructions_root='/software/instructions',
                                model='fixture-model')
         self.assertIn('brai-telegram', value['plugins']['enabled'])
+
+    def test_native_mcp_launcher_excludes_script_and_user_sitecustomize(self):
+        source = Path(__file__).resolve().parents[2] / 'identity'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            managed_root = root / 'managed'
+            identity_root = managed_root / 'services/hermes/identity'
+            identity_root.mkdir(parents=True)
+            for name in ('tool_client.py', 'tool-policy.json'):
+                shutil.copyfile(source / name, identity_root / name)
+
+            config = native_profile(self.profile(), instructions_root=str(managed_root),
+                                    model='fixture-model')
+            mcp = config['mcp_servers']['brai']
+            self.assertEqual(mcp['args'][:2], ['-s', '-P'])
+            self.assertEqual(mcp['args'][2], str(identity_root / 'tool_client.py'))
+
+            home = root / 'home'
+            home.mkdir()
+            userbase = root / 'userbase'
+            marker = root / 'sitecustomize-ran'
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ('PYTHONPATH', 'PYTHONNOUSERSITE', 'PYTHONSAFEPATH')}
+            env.update(HOME=str(home), PYTHONUSERBASE=str(userbase),
+                       SITE_CUSTOMIZE_MARKER=str(marker))
+            query = subprocess.run([mcp['command'], '-c',
+                                    'import site; print(site.getusersitepackages())'],
+                                   cwd=home, env=env, text=True, capture_output=True,
+                                   timeout=10, check=True)
+            user_site = Path(query.stdout.strip())
+            user_site.mkdir(parents=True)
+            payload = ('from pathlib import Path\n'
+                       'import os\n'
+                       'Path(os.environ["SITE_CUSTOMIZE_MARKER"]).write_text("executed")\n')
+            (identity_root / 'sitecustomize.py').write_text(payload, encoding='utf-8')
+            (user_site / 'sitecustomize.py').write_text(payload, encoding='utf-8')
+
+            request = json.dumps({'jsonrpc': '2.0', 'id': 'ping', 'method': 'ping',
+                                  'params': None}) + '\n'
+            result = subprocess.run([mcp['command'], *mcp['args']], cwd=home, env=env,
+                                    input=request, text=True, capture_output=True,
+                                    timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout),
+                             {'jsonrpc': '2.0', 'id': 'ping', 'result': {}})
+            self.assertFalse(marker.exists())
 
     def test_child_tools_receive_only_the_trusted_proxy_allowlist(self):
         value = native_profile(self.profile(), instructions_root='/software/instructions',
@@ -85,7 +136,7 @@ class ProfileTests(unittest.TestCase):
                             broker_socket='/run/broker.sock', memory_socket='/run/memory.sock',
                             egress_socket='/run/egress.sock', instance='dev',
                             site_packages='/software/site-packages', instructions_root='/software/instructions')
-        self.assertIn('ExecStart=/opt/brai-profile/python/bin/python3.14 -P -B -m identity.worker', value)
+        self.assertIn('ExecStart=/opt/brai-profile/python/bin/python3.14 -s -P -B -m identity.worker', value)
         self.assertIn('PrivateNetwork=yes', value)
         self.assertIn('Environment=BU_CDP_URL=http://127.0.0.1:19364', value)
         environment = dict(line.removeprefix('Environment=').split('=', 1)

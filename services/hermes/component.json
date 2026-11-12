@@ -31,7 +31,12 @@
     "services/hermes/identity/media.py",
     "services/hermes/identity/network.py",
     "services/hermes/identity/search.py",
-    "services/hermes/identity/pause_preseed.py"
+    "services/hermes/identity/native_policy.py",
+    "services/hermes/identity/pause_preseed.py",
+    "services/hermes/identity/guest_tools.py",
+    "services/hermes/identity/guest_browser.py",
+    "services/hermes/files/generated.py",
+    "services/hermes/identity/guest_generation.py"
   ],
   "inputs": {
     "build": [],
@@ -224,6 +229,8 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/native_policy.py",
+      "services/hermes/identity/tool-policy.json",
       "services/hermes/identity/bug-hunt.mjs",
       "services/bug-hunt/schemas/messages.schema.json",
       "services/bug-hunt/schemas/v2.schema.json",
@@ -233,7 +240,13 @@
       "services/hermes/identity/ingress.openrpc.json",
       "services/hermes/identity/pause_preseed.py",
       "services/hermes/identity/schemas/pause-preseed.schema.json",
-      "services/bug-hunt/schemas/verification-v3.schema.json"
+      "services/bug-hunt/schemas/verification-v3.schema.json",
+      "services/hermes/identity/guest_tools.py",
+      "services/hermes/identity/guest_browser.py",
+      "services/hermes/identity/browser-defaults.json",
+      "services/hermes/files/document.py",
+      "services/hermes/files/generated.py",
+      "services/hermes/identity/guest_generation.py"
     ],
     "checks": [
       "services/hermes/extensions/config/network-timeouts.json",
@@ -274,6 +287,8 @@
       "services/hermes/identity/tests/test_login.py",
       "services/hermes/identity/tests/control.test.mjs",
       "services/hermes/identity/tests/test_broker.py",
+      "services/hermes/identity/tests/test_diagnostics.py",
+      "services/local-ai/schemas/messages.schema.json",
       "services/hermes/identity/tests/test_memory_boundary_contract.py",
       "services/hermes/identity/tests/test_network.py",
       "services/hermes/identity/tests/broker.test.mjs",
@@ -303,11 +318,17 @@
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
       "services/hermes/tests/dialogues-summary.test.mjs",
+      "services/hermes/identity/tests/test_worker_artifact_read.py",
+      "services/hermes/identity/tests/roles.sol.test.mjs",
+      "services/hermes/identity/tests/roles_regression.test.mjs",
+      "services/hermes/identity/tests/test_roles_admission.py",
+      "services/hermes/identity/tests/test_roles_cron.py",
+      "services/hermes/identity/tests/test_roles_files.py",
+      "services/hermes/identity/tests/test_roles_native.py",
       "services/hermes/identity/tests/test_system_skills_native.py",
       "services/hermes/tests/identity-bug-hunt.test.mjs",
       "services/hermes/identity/tests/test_chat_journal.py",
       "services/hermes/identity/tests/telegram-chat-read.test.mjs",
-      "services/hermes/identity/tests/test_worker_artifact_read.py",
       "services/hermes/identity/tests/test_chat_pause.py",
       "services/hermes/identity/tests/chat_pause.test.mjs",
       "services/hermes/identity/tests/control_pause.test.mjs",
@@ -315,7 +336,16 @@
       "services/hermes/identity/tests/test_memory_checkpoint_integration.py",
       "services/hermes/identity/tests/test_relay_lifetime.py",
       "services/hermes/identity/tests/test_pause_preseed.py",
-      "services/hermes/identity/tests/pause_preseed.test.mjs"
+      "services/hermes/identity/tests/pause_preseed.test.mjs",
+      "services/hermes/identity/tests/test_guest_browser_egress.py",
+      "services/hermes/identity/tests/test_guest_browser_guard.py",
+      "services/hermes/identity/tests/test_guest_browser_runtime.py",
+      "services/hermes/identity/tests/test_guest_generation.py",
+      "services/hermes/identity/tests/test_guest_tools.py",
+      "services/hermes/identity/tests/guest_tools.test.mjs",
+      "services/hermes/files/tests/test_document.py",
+      "services/hermes/files/tests/test_structured.py",
+      "services/hermes/files/tests/test_generated_files.py"
     ]
   },
   "dependencies": [
@@ -607,6 +637,8 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/native_policy.py",
+      "services/hermes/identity/tool-policy.json",
       "services/hermes/extensions/scripts/context_gif.py",
       "services/hermes/identity/bug-hunt.mjs",
       "services/bug-hunt/schemas/messages.schema.json",
@@ -616,7 +648,13 @@
       "services/hermes/identity/telegram-chat-read.mjs",
       "services/hermes/identity/ingress.openrpc.json",
       "services/hermes/identity/pause_preseed.py",
-      "services/hermes/identity/schemas/pause-preseed.schema.json"
+      "services/hermes/identity/schemas/pause-preseed.schema.json",
+      "services/hermes/identity/guest_tools.py",
+      "services/hermes/identity/guest_browser.py",
+      "services/hermes/identity/guest_generation.py",
+      "services/hermes/identity/browser-defaults.json",
+      "services/hermes/files/document.py",
+      "services/hermes/files/generated.py"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

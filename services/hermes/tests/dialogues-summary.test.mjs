@@ -17,7 +17,7 @@ class Control:
     enabled=True
     async def call(self,method,params,timeout=3):
         if not self.enabled: raise ConnectionError('Auth unavailable')
-        return {'userId':'account-a','profileId':'profile-a'}
+        return {'userId':'account-a','profileId':'profile-a','role':'user','generation':0}
 program="""import sys,json,hashlib,time
 for line in sys.stdin:
  p=json.loads(line)

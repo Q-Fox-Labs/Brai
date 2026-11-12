@@ -7,6 +7,36 @@
   },
   "methods": [
     {
+      "name": "identity.get",
+      "summary": "Прочитать актуальную идентичность Auth по стабильному userId для root lifecycle; не доступен Unix worker.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "userId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
       "name": "identity.resolve",
       "paramStructure": "by-name",
       "params": [
@@ -136,6 +166,56 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ActivePrincipal"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "permissions.bootstrap",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "role",
+            "generation",
+            "backgroundsSuspended",
+            "staged"
+          ],
+          "properties": {
+            "role": {
+              "$ref": "#/components/schemas/ActivePrincipal/properties/role"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "backgroundsSuspended": {
+              "type": "boolean"
+            },
+            "staged": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "errors": [
@@ -288,6 +368,7 @@
         "schema": {
           "type": "object",
           "required": [
+            "role",
             "tools"
           ],
           "properties": {
@@ -311,6 +392,9 @@
                   }
                 }
               }
+            },
+            "role": {
+              "$ref": "#/components/schemas/ActivePrincipal/properties/role"
             }
           }
         }
@@ -950,6 +1034,10 @@
           "role"
         ],
         "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0
+          },
           "active": {
             "const": true
           },
@@ -965,8 +1053,10 @@
           },
           "role": {
             "enum": [
+              "creator",
               "admin",
-              "user"
+              "user",
+              "guest"
             ]
           }
         }
@@ -1017,12 +1107,66 @@
           }
         },
         "additionalProperties": false
+      },
+      "FailureDiagnostic": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "reason",
+          "stage"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "FORBIDDEN",
+              "INVALID_ARGUMENT",
+              "DEADLINE_EXCEEDED",
+              "OUTCOME_UNKNOWN",
+              "UPSTREAM_UNAVAILABLE",
+              "INVALID_UPSTREAM_RESPONSE",
+              "OWNER_MISMATCH",
+              "OVERLOADED",
+              "CANCELLED",
+              "NOT_FOUND",
+              "CONFLICT",
+              "REQUEST_TOO_LARGE",
+              "RESULT_TOO_LARGE",
+              "UNAVAILABLE",
+              "INTERNAL",
+              "MODEL_NOT_FOUND",
+              "MODEL_NOT_INSTALLED",
+              "UNSUPPORTED_OPERATION",
+              "MODEL_IN_USE",
+              "INPUT_TOO_LARGE",
+              "BUSY",
+              "MODEL_LOAD_FAILED",
+              "ENGINE_UNAVAILABLE",
+              "ARTIFACT_NOT_AVAILABLE",
+              "DEPENDENCY_UNAVAILABLE",
+              "INSTALLATION_FAILED",
+              "REVISION_CONFLICT",
+              "NOT_SUPPORTED"
+            ]
+          },
+          "stage": {
+            "enum": [
+              "control",
+              "broker"
+            ]
+          }
+        },
+        "additionalProperties": false
       }
     },
     "errors": {
       "RequestFailed": {
         "code": -32603,
-        "message": "Request failed"
+        "message": "Request failed",
+        "data": {
+          "reason": "INTERNAL",
+          "stage": "control"
+        }
       },
       "InvalidParams": {
         "code": -32602,

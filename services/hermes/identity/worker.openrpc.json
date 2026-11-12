@@ -233,7 +233,7 @@
         {
           "name": "payload",
           "required": true,
-          "description": "send_draft принимает chat_id, ненулевой integer draft_id, строку content до 65536 символов и metadata; native Root renderer отправляет временный preview в личный чат владельца без message_id. Файловые действия принимают artifact descriptor владельца. send_voice дополнительно принимает необязательный is_voice:boolean; true сохраняет голосовую подачу до native transport. Неподтверждённая доставка не возвращает успешную квитанцию.",
+          "description": "send_draft принимает chat_id, ненулевой integer draft_id, строку content до 65536 символов и metadata; native Root renderer отправляет временный preview в личный чат владельца без message_id. Файловые действия принимают artifact descriptor владельца. send_voice дополнительно принимает необязательный is_voice:boolean; true сохраняет голосовую подачу до native transport. Неподтверждённая доставка не возвращает успешную квитанцию. metadata._brai_return_notice_generation — необязательное неотрицательное целое поколение служебного уведомления; Root отклоняет устаревшее поколение и не расширяет доступ к адресу.",
           "schema": {
             "type": "object"
           }
@@ -296,7 +296,13 @@
           },
           "additionalProperties": false
         }
-      }
+      },
+      "errors": [
+        {
+          "code": -32003,
+          "message": "Forbidden"
+        }
+      ]
     },
     {
       "name": "turn_ended",
@@ -346,7 +352,7 @@
             "type": "boolean",
             "default": false
           },
-          "description": "После active Auth дождаться полного native startup, MCP, scheduler и private plugin."
+          "description": "Дождаться полного native startup и ограниченного каталога; подготовка не разрешает вызовы до active Auth."
         }
       ],
       "result": {
@@ -357,7 +363,9 @@
             "ready",
             "userId",
             "telegramId",
-            "operational"
+            "operational",
+            "role",
+            "rolePolicyVersion"
           ],
           "properties": {
             "ready": {
@@ -371,6 +379,18 @@
             },
             "operational": {
               "type": "boolean"
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "creator",
+                "admin",
+                "user",
+                "guest"
+              ]
+            },
+            "rolePolicyVersion": {
+              "const": 1
             }
           },
           "additionalProperties": false

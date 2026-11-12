@@ -2,6 +2,8 @@
 # ABOUTME: Публикует только собственное аудио; не получает credentials и не повторяет invoke.
 """Голосовой вход с владельцем из SO_PEERCRED, без общего Transcription bearer."""
 import argparse
+import json
+import logging
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -11,6 +13,9 @@ import time
 import uuid
 
 from .tool_client import broker_call
+from .ipc import safe_failure
+
+logger = logging.getLogger(__name__)
 
 AUDIO_TYPES = {'audio/ogg', 'audio/wav', 'audio/flac', 'audio/mpeg'}
 
@@ -31,11 +36,25 @@ def transcribe_file(input_path, output_path, model, *, call=broker_call, timeout
     started = time.monotonic()
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
 
+    request_id, operation_id = str(uuid.uuid4()), str(uuid.uuid4())
+
     def invoke(method, params):
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError('DEADLINE_EXCEEDED')
-        return call(method, params, timeout=remaining)
+        try:
+            return call(method, params, timeout=remaining)
+        except Exception as error:
+            data = getattr(error, 'diagnostic', None)
+            diagnostic = (safe_failure(**{k: data.get(k) for k in ('reason', 'stage')})
+                if isinstance(data, dict) else safe_failure(
+                    reason='FORBIDDEN' if isinstance(error, PermissionError) else
+                    'DEADLINE_EXCEEDED' if isinstance(error, TimeoutError) else 'INTERNAL'))
+            logger.warning('identity_stt_failed %s', json.dumps({
+                'requestId': request_id, 'operationId': operation_id, 'method': method,
+                'elapsedMs': max(0, int((time.monotonic()-started)*1000)),
+                'errorType': type(error).__name__, **diagnostic}, sort_keys=True))
+            raise
 
     cached_id = source.parent.name
     try:
@@ -53,7 +72,6 @@ def transcribe_file(input_path, output_path, model, *, call=broker_call, timeout
     if (not isinstance(aid, str) or str(uuid.UUID(aid)) != aid
             or published.get('mimeType') not in AUDIO_TYPES):
         raise ValueError('INVALID_AUDIO_ARTIFACT')
-    request_id, operation_id = str(uuid.uuid4()), str(uuid.uuid4())
     result = invoke('tools.call', {'name': 'local_ai_invoke_transcribe', 'args': {
         'requestId': request_id, 'operationId': operation_id, 'model': model,
         'deadlineAt': deadline, 'audioArtifactId': aid}})

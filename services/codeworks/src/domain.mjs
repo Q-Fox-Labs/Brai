@@ -8,6 +8,7 @@ import {createWriteAdmission} from './write-admission.mjs';
 import {createCompletionInbox} from './completion-inbox.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyPublication,recheckPublication} from './publication.mjs';
+import {recoveryStatus} from './recovery-status.mjs';
 import {publicWebPreview} from './web-preview-status.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
 const publicDTO=(name,row)=>dto(Object.fromEntries(Object.keys(schema.definitions[name].properties).filter(key=>key in row).map(key=>[key,row[key]])));
@@ -66,15 +67,22 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           const obligation=await db.cleanupObligation?.(w.id);
           const closing=obligation&&obligation.state!=='done';
           const writerBlocked=await db.uncertainWriter?.(w.id);
-          return {workspace_id:w.id,task_status:closing?'closing':w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-Math.max(new Date(lifecycle.updated_at).getTime(),new Date(obligation?.updated_at??0).getTime())>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:closing?'cleanup:'+obligation.step:lifecycle.last_stage,blocked_reason:closing?obligation.blocker:writerBlocked?'WRITER_OUTCOME_UNKNOWN':lifecycle.blocked_reason}:null,cleanup:obligation?{id:obligation.id,state:obligation.state,step:obligation.step,outcome:obligation.outcome,owner_workflow_id:obligation.owner_workflow_id,epoch:Number(obligation.epoch),next_attempt_at:obligation.next_attempt_at,blocker:obligation.blocker}:null,blockers:await db.blockers(w.id)};
+          const latest=operation??await db.latestOperation(w.id);
+          const recovery=recoveryStatus({workspace:w,workflow:lifecycle,obligation,writerBlocked,operation:latest,control:await db.executionControl?.(p.id),postprocessing:latest?await db.postprocessFailure?.(p.id,latest.id):null,retryAt:latest?await db.commandRetry?.(latest.id):null});
+          return {...(recovery?{recovery}:{}),workspace_id:w.id,task_status:closing?'closing':w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-Math.max(new Date(lifecycle.updated_at).getTime(),new Date(obligation?.updated_at??0).getTime())>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:closing?'cleanup:'+obligation.step:lifecycle.last_stage,blocked_reason:closing?obligation.blocker:writerBlocked?'WRITER_OUTCOME_UNKNOWN':lifecycle.blocked_reason}:null,cleanup:obligation?{id:obligation.id,state:obligation.state,step:obligation.step,outcome:obligation.outcome,owner_workflow_id:obligation.owner_workflow_id,epoch:Number(obligation.epoch),next_attempt_at:obligation.next_attempt_at,blocker:obligation.blocker}:null,blockers:await db.blockers(w.id)};
         }
         if(!w){
-          if(operation)return {operation:operationDTO(operation)};
+          if(operation){
+            const recovery=recoveryStatus({operation,control:await db.executionControl?.(p.id),postprocessing:await db.postprocessFailure?.(p.id,operation.id),retryAt:await db.commandRetry?.(operation.id)});
+            return {operation:operationDTO(operation),...(recovery?{recovery}:{})};
+          }
           const offset=args.offset??0,limit=args.limit??100,rows=await db.workspaces(p.id,limit+1,offset);
           return {workspaces:rows.slice(0,limit).map(workspaceDTO),next_offset:rows.length>limit?offset+limit:null};
         }
         const latest=operation??await db.latestOperation(w.id);
         const result={workspace:workspaceDTO(w),operation:latest?operationDTO(latest):null,git:null};
+        const recovery=recoveryStatus({workspace:w,operation:latest,control:await db.executionControl?.(p.id),postprocessing:latest?await db.postprocessFailure?.(p.id,latest.id):null,retryAt:latest?await db.commandRetry?.(latest.id):null});
+        if(recovery)result.recovery=recovery;
         if(p.web_preview?.enabled)result.preview=publicWebPreview(await db.webPreview(p.id,w.id),p.web_preview);
         if(w.preparation_state==='ready'&&!w.removed_at){
           try{result.git=await git.inspect(p,w);}catch(error){result.inspection_error=safeFault(error).dto();}

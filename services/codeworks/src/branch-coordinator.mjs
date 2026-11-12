@@ -1,7 +1,7 @@
 // ABOUTME: Завершает очистку исторических Git-ссылок без рабочей области.
 // ABOUTME: Не создаёт путь или индекс и не удаляет ссылки без проверенного решения.
 import {canonical} from './contracts.mjs';
-import {verifyCleanupArchive} from './cleanup-archive.mjs';
+import {verifyCleanupArchive,classifyCleanupArchiveError} from './cleanup-archive.mjs';
 import {branchResourcesAbsent} from './branch-cleanup.mjs';
 
 /** Выполняет один шаг закреплённой очистки под внешним guard субъекта. */
@@ -33,7 +33,12 @@ export async function advanceBranchCleanup(db,obligation,project,{git,checkpoint
   const archive=obligation.evidence?.archive;
   if(archive){
     if(manifest.reviewed!==true||manifest.disposition?.type!=='archived'||obligation.evidence?.archive_authorized!==true||canonical(archive)!==canonical(manifest.disposition.archive))return wait('ARCHIVE_UNVERIFIED');
-    try{await fence();await verifyArchive(project,expected,archive,{manifest});await fence();}catch(error){if(error.message==='CLEANUP_FENCE_LOST'||error.message==='BRANCH_LIVE_TASK')throw error;return wait('ARCHIVE_UNVERIFIED');}
+    try{await fence();await verifyArchive(project,expected,archive,{manifest});await fence();}catch(error){
+      const category=classifyCleanupArchiveError(error);
+      if(category==='decision')return wait('ARCHIVE_UNVERIFIED');
+      if(category==='retry')return save("state='retry',blocker='TECHNICAL_RETRY',attempts=attempts+1,next_attempt_at=now()+interval '60 seconds'",[]);
+      throw error;
+    }
   }else return wait('DISPOSITION_PROOF_REQUIRED');
   const step=obligation.step==='local_refs'?'local_refs':'remote';
   await fence();await git.cleanupBranchStep(project,subject,expected,step);

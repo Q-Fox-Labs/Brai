@@ -6,6 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import { Fault } from './errors.mjs';
 import {executionContext} from './execution-context.mjs';
+import {operatorCommandSpec} from './operator-command.mjs';
 import {verifyFilesystemPreservation} from './filesystem-preservation.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
 async function exists(file) { try { return await lstat(file); } catch(error) { if(error.code==='ENOENT') return null; throw error; } }
@@ -21,8 +22,9 @@ export async function command(executable,args,{cwd,allowFailure=false,timeout=12
   return new Promise((resolve,reject)=>{
     let stdout='',stderr='',overflow=false,abortKill;
     const signal=executionContext()?.signal;signal?.throwIfAborted();
-    const inherited=process.env.CODEWORKS_LOCK_HELD==='1';
-    const child=spawn(executable,args,{cwd,env:{...process.env,...env,GIT_TERMINAL_PROMPT:'0'},stdio:inherited?[input===undefined?'ignore':'pipe','pipe','pipe',3]:[input===undefined?'ignore':'pipe','pipe','pipe']});
+    const operator=operatorCommandSpec(executable,args);
+    const inherited=!operator&&process.env.CODEWORKS_LOCK_HELD==='1';
+    const child=spawn(operator?.executable??executable,operator?.args??args,{cwd:operator?.cwd??cwd,env:operator?.env??{...process.env,...env,GIT_TERMINAL_PROMPT:'0'},stdio:inherited?[input===undefined?'ignore':'pipe','pipe','pipe',3]:[input===undefined?'ignore':'pipe','pipe','pipe']});
     if(input!==undefined){child.stdin.on('error',()=>{});child.stdin.end(input);}
     const abort=()=>{child.kill('SIGTERM');abortKill=setTimeout(()=>child.kill('SIGKILL'),5000);};
     signal?.addEventListener('abort',abort,{once:true});

@@ -36,7 +36,7 @@ class SystemTests(unittest.TestCase):
         package = ModuleType('agent')
         package.skill_utils = utils
         with patch.dict(sys.modules, agent=package), patch.dict(os.environ, HERMES_HOME=str(self.root)), \
-             patch.object(system_skills, 'protected_root'), \
+             patch.object(system_skills, 'protected_root'), patch.object(system_skills, 'install_personal_policy'), \
              patch.object(system_skills, 'system_aliases', side_effect=lambda value: set(aliases)):
             system_skills.install_policy()
             roots = utils.get_skill_search_roots(self.root / 'malicious')
@@ -51,6 +51,7 @@ class SystemTests(unittest.TestCase):
             self.assertEqual(utils.get_disabled_skill_names(), set())
 
     def test_unprotected_system_root_is_rejected(self):
+        self.root.chmod(0o777)
         with self.assertRaises(PermissionError):
             system_skills.protected_root(self.root)
 
@@ -203,12 +204,12 @@ class SystemTests(unittest.TestCase):
     def test_media_launchers_use_sdk_and_only_personal_download_paths(self):
         argv = media_command('yt-dlp', ['-o', '/downloads/%(id)s.mp4', '--', 'https://youtu.be/x'],
                              home='/profiles/one', python='/sdk/python')
-        self.assertEqual(argv[:4], ['/sdk/python', '-B', '-m', 'yt_dlp'])
+        self.assertEqual(argv[:6], ['/sdk/python', '-s', '-P', '-B', '-m', 'yt_dlp'])
         self.assertIn('--ignore-config', argv)
         self.assertIn('/profiles/one/workspace/downloads/%(id)s.mp4', argv)
         self.assertNotIn('/downloads/%(id)s.mp4', argv)
         self.assertEqual(media_command('instaloader', ['--help'], home='/profiles/two', python='/sdk/python'),
-                         ['/sdk/python', '-B', '-m', 'instaloader', '--help'])
+                         ['/sdk/python', '-s', '-P', '-B', '-m', 'instaloader', '--help'])
         with self.assertRaises(ValueError):
             media_command('other', [], home='/profiles/one', python='/sdk/python')
 

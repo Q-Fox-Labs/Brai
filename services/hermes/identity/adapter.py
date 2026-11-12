@@ -111,6 +111,8 @@ def make_adapter(config, platform, peer, publish_file):
                 logging.getLogger(__name__).warning(
                     'identity_delivery_failed action=%s error=%s rpc_code=%s',
                     name, type(error).__name__, getattr(error, 'code', None))
+                if isinstance(error, RpcError) and error.code == -32003:
+                    return SendResult(success=False, error='Delivery forbidden', retryable=False, error_kind='forbidden')
                 return SendResult(success=False, error='Ingress delivery unavailable or outcome unknown')
 
         async def create_handoff_thread(self, parent_chat_id, name):

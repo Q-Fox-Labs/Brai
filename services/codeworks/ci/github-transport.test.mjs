@@ -25,7 +25,7 @@ test('transient GET retries once within its original total budget',async t=>{
 test('nontransient HTTP, certificate and invalid JSON failures never retry',async t=>{
   for(const stderr of ['HTTP 403: i/o timeout','HTTP 401','HTTP 404','HTTP 429','x509: certificate has expired'])await t.test(stderr,async()=>{
     let calls=0;const adapter=createGitHub({run:async()=>{calls++;return failure(stderr);}});
-    await assert.rejects(adapter.get(project,7),{code:'GITHUB_UNAVAILABLE'});assert.equal(calls,1);
+    await assert.rejects(adapter.get(project,7),{code:/HTTP (?:401|403)/.test(stderr)?'GITHUB_AUTH_REQUIRED':/HTTP 429/.test(stderr)?'GITHUB_RATE_LIMITED':'GITHUB_UNAVAILABLE'});assert.equal(calls,1);
   });
   let calls=0;const adapter=createGitHub({run:async()=>{calls++;return {code:0,stdout:'not JSON'};}});
   await assert.rejects(adapter.get(project,7),{code:'GITHUB_UNAVAILABLE'});assert.equal(calls,1);
@@ -39,7 +39,7 @@ test('failed GET has at most two attempts and never renews an exhausted budget',
 });
 test('write and authentication failures remain single attempts',async()=>{
   let calls=0;const write=createGitHub({run:async(_exe,args,options)=>{
-    calls++;assert.equal(args[2],'POST');assert.equal(options.allowFailure,undefined);throw Error('TLS handshake timeout');
+    calls++;assert.equal(args[args.indexOf('--method')+1],'POST');assert.equal(options.allowFailure,true);throw Error('TLS handshake timeout');
   }});
   await assert.rejects(write.create(project,{branch:'feature',target:'dev'},'body'),{code:'GITHUB_UNAVAILABLE'});assert.equal(calls,1);
   let auth=0;const adapter=createGitHub({run:async(_exe,args)=>{
@@ -47,7 +47,7 @@ test('write and authentication failures remain single attempts',async()=>{
     return {code:0,stdout:JSON.stringify({total_count:1,check_runs:[{name:'check',app:{id:42},head_sha:sha,status:'completed',conclusion:'success'}]})};
   }});
   const rows=await adapter.checks({github:{...project.github,ci:{check_name:'check',app_id:42}}},sha);
-  assert.equal(auth,1);assert.equal(rows[0].ci_state,'CI_VERIFICATION_UNAVAILABLE');
+  assert.equal(auth,1);assert.equal(rows[0].ci_state,'GITHUB_AUTH_REQUIRED');
 });
 test('same-SHA contents are read once per operation while run/check identity stays fresh',async()=>{
   const root=new URL('../../../',import.meta.url),workflow='.github/workflows/codeworks.yml',calls=[];

@@ -6,6 +6,7 @@
     "agent/i18n.py",
     "agent/terminal_approval_batch.py",
     "agent/tool_executor.py",
+    "agent/turn_tool_round.py",
     "apps/desktop/src/app/pet-overlay/pet-overlay-app.tsx",
     "apps/desktop/src/app/quick-entry/quick-entry-app.tsx",
     "apps/desktop/src/app/settings/computer-use-panel.tsx",
