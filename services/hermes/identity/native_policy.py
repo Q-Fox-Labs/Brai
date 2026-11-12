@@ -65,6 +65,17 @@ def protected_config(path):
     return value
 
 
+def protect_config_readers(config, accepted):
+    """Закрепить обычные и raw readers SDK за одним доверенным guest/staged config."""
+    for name in ('load_config', 'load_config_readonly', 'read_raw_config',
+                 'read_raw_config_readonly', 'read_user_config_raw'):
+        original = getattr(config, name, None)
+        if original is not None:
+            def reader(*args, original=original, **kwargs):
+                return original(*args, **kwargs) if active_configuration() else deepcopy(accepted)
+            setattr(config, name, reader)
+
+
 def restrict_exclusive_plugins(product):
     """Привязать независимые loader-ы к bundled коду до загрузки пользовательских модулей."""
     import importlib
@@ -255,9 +266,7 @@ def install():
         import hermes_cli.config as config
         accepted = protected_config('/opt/brai-profile/profile-config.json')
         # AIDEV-NOTE: Не читаем прежний личный config: он мог сохранить hooks, MCP и исполняемые плагины.
-        original_load, original_read = config.load_config, config.load_config_readonly
-        config.load_config = lambda *args, **kwargs: deepcopy(accepted) if not active_configuration() else original_load(*args, **kwargs)
-        config.load_config_readonly = lambda *args, **kwargs: deepcopy(accepted) if not active_configuration() else original_read(*args, **kwargs)
+        protect_config_readers(config, accepted)
         # Gateway turn/startup readers имеют отдельные raw YAML/legacy пути.
         from hermes_cli import config_effective
         from gateway import config_loader

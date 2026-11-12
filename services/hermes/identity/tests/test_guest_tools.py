@@ -14,6 +14,30 @@ from identity import guest_tools
 
 
 class ArgumentsTests(unittest.TestCase):
+    def test_raw_sdk_config_readers_cannot_select_user_browser_backend(self):
+        from identity import native_policy as policy
+        calls = []
+        config = ModuleType('hermes_cli.config')
+        for name in ('load_config', 'load_config_readonly', 'read_raw_config',
+                     'read_raw_config_readonly', 'read_user_config_raw'):
+            def original(*args, name=name, **kwargs):
+                calls.append(name)
+                return {'browser': {'backend': 'browser-use'}}
+            setattr(config, name, original)
+        accepted = {'browser': {'backend': 'off', 'cdp_url': 'http://127.0.0.1:19364'}}
+        with patch.object(policy, 'active_configuration', return_value=False):
+            policy.protect_config_readers(config, accepted)
+            for name in ('load_config', 'load_config_readonly', 'read_raw_config',
+                         'read_raw_config_readonly', 'read_user_config_raw'):
+                result = getattr(config, name)()
+                self.assertEqual(result, accepted)
+                result['browser']['backend'] = 'changed'
+            self.assertEqual(calls, [])
+            self.assertEqual(config.read_raw_config(), accepted)
+        with patch.object(policy, 'active_configuration', return_value=True):
+            self.assertEqual(config.read_raw_config()['browser']['backend'], 'browser-use')
+        self.assertEqual(calls, ['read_raw_config'])
+
     def test_supported_requests(self):
         cases=[('web_search',{'query':'погода','limit':5}),
           ('image_generate',{'prompt':'море','aspect_ratio':'square'}),
