@@ -572,7 +572,10 @@ def conversation_tool(function):
             result=getattr(managed,"result",managed)
             try:
                 body=json.loads(result) if isinstance(result,str) else result
-                if isinstance(body,dict) and (body.get("status") in {"error","timeout","cancelled","interrupted","degraded"} or body.get("timed_out")):
+                if isinstance(body,dict) and (
+                        body.get("error") or body.get("isError") is True
+                        or body.get("status") in {"error","timeout","cancelled","interrupted","degraded","outcome_unknown"}
+                        or body.get("outcome") == "unknown" or body.get("timed_out")):
                     completion["uncertain"]=True
             except (ValueError,TypeError):
                 pass

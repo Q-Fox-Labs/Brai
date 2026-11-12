@@ -10,6 +10,45 @@ class ConsentRegressions(unittest.TestCase):
     tearDown = fixture.ConsentTests.tearDown
     prepare = fixture.ConsentTests.prepare
 
+    def _consented_tool_outcome(self, body):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        consent = fixture.consent
+        tool = 'mcp__brai__publish_file'
+        args = {'path':str(fixture.Path(self.temp.name)/'report.xlsx'), 'requestId':'fixture'}
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'Создай файл', '1'):
+            with consent.tool_scope(tool, args, 'prepare'):
+                with patch.object(consent, 'review_action', return_value=fixture.REVIEW):
+                    consent.gate(tool)
+        row = self.store.query(self.scope.key)
+        self.assertEqual(fixture.ConsentTests.authorize(self, row), 'authorized')
+        @consent.conversation_tool
+        def invoke(agent, **kwargs):
+            self.assertTrue(consent.gate(tool)['approved'])
+            return SimpleNamespace(result=json.dumps(body))
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'да', '11'):
+            invoke(SimpleNamespace(), function_name=tool, function_args=args,
+                tool_call_id='actual', effective_task_id='fixture')
+        return self.store.query(self.scope.key)['status']
+
+    def test_mcp_error_keeps_consented_execution_unknown(self):
+        self.assertEqual(self._consented_tool_outcome({'error':'Broker unavailable'}), 'unknown')
+
+    def test_mcp_is_error_keeps_consented_execution_unknown(self):
+        self.assertEqual(self._consented_tool_outcome({'isError':True,
+            'content':[{'type':'text','text':'Результат не подтверждён'}]}), 'unknown')
+
+    def test_explicit_unknown_status_is_not_completion(self):
+        self.assertEqual(self._consented_tool_outcome({'status':'outcome_unknown'}), 'unknown')
+
+    def test_stored_command_with_unknown_effect_requires_reconciliation(self):
+        self.assertEqual(self._consented_tool_outcome({'status':'stored','outcome':'unknown'}), 'unknown')
+
+    def test_successful_receipt_does_not_interpret_business_error_fields(self):
+        self.assertEqual(self._consented_tool_outcome({'success':True,
+            'records':[{'error':'данные, не статус исполнения'}]}), 'completed')
+
     def test_reminder_preserves_first_delivery(self):
         row = self.prepare()
         self.store.delivered(row['id'], '10')

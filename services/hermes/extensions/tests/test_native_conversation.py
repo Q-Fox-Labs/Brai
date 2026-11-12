@@ -34,6 +34,39 @@ class NativeConsentTests(unittest.TestCase):
             description="script execution",pattern_key="python",pattern_keys=["python"],
             session_key="test-session",approval_callback=None,is_cli=False,is_gateway=True,is_ask=False,smart=True)
 
+    def test_native_mcp_transport_error_preserves_unknown_execution(self):
+        import time
+        from tools.mcp_tool_handlers import _render_call_tool_result
+        tool = 'mcp__brai__publish_file'
+        args = {'path':str(Path(self.temp.name)/'report.xlsx'), 'requestId':'fixture'}
+        review = {'decision':'needs_consent','effects_known':True,
+            'target':'Отчёт','consequences':'Файл будет опубликован.','reason':'Нужно согласие.'}
+        store = consent.Store(self.db)
+        key = consent.conversation_key(self.source)
+        with consent.turn_scope(self.db,self.source,'test-session','Подготовь файл','1'):
+            with consent.tool_scope(tool,args,'prepare'):
+                with patch.object(consent,'review_action',return_value=review):
+                    consent.gate(tool)
+        row = store.query(key)
+        store.delivered(row['id'],'10')
+        self.assertEqual(store.answer(key,'alice','11','да',time.time()+1,'10'),'authorized')
+        calls = []
+        @consent.conversation_tool
+        def execute(agent, **kwargs):
+            self.assertTrue(consent.gate(tool)['approved'])
+            calls.append(True)
+            result = _render_call_tool_result(types.SimpleNamespace(isError=True,
+                content=[types.SimpleNamespace(type='text',text='Broker unavailable')]),'fixture')
+            return types.SimpleNamespace(result=result)
+        with consent.turn_scope(self.db,self.source,'test-session','да','11'):
+            execute(types.SimpleNamespace(),function_name=tool,function_args=args,
+                tool_call_id='actual',effective_task_id='fixture')
+        self.assertEqual(store.query(key)['status'],'unknown')
+        with consent.turn_scope(self.db,self.source,'test-session','Что получилось?','12'):
+            with consent.tool_scope(tool,args,'retry'):
+                self.assertEqual(consent.gate(tool)['status'],'execution_unknown')
+        self.assertEqual(len(calls),1)
+
     def test_native_round_presents_brai_question_without_technical_status(self):
         from agent import turn_tool_round as rounds
         from unittest.mock import Mock
