@@ -10,6 +10,7 @@ import {createStore} from "../../dist/storage.js";
 import {createVerificationStore,verificationHash as hash} from "../../dist/verification-store.js";
 import {verificationPolicy,validateResult,VerificationFault as VF} from "../../dist/verification.js";
 import {createVerificationEngine} from "../../dist/verification-engine.js";
+import {verificationProcess} from "../../dist/verification-process.js";
 const fixture=JSON.parse(readFileSync(new URL("../../../../tmp/bug-hunt-test.json",import.meta.url),"utf8"));
 for(const k of ["ownerURL","appURL"]){const u=new URL(fixture[k]);assert.equal(u.hostname,"127.0.0.1");assert.equal(u.pathname,"/brai_bug_hunt_test");}
 test("v3 admission, timer, immutable data, fencing, ACL and replay use one scoped ledger",async t=>{
@@ -50,6 +51,14 @@ test("v3 admission, timer, immutable data, fencing, ACL and replay use one scope
    const old=await store.get(p,investigation);assert.equal(old.executor,"codex_app_server");assert.equal(old.config_revision,"fixture-one");
    const fresh=await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipts[6].case_id}});
    assert.equal((await store.get(p,fresh.investigation_ids[0])).executor,"providers");
+  });
+  await t.test("unlimited guard remains null after four active hours and explicit finite policies retain their deadline",async()=>{
+   await owner.query("UPDATE verification_investigation SET active_ms=$2 WHERE id=$1",[investigation,4*60*60*1000]);
+   await store.guard(investigation,async r=>{assert.equal(r.policy.budgets.attemptMs,null);assert.equal(r.deadline_at,null);});
+   const finite=await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipts[7].case_id}});
+   const finiteId=finite.investigation_ids[0];
+   await owner.query("UPDATE verification_investigation SET policy=jsonb_set(policy,'{budgets,attemptMs}','3600000'::jsonb),active_ms=0 WHERE id=$1",[finiteId]);
+   await store.guard(finiteId,async r=>{assert.ok(r.deadline_at.getTime()>Date.now()+3500000);});
   });
   await t.test("session guard fences stale writes and unknown intents are not replaced",async()=>{
    let stale;
@@ -165,6 +174,46 @@ test("v3 admission, timer, immutable data, fencing, ACL and replay use one scope
    }
   });
   await t.test("fresh workflow intent is delivered ahead of old blocked workflows",async()=>{const ids=(await owner.query("SELECT id FROM verification_investigation WHERE installation_id=$1 ORDER BY registered_at",[installationId])).rows.map(r=>r.id);for(const id of ids)await store.workflow(id,"active");await store.workflow(investigation,"pending");assert.equal((await store.pending())[0].id,investigation);});
+  await t.test("process status replies retain the actual PG session guard until owned execution settles",async()=>{
+   const receipt=await report(p,{request_id:randomUUID(),observation:{title:"Owned guard",operation:"wait",expected:"same owner",observed:"status returned"}});
+   const id=(await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipt.case_id}})).investigation_ids[0];
+   let enter,finish,task,calls=0;const entered=new Promise(r=>enter=r),held=new Promise(r=>finish=r);
+   const process=verificationProcess({advance:async id=>{calls++;task=store.guard(id,async r=>{assert.equal(r.deadline_at,null);enter();return held;});return task;},requestStopOwned:async()=>({ids:[],unknown:false})});
+   await process.advance(id);await entered;
+   assert.equal(await store.guard(id,async()=>{throw Error("guard must remain owned");}),null);
+   for(let n=0;n<400;n++)assert.equal((await process.advance(id)).code,"ENGINE_PENDING");
+   assert.equal(calls,1);finish({terminal:false,wait_ms:1,code:"REVIEW_PENDING"});await task;await new Promise(r=>setImmediate(r));
+   assert.equal((await process.advance(id)).code,"REVIEW_PENDING");assert.equal(calls,1);
+  });
+  await t.test("fenced cleanup registry retains runners from multiple completed engine passes",async()=>{
+   const ids=[],executions=[],cancelled=[];
+   const narrowPool=new Pool({connectionString:fixture.appURL,max:3,connectionTimeoutMillis:2000});
+   const limited=createVerificationStore(narrowPool,{installationId,cursorKey:"fixture-verification-cursor-key-32-bytes",policy:()=>policy,maxDatabaseBytes:1073741824});
+   try{
+   const candidate={claim:"Synthetic missing evidence",expected:"Known requirement",facts:[],verdict:"insufficient_evidence",reproduction_outcome:"not_attempted",observed_failure:"unknown",requirement_id:null,source_id:null,runner_id:null,evidence_ids:[],missing:["No proof"],limitations:["Synthetic"]};
+   const engine=createVerificationEngine({store:limited,sources:{},recipes:[],activeOwner:async()=>true,runner:{cancel:async(scope,id)=>{cancelled.push({scope,id});return {finished_at:new Date().toISOString()};}},executor:()=>({preflight:async()=>({ready:true,models:[{id:"gpt-6.1-sol",supportedReasoningEfforts:[{reasoningEffort:"high"}]}],catalog_revision:"fixture"}),startStep:async()=>({state:"completed",native:{},result:candidate,usage:null,code:null})})});
+   const execution=verificationProcess(engine);
+   for(let n=0;n<3;n++){
+    const receipt=await report(p,{request_id:randomUUID(),observation:{title:"Unsettled runner "+n,operation:"stop",expected:"owned cleanup",observed:"model phase completed"}});
+    const id=(await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipt.case_id}})).investigation_ids[0],executionId=randomUUID();ids.push(id);executions.push(executionId);
+    await store.guard(id,async r=>{const effect=await store.effect(r,"runner",executionId,{id:randomUUID(),execution_id:executionId});await store.checkpoint(r,effect.id,{state:"running",native:{},result:null,usage:null,code:null});});
+    let status;do{status=await execution.advance(id);if(status.code==="ENGINE_PENDING")await new Promise(r=>setImmediate(r));}while(status.code==="ENGINE_PENDING");
+    assert.equal(status.code,"REVIEW_PENDING");
+   }
+   await execution.stop();
+   for(const id of ids){const detail=await limited.get(p,id);assert.equal(detail.code,"WORKER_STOPPED");assert.equal(detail.cancel_requested,false);}
+   assert.deepEqual(cancelled.map(r=>r.id).sort(),executions.sort());assert.ok(cancelled.every(r=>r.scope.owner_id===p.ownerId&&ids.includes(r.scope.investigation_id)));
+   assert.deepEqual(await engine.requestStopOwned(),{ids:[],unknown:false});
+   }finally{await narrowPool.end();}
+  });
+  await t.test("a BUSY loser and a stale scoped fence cannot stop another live investigation",async()=>{
+   const receipt=await report(p,{request_id:randomUUID(),observation:{title:"Fence stop",operation:"stop",expected:"owner only",observed:"another worker owns guard"}});
+   const id=(await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipt.case_id}})).investigation_ids[0];
+   const engine=createVerificationEngine({store,sources:{},runner:{},recipes:[],activeOwner:async()=>true,executor:()=>{throw Error("must not dispatch");}});
+   let stale;
+   await store.guard(id,async r=>{stale=r;assert.equal((await engine.advance(id)).code,"BUSY");assert.deepEqual(await engine.requestStopOwned(),{ids:[],unknown:false});assert.equal((await store.get(p,id)).code,null);});
+   await store.guard(id,async r=>{assert.equal(await store.requestStop(stale),false);assert.equal(await store.requestStop({...r,owner_id:foreign.ownerId}),false);assert.equal((await store.get(p,id)).code,null);});
+  });
   assert.equal(await digest(),before);
  }finally{await Promise.all([app.end(),owner.end()]);}
 });

@@ -13,7 +13,7 @@ import type {Dispatch} from "./verification-models.js";
 type Store=ReturnType<typeof createVerificationStore>;
 type Row=Record<string,any>;
 export interface PreparedRecipe {ref:string;recipe_id:string;recipe_version:string;source_id:string;source_commit:string;source_sha256:string;source_tree_sha256:string;source_path:string;requirement_path:string;requirement_sha256:string;expected:string;fixture_ref:string;refutes_claim?:string;confirms_claim?:string}
-interface Options {store:Store;sources:ReturnType<typeof sourceReader>;runner:ReproductionRunner;recipes:PreparedRecipe[];activeOwner:(id:string)=>Promise<boolean>;executor:(r:Investigation,d:Dispatch)=>InvestigationExecutor}
+interface Options {store:Store;sources:ReturnType<typeof sourceReader>;runner:ReproductionRunner;recipes:PreparedRecipe[];activeOwner:(id:string)=>Promise<boolean>;stopping?:()=>boolean;executor:(r:Investigation,d:Dispatch)=>InvestigationExecutor}
 const schema=JSON.parse(readFileSync(new URL("../schemas/verification-v3.schema.json",import.meta.url),"utf8"));
 const ajv=new Ajv.default({strict:false});addFormats.default(ajv);ajv.addSchema(schema);
 const checkCandidate=ajv.getSchema(schema.$id+"#/definitions/candidate")!,checkReview=ajv.getSchema(schema.$id+"#/definitions/modelReview")!;
@@ -32,26 +32,52 @@ const tools=[
 export const investigationTools=(phase:"investigator"|"reviewer")=>tools.filter(t=>phase!=="reviewer"||t.function.name!=="reproduction_run");
 /** Идентификатор детерминированного свидетельства не зависит от повторного чтения. */
 const evidenceId=(value:unknown)=>{const h=hash(value);return h.slice(0,8)+"-"+h.slice(8,12)+"-4"+h.slice(13,16)+"-8"+h.slice(17,20)+"-"+h.slice(20,32);};
-/** Один Activity-проход возвращает только короткий безопасный статус для Workflow history. */
+/** Один process-owned проход сохраняет внешние эффекты; Temporal видит только краткий статус. */
 export function createVerificationEngine(options:Options){
  const {store}=options;
- return {async advance(id:string):Promise<{terminal:boolean;wait_ms:number;code:string}>{
+ const owned=new Map<string,Investigation>();
+ const cleanupRunners=async(r:Investigation,effects:Row[])=>{
+  let pending=false;const scope={installation_id:r.installation_id,owner_id:r.owner_id,investigation_id:r.id};
+  for(const effect of effects.filter(e=>e.kind==="runner"&&!["not_sent","completed","failed"].includes(e.checkpoint.state))){
+   const receipt=await options.runner.cancel(scope,effect.intent.execution_id).catch(()=>null);
+   if(!receipt||!receipt.finished_at){pending=true;continue;}
+   await store.checkpoint(r,effect.id,{...effect.checkpoint,state:"completed",result:receipt});
+  }
+  return pending;
+ };
+ const set:Store["set"]=async(r,state,code=null,stage=r.stage,model=r.model)=>{if(options.stopping?.()&&state!=="cancelled"&&!code?.startsWith("WORKER_STOP"))return store.set(r,"outcome_unknown","WORKER_STOPPING",stage,model);return store.set(r,state,code,stage,model);};
+ return {async requestStopOwned(){const ids:string[]=[];let unknown=false;for(const [id,r] of owned){try{if(await store.requestStop(r))ids.push(id);else owned.delete(id);}catch{unknown=true;}}return {ids,unknown};},async advance(id:string):Promise<{terminal:boolean;wait_ms:number;code:string}>{
   const result=await store.guard(id,async r=>{
+   owned.set(id,r);
+   try{
    const scope:Scope={installation_id:r.installation_id,owner_id:r.owner_id,investigation_id:r.id};
-   const allowed=async()=>await store.allowed(r)&&await options.activeOwner(r.owner_id);
+   const allowed=async()=>!options.stopping?.()&&await store.allowed(r)&&await options.activeOwner(r.owner_id);
    const effects=await store.effects(r);
-   if(r.cancel_requested){
-    for(const effect of effects.filter(e=>e.kind==="model"&&!["completed","failed"].includes(e.checkpoint.state)&&!(e.checkpoint.state==="blocked"&&!e.checkpoint.native.turnId&&!e.checkpoint.native.operationId))){const executor=options.executor(r,{tools:()=>[],call:async()=>{throw new VF("CANCEL_REQUESTED");},reserve:async()=>{throw new VF("CANCEL_REQUESTED");},allowed:async()=>false});let cp;try{cp=await executor.cancelStep(effect.intent,effect.checkpoint).catch(()=>({...effect.checkpoint,state:"unknown",code:"CANCEL_UNKNOWN"}));}finally{executor.close?.();}await store.checkpoint(r,effect.id,cp);if(cp.state==="unknown"||cp.state==="running"){await store.set(r,"outcome_unknown","CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"CANCEL_UNKNOWN"};}}
-    for(const effect of effects.filter(e=>e.kind==="runner")){const receipt=await options.runner.cancel(scope,effect.intent.execution_id).catch(()=>null);if(!receipt||!receipt.finished_at){await store.set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}}
-    await store.set(r,"cancelled");return {terminal:true,wait_ms:0,code:"CANCELLED"};
+   const infrastructureStop=options.stopping?.()||["WORKER_STOPPING","WORKER_STOP_UNKNOWN"].includes(r.code??"");
+   if(r.cancel_requested||infrastructureStop){
+    if(infrastructureStop)await set(r,"outcome_unknown","WORKER_STOPPING");
+    let modelPending=false,runnerPending=false,interrupted=false;
+    for(const effect of effects.filter(e=>e.kind==="model"&&e.checkpoint.state!=="completed")){
+     if(["not_sent","blocked"].includes(effect.checkpoint.state)&&!effect.checkpoint.native.turnId&&!effect.checkpoint.native.operationId)continue;
+     if(effect.checkpoint.state==="failed"){interrupted=true;continue;}
+     const executor=options.executor(r,{tools:()=>[],call:async()=>{throw new VF("CANCEL_REQUESTED");},reserve:async()=>{throw new VF("CANCEL_REQUESTED");},allowed:async()=>false});
+     let cp;try{cp=await executor.cancelStep(effect.intent,effect.checkpoint).catch(()=>({...effect.checkpoint,state:"unknown",code:"CANCEL_UNKNOWN"}));}finally{executor.close?.();}
+     await store.checkpoint(r,effect.id,cp);
+     if(["unknown","running","dispatching","blocked"].includes(cp.state))modelPending=true;else if(cp.state!=="completed")interrupted=true;
+    }
+    runnerPending=await cleanupRunners(r,effects);
+    if(modelPending||runnerPending){const code=infrastructureStop?"WORKER_STOP_UNKNOWN":runnerPending?"RUNNER_CANCEL_UNKNOWN":"CANCEL_UNKNOWN";await set(r,"outcome_unknown",code);return {terminal:false,wait_ms:60000,code};}
+    if(r.cancel_requested){await set(r,"cancelled");return {terminal:true,wait_ms:0,code:"CANCELLED"};}
+    await set(r,interrupted?"failed":"waiting_dependency","WORKER_STOPPED");
+    return {terminal:interrupted,wait_ms:1,code:"WORKER_STOPPED"};
    }
-   if(!await allowed()){r.charge_active=false;await store.set(r,"blocked_policy","POLICY_OR_OWNER_REVOKED");return {terminal:false,wait_ms:60000,code:"POLICY_OR_OWNER_REVOKED"};}
+   if(!await allowed()){r.charge_active=false;await set(r,"blocked_policy","POLICY_OR_OWNER_REVOKED");return {terminal:false,wait_ms:60000,code:"POLICY_OR_OWNER_REVOKED"};}
    if(r.deadline_at&&r.deadline_at.getTime()<Date.now()&&!effects.some(e=>["dispatching","running","unknown"].includes(e.checkpoint.state))){
-    await store.set(r,"failed","ATTEMPT_DEADLINE");return {terminal:true,wait_ms:0,code:"ATTEMPT_DEADLINE"};
+    await set(r,"failed","ATTEMPT_DEADLINE");return {terminal:true,wait_ms:0,code:"ATTEMPT_DEADLINE"};
    }
    let phase:"investigator"|"reviewer"=r.stage==="review"?"reviewer":"investigator";
    const dispatch:Dispatch={
-    tools:investigationTools,allowed,remainingMs:()=>Math.max(0,r.deadline_at!.getTime()-Date.now()),
+    tools:investigationTools,allowed,remainingMs:()=>r.deadline_at===null?null:Math.max(0,r.deadline_at.getTime()-Date.now()),
     reserve:()=>store.reserve(r,r.executor==="providers"?4096:0),
     async call(callId,name,args){
      if(!callId||callId.length>200||!tools.some(t=>t.function.name===name)||phase==="reviewer"&&name==="reproduction_run")throw new VF("TOOL_FORBIDDEN");
@@ -100,7 +126,7 @@ export function createVerificationEngine(options:Options){
       const oracle:Oracle={requirement_id:requirement.id,requirement_sha256:requirement.sha256,expected:template.expected,version:"registry-oracle-v1",...(template.confirms_claim?{confirms_claim:template.confirms_claim}:{}),...(template.refutes_claim?{refutes_claim:template.refutes_claim}:{})};
       const body={execution_id,scope,recipe_id:template.recipe_id,recipe_version:template.recipe_version,source_id:template.source_id,source_commit:template.source_commit,source_sha256:template.source_sha256,source_tree_sha256:template.source_tree_sha256,oracle,oracle_sha256:hash(oracle),fixture_ref:template.fixture_ref};
       const old=all.find(e=>e.kind==="runner"&&e.step_key===execution_id);
-      const spec:RunSpec=old?.intent??{...body,spec_sha256:hash(body),deadline_at:new Date(Math.min(r.deadline_at!.getTime(),Date.now()+120000)).toISOString()};
+      const spec:RunSpec=old?.intent??{...body,spec_sha256:hash(body),deadline_at:new Date(Math.min(r.deadline_at?.getTime()??Infinity,Date.now()+120000)).toISOString()};
       const run=await store.effect(r,"runner",execution_id,spec);
       if(all.filter(e=>e.kind==="runner").length+(run.fresh?1:0)>r.policy.budgets.runnerRuns)throw new VF("RUNNER_LIMIT");
       if(run.checkpoint.state==="not_sent")await store.checkpoint(r,run.id,{state:"dispatching",native:{},result:null,code:null,usage:null});
@@ -119,9 +145,9 @@ export function createVerificationEngine(options:Options){
    try{
     executor=options.executor(r,dispatch);
     if(!r.model){
-     const ready=await executor.preflight();if(!ready.ready){r.charge_active=false;await store.set(r,"waiting_dependency",ready.code);return {terminal:false,wait_ms:60000,code:ready.code??"DEPENDENCY_UNAVAILABLE"};}
+     const ready=await executor.preflight();if(!ready.ready){r.charge_active=false;await set(r,"waiting_dependency",ready.code);return {terminal:false,wait_ms:60000,code:ready.code??"DEPENDENCY_UNAVAILABLE"};}
      const model=r.executor==="codex_app_server"?resolveSol(ready.models,ready.catalog_revision):{id:r.policy.profiles.providers.model,effort:null,catalog_revision:r.policy.profiles.providers.revision,resolver_version:"providers-profile-v1"};
-     await store.set(r,"running",null,r.stage,model);r.model=model;
+     await set(r,"running",null,r.stage,model);r.model=model;
     }
     const prior=effects.find(e=>e.kind==="model"&&e.step_key===phase);
     let intent:ModelIntent;
@@ -133,25 +159,31 @@ export function createVerificationEngine(options:Options){
      const evidence=phase==="reviewer"?await store.evidenceByIds(r,[...new Set<string>([...(author?.evidence_ids??[]),author?.requirement_id,author?.source_id,author?.runner_id].filter((id):id is string=>typeof id==="string"))]):[];
      const input={snapshot:{version:3,cases:projections,source:r.snapshot.source,group:r.snapshot.group},evidence:evidence.map(e=>({id:e.id,kind:e.kind,sha256:e.sha256,provenance:e.provenance})),evidence_manifest:{read_via:"evidence_list",page_size:20},available_specs:options.recipes.filter(s=>s.source_commit===r.snapshot.source?.commit&&s.source_id===r.snapshot.source?.id).map(s=>({spec_ref:s.ref,source_path:s.source_path,requirement_path:s.requirement_path,oracle:{expected:s.expected,...(s.confirms_claim?{confirms_claim:s.confirms_claim}:{})},...(s.refutes_claim?{refutes_claim:s.refutes_claim}:{})})),...(phase==="reviewer"?{candidate:author,candidate_sha256:hash(author)}:{}),output_schema:schema.definitions[phase==="reviewer"?"modelReview":"candidate"]};
      if(Buffer.byteLength(JSON.stringify(input))>(r.executor==="providers"?8000:32768))throw new VF("MODEL_INPUT_TOO_LARGE");
-     const body={id:evidenceId([scope,phase,"model"]),scope,phase,executor:r.executor,config_hash:r.config_hash,model:r.model,deadline_at:r.deadline_at!.toISOString(),input};
+     const body={id:evidenceId([scope,phase,"model"]),scope,phase,executor:r.executor,config_hash:r.config_hash,model:r.model,deadline_at:r.deadline_at?.toISOString()??null,input};
      intent={...body,input_hash:hash(input)} as ModelIntent;
     }
     const effect=await store.effect(r,"model",phase,intent),save=(cp:ModelCheckpoint)=>store.checkpoint(r,effect.id,cp);
     const cp:ModelCheckpoint=effect.fresh||effect.checkpoint.state==="not_sent"||effect.checkpoint.state==="blocked"&&Object.keys(effect.checkpoint.native).length===0?await executor.startStep(intent,save):await executor.inspectStep(intent,effect.checkpoint,save);
     await save(cp);
-    if(cp.state!=="completed"&&cp.code==="POLICY_REVOKED"&&await store.cancelRequested(r)){await store.set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}
-    if(cp.state!=="completed"){const state=cp.state==="unknown"?"outcome_unknown":cp.state==="blocked"?"waiting_dependency":cp.state==="failed"?"failed":"running";await store.set(r,state,cp.code);return {terminal:state==="failed",wait_ms:state==="running"&&!cp.native.operationId?1:60000,code:cp.code??"PENDING"};}
+    if(options.stopping?.()){await set(r,"outcome_unknown","WORKER_STOPPING");return {terminal:false,wait_ms:1,code:"WORKER_STOPPING"};}
+    if(cp.state!=="completed"&&cp.code==="POLICY_REVOKED"&&await store.cancelRequested(r)){await set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}
+    if(cp.state==="failed"&&await cleanupRunners(r,await store.effects(r))){await set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}
+    if(cp.state!=="completed"){const state=cp.state==="unknown"?"outcome_unknown":cp.state==="blocked"?"waiting_dependency":cp.state==="failed"?"failed":"running";await set(r,state,cp.code);return {terminal:state==="failed",wait_ms:state==="running"&&!cp.native.operationId?1:60000,code:cp.code??"PENDING"};}
     if(phase==="investigator"){
      if(!checkCandidate(cp.result)||Buffer.byteLength(JSON.stringify(cp.result))>32768)throw new VF("CANDIDATE_INVALID");
-     await store.set(r,"running",null,"review");return {terminal:false,wait_ms:1,code:"REVIEW_PENDING"};
+     await set(r,"running",null,"review");return {terminal:false,wait_ms:1,code:"REVIEW_PENDING"};
     }
     if(!checkReview(cp.result))throw new VF("REVIEW_INVALID");
     const author=(await store.effects(r)).find(e=>e.kind==="model"&&e.step_key==="investigator")!.checkpoint.result as Candidate;
     const allEvidence=await store.evidenceByIds(r,[...new Set<string>([...author.evidence_ids,...(cp.result as Review).evidence_ids,author.requirement_id,author.source_id,author.runner_id].filter((id):id is string=>typeof id==="string"))]),run=(await store.effects(r)).find(e=>e.kind==="runner"&&e.checkpoint.result?.execution_id===allEvidence.find(e=>e.id===author.runner_id)?.provenance.execution_id);
     const receipt=validateResult({scope,snapshot:r.snapshot,candidate:author,candidateHash:hash(author),review:cp.result as Review,evidence:allEvidence,receipt:run?.checkpoint.result??null,oracle:run?.checkpoint.oracle??null,hash});
+    if(await cleanupRunners(r,await store.effects(r))){await set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}
     const result_id=await store.publish(r,{...author,snapshot_hash:r.snapshot_hash,case_ids:r.snapshot.cases.map(c=>c.case_id),model:r.model,executor:r.executor,config_revision:r.policy.revision,origin:"automatic_evidence",evidence_availability:allEvidence.every(e=>e.availability==="available")?"available":"partial"},receipt);
     return {terminal:true,wait_ms:0,code:"PUBLISHED"};
-   }catch(e){const code=e instanceof VF?e.code:"VERIFICATION_FAILED";if(code==="CANCEL_REQUESTED"){await store.set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}const unknown=e instanceof VF&&e.outcome==="unknown";await store.set(r,unknown?"outcome_unknown":"failed",code);return {terminal:!unknown,wait_ms:60000,code};}finally{executor?.close?.();}
+   }catch(e){const code=e instanceof VF?e.code:"VERIFICATION_FAILED";if(options.stopping?.()||code==="WORKER_STOPPING"){await set(r,"outcome_unknown","WORKER_STOPPING");return {terminal:false,wait_ms:1,code:"WORKER_STOPPING"};}if(code==="CANCEL_REQUESTED"){await set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}const unknown=e instanceof VF&&e.outcome==="unknown";if(!unknown&&await cleanupRunners(r,await store.effects(r))){await set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}await set(r,unknown?"outcome_unknown":"failed",code);return {terminal:!unknown,wait_ms:60000,code};}finally{executor?.close?.();}
+   }finally{
+    try{const effects=await store.effects(r);if(effects.every(e=>["completed","failed","not_sent"].includes(e.checkpoint.state)||e.checkpoint.state==="blocked"&&!e.checkpoint.native.turnId&&!e.checkpoint.native.operationId))owned.delete(id);}catch{/* Existing fenced handle remains unresolved until it can be inspected. */}
+   }
   });
   return result??(await store.terminal(id)?{terminal:true,wait_ms:0,code:"ALREADY_TERMINAL"}:{terminal:false,wait_ms:60000,code:"BUSY"});
  }};

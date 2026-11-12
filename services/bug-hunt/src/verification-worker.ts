@@ -3,7 +3,7 @@
 import {Pool} from "pg";
 import {Worker,NativeConnection} from "@temporalio/worker";
 import {Client,Connection} from "@temporalio/client";
-import {heartbeat,Context} from "@temporalio/activity";
+import {Context} from "@temporalio/activity";
 import {fileURLToPath,pathToFileURL} from "node:url";
 import {config as loadConfig,type Config} from "./config.js";
 import {connectNats} from "./main.js";
@@ -14,6 +14,7 @@ import {sourceReader,type SourceRegistration} from "./verification-sources.js";
 import {runnerClient} from "./verification-runner.js";
 import {codexExecutor,providersExecutor,type NativeProfile} from "./verification-models.js";
 import {createVerificationEngine,type PreparedRecipe} from "./verification-engine.js";
+import {verificationProcess,shutdownVerification} from "./verification-process.js";
 interface RuntimeConfig {temporal:{address:string;namespace:string;taskQueue:string;identity:string};runnerSocket:string;sources:SourceRegistration[];recipes:PreparedRecipe[];nativeProfiles:Record<string,NativeProfile>}
 /** Проверяет обязательные защищённые входы worker; endpoint и путь не берутся из наблюдения. */
 export function verificationRuntime(value:unknown):RuntimeConfig{
@@ -32,14 +33,15 @@ export async function deliverVerification(store:Pick<ReturnType<typeof createVer
    catch{await store.workflow(pending.id,"unknown");}
   }
 }
-/** Запускает один model/runner Activity одновременно; пауза и политики читаются перед каждым эффектом. */
+/** Запускает один process-owned model/runner проход одновременно; пауза и политики читаются перед каждым эффектом. */
 export async function startVerificationWorker(cfg:Config=loadConfig()){
  const fromFile=arguments.length===0;
  const infra=verificationRuntime(cfg.verificationRuntime),policies=policyReader(()=>(fromFile?loadConfig():cfg).verification);
  const pool=new Pool({connectionString:cfg.databaseURL,max:3,statement_timeout:3000,connectionTimeoutMillis:2000});
  const store=createVerificationStore(pool,{installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,policy:()=>policies.get()});
  const nc=await connectNats(cfg);
- const engine=createVerificationEngine({store,sources:sourceReader(infra.sources),runner:runnerClient(infra.runnerSocket),recipes:infra.recipes,
+ let execution:ReturnType<typeof verificationProcess>|undefined;
+ const engine=createVerificationEngine({stopping:()=>execution?.stopping??false,store,sources:sourceReader(infra.sources),runner:runnerClient(infra.runnerSocket),recipes:infra.recipes,
   activeOwner:async owner=>{try{await activeIdentity(async(subject,input)=>{const msg=await nc.request(subject,Buffer.from(JSON.stringify(input)),{timeout:2000});if(msg.headers?.has("Nats-Service-Error")||msg.data.length>65536)throw Error();return JSON.parse(new TextDecoder("utf8",{fatal:true}).decode(msg.data));},owner);return true;}catch{return false;}},
   executor:(r,d)=>{
    if(r.executor==="providers")return providersExecutor(nc,r.owner_id,r.policy.profiles.providers,d);
@@ -48,21 +50,24 @@ export async function startVerificationWorker(cfg:Config=loadConfig()){
    return codexExecutor(profile,d);
   }
  });
+ execution=verificationProcess(engine);
  const native=await NativeConnection.connect({address:infra.temporal.address});
  const control=await Connection.connect({address:infra.temporal.address});
  const client=new Client({connection:control,namespace:infra.temporal.namespace});
- const worker=await Worker.create({connection:native,namespace:infra.temporal.namespace,taskQueue:infra.temporal.taskQueue,identity:infra.temporal.identity,workflowBundle:{codePath:fileURLToPath(new URL("./verification-workflow-bundle.cjs",import.meta.url))},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2,maxCachedWorkflows:50,shutdownGraceTime:"16 minutes",activities:{
-  async advance(id:string){const timer=setInterval(()=>heartbeat({investigation_id:id}),2000);try{if(Context.current().cancellationSignal.aborted)return {terminal:false,wait_ms:60000,code:"ACTIVITY_CANCELLED"};return await engine.advance(id);}finally{clearInterval(timer);}}
+ const worker=await Worker.create({connection:native,namespace:infra.temporal.namespace,taskQueue:infra.temporal.taskQueue,identity:infra.temporal.identity,workflowBundle:{codePath:fileURLToPath(new URL("./verification-workflow-bundle.cjs",import.meta.url))},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2,maxCachedWorkflows:50,activities:{
+  async advance(id:string){if(Context.current().cancellationSignal.aborted)return {terminal:false,wait_ms:60000,code:"ACTIVITY_CANCELLED"};return execution!.advance(id);}
  }});
- let stopped=false,pumping=false;
+ let stopped=false,pumping=false,stopPromise:Promise<void>|undefined;
  async function pump(){if(stopped||pumping)return;pumping=true;try{
   await store.tick();
   await deliverVerification(store,client,infra.temporal.taskQueue);
  }catch{console.error(JSON.stringify({service:"bug-hunt-verification",code:"PUMP_UNAVAILABLE"}));}finally{pumping=false;}}
  const timer=setInterval(()=>void pump(),30000);await pump();const running=worker.run();
- return {store,worker,running,async stop(){stopped=true;clearInterval(timer);worker.shutdown();await running;await nc.drain();await Promise.all([pool.end(),native.close(),control.close()]);}};
+ const runtime={store,worker,running,stop(){if(stopPromise)return stopPromise;stopped=true;clearInterval(timer);const stoppedExecution=execution!.stop(),stoppedWorker=Promise.resolve().then(()=>worker.shutdown()).then(()=>running);stopPromise=shutdownVerification(stoppedWorker,stoppedExecution,[()=>nc.close(),()=>pool.end(),()=>native.close(),()=>control.close()]);return stopPromise;}};
+ void running.catch(()=>runtime.stop().catch(()=>{console.error("VERIFICATION_STOP_UNKNOWN");}));
+ return runtime;
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
- try{const runtime=await startVerificationWorker();for(const signal of ["SIGTERM","SIGINT"] as const)process.once(signal,()=>void runtime.stop());await runtime.running;}
+ try{const runtime=await startVerificationWorker();for(const signal of ["SIGTERM","SIGINT"] as const)process.once(signal,()=>void runtime.stop().catch(()=>{console.error("VERIFICATION_STOP_UNKNOWN");process.exitCode=1;}));await runtime.running;}
  catch{console.error("VERIFICATION_WORKER_UNAVAILABLE");process.exitCode=1;}
 }

@@ -18,6 +18,10 @@ test("configuration defaults, one executor switch and atomic invalid reload",()=
  raw={...raw,executor:"providers",revision:"two"};assert.equal(reader.get().executor,"providers");
  raw={...raw,schedule:{...raw.schedule,maxInvestigationsPerRun:100}};assert.equal(reader.get().revision,"two");assert.equal(reader.status().config_error,"CONFIG_ERROR");
  assert.equal(first.budgets.toolCalls,null);
+ assert.equal(first.budgets.attemptMs,null);
+ assert.equal(verificationPolicy({budgets:{attemptMs:3600000}}).budgets.attemptMs,3600000);
+ assert.equal(verificationPolicy({budgets:{attemptMs:900000}}).budgets.attemptMs,900000);
+ for(const attemptMs of [-1,0,1.5,Infinity,NaN,"unlimited"])assert.throws(()=>verificationPolicy({budgets:{attemptMs}}));
  assert.equal(verificationPolicy({budgets:{toolCalls:400}}).budgets.toolCalls,400);
  assert.equal(verificationPolicy({budgets:{toolCalls:24}}).budgets.toolCalls,24);
  for(const field of [{executor:"automatic"},{schedule:{manualEnabled:1}},{profiles:{providers:{model:"foreign"}}},{budgets:{toolCalls:-1}},{budgets:{toolCalls:1.5}}])assert.throws(()=>verificationPolicy(field));

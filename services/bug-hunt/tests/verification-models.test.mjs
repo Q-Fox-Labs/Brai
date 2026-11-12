@@ -188,3 +188,21 @@ test("native quiet turn notices revoked policy before its long deadline",{timeou
  assert.equal(cp.state,"failed");assert.equal(cp.code,"POLICY_REVOKED");assert.equal(f.tools,0);
  assert.deepEqual(f.calls.find(c=>c.method==="turn/interrupt").params,{threadId:"own-thread",turnId:"own-turn"});
 });
+
+test("unlimited native attempt completes 400 tools after four virtual hours without another deadline",async t=>{
+ const initial=Date.now();let now=initial;t.mock.method(Date,"now",()=>now);
+ const f=fixture({toolCount:400,remainingMs:()=>null,onTool:n=>{if(n===1)now+=4*60*60*1000;}}),i=intent();
+ i.deadline_at=null;
+ const cp=await f.executor.startStep(i,async()=>{});
+ assert.equal(cp.state,"completed");assert.equal(f.tools,400);assert.equal(cp.native.call_deadline_at,null);
+ assert.equal(f.calls.filter(c=>c.method==="turn/interrupt").length,0);
+});
+test("native unlimited recovery keeps the same pending turn and a malformed deadline fails closed",async()=>{
+ for(const deadline of [null,"invalid"]){
+  const f=fixture({pending:true}),i=intent(),cp={state:"running",native:{generation:profile.generation,threadId:"own-thread",turnId:"own-turn",call_deadline_at:deadline},result:null,code:null,usage:null};
+  i.deadline_at=null;const result=await f.executor.inspectStep(i,cp,async()=>{});
+  assert.equal(result.state,"unknown");
+  assert.equal(f.calls.filter(c=>c.method==="turn/interrupt").length,deadline===null?0:1);
+  assert.equal(f.calls.filter(c=>c.method.endsWith("/start")).length,0);
+ }
+});

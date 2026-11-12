@@ -6,6 +6,7 @@ import {randomUUID} from "node:crypto";
 import {fileURLToPath} from "node:url";
 import {Connection,Client} from "@temporalio/client";
 import {deliverVerification} from "../../dist/verification-worker.js";
+import {verificationProcess} from "../../dist/verification-process.js";
 import {Worker,NativeConnection} from "@temporalio/worker";
 const codePath=fileURLToPath(new URL("../../dist/verification-workflow-bundle.cjs",import.meta.url));
 test("own Temporal queue survives worker restart and replays without new Activities",{timeout:90000},async()=>{
@@ -31,5 +32,29 @@ test("own Temporal queue survives worker restart and replays without new Activit
  }finally{
   if(handle)await handle.terminate("own synthetic fixture cleanup").catch(()=>{});
   worker?.shutdown();await run?.catch(()=>{});await Promise.all([control.close(),native.close()]);
+ }
+});
+
+test("a lost ten-second status reply does not interrupt or replay the process-owned investigation",{timeout:90000},async()=>{
+ const namespace="brai",taskQueue="bug-hunt-fixture-"+randomUUID(),workflowId="bug-hunt-fixture/"+randomUUID(),id=randomUUID();
+ const control=await Connection.connect({address:"127.0.0.1:7233",connectTimeout:"5 seconds"}),native=await NativeConnection.connect({address:"127.0.0.1:7233"}),client=new Client({connection:control,namespace});
+ let enter,finish,calls=0,replies=0;const entered=new Promise(r=>enter=r),held=new Promise(r=>finish=r);
+ const execution=verificationProcess({advance:async()=>{calls++;enter();return held;},requestStopOwned:async()=>({ids:[],unknown:false})});
+ const worker=await Worker.create({connection:native,namespace,taskQueue,workflowBundle:{codePath},activities:{advance:async input=>{
+  assert.equal(input,id);const reply=await execution.advance(id);if(++replies===1)await new Promise(r=>setTimeout(r,11000));return reply;
+ }},maxConcurrentActivityTaskExecutions:2,maxConcurrentWorkflowTaskExecutions:2,shutdownGraceTime:"2 seconds"});
+ const run=worker.run();let handle;
+ try{
+  handle=await client.workflow.start("verificationWorkflow",{workflowId,taskQueue,args:[id]});await entered;
+  let history;
+  do{await new Promise(r=>setTimeout(r,100));history=await handle.fetchHistory();}while(!history.events.some(e=>e.activityTaskTimedOutEventAttributes));
+  assert.equal(calls,1);assert.equal(execution.stopping,false);
+  finish({terminal:true,wait_ms:0,code:"SYNTHETIC_COMPLETE"});await new Promise(r=>setImmediate(r));await handle.signal("wake");await handle.result();
+  assert.equal(calls,1);assert.ok(replies>=2);
+  await Worker.runReplayHistory({workflowBundle:{codePath}},await handle.fetchHistory());assert.equal(calls,1);
+ }finally{
+  finish({terminal:true,wait_ms:0,code:"SYNTHETIC_CLEANUP"});
+  if(handle)await handle.terminate("own synthetic fixture cleanup").catch(()=>{});
+  worker.shutdown();await run.catch(()=>{});await Promise.all([control.close(),native.close()]);
  }
 });

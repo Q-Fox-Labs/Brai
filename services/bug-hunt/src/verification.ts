@@ -34,7 +34,7 @@ export interface PinnedModel { id:string; effort:"high"|null; catalog_revision:s
 export interface ModelMetadata { id:string; supportedReasoningEfforts:{reasoningEffort:string}[]; hidden?:boolean }
 export interface ModelIntent {
  id:string; scope:Scope; phase:"investigator"|"reviewer"; executor:Executor; config_hash:string;
- model:PinnedModel; deadline_at:string; input:Record<string,unknown>; input_hash:string;
+ model:PinnedModel; deadline_at:string|null; input:Record<string,unknown>; input_hash:string;
 }
 export interface ModelCheckpoint {
  state:"not_sent"|"dispatching"|"running"|"completed"|"failed"|"unknown"|"blocked";
@@ -110,13 +110,13 @@ export interface VerificationPolicy {
  enabled:boolean;executor:Executor;revision:string;
  schedule:{enabled:boolean;intervalHours:number;manualEnabled:boolean;maxInvestigationsPerRun:number};
  externalAllowedOwners:string[];maxPending:number;maxDerivativeBytes:number;
- budgets:{dailyCalls:number;ownerDailyCalls:number;dailyTokens:number;attemptMs:number;toolCalls:number|null;runnerRuns:number};
+ budgets:{dailyCalls:number;ownerDailyCalls:number;dailyTokens:number;attemptMs:number|null;toolCalls:number|null;runnerRuns:number};
  profiles:{codex_app_server:{endpointRef:string;revision:string};providers:{connectionId:string;provider:string;model:string;revision:string;inboxPrefix:string}};
 }
 /** Отсутствующий блок выключает dispatch и сохраняет v1/v2. Расписание по умолчанию — 6 часов. */
 export function verificationPolicy(value:unknown):VerificationPolicy {
  const defaults:VerificationPolicy={enabled:false,executor:"codex_app_server",revision:"disabled-v1",schedule:{enabled:true,intervalHours:6,manualEnabled:true,maxInvestigationsPerRun:5},externalAllowedOwners:[],maxPending:100,maxDerivativeBytes:268435456,
- budgets:{dailyCalls:20,ownerDailyCalls:10,dailyTokens:100000,attemptMs:900000,toolCalls:null,runnerRuns:2},
+ budgets:{dailyCalls:20,ownerDailyCalls:10,dailyTokens:100000,attemptMs:null,toolCalls:null,runnerRuns:2},
  profiles:{codex_app_server:{endpointRef:"bug-hunt-codex",revision:"unprepared"},providers:{connectionId:"bug_hunt",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"unprepared",inboxPrefix:"_INBOX.providers_client."}}};
  if(value===undefined)return defaults;
  if(!value||typeof value!=="object"||Array.isArray(value))throw new VerificationFault("CONFIG_ERROR");
@@ -130,7 +130,7 @@ export function verificationPolicy(value:unknown):VerificationPolicy {
  const bounded=(n:number,min:number,max:number)=>Number.isSafeInteger(n)&&n>=min&&n<=max;
  if(!bounded(p.schedule.intervalHours,1,168)||!bounded(p.schedule.maxInvestigationsPerRun,1,5)||!bounded(p.maxPending,1,1000)||!bounded(p.maxDerivativeBytes,16777216,1073741824)||
  !bounded(p.budgets.dailyCalls,0,1000)||!bounded(p.budgets.ownerDailyCalls,0,p.budgets.dailyCalls)||!bounded(p.budgets.dailyTokens,0,10000000)||
- !bounded(p.budgets.attemptMs,1000,900000)||(p.budgets.toolCalls!==null&&!bounded(p.budgets.toolCalls,0,Number.MAX_SAFE_INTEGER))||!bounded(p.budgets.runnerRuns,0,2))throw new VerificationFault("CONFIG_ERROR");
+ (p.budgets.attemptMs!==null&&(!bounded(p.budgets.attemptMs,1,Number.MAX_SAFE_INTEGER)||!Number.isFinite(new Date(Date.now()+p.budgets.attemptMs).getTime())))||(p.budgets.toolCalls!==null&&!bounded(p.budgets.toolCalls,0,Number.MAX_SAFE_INTEGER))||!bounded(p.budgets.runnerRuns,0,2))throw new VerificationFault("CONFIG_ERROR");
  for(const key of ["codex_app_server","providers"] as const){const profile=p.profiles[key],def=defaults.profiles[key];
  if(!profile||typeof profile!=="object"||Object.keys(profile).some(k=>!Object.hasOwn(def,k))||Object.keys(def).some(k=>typeof (profile as any)[k]!=="string"||!(profile as any)[k]||(profile as any)[k].length>200))throw new VerificationFault("CONFIG_ERROR");}
  return structuredClone(p);
