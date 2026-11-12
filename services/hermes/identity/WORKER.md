@@ -127,3 +127,9 @@ FD с обеих сторон; disconnect не означает отмену bac
 ## Guest
 
 Перед GatewayRunner устанавливается native_policy; у guest используется readonly гостевой config и только trusted product plugins. MCP discovery остаётся включён. Каталог и dispatch проверяются раздельно. Guest operational readiness требует настоящего зарегистрированного create_text_file и отказа terminal/login. Bootstrap health содержит rolePolicyVersion:1 и роль, но не подтверждает полный операционный сценарий. [Политика](ROLES.md).
+
+Разговорные согласования принимаются в `dispatch` после проверки владельца и
+поколения, до native busy/idle и файлового steer. Один объект события обрабатывается
+один раз; штатный STT и его cache сохраняются. IPC adapter связывает вопрос с
+транспортной операцией до ожидания ответа и сохраняет только успешную квитанцию
+с message ID. Завершение модельного хода для этого не используется.

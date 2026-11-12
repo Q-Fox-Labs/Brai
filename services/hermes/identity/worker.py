@@ -480,7 +480,17 @@ class Worker:
                     if (not self.route_allowed(source)
                             or generation != self.chat_states.get(route, {}).get('generation', 0)):
                         return {'accepted': False, 'turn_id': None}
-                await self.adapter.handle_message(message)
+                from tools.approval_conversation import gateway_input_prepared
+                reply = await gateway_input_prepared(self.runner, message, message)
+                if (not self.route_allowed(source)
+                        or generation != self.chat_states.get(route, {}).get('generation', 0)):
+                    return {'accepted': False, 'turn_id': None}
+                if reply is None:
+                    await self.adapter.handle_message(message)
+                else:
+                    if reply:
+                        await self.runner._send_busy_reply(message, self.adapter, reply)
+                    message._gateway_accepted = True
             task = self.adapter._session_tasks.get(key)
             state = self.chat_states.get(route)
             if message._gateway_accepted and state is not None and not state['paused'] and state['generation'] == generation:

@@ -522,14 +522,6 @@
 -        if not human_platform:
 +        if not human_platform or source.platform == Platform.TELEGRAM:
              return
-@@ -4185,3 +4185,8 @@
-                 _sk, _streamed, _previewed, _content_delivered, _transformed, len(_final),
-             )
-+        if response.get("already_sent") and _sc is not None:
-+            # The normal-send receipt is absent when streaming delivered the question.
-+            from tools.approval_conversation import record_stream_delivery
-+            await asyncio.to_thread(record_stream_delivery,self,turn_ctx,_final,
-+                                    getattr(_sc,"message_id",None))
 
 --- a/cron/scheduler_delivery.py
 +++ b/cron/scheduler_delivery.py

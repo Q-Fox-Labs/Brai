@@ -227,6 +227,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         modules['gateway.run'].start_gateway = start_gateway
         async def active_gate(worker, runner):
             await worker.activation.wait()
+        modules['tools.approval_conversation'] = types.SimpleNamespace(gateway_input_prepared=AsyncMock(return_value=None), pending_delivery=lambda *_:None)
         modules['tools.registry'] = types.ModuleType('tools.registry')
         entry = Mock(return_value=object())
         modules['tools.registry'].registry = SimpleNamespace(get_entry=entry)
