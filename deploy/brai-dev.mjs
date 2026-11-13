@@ -230,7 +230,9 @@ export async function localPorts() {
         return result;
       } finally { rmSync(stage, {recursive: true, force: true}); }
     },
-    saveCandidate: (root, candidate) => {
+    saveCandidate: async (root, candidate) => {
+      if (!sha.test(candidate.sourceSha ?? '') || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate.releaseId ?? '')) fail('CANDIDATE_ID_INVALID');
+      await run('git', ['-C', root, 'update-ref', `refs/brai-dev/releases/${candidate.releaseId}`, candidate.sourceSha, '0'.repeat(40)]);
       const directory = join(root, 'tmp', 'dev-release', candidate.releaseId); mkdirSync(directory, {recursive: true});
       const path = join(directory, 'candidate.json'); writeFileSync(path, JSON.stringify(candidate, null, 2) + '\n', {flag: 'wx', mode: 0o644}); return path;
     },

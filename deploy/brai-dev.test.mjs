@@ -4,7 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {assertSource, selectComponents, release, preview, main, parseArguments, waitForOperation} from './brai-dev.mjs';
+import {assertSource, selectComponents, release, preview, main, parseArguments, waitForOperation, localPorts} from './brai-dev.mjs';
+import {execFileSync} from 'node:child_process';
 import {packageComponent, verifyPackage} from './components/package-runtime.mjs';
 import {createHash} from 'node:crypto';
 
@@ -12,6 +13,17 @@ const source = 'a'.repeat(40), oldSource = 'b'.repeat(40), digest = 'd'.repeat(6
 const releaseId = '2f72cb35-62f6-47b8-8bde-83005bf2e6de', base = '3794fd23-d27d-45e9-a952-607b4a59b6c4';
 const keys = suffix => ({build: `build-${suffix}`, artifact: `artifact-${suffix}`, runtime: `runtime-${suffix}`, checks: `checks-${suffix}`});
 const component = (id, deps = []) => ({id, status: 'active', environments: ['dev'], dependencies: deps.map(id => ({id})), directory: `services/${id}`});
+
+test('candidate pins exact commit without replacing an existing release ref', async t => {
+  const root=mkdtempSync('/tmp/brai-release-pin-');t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const git=(...args)=>execFileSync('git',['-C',root,...args],{encoding:'utf8'}).trim();
+  git('init','-q');writeFileSync(join(root,'file'),'one');git('add','file');
+  git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture');
+  const commit=git('rev-parse','HEAD'),ports=await localPorts();
+  await ports.saveCandidate(root,{sourceSha:commit,releaseId});
+  assert.equal(git('rev-parse',`refs/brai-dev/releases/${releaseId}`),commit);
+  await assert.rejects(ports.saveCandidate(root,{sourceSha:commit,releaseId}));
+});
 
 function fixture() {
   const graph = {components: new Map([['auth', component('auth')], ['web', component('web', ['auth'])], ['timer', component('timer')]]), order: ['auth', 'web', 'timer']};
