@@ -969,3 +969,246 @@
              await asyncio.sleep(interval)
 
      @staticmethod
+diff --git a/plugins/platforms/telegram/update_admission.py b/plugins/platforms/telegram/update_admission.py
+index be158a8..28cc883 100644
+--- a/plugins/platforms/telegram/update_admission.py
++++ b/plugins/platforms/telegram/update_admission.py
+@@ -99,6 +99,7 @@ class _Claim:
+     accepted: bool = False
+     completed: bool = False
+     failed: bool = False
++    deferred: bool = False
+     owners: int = 1
+ 
+ 
+@@ -188,6 +189,7 @@ def build_update_processor(extra, name: str) -> PerChatUpdateProcessor:
+ 
+ 
+ class TelegramApplication(Application):
++    _brai_identity_admission_protocol = 1
+     __slots__ = ("_current_claim", "adapter")
+ 
+     def __init__(self, *, adapter, **kwargs):
+@@ -272,8 +274,12 @@ class TelegramApplication(Application):
+         claim.owners -= 1
+         if claim.owners:
+             return
++        disposition = getattr(self.adapter, '_brai_identity_disposition', None)
++        if callable(disposition):
++            disposition(claim.key, {'deferred': claim.deferred, 'accepted': claim.accepted,
++                                    'completed': claim.completed, 'failed': claim.failed})
+         del self.adapter._inflight_update_ids[claim.key]
+-        if claim.accepted or (claim.completed and not claim.failed):
++        if not claim.deferred and (claim.accepted or (claim.completed and not claim.failed)):
+             _record_receipt(self.adapter, claim.key)
+ 
+     async def process_error(self, update, error, job=None, coroutine=None):
+@@ -295,6 +301,11 @@ class TelegramApplication(Application):
+         seen = self.adapter._seen_update_ids
+         pending = self.adapter._inflight_update_ids
+         if key in seen or key in pending:
++            duplicate = getattr(self.adapter, '_brai_identity_duplicate', None)
++            if duplicate is not None:
++                if not callable(duplicate):
++                    raise RuntimeError('BRAI_DUPLICATE_UNAVAILABLE')
++                await duplicate(update, key, 'seen' if key in seen else 'pending')
+             return
+         claim = _Claim(key, asyncio.current_task())
+         # Atomic on PTB's event loop: no await between lookup and claim. Dispatch and its
+@@ -302,6 +313,19 @@ class TelegramApplication(Application):
+         pending[key] = claim
+         token = self._current_claim.set(claim)
+         try:
++            gate = getattr(self.adapter, '_brai_identity_preflight', None)
++            if gate is not None:
++                if not callable(getattr(gate, 'enter', None)) or not callable(getattr(gate, 'classify', None)):
++                    raise RuntimeError('BRAI_PREFLIGHT_UNAVAILABLE')
++                ticket = gate.enter(claim.key, update)
++                deferred = await gate.classify(ticket, update)
++                if type(deferred) is not bool:
++                    raise RuntimeError('BRAI_PREFLIGHT_INVALID')
++                if deferred:
++                    if claim.owners != 1 or claim.accepted or claim.completed:
++                        raise RuntimeError('BRAI_PREFLIGHT_LATE')
++                    claim.deferred = True
++                    return
+             await super().process_update(update)
+         except BaseException:
+             claim.failed = True
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index 3689231..ad46317 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -528,6 +528,7 @@ class _PollingStallError(RuntimeError):
+ 
+ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+     """Telegram bot adapter: users/groups, MarkdownV2 replies, forum topics, media."""
++    _brai_identity_batch_protocol = 1
+ 
+     # Bound for the per-(chat_id, status_key) status-message cache; FIFO half-trim on overflow.
+     _STATUS_MESSAGE_IDS_MAX = 2000
+@@ -6593,7 +6594,13 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         if self._should_drop_delayed_delivery():
+             self._hold_inbound_event(event, where="text-enqueue")
+             return
++        hook = getattr(self, "_brai_identity_text_batch", None)
++        previous = dict(self._pending_text_batch_tasks) if callable(hook) else None
++        if previous is not None:
++            hook(event, previous, "before")
+         super()._enqueue_text_event(event)
++        if previous is not None:
++            hook(event, previous, "after")
+         self._accept_update()
+ 
+     async def _flush_buffered(self, pending: dict, tasks: dict, key: str, delay: float, where: str, log_fn=None) -> None:
+@@ -6692,6 +6699,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         if (os.environ.get("BRAI_IDENTITY_MODE") == "telegram"
+                 and self._brai_identity_batch_scope(existing.source) != self._brai_identity_batch_scope(event.source)):
+             raise PermissionError("BRAI_IDENTITY_BATCH_SOURCE_MISMATCH")
++        hook = getattr(self, "_brai_identity_merge_batch", None)
++        if callable(hook):
++            hook(existing, event)
+         import brai_files
+         brai_files.merge_events(existing, event)
+         existing.media_urls.extend(event.media_urls)
+@@ -6709,7 +6719,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         prior_task = self._pending_photo_batch_tasks.get(batch_key)
+         if prior_task and not prior_task.done():
+             prior_task.cancel()
+-        self._pending_photo_batch_tasks[batch_key] = asyncio.create_task(self._flush_photo_batch(batch_key))
++        task = asyncio.create_task(self._flush_photo_batch(batch_key))
++        self._pending_photo_batch_tasks[batch_key] = task
++        hook = getattr(self, "_brai_identity_track_batch", None)
++        if callable(hook):
++            hook(task, event)
+ 
+     async def _route_photo_event(self, msg, event: MessageEvent) -> None:
+         """Album items debounce on media_group_id; singles go through the photo burst batcher."""
+@@ -6948,7 +6962,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         prior_task = self._media_group_tasks.get(media_group_id)
+         if prior_task:
+             prior_task.cancel()
+-        self._media_group_tasks[media_group_id] = asyncio.create_task(self._flush_media_group_event(media_group_id))
++        task = asyncio.create_task(self._flush_media_group_event(media_group_id))
++        self._media_group_tasks[media_group_id] = task
++        hook = getattr(self, "_brai_identity_track_batch", None)
++        if callable(hook):
++            hook(task, event)
+ 
+     async def _flush_media_group_event(self, media_group_id: str) -> None:
+         await self._flush_buffered(
+@@ -7205,12 +7223,16 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         from plugins.platforms.telegram.telegram_context import group_identity_prompt
+         _chat_id_str = str(chat.id)
+         channel_prompt = resolve_channel_prompt(self.config.extra, thread_id_str or _chat_id_str, _chat_id_str if thread_id_str else None)
+-        return MessageEvent(
++        event = MessageEvent(
+             text=expand_link_entities(message), message_type=msg_type, source=source, raw_message=message,
+             message_id=str(message.message_id), platform_update_id=update_id,
+             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text, auto_skill=topic_skill,
+             channel_prompt=group_identity_prompt(self, message, channel_prompt),
+             timestamp=message.date)
++        hook = getattr(self, "_brai_identity_tag_event", None)
++        if callable(hook):
++            hook(event, update_id)
++        return event
+ 
+     # -- Message reactions (processing lifecycle) --
+ 
+diff --git a/plugins/platforms/telegram/telegram_held_inbound.py b/plugins/platforms/telegram/telegram_held_inbound.py
+index e9819bc..800c70d 100644
+--- a/plugins/platforms/telegram/telegram_held_inbound.py
++++ b/plugins/platforms/telegram/telegram_held_inbound.py
+@@ -14,6 +14,7 @@ logger = logging.getLogger("plugins.platforms.telegram.adapter")
+ 
+ class TelegramHeldInboundMixin:
+     """Hold / redispatch / hand-over of inbound events for ``TelegramAdapter``."""
++    _brai_identity_held_protocol = 1
+ 
+     def _schedule_held_inbound_redispatch(self) -> None:
+         """Ensure a tracked drain runs when held events exist and delivery is live (no-op while
+@@ -44,6 +45,10 @@ class TelegramHeldInboundMixin:
+         update and advanced the offset — silent permanent loss, no log, no error.
+         """
+         if self._is_permanent_fatal():
++            preserve = getattr(self, "_brai_identity_preserve_held", None)
++            if callable(preserve):
++                preserve(event, where)
++                return
+             logger.warning(
+                 "[Telegram] Discarding inbound under non-retryable fatal (%s, %d chars)", where, len(getattr(event, "text", None) or ""))
+             return
+@@ -59,7 +64,7 @@ class TelegramHeldInboundMixin:
+         if any(existing is event for existing in held):
+             return
+         max_n = int(getattr(self, "HELD_INBOUND_MAX", 64) or 64)
+-        while len(held) >= max_n:
++        while len(held) >= max_n and not callable(getattr(self, "_brai_identity_preserve_held", None)):
+             dropped = held.pop(0)
+             logger.warning(
+                 "[Telegram] Held-inbound queue full (%d); dropping oldest (%d chars)", max_n, len(getattr(dropped, "text", None) or ""))
+@@ -103,26 +108,51 @@ class TelegramHeldInboundMixin:
+         held = getattr(self, "_held_inbound_events", None)
+         if self._is_permanent_fatal():
+             if held:
+-                n = len(held)
+-                held.clear()
+-                logger.warning("[Telegram] Redispatch aborted; discarded %d held inbound under non-retryable fatal", n)
++                preserve = getattr(self, "_brai_identity_preserve_held", None)
++                if callable(preserve):
++                    for event in held:
++                        preserve(event, "redispatch-fatal")
++                else:
++                    n = len(held)
++                    held.clear()
++                    logger.warning("[Telegram] Redispatch aborted; discarded %d held inbound under non-retryable fatal", n)
+             return
+         if not held:
+             return
+         # Take ownership atomically; concurrent holds append to the fresh list for a follow-up.
+         events = list(held)
++        hook = getattr(self, "_brai_identity_take_held", None)
++        if callable(hook):
++            hook(events)
+         held.clear()
+         logger.warning("[Telegram] Redispatching %d held inbound message(s)", len(events))
+         allow_followup_schedule = True
+         try:
+             for idx, event in enumerate(events):
++                can_redispatch = getattr(self, "_brai_identity_can_redispatch", None)
++                if callable(can_redispatch) and not can_redispatch(event):
++                    self._rehold_from(events, idx, "redispatch-unknown")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-unknown")
++                    allow_followup_schedule = False
++                    return
+                 if self._is_permanent_fatal() or self._should_drop_delayed_delivery():
+                     self._rehold_from(events, idx, "redispatch-interrupted")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-interrupted")
+                     return
+                 try:
+                     await self.handle_message(event)
++                    hook = getattr(self, "_brai_identity_finish_held", None)
++                    if callable(hook):
++                        hook(event)
+                 except asyncio.CancelledError:
+                     self._rehold_from(events, idx, "redispatch-cancelled")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-cancelled")
+                     raise
+                 except Exception:
+                     # Retryable failure: re-hold but do NOT reschedule now (a poison event would
+@@ -130,6 +160,9 @@ class TelegramHeldInboundMixin:
+                     logger.exception(
+                         "[Telegram] Failed to redispatch held inbound (%d chars); re-holding", len(getattr(event, "text", None) or ""))
+                     self._rehold_from(events, idx, "redispatch-failed")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-failed")
+                     allow_followup_schedule = False
+                     return
+         finally:

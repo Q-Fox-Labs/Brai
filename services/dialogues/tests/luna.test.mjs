@@ -4,14 +4,14 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {WebSocketServer} from 'ws';
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
-import {fileURLToPath} from 'node:url';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createLuna} from '../dist/luna.js';
 
 async function fixture(mode='completed'){
- const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});
- const dir=await mkdtemp(join(tmp,'dn-')),path=join(dir,'rpc.sock');
+ // AIDEV-NOTE: Unix socket должен помещаться в системный sun_path независимо от длины worktree.
+ const dir=await mkdtemp(join(tmpdir(),'brai-dialogues-')),path=join(dir,'rpc.sock');
  const server=createServer(),wss=new WebSocketServer({server});
  const threads=new Map(),calls=[],replies=[];let next=0,turnStarts=0,configReads=0;
  wss.on('connection',socket=>socket.on('message',raw=>{

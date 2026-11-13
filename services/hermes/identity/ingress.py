@@ -40,6 +40,7 @@ class Bridge:
         self.received = set()
         self.sent = set()
         self.chat_state = self.chat_admission = self.chat_started = self.chat_states = None
+        self.input_receipt = None
         if not self.worker_telegram_id.isascii():
             raise ValueError('invalid worker Telegram identity')
 
@@ -141,6 +142,8 @@ class Bridge:
             if turn_id in self.early_ends:
                 self.early_ends.remove(turn_id)
                 asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(self._close_turn(turn_id)))
+        if callable(self.input_receipt):
+            await self.input_receipt(event, result)
         return result
 
     async def _close_turn(self, turn_id):
@@ -301,7 +304,10 @@ async def serve_chat_control(path, handler, release=None):
             methods = {'chats.control': handler}
             if release is not None:
                 methods.update({'release.begin': release.begin, 'release.status': release.status,
-                                'release.resume': release.resume, 'release.commit': release.commit})
+                                'release.resume': release.resume, 'release.commit': release.commit,
+                                'profile.release.try': release.profile_try,
+                                'profile.release.status': release.profile_status,
+                                'profile.release.resume': release.profile_resume})
             await Peer(reader, writer, methods).run()
         finally:
             clients.discard(task)
@@ -349,12 +355,32 @@ def install(runner, adapter, resolve_bridge):
             return
         if not isinstance(bridge, Bridge) or sender not in bridge.telegram_ids:
             raise PermissionError('No owner binding')
+        original_event = event
+        binding = getattr(original_event, '_brai_release_binding', None)
+        if binding is not None and (not isinstance(binding, tuple) or len(binding) != 7
+                or binding[:3] != (bridge.worker_uid, bridge.profile_id, bridge.owner)
+                or binding[3] != sender or binding[4] != bridge.worker_telegram_id):
+            block = getattr(resolve_bridge, 'input_blocked', None)
+            if callable(block):
+                await block(original_event)
+            raise PermissionError('Ingress profile binding changed')
+        if binding is not None:
+            validate = getattr(resolve_bridge, 'validate_event_binding', None)
+            if not callable(validate):
+                raise PermissionError('Ingress binding validation unavailable')
+            await validate(original_event)
         token = _authorized_telegram.set(sender)
         try:
             admitted = await runner._hm_admit_event(event)
             if admitted is None:
+                filtered = getattr(resolve_bridge, 'input_filtered', None)
+                if callable(filtered):
+                    await filtered(original_event)
                 return
             event, source, internal = admitted
+            if event is not original_event and binding is not None:
+                event._brai_release_binding = binding
+                event._brai_release_updates = list(getattr(original_event, '_brai_release_updates', []))
             if (internal or str(getattr(source, 'user_id', '')) != sender
                     or getattr(getattr(source, 'platform', None), 'value', None) != 'telegram'
                     or (str(getattr(source, 'chat_id', '') or ''), str(getattr(source, 'thread_id', '') or '')) != original_route):

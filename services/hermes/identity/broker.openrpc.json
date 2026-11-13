@@ -7,6 +7,58 @@
   },
   "methods": [
     {
+      "name": "dev.release",
+      "description": "DEV-only creator/admin request to prepare and queue an exact source or read one operation. No caller path or command is accepted; a lost response requires status by the same operation ID.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "action",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "release",
+              "status"
+            ]
+          }
+        },
+        {
+          "name": "requestId",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "sourceSha",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "expectedBase",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "operationId",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "status",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
       "name": "authorize",
       "description": "Root-only admission check; user and profile must remain active.",
       "paramStructure": "by-name",
@@ -52,6 +104,25 @@
           "$ref": "#/components/errors/Unavailable"
         }
       ]
+    },
+    {
+      "name": "ingress.profiles-strict",
+      "description": "Только ingress: авторизованные active профили и UUID всех зарегистрированных профилей; ошибка при недоступном Auth.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {"name": "result", "schema": {"type": "object", "required": ["profiles", "allProfileIds"],
+        "properties": {"profiles": {"type": "array", "items": {"type": "object"}},
+          "allProfileIds": {"type": "array", "items": {"type": "string"}}}}}
+    },
+    {
+      "name": "ingress.resolve-known",
+      "description": "Только ingress: подтверждённый null Auth отличает незарегистрированный аккаунт от отказа и недоступности.",
+      "paramStructure": "by-name",
+      "params": [
+        {"name": "telegramId", "required": true, "schema": {"type": "string", "pattern": "^[0-9]+$"}}
+      ],
+      "result": {"name": "result", "schema": {"type": "object", "required": ["state"],
+        "properties": {"state": {"enum": ["known", "unregistered", "forbidden"]}, "profile": {"type": "object"}}}}
     },
     {
       "name": "identity.resolve",

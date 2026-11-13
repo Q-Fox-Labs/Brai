@@ -6,7 +6,7 @@ import re
 
 
 def catalog_files(bundled, instructions):
-    """Вернуть полный общий набор; канонический продуктовый router заменяет bundled по пути."""
+    """Закрепить bundled навыки; публичные тексты читаются из отдельной generation."""
     if not bundled.is_dir() or not instructions.is_dir():
         raise ValueError('SYSTEM_SKILLS_SOURCE_MISSING')
     result = {}
@@ -22,38 +22,42 @@ def catalog_files(bundled, instructions):
             if total > 64 * 1024 * 1024:
                 raise ValueError('SYSTEM_SKILLS_TOO_LARGE')
             result[str(source.relative_to(bundled))] = raw
-    for source in sorted(instructions.rglob('*')):
-        if source.is_symlink():
-            raise ValueError('SYSTEM_SKILL_LINK')
-        if not source.is_file():
-            continue
-        relative = source.relative_to(instructions)
-        raw = source.read_bytes()
-        total += len(raw)
-        if total > 64 * 1024 * 1024:
-            raise ValueError('SYSTEM_SKILLS_TOO_LARGE')
-        if source.name != 'SKILL.md':
-            result[str(relative)] = raw
-            continue
-        text = raw.decode('utf-8')
-        front = re.match(r'\A---\n.*?\n---\n', text, re.S)
-        if not front or not re.search(r'^name:\s*\S+', front.group(), re.M):
-            raise ValueError('SYSTEM_SKILL_METADATA')
-        destination = '/opt/brai-profile/system-instructions/current/skills/' + relative.as_posix()
-        result[str(relative)] = (front.group() + '\nПеред выполнением полностью прочитай '
-            '[каноническую инструкцию](' + destination + ').\n').encode()
     if not any(Path(name).name == 'SKILL.md' for name in result):
         raise ValueError('SYSTEM_SKILLS_EMPTY')
     return result
 
 # AIDEV-NOTE: Пути определяет readonly namespace, личный config.yaml их не меняет.
-SYSTEM_SKILLS = Path('/opt/brai-profile/system-skills/skills')
+PUBLIC_SKILL_GENERATION_READER = 1
+SYSTEM_SKILLS = Path('/opt/brai-profile/system-instructions')
 BUNDLED_SKILLS = Path('/opt/brai-profile/skills')
+PROGRAM_SKILL_SCRIPTS = Path('/opt/brai-profile/instructions/skill-scripts')
+
+
+def system_root():
+    """Выбрать одно проверенное поколение общих документов на каждое открытие каталога."""
+    from . import instructions
+    root = instructions.selected_generation() / 'skills'
+    protected_root(root)
+    return root
+
+
+def system_relative(directory):
+    """Устойчивый skill ID не зависит от выбранного поколения документов."""
+    path = Path(directory)
+    try:
+        parts = path.relative_to(SYSTEM_SKILLS / '.generations').parts
+    except ValueError:
+        return None
+    if (len(parts) < 3 or not re.fullmatch(r'[0-9a-f]{64}', parts[0]) or parts[1] != 'skills'
+            or any(part in ('.', '..') for part in parts[2:])):
+        return None
+    protected_root(SYSTEM_SKILLS / '.generations' / parts[0] / 'skills')
+    return Path(*parts[2:])
 
 
 def policy_roots(home, system=None, bundled=None):
     """Системный каталог имеет приоритет; личные навыки читаются только из custom."""
-    return [(-2, Path(system or SYSTEM_SKILLS)), (-1, Path(bundled or BUNDLED_SKILLS)),
+    return [(-2, Path(system or system_root())), (-1, Path(bundled or BUNDLED_SKILLS)),
             (1, Path(home) / 'usercustom/userdata/skills')]
 
 
@@ -69,7 +73,7 @@ def protected_root(root):
 def system_aliases(utils, roots=None):
     """Вернуть имена и пути всех системных навыков, включая новый каталог обновления."""
     aliases = set()
-    for root in roots or (SYSTEM_SKILLS, BUNDLED_SKILLS):
+    for root in roots or (system_root(), BUNDLED_SKILLS):
         for path in utils.iter_skill_index_files(root, 'SKILL.md'):
             protected_root(path.parent)
             info = path.lstat()
@@ -89,7 +93,7 @@ def install_policy():
     """
     import os
     from agent import skill_utils as utils
-    for root in (SYSTEM_SKILLS, BUNDLED_SKILLS):
+    for root in (system_root(), BUNDLED_SKILLS):
         protected_root(root)
     if getattr(utils, '_brai_system_skills', False):
         return
@@ -98,13 +102,12 @@ def install_policy():
     home = Path(os.environ['HERMES_HOME'])
     personal = home / 'usercustom/userdata/skills'
     utils.get_skill_search_roots = lambda local=None, include_project=True: policy_roots(home)
-    utils.get_external_skills_dirs = lambda: [SYSTEM_SKILLS, BUNDLED_SKILLS]
+    utils.get_external_skills_dirs = lambda: [system_root(), BUNDLED_SKILLS]
     utils.get_skill_create_dir = lambda: personal
     utils.get_disabled_skill_names = lambda platform=None: original_disabled(platform) - system_aliases(utils)
     utils.is_disabled_entry = lambda entry, disabled: (
-        False if Path(entry['root']) in (SYSTEM_SKILLS, BUNDLED_SKILLS)
+        False if Path(entry['root']) == BUNDLED_SKILLS or system_relative(Path(entry['root']) / '_root') is not None
         else original_entry(entry, disabled))
-    utils.ESSENTIAL_SKILLS = utils.ESSENTIAL_SKILLS | system_aliases(utils)
     install_personal_policy(home, utils)
     utils._brai_system_skills = True
 
@@ -169,7 +172,10 @@ def install_personal_policy(home, utils):
 
     def shared_id(directory):
         if directory is not None:
-            for label, root in (('system', SYSTEM_SKILLS), ('bundled', BUNDLED_SKILLS)):
+            relative = system_relative(directory)
+            if relative is not None:
+                return 'system:' + relative.as_posix()
+            for label, root in (('bundled', BUNDLED_SKILLS),):
                 if directory.is_relative_to(root):
                     return label + ':' + directory.relative_to(root).as_posix()
         return None
@@ -198,8 +204,15 @@ def install_personal_policy(home, utils):
     def personalized_view(name, file_path=None, task_id=None, preprocess=True):
         result = json.loads(original_view(name, file_path=file_path, task_id=task_id, preprocess=preprocess))
         if result.get('success') and not file_path and result.get('skill_dir'):
-            identity = shared_id(Path(result['skill_dir']))
+            directory = Path(result['skill_dir'])
+            identity = shared_id(directory)
             if identity:
+                relative = system_relative(directory)
+                if relative is not None:
+                    program = PROGRAM_SKILL_SCRIPTS / relative
+                    if program.is_dir():
+                        protected_root(program)
+                        result['program_skill_dir'] = str(program)
                 try:
                     content = read_lesson(identity)
                 except (OSError, ValueError, UnicodeError) as error:

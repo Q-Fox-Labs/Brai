@@ -10,6 +10,10 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 import re
 
+_STARTUP_HOLD = ('BRAI_IDENTITY_RELEASE_HOLD_OPERATION', 'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
+_PROCESS_METADATA = ('INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID',
+                     'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE')
+
 
 class NativeRelease:
     """Сериализовать один release; готовность означает отсутствие живой работы."""
@@ -28,18 +32,24 @@ class NativeRelease:
         self.tasks = set()
         self.fence = None
         self.cold_start = False
+        self.attempt = None
 
     def bootstrap(self, source):
         """Root-bound cold startup closes both sources before native construction."""
         operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
         digest = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
-        if operation is None and digest is None:
-            return
-        if (not operation or not digest or str(uuid.UUID(operation)) != operation
+        held = operation is not None or digest is not None
+        if held and (not operation or not digest or str(uuid.UUID(operation)) != operation
                 or not re.fullmatch('[a-f0-9]{64}', digest)
                 or Path(source) != Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
                 or hashlib.sha256(Path(source).read_bytes()).hexdigest() != digest):
             raise RuntimeError('Root startup release binding unavailable')
+        # The startup-only values must not leak into executable tool environments.
+        # /proc/<pid>/environ retains the original systemd binding for Root checks.
+        for name in (*_STARTUP_HOLD, *_PROCESS_METADATA):
+            os.environ.pop(name, None)
+        if not held:
+            return
         from hermes_cli.backend_retirement import retirement
         if not callable(getattr(retirement, 'brai_hold', None)) or not retirement.brai_hold(operation):
             raise RuntimeError('Root startup release fence unavailable')
@@ -99,6 +109,119 @@ class NativeRelease:
             yield
         finally:
             self.sources -= 1
+
+    def _profile_binding(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime):
+        for value in (operationId, attemptId, profileId):
+            if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                raise ValueError('RELEASE_IDENTITY_REQUIRED')
+        if (profileId != os.environ.get('BRAI_IDENTITY_PROFILE_ID') or type(workerPid) is not int
+                or workerPid != os.getpid() or not isinstance(workerStartTime, str)
+                or not isinstance(targetPayloadHash, str) or not re.fullmatch('[a-f0-9]{64}', targetPayloadHash)):
+            raise ValueError('RELEASE_BINDING_CHANGED')
+        stat = Path('/proc/self/stat').read_text()
+        observed = stat.rsplit(')', 1)[1].split()[19]
+        if observed != workerStartTime:
+            raise ValueError('RELEASE_BINDING_CHANGED')
+        return (operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime)
+
+    async def try_hold(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime):
+        """Закрыть источники только если уже свободны, сохранив решение exact attempt."""
+        binding = self._profile_binding(operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime)
+        self._owner(operationId)
+        if self.attempt is not None:
+            old, result = self.attempt
+            if binding == old:
+                return self._attempt_receipt(binding)
+            if old[0] == operationId:
+                if old[2:] != binding[2:] or result['state'] != 'busy':
+                    raise ValueError('RELEASE_ATTEMPT_CHANGED')
+            elif (self.operation is not None or (result['state'] != 'busy'
+                  and self.last_resumed != old[0])):
+                raise ValueError('RELEASE_ATTEMPT_CHANGED')
+        if self.operation is not None:
+            raise ValueError('RELEASE_ALREADY_ACTIVE')
+        result = {'operationId': operationId, 'attemptId': attemptId, 'profileId': profileId,
+                  'state': 'busy', 'reason': 'native_work'}
+        try:
+            if not self.worker.activation.is_set() or self._busy():
+                self.attempt = (binding, dict(result))
+                return result
+            from hermes_cli.backend_retirement import retirement
+            hold, resume = getattr(retirement, 'brai_hold', None), getattr(retirement, 'brai_resume', None)
+            if not callable(hold) or not callable(resume):
+                raise RuntimeError('NATIVE_RELEASE_HOOK_REQUIRED')
+            self.fence = retirement
+            if not hold(operationId):
+                resume(operationId)
+                self.fence = None
+                self.attempt = (binding, dict(result))
+                return result
+            if self._busy():
+                resume(operationId)
+                self.fence = None
+                self.attempt = (binding, dict(result))
+                return result
+            self.operation = operationId
+            self.open.clear()
+            self.completions_open.clear()
+            result = {**result, 'state': 'ready', 'reason': None}
+        except Exception:
+            if self.fence is not None:
+                self.operation = operationId
+                self.open.clear()
+                self.completions_open.clear()
+            result = {**result, 'state': 'blocked', 'reason': 'native_state_unavailable'}
+        self.attempt = (binding, dict(result))
+        return result
+
+    def _attempt_receipt(self, binding):
+        operationId, attemptId, profileId = binding[:3]
+        unknown = {'operationId': operationId, 'attemptId': attemptId, 'profileId': profileId,
+                   'state': 'unknown', 'reason': 'attempt_unavailable'}
+        if self.attempt is None or self.attempt[0] != binding:
+            return unknown
+        result = self.attempt[1]
+        if result['state'] == 'ready' and self.operation != operationId:
+            return unknown
+        if result['state'] == 'busy' and not self._sources_unfenced():
+            return unknown
+        return dict(result)
+
+    def _sources_unfenced(self):
+        if (self.operation is not None or self.fence is not None
+                or not self.open.is_set() or not self.completions_open.is_set()):
+            return False
+        try:
+            from hermes_cli.backend_retirement import retirement
+            with retirement._lock:
+                return (retirement._brai_release_owner is None and not retirement._preparing
+                        and retirement._token is None and not retirement._committed)
+        except Exception:
+            return False
+
+    async def try_status(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime):
+        binding = self._profile_binding(operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime)
+        return self._attempt_receipt(binding)
+
+    async def reject_attempt(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime):
+        """Record ingress-busy without closing native sources or taking the fence."""
+        binding = self._profile_binding(operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime)
+        self._owner(operationId)
+        if self.attempt is not None:
+            old, result = self.attempt
+            if old == binding:
+                return self._attempt_receipt(binding)
+            if old[0] == operationId:
+                if old[2:] != binding[2:] or result['state'] != 'busy':
+                    raise ValueError('RELEASE_ATTEMPT_CHANGED')
+            elif self.operation is not None or (result['state'] != 'busy' and self.last_resumed != old[0]):
+                raise ValueError('RELEASE_ATTEMPT_CHANGED')
+        if not self._sources_unfenced():
+            raise ValueError('RELEASE_ALREADY_ACTIVE')
+        result = {'operationId': operationId, 'attemptId': attemptId, 'profileId': profileId,
+                  'state': 'busy', 'reason': 'ingress_work'}
+        self.attempt = (binding, dict(result))
+        return result
 
     async def begin(self, operationId):
         """Удержать будущие source scans; существующая работа продолжает исполнение."""

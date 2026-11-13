@@ -4,10 +4,12 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync, realpat
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { discover, fingerprints, checkGroupFingerprint, json, validateDocumentation } from './graph.mjs';
 import {lockInputs} from './lock-inputs.mjs';
+import {verifiedProof} from './web-build-cache.mjs';
+import {sealedInventory} from './sealed-dependencies.mjs';
 import {buildOutputDigest, verifyBuildReceipt as verifyPreparedBuild, command} from './build-engine.mjs';
 export {buildOutputInventory, buildOutputDigest} from './build-engine.mjs';
 const defaultRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
@@ -20,9 +22,47 @@ function saveState(path,state) {
   writeFileSync(temporary,JSON.stringify(state)+'\n');
   renameSync(temporary,path);
 }
-function dependencyInventory(root,c,development,cache) {
+export function runComponentCommand(root,c,text) {
+  if(process.env.BRAI_PUBLISHER_PROOF_FD!=='3')return command(root,c,text);
+  if(!text)return;
+  const environment={...process.env,NEXT_TELEMETRY_DISABLED:'1'};
+  delete environment.CODEX_TOOL_CALL_ID;
+  const result=spawnSync(text,{cwd:join(root,c.directory),shell:true,stdio:['inherit','inherit','inherit',3],env:environment});
+  if(result.error)throw result.error;
+  if(result.status!==0)throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
+}
+function runCheckCommand(root,c,text) {
+  if(!text)return Promise.resolve();
+  const environment={...process.env,NEXT_TELEMETRY_DISABLED:'1'};
+  delete environment.CODEX_TOOL_CALL_ID;
+  const stdio=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?['inherit','inherit','inherit',3]:'inherit';
+  return new Promise((resolve,reject)=>{
+    const child=spawn(text,{cwd:join(root,c.directory),shell:true,stdio,env:environment});
+    child.once('error',reject);
+    child.once('close',(status,signal)=>{
+      if(status===0)resolve();
+      else reject(Error(`COMMAND_FAILED: ${c.id}: ${text}: ${status ?? signal}`));
+    });
+  });
+}
+function sealedDependencies(root,entries) {
+  try {
+    const marker=json(join(root,'node_modules/.brai-worktree.json'));
+    const generation=marker.dependencyRoot;
+    if(typeof generation!=='string')return null;
+    const proof=verifiedProof(root,[join(generation,'node_modules')]);
+    if(!proof)return null;
+    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'
+      ?join(dirname(root),'repo/.git/codeworks-dependencies/prepared'):proof.root;
+    if(generation!==expected)return null;
+    return sealedInventory(root,entries,proof,generation);
+  } catch {return null;}
+}
+export function dependencyInventory(root,c,development,cache=new Map()) {
   if(process.env.NODE_PATH || process.env.NODE_OPTIONS)return null;
   const entries=lockInputs(root,c.npm.workspaces,{development});
+  const sealed=sealedDependencies(root,entries);
+  if(sealed)return sealed;
   const cacheName=JSON.stringify(entries);
   if(cache.has(cacheName))return cache.get(cacheName);
   try {
@@ -173,18 +213,21 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
     const state=existsSync(statePath)?json(statePath):{};
     let compiled=false;
     // package also verifies build identity; check invokes only declared check commands, never npm test's legacy build prefix.
-    let needsBuild=c.commands.build && state.build!==item.build;
+    const buildDependencies=c.commands.build && sealedDependencies(root,lockInputs(root,c.npm.workspaces,{development:true}));
+    let needsBuild=c.commands.build && (state.build!==item.build || (buildDependencies && state.buildDependencies!==buildDependencies));
     if(c.commands.build && !needsBuild) {
       try {verifyBuildReceipt(root,c,state,item.build);}
       catch(error) {if(['build','run'].includes(action))needsBuild=true;else throw error;}
     }
     if (needsBuild) {
-      command(root,c,c.commands.build); compiled=true;
+      runComponentCommand(root,c,c.commands.build); compiled=true;
+      if(buildDependencies && sealedDependencies(root,lockInputs(root,c.npm.workspaces,{development:true}))!==buildDependencies)throw Error(`BUILD_DEPENDENCIES_CHANGED: ${c.id}`);
       state.outputDigest=buildOutputDigest(root,c);
     }
     // Generated payload and dependency outputs are fingerprinted after this compilation.
     item={id:item.id,...fingerprints(root,c)};
     state.build=item.build;
+    if(buildDependencies)state.buildDependencies=buildDependencies;
     saveState(statePath,state);
     let checked=false, checkProof, checkGroups, checkDependencies;
     if (['check','run'].includes(action)) {
@@ -193,39 +236,53 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
       if(c.commands.checkGroups) {
         const groups=c.commands.checkGroups, ids=new Set(groups.map(g=>g.id));
         if(ids.size!==groups.length)throw Error(`CHECK_GROUP_DUPLICATE: ${c.id}`);
-        const receipts={...state.checkGroups},inputs=[];let executed=false;
-        checkGroups=[];
+        const receipts={...state.checkGroups},inputs=[];
         for(const group of groups) {
           const checks=checkGroupFingerprint(root,c,group), qualified={...c,commands:{...c.commands,checkTools:group.tools,pythonModules:group.pythonModules,pythonAbsent:group.pythonAbsent,absentPaths:group.absentPaths}};
           const key=dependencies && checkKey(qualified,{checks:checks+dependencies},toolCache);
           const proof=key && receipts[group.id]===key?'cached':'executed';
-          if(proof==='executed') {command(root,c,group.command);executed=true;}
+          inputs.push({group,checks,qualified,key,proof});
+        }
+        // Wait for every started process even on failure; no partial receipts escape.
+        const outcomes=await Promise.allSettled(inputs.filter(row=>row.proof==='executed').map(({group})=>runCheckCommand(root,c,group.command)));
+        const failed=outcomes.find(result=>result.status==='rejected');
+        if(failed)throw failed.reason;
+        checkGroups=[];
+        for(const {group,checks,qualified,key,proof} of inputs) {
           if(checkGroupFingerprint(root,c,group)!==checks || (key && checkKey(qualified,{checks:checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
-          inputs.push({group,checks});receipts[group.id]=key;checkGroups.push({id:group.id,proof});
+          receipts[group.id]=key;checkGroups.push({id:group.id,proof});
         }
         if(inputs.some(({group,checks})=>checkGroupFingerprint(root,c,group)!==checks))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
         if(dependencies && dependencyInventory(root,c,true,new Map())!==dependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
         state.checkGroups=receipts;
-        checkProof=executed?'executed':'cached';
+        checkProof=outcomes.length?'executed':'cached';
       } else {
         const key=dependencies && checkKey(c,{checks:item.checks+dependencies},toolCache);
         if(key && state.checkReceipt?.key===key) checkProof='cached';
-        else {command(root,c,c.commands.check);checkProof='executed';}
+        else {runComponentCommand(root,c,c.commands.check);checkProof='executed';}
         if(fingerprints(root,c).checks!==item.checks || (key && checkKey(c,{checks:item.checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
         if(dependencies && dependencyInventory(root,c,true,new Map())!==dependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
         state.checkReceipt=key?{key}:null;
       }
       verifyBuildReceipt(root,c,state,item.build);checked=true;
       state.checks=item.checks;saveState(statePath,state);
+      if(c.id==='web' && c.delivery.strategy==='next-standalone') {
+        const {dependencyRoots}=await import('./build-web-standalone.mjs');
+        const {publishWebCache}=await import('./web-build-cache.mjs');
+        const roots=dependencyRoots(root).flatMap(base=>['node_modules','apps/web/node_modules','services/agent/node_modules'].map(path=>join(base,path))).filter(existsSync);
+        publishWebCache(root,c,roots);
+      }
     }
     let artifact,packaged=false;
     if (['package','run'].includes(action)) {
       const {packageComponent,verifyPackage}=await import('./package-runtime.mjs');
       const delivery={...c.delivery,files:[...new Set([...c.delivery.files,...c.dependencies.flatMap(d=>d.delivery)])]};
-      const dependencies=dependencyInventory(root,c,false,dependencyCache);
+      // Standalone packages use only the verified Next output, already included in item.runtime.
+      const dependencies=c.delivery.strategy==='next-standalone'?'next-standalone-output':dependencyInventory(root,c,false,dependencyCache);
       if(dependencies && state.runtimeDependencies===dependencies && state.runtime===item.runtime && state.packagePath && existsSync(state.packagePath)) artifact=verifyPackage(state.packagePath,c.id);
       else {artifact=await packageComponent(root,{...c,delivery},join(root,'tmp','component-packages'));packaged=true;}
-      if(dependencies && dependencyInventory(root,c,false,new Map())!==dependencies)throw Error(`PACKAGE_DEPENDENCIES_CHANGED: ${c.id}`);
+      if(dependencies && c.delivery.strategy!=='next-standalone' && dependencyInventory(root,c,false,new Map())!==dependencies)throw Error(`PACKAGE_DEPENDENCIES_CHANGED: ${c.id}`);
+      if(c.delivery.strategy==='next-standalone' && fingerprints(root,c).runtime!==item.runtime)throw Error(`PACKAGE_INPUTS_CHANGED: ${c.id}`);
       if(checkDependencies && dependencyInventory(root,c,true,new Map())!==checkDependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
       state.runtime=item.runtime;state.runtimeDependencies=dependencies;state.packagePath=artifact.path;saveState(statePath,state);
     }

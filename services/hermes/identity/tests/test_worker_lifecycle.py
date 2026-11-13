@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import inspect
+import importlib.util
 import tempfile
 import os
 from pathlib import Path
@@ -141,6 +142,30 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(worker.operational.is_set())
         finally:
             await worker.stop_runtime()
+
+    async def test_cold_policy_discovery_sees_validated_telegram_identity(self):
+        # Cold policy imports gateway before returning; its discovery must see the real owner.
+        path = Path(__file__).resolve().parents[2] / 'telegram/__init__.py'
+        spec = importlib.util.spec_from_file_location('_fixture_telegram_identity', path)
+        module = importlib.util.module_from_spec(spec)
+        policy = ModuleType('identity.native_policy')
+        class StopAfterDiscovery(Exception): pass
+        def install(*, cold_start):
+            self.assertTrue(cold_start)
+            self.assertEqual(module.Config.from_identity().owner, '123')
+            os.environ['BRAI_IDENTITY_TELEGRAM_ID'] = '124'
+            with self.assertRaisesRegex(ValueError, 'BRAI_TELEGRAM_IDENTITY_INVALID'):
+                module.Config.from_identity()
+            raise StopAfterDiscovery()
+        policy.install = install
+        with patch.dict(sys.modules, {'_fixture_telegram_identity': module, 'identity.native_policy': policy}), \
+             patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': '/tmp/synthetic-home'}):
+            sys.modules.pop('_brai_identity_human', None)
+            spec.loader.exec_module(module)
+            worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+            worker.release.cold_start = True
+            with self.assertRaises(StopAfterDiscovery):
+                await worker.start(NS(closed=False))
 
     async def test_bootstrap_does_not_start_tools_or_recovery(self):
         worker = await self.worker()
@@ -391,7 +416,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             profile.attach = attach
             self.calls.append('plugin_discovery')
         with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules):
-            with patch('identity.native_policy.revalidate_startup'), patch('identity.native_policy.install', side_effect=lambda: self.calls.append('role_policy')), patch('identity.images.install_shared_provider', side_effect=discover):
+            with patch('identity.native_policy.revalidate_startup'), patch('identity.native_policy.install', side_effect=lambda **_kwargs: self.calls.append('role_policy')), patch('identity.images.install_shared_provider', side_effect=discover):
                 worker = await self.worker()
             try:
                 self.assertIs(sys.modules['_brai_identity_human'].attach, attach)

@@ -63,6 +63,8 @@
       "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
       "docs/user-agent/instructions/hermes/BASE.md",
       "docs/user-agent/instructions/hermes/INDEX.md",
+      "docs/user-agent/instructions/hermes/skills/**/*",
+      "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
       "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
       "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
       "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
@@ -248,7 +250,12 @@
       "services/hermes/files/document.py",
       "services/hermes/files/generated.py",
       "services/hermes/identity/guest_generation.py",
-      "services/hermes/identity/release_native.py"
+      "services/hermes/identity/release_native.py",
+      "services/hermes/identity/ordinary_admission.py",
+      "services/hermes/identity/profile_release.py",
+      "services/hermes/identity/transport_inbox.py",
+      "services/hermes/identity/update_inbox.py",
+      "services/hermes/identity/release-contract.json"
     ],
     "checks": [
       "services/hermes/extensions/config/network-timeouts.json",
@@ -358,6 +365,22 @@
       "services/hermes/identity/tests/fixtures/release_native/gateway/run.py",
       "services/hermes/identity/tests/fixtures/release_native/gateway/run_startup.py",
       "services/hermes/identity/tests/fixtures/release_native/gateway/session_state.py",
+      "services/hermes/identity/tests/test_component_release_package.py",
+      "services/hermes/identity/tests/test_ordinary_admission.py",
+      "services/hermes/identity/tests/test_ordinary_batches.py",
+      "services/hermes/identity/tests/test_ordinary_boundaries.py",
+      "services/hermes/identity/tests/test_ordinary_uds_root.py",
+      "services/hermes/identity/tests/ordinary_uds_proof.py",
+      "services/hermes/identity/tests/test_ordinary_uds_proof.py",
+      "services/hermes/identity/tests/test_profile_release.py",
+      "services/hermes/identity/tests/test_profile_resume_health.py",
+      "services/hermes/identity/tests/test_dev_release_broker.py",
+      "services/hermes/identity/tests/test_release_contract.py",
+      "services/hermes/identity/tests/test_transport_inbox.py",
+      "services/hermes/identity/tests/test_update_inbox.py",
+      "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/adapter.py",
+      "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/telegram_held_inbound.py",
+      "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/update_admission.py",
       "services/hermes/identity/tests/test_backup_roles.py"
     ]
   },
@@ -506,6 +529,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -556,6 +581,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -606,6 +633,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -654,6 +683,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -704,6 +735,8 @@
       "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
       "docs/user-agent/instructions/hermes/BASE.md",
       "docs/user-agent/instructions/hermes/INDEX.md",
+      "docs/user-agent/instructions/hermes/skills",
+      "docs/user-agent/instructions/skills/brai-task-workflows",
       "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
       "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
       "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
@@ -887,7 +920,12 @@
       "services/hermes/identity/browser-defaults.json",
       "services/hermes/files/document.py",
       "services/hermes/files/generated.py",
-      "services/hermes/identity/release_native.py"
+      "services/hermes/identity/release_native.py",
+      "services/hermes/identity/ordinary_admission.py",
+      "services/hermes/identity/profile_release.py",
+      "services/hermes/identity/transport_inbox.py",
+      "services/hermes/identity/update_inbox.py",
+      "services/hermes/identity/release-contract.json"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

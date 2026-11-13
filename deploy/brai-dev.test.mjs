@@ -46,8 +46,8 @@ function fixture() {
       calls.push(['operator', action, arg]);
       if (action === 'status') return {current: state.current, previous: state.previous, operation: state.operation, supportedComponents};
       if (action === 'seal') return state.candidate;
-      if (action === 'apply') {state.operation = {releaseId, state: 'accepted', timings: [{phase: 'smoke', durationMs: 4}]}; state.current = {releaseId, sourceSha: source, components: state.candidate.components}; return {releaseId, state: 'queued'};}
-      if (action === 'rollback') {state.operation = {releaseId, state: 'rolled-back'}; state.current = state.previous; return {releaseId};}
+      if (action === 'apply') {state.operation = {releaseId, action:'apply', sourceSha:source, state: 'accepted', timings: [{phase: 'smoke', durationMs: 4}]}; state.current = {releaseId, sourceSha: source, components: state.candidate.components}; return {releaseId, state: 'queued'};}
+      if (action === 'rollback') {state.operation = {releaseId, action:'rollback', sourceSha:state.previous.sourceSha, targetReleaseId:state.previous.releaseId, state: 'rolled-back'}; state.current = state.previous; return {releaseId};}
       if (action === 'reconcile') return {state: 'reconciled', releaseId: arg};
       throw Error('unexpected operator command');
     },
@@ -96,6 +96,40 @@ test('release executes exact changed closure, manifests, CAS and accepted wait',
   assert.deepEqual(state.candidate.components[0].schema, {before: 'schema-v1', after: 'schema-v1', rollbackCompatible: true});
   assert.ok(result.timings.some(t => t.phase === 'prepare' && t.component === 'auth'));
   assert.deepEqual(result.operatorTimings, [{phase: 'smoke', durationMs: 4}]); assert.equal(state.report.state, 'accepted');
+});
+
+test('prepare-only returns the actual candidate without applying or waiting', async () => {
+  const {ports,state}=fixture();
+  const result=await release({root:'/repository',source,prepareOnly:true},ports);
+  assert.equal(result.state,'prepared');assert.equal(result.releaseId,releaseId);
+  assert.equal(result.expectedBase,base);assert.equal(result.candidatePath,'/candidate.json');
+  assert.deepEqual(result.components,['auth','web']);
+  assert.ok(!state.calls.some(call=>call[0]==='operator'&&call[1]!=='status'));
+  assert.equal(state.current.releaseId,base);
+});
+
+test('release reports its historical acceptance when a later release is already current', async () => {
+  const {ports,state}=fixture(), original=ports.operator;
+  const later='2c7836fe-e0c0-4224-a1f4-9d845c1f5010';
+  ports.operator=async (action,id)=>{
+    const value=await original(action,id);
+    if(action==='status' && id===releaseId) return {...value,current:{...value.current,releaseId:later}};
+    return value;
+  };
+  const result=await release({root:'/repository',source},ports);
+  assert.equal(result.state,'accepted');assert.equal(result.releaseId,releaseId);assert.equal(result.currentDesiredReleaseId,later);
+  assert.ok(state.calls.some(row=>row[0]==='operator'&&row[1]==='status'&&row[2]===releaseId));
+});
+
+test('historical acceptance must match the source and action', async () => {
+  for(const field of ['sourceSha','action']) {
+    const {ports}=fixture(), original=ports.operator;
+    ports.operator=async (action,id)=>{
+      const value=await original(action,id);
+      return action==='status'&&id===releaseId?{...value,operation:{...value.operation,[field]:'wrong'}}:value;
+    };
+    await assert.rejects(release({root:'/repository',source},ports),/OPERATION_IDENTITY_MISMATCH/);
+  }
 });
 
 test('candidate uses accepted migration ref before and packaged migration ref after', async () => {
@@ -276,6 +310,27 @@ test('rollback identifies requested previous release and uses current release CA
   assert.equal(result.current.releaseId, base); assert.ok(state.calls.some(c => c[0] === 'operator' && c[1] === 'rollback' && c[2] === 'current'));
 });
 
+test('rollback verifies historical target when a later release is current', async () => {
+  const {ports,state}=fixture(),original=ports.operator;
+  state.previous={releaseId:base,sourceSha:oldSource};
+  ports.operator=async (action,id)=>{
+    const value=await original(action,id);
+    return action==='status'&&id===releaseId?{...value,current:{releaseId:'later'}}:value;
+  };
+  const result=await main(['rollback','--release',base],ports,'/repository');
+  assert.equal(result.operation.targetReleaseId,base);assert.equal(result.currentDesiredReleaseId,'later');
+});
+
+test('rollback requires target proof even if global current matches', async () => {
+  const {ports,state}=fixture(),original=ports.operator;
+  state.previous={releaseId:base,sourceSha:oldSource};
+  ports.operator=async (action,id)=>{
+    const value=await original(action,id);
+    return action==='status'&&id===releaseId?{...value,operation:{...value.operation,targetReleaseId:undefined}}:value;
+  };
+  await assert.rejects(main(['rollback','--release',base],ports,'/repository'),/ROLLBACK_NOT_ACCEPTED/);
+});
+
 test('reconcile requires matching operation and passes its ID to the locked helper', async () => {
   const {ports, state} = fixture(); state.operation = {releaseId, state: 'recovery-required'};
   await assert.rejects(main(['reconcile', base], ports), /RECONCILE_RELEASE_MISMATCH/);
@@ -325,4 +380,14 @@ test('real ready-files package integrates exact manifest hash and payload verifi
     writeFileSync(join(artifact.path, 'services/fixture/main.mjs'), 'export const value = 43;\n');
     assert.throws(() => verifyPackage(artifact.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
   } finally {rmSync(root, {recursive: true, force: true});}
+});
+
+
+test('planner compares logical fingerprints while retaining actual program fingerprints', async () => {
+  const {ports, state} = fixture();
+  state.current.components.auth.fingerprints = keys('previous-program');
+  state.current.components.auth.comparisonFingerprints = state.next.auth;
+  const result = await release({root:'/repo', source}, ports);
+  assert.equal(result.state, 'unchanged');
+  assert.equal(state.current.components.auth.fingerprints.build, keys('previous-program').build);
 });

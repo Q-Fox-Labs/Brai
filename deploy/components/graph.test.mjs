@@ -2,7 +2,7 @@
 // ABOUTME: Изолированные Git fixtures не читают live-данные основной копии.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { discover, fingerprints, checkGroupFingerprint, sourceFiles } from './graph.mjs';
@@ -106,6 +106,58 @@ test('check groups reuse only proofs whose declared inputs are unchanged',async 
  assert.equal(readFileSync(join(root,'tmp/all-count'),'utf8'),'11');
  assert.equal(readFileSync(join(root,'tmp/other-count'),'utf8'),'1');
 });
+test('independent check groups cross a process barrier before receipts are saved',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'first',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'second',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ const wait=`import{existsSync,watch,writeFileSync}from'node:fs';\nconst wait=p=>new Promise(resolve=>{if(existsSync(p))return resolve();const w=watch('../../tmp',()=>{if(existsSync(p)){w.close();resolve()}});if(existsSync(p)){w.close();resolve()}});\n`;
+ put(root,'services/probe/tests.mjs',wait+"writeFileSync('../../tmp/first','ready');await wait('../../tmp/second');\n");
+ put(root,'services/probe/peer.mjs',wait+"await wait('../../tmp/first');writeFileSync('../../tmp/second','ready');\n");
+ const result=(await execute(root,'check',['probe']))[0];
+ assert.deepEqual(result.checkGroups.map(row=>[row.id,row.proof]),[['first','executed'],['second','executed']]);
+ assert.equal(readFileSync(join(root,'tmp/first'),'utf8'),'ready');
+ assert.equal(readFileSync(join(root,'tmp/second'),'utf8'),'ready');
+});
+test('a failed group waits for its peer and does not persist partial receipts',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'failure',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'peer',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs',"import{writeFileSync}from'node:fs';writeFileSync('../../tmp/failed','yes');process.exit(1);\n");
+ put(root,'services/probe/peer.mjs',`import{existsSync,watch,writeFileSync}from'node:fs';
+const p='../../tmp/failed';if(!existsSync(p))await new Promise(resolve=>{const w=watch('../../tmp',()=>{if(existsSync(p)){w.close();resolve()}});if(existsSync(p)){w.close();resolve()}});
+writeFileSync('../../tmp/peer-finished','yes');\n`);
+ await assert.rejects(execute(root,'check',['probe']),/COMMAND_FAILED/);
+ assert.equal(readFileSync(join(root,'tmp/peer-finished'),'utf8'),'yes');
+ assert.equal(JSON.parse(readFileSync(join(root,'tmp/component-state/probe.json'))).checkGroups,undefined);
+});
+test('concurrent groups inherit the publisher proof descriptor',t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.commands.checkGroups=[{id:'proof',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs',"import{readFileSync}from'node:fs';import assert from'node:assert/strict';assert.equal(readFileSync(3,'utf8'),'proof');\n");
+ const file=join(root,'proof');writeFileSync(file,'proof');const fd=openSync(file,'r');
+ try {
+  const script=`import{execute}from ${JSON.stringify(new URL('./cli.mjs',import.meta.url).href)};await execute(${JSON.stringify(root)},'check',['probe']);`;
+  execFileSync(process.execPath,['--input-type=module','-e',script],{env:{...process.env,BRAI_PUBLISHER_PROOF_FD:'3'},stdio:['ignore','pipe','pipe',fd]});
+ } finally {closeSync(fd);}
+});
+test('a group changing declared input invalidates the entire check',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'first',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'second',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs',"import{appendFileSync}from'node:fs';appendFileSync('main.mjs','\\n// changed');\n");
+ put(root,'services/probe/peer.mjs','export {};\n');
+ await assert.rejects(execute(root,'check',['probe']),/CHECK_INPUTS_CHANGED/);
+ assert.equal(JSON.parse(readFileSync(join(root,'tmp/component-state/probe.json'))).checkGroups,undefined);
+});
 test('changing installed dependency bytes invalidates check and package reuse',async t=>{
  const root=fixture(t),d=add(root,'probe');d.commands.build=null;d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];d.npm.workspaces=['services/probe'];
  d.inputs.runtime.push('services/probe/package.json');save(root,'probe',d);
@@ -142,6 +194,13 @@ test('Hermes check groups select instructions and adapter consumers independentl
  const instruction='docs/user-agent/instructions/context.md';
  put(root,instruction,readFileSync(join(root,instruction),'utf8')+'\nfixture change\n');
  assert.deepEqual(changed(before,keys()),['instructions']);
+ put(root,instruction,readFileSync(join(repository,instruction),'utf8'));
+ for(const path of ['docs/user-agent/instructions/hermes/skills/creative/art-director/SKILL.md',
+                    'docs/user-agent/instructions/skills/brai-task-workflows/SKILL.md']) {
+  put(root,path,readFileSync(join(root,path),'utf8')+'\nfixture change\n');
+  assert.deepEqual(changed(before,keys()),['instructions']);
+  put(root,path,readFileSync(join(repository,path),'utf8'));
+ }
 });
 test('strict schema, missing npm owner and missing executable are rejected',t=>{
  const root=fixture(t),d=add(root,'probe');d.typo=true;save(root,'probe',d);

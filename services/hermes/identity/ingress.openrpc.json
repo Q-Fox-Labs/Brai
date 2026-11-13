@@ -72,6 +72,401 @@
       ]
     },
     {
+      "name": "profile.release.try",
+      "paramStructure": "by-name",
+      "summary": "Условно удержать только свободный профиль; busy не останавливает текущие inputs.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "attemptId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "targetPayloadHash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "workerPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "workerStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "attemptId",
+            "profileId",
+            "targetPayloadHash",
+            "workerPid",
+            "workerStartTime",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attemptId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "profileId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "targetPayloadHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "workerPid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "workerStartTime": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "replacementPid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "replacementStartTime": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "busy",
+                "ready",
+                "blocked",
+                "unknown",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "profile.release.status",
+      "paramStructure": "by-name",
+      "summary": "Проверить устойчивый receipt exact попытки и действительного peer.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "attemptId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "targetPayloadHash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "workerPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "workerStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        {
+          "name": "replacementPid",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "replacementStartTime",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "attemptId",
+            "profileId",
+            "targetPayloadHash",
+            "workerPid",
+            "workerStartTime",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attemptId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "profileId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "targetPayloadHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "workerPid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "workerStartTime": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "replacementPid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "replacementStartTime": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "busy",
+                "ready",
+                "blocked",
+                "unknown",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "profile.release.resume",
+      "paramStructure": "by-name",
+      "summary": "Освободить exact gate после восстановления выбранного worker и очереди.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "attemptId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "targetPayloadHash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "workerPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "workerStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        {
+          "name": "replacementPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "replacementStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "attemptId",
+            "profileId",
+            "targetPayloadHash",
+            "workerPid",
+            "workerStartTime",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attemptId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "profileId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "targetPayloadHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "workerPid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "workerStartTime": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "replacementPid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "replacementStartTime": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "busy",
+                "ready",
+                "blocked",
+                "unknown",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "release.begin",
       "paramStructure": "by-name",
       "summary": "Удержать следующий polling и начать drain.",

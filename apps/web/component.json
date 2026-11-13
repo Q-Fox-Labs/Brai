@@ -10,7 +10,12 @@
   "executableSources": [],
   "inputs": {
     "build": [
-      "apps/web/tsconfig.json"
+      "apps/web/tsconfig.json",
+      "deploy/components/build-web-standalone.mjs",
+      "deploy/components/graph.mjs",
+      "deploy/components/sealed-dependencies.mjs",
+      "deploy/components/source-snapshot.mjs",
+      "deploy/components/web-build-cache.mjs"
     ],
     "runtime": [
       "apps/web/AGENTS.md",
@@ -429,26 +434,19 @@
     }
   ],
   "commands": {
-    "build": "npm run build",
+    "build": "node ../../deploy/components/build-web-standalone.mjs",
     "check": "node --experimental-strip-types --test --test-isolation=none tests/*.test.ts"
   },
   "delivery": {
     "kind": "oci-context",
+    "strategy": "next-standalone",
     "files": [
-      "apps/web/.next/BUILD_ID",
-      "apps/web/.next/app-path-routes-manifest.json",
-      "apps/web/.next/build-manifest.json",
-      "apps/web/.next/package.json",
-      "apps/web/.next/prerender-manifest.json",
-      "apps/web/.next/required-server-files.json",
-      "apps/web/.next/routes-manifest.json",
-      "apps/web/.next/server",
+      "apps/web/.next/standalone",
       "apps/web/.next/static",
-      "apps/web/package.json",
       "apps/web/public"
     ],
     "entrypoints": [
-      "node_modules/next/dist/bin/next"
+      "apps/web/server.js"
     ],
     "smokeImports": [
       "services/agent/contracts/index.mjs"
@@ -458,8 +456,7 @@
     ],
     "command": [
       "node",
-      "../../node_modules/next/dist/bin/next",
-      "start"
+      "server.js"
     ]
   },
   "deploy": {

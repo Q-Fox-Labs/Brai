@@ -104,7 +104,8 @@ class Worker:
 
         peer = Peer(reader, writer, {'health': check_health, 'dispatch': primary(self.dispatch),
                     'cancel': primary(self.cancel), 'interactive': primary(self.interactive),
-                    'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin),
+                    'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin), 'release.try': primary(self.release.try_hold),
+                    'release.try_status': primary(self.release.try_status), 'release.reject_attempt': primary(self.release.reject_attempt),
                     'release.status': primary(self.release.status), 'release.resume': primary(self.release.resume)})
         reading = asyncio.create_task(peer.run())
         claimed_wait = asyncio.create_task(claimed.wait())
@@ -143,9 +144,9 @@ class Worker:
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
-            from .native_policy import install
-            install()
             self._install_telegram_profile()
+            from .native_policy import install
+            install(cold_start=self.release.cold_start)
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
@@ -830,13 +831,13 @@ async def run(config_path):
     from .tool_client import broker_call
     # У файлового bootstrap только привязанный по UID broker; старый fixed-owner порт запрещён.
     os.environ['BRAI_IDENTITY_MODE'] = 'worker'
-    from .skills import install_policy
-    install_policy()
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
     worker = Worker(ingress, owner, telegram, publish_delivery_file)
     worker.release.bootstrap(Path(__file__))
+    from .skills import install_policy
+    install_policy()
     relay = await start_relay(egress, port=18080)
     browser_relay = None
     try:

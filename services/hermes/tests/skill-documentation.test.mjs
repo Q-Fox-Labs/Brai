@@ -1,14 +1,16 @@
-// ABOUTME: Проверяет, что тексты навыков не меняют идентичность сборки Hermes.
+// ABOUTME: Проверяет включение публичных текстов навыков в идентичность поставки Hermes.
 // ABOUTME: Сравнивает настоящие fingerprints в отдельной временной копии исходных входов.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, cpSync, existsSync, readdirSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
 import {expand, fingerprints, discover, validateDocumentation} from '../../../deploy/components/graph.mjs';
+import {buildOutputInventory} from '../../../deploy/components/cli.mjs';
 
 const root=fileURLToPath(new URL('../../../',import.meta.url));
-test('skill text updates leave build and payload unchanged; script updates change them',t=>{
+test('public skill texts and executable helpers change their Hermes payload',t=>{
   mkdirSync(join(root,'tmp'),{recursive:true});
   const fixture=mkdtempSync(join(root,'tmp/hermes-doc-fingerprint-'));
   t.after(()=>rmSync(fixture,{recursive:true,force:true}));
@@ -47,18 +49,35 @@ test('skill text updates leave build and payload unchanged; script updates chang
   const text='docs/user-agent/instructions/hermes/skills/creative/art-director/SKILL.md';
   mkdirSync(dirname(join(fixture,text)),{recursive:true});
   writeFileSync(join(fixture,text),'first text');
-  assert.deepEqual(fingerprints(fixture,component),before);
+  const first=fingerprints(fixture,component);
+  assert.notEqual(first.artifact,before.artifact);
+  assert.notEqual(first.runtime,before.runtime);
   writeFileSync(join(fixture,text),'changed skill text');
-  assert.deepEqual(fingerprints(fixture,component),before);
+  const updated=fingerprints(fixture,component);
+  assert.notEqual(updated.artifact,first.artifact);
+  assert.notEqual(updated.runtime,first.runtime);
   const script='services/hermes/extensions/skill-scripts/media/youtube-content/scripts/video_workflow.py';
   writeFileSync(join(fixture,script),readFileSync(join(fixture,script),'utf8')+'\n# changed executable fixture\n');
   const after=fingerprints(fixture,component);
-  assert.notEqual(after.build,before.build);
-  assert.notEqual(after.artifact,before.artifact);
-  assert.notEqual(after.runtime,before.runtime);
+  assert.notEqual(after.build,updated.build);
+  assert.notEqual(after.artifact,updated.artifact);
+  assert.notEqual(after.runtime,updated.runtime);
 });
 
 test('the actual component graph and documentation remain valid',()=>{
   const graph=discover(root,{allowMissingBuildOutputs:true});
   validateDocumentation(root,graph);
+});
+
+test('delivery includes the mandatory public skill documentation',()=>{
+  const component=JSON.parse(readFileSync(join(root,'services/hermes/component.json'),'utf8'));
+  const delivered=new Set(buildOutputInventory(root,component).map(item=>item.path));
+  assert.ok(delivered.has('docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md'));
+});
+
+test('Hermes packager includes the public skill and workflow closure',()=>{
+  const result=spawnSync(process.env.PYTHON||'python3',['-B','-m','unittest','discover','-s',join(root,'services/hermes/identity/tests'),'-p','test_component_release_package.py'],
+    {cwd:root,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr||result.error?.message);
+  assert.match(result.stderr,/Ran [1-9]\d* tests?/);
 });

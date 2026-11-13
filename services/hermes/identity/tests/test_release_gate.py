@@ -14,6 +14,30 @@ class Bot:
 
 
 class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_after_cleanup_rehydrates_updates_that_ptb_did_not_enqueue(self):
+        class TestBot:
+            id=123
+            async def get_updates(self, **kwargs): return ['synthetic']
+        class Mirror:
+            hydrated=True
+            def __init__(self): self.recoveries=0;self.captures=0
+            async def hydrate(self):
+                if not self.hydrated:
+                    self.recoveries+=1;self.hydrated=True
+            async def capture(self, updates, bot_id): self.captures+=1
+        class Resolver:
+            def __init__(self): self.mirror=Mirror()
+            async def release_resume(self, operationId): return True
+        bot=TestBot();resolver=Resolver()
+        gate=ReleaseGate(SimpleNamespace(bot=bot,updater=SimpleNamespace(running=False),update_queue=asyncio.Queue()))
+        gate.resolver=resolver;gate.install();self.addCleanup(gate.restore)
+        gate.operation='op';gate.committed=True
+        self.assertEqual(await bot.get_updates(timeout=0),['synthetic'])
+        self.assertFalse(resolver.mirror.hydrated)
+        await gate.resume('op')
+        self.assertEqual(await bot.get_updates(timeout=1),['synthetic'])
+        self.assertEqual(resolver.mirror.recoveries,1)
+
     async def test_fence_waits_for_queue_and_operation_owner(self):
         bot = Bot()
         queue = asyncio.Queue()
@@ -92,6 +116,37 @@ class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await gate.resume('one'))['state'], 'resumed')
         self.assertEqual((await gate.status('one'))['state'], 'resumed')
         self.assertEqual(await bot.get_updates(), ['update'])
+
+    async def test_batch_is_durable_before_get_updates_returns(self):
+        entered, commit = asyncio.Event(), asyncio.Event()
+        class RecordedBot:
+            id = 123
+            async def get_updates(self, **kwargs): return ['synthetic']
+        class Mirror:
+            async def capture(self, updates, bot_id):
+                self.values=(updates,bot_id)
+                entered.set()
+                await commit.wait()
+        bot=RecordedBot();mirror=Mirror()
+        gate=ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.resolver=SimpleNamespace(mirror=mirror)
+        gate.install();self.addCleanup(gate.restore)
+        fetching=asyncio.create_task(bot.get_updates())
+        await entered.wait()
+        self.assertFalse(fetching.done())
+        self.assertEqual(mirror.values,(['synthetic'],123))
+        commit.set()
+        self.assertEqual(await fetching,['synthetic'])
+
+    async def test_preack_storage_error_propagates_instead_of_returning_batch(self):
+        class RecordedBot:
+            id=123
+            async def get_updates(self, **kwargs): return ['synthetic']
+        class Mirror:
+            async def capture(self, updates, bot_id): raise OSError('synthetic disk failure')
+        bot=RecordedBot();gate=ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.resolver=SimpleNamespace(mirror=Mirror());gate.install();self.addCleanup(gate.restore)
+        with self.assertRaisesRegex(OSError,'disk failure'): await bot.get_updates()
 
     async def test_resume_before_poll_does_not_wait_for_queue(self):
         bot = Bot()

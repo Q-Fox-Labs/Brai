@@ -3,6 +3,7 @@
 """Плагин не запускает polling и не создаёт пользовательский agent в ingress."""
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -11,6 +12,27 @@ from contextvars import ContextVar
 from .ingress import install
 
 _admitted_message = ContextVar('brai_identity_admitted_message', default=None)
+RELEASE_CONTRACT_PATH = Path(__file__).with_name('release-contract.json')
+RELEASE_CONTRACT = {'version':2,'profileGate':2,'telegramInbox':2,'routingIndex':2,'legacyJournal':1}
+
+
+def _verify_release_contract():
+    """Reject missing or unknown provider contracts before touching the native app."""
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('Duplicate release contract field')
+            value[key] = item
+        return value
+    try:
+        value = json.loads(RELEASE_CONTRACT_PATH.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
+    except (OSError,UnicodeError,ValueError) as error:
+        raise RuntimeError('Identity release contract unavailable') from error
+    if (not isinstance(value,dict) or set(value) != set(RELEASE_CONTRACT)
+            or any(type(value[key]) is not int or value[key] != expected
+                   for key,expected in RELEASE_CONTRACT.items())):
+        raise RuntimeError('Identity release contract incompatible')
 
 
 def _message_identity(message):
@@ -52,6 +74,7 @@ class ReleaseGate:
         original = cls.get_updates
         owned = 'get_updates' in cls.__dict__
         async def gated(instance, *args, **kwargs):
+            cleanup = False
             if instance is bot and self.operation is not None:
                 timeout = kwargs.get('timeout')
                 seconds = timeout.total_seconds() if callable(getattr(timeout, 'total_seconds', None)) else timeout
@@ -61,7 +84,19 @@ class ReleaseGate:
                 if not cleanup:
                     self.held.set()
                     await self.unlocked.wait()
-            return await original(instance, *args, **kwargs)
+            mirror = getattr(self.resolver, 'mirror', None)
+            hydrate = getattr(mirror, 'hydrate', None)
+            if instance is bot and callable(hydrate) and not cleanup:
+                await hydrate()
+            updates = await original(instance, *args, **kwargs)
+            if instance is bot and mirror is not None and updates:
+                # PTB меняет offset после возврата: все profile commits должны успеть раньше.
+                await mirror.capture(updates, bot.id)
+                if cleanup:
+                    # PTB cleanup не помещает возвращённые updates в очередь.
+                    # При отмене остановки следующий poll обязан восстановить их.
+                    mirror.hydrated = False
+            return updates
         cls.get_updates = gated
         def restore():
             self.operation = None
@@ -121,6 +156,24 @@ class ReleaseGate:
             if self.operation != operationId:
                 raise RpcError(-32602, 'Release operation does not own ingress')
             return await self.resolver.release_status(operationId)
+
+    async def profile_try(self, **params):
+        owner = getattr(self.resolver, 'profile_release', None)
+        if owner is None:
+            raise ValueError('PROFILE_RELEASE_UNAVAILABLE')
+        return await owner.try_profile(**params)
+
+    async def profile_status(self, **params):
+        owner = getattr(self.resolver, 'profile_release', None)
+        if owner is None:
+            raise ValueError('PROFILE_RELEASE_UNAVAILABLE')
+        return await owner.status(**params)
+
+    async def profile_resume(self, **params):
+        owner = getattr(self.resolver, 'profile_release', None)
+        if owner is None:
+            raise ValueError('PROFILE_RELEASE_UNAVAILABLE')
+        return await owner.resume(**params)
 
     async def commit(self, operationId):
         """Разрешить только завершающий PTB cleanup после полной проверки drain."""
@@ -185,6 +238,7 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             loop.call_soon_threadsafe(start)
 
     def factory(app, adapter):
+        _verify_release_contract()
         runner = getattr(adapter, 'gateway_runner', None)
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
@@ -193,6 +247,36 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         adapter._drop_pending_on_cold_boot = False
         gate = ReleaseGate(app)
         gate.resolver = resolver
+        mirror = getattr(resolver, 'mirror', None)
+        hooks = {}
+        if mirror is not None:
+            if (getattr(app, '_brai_identity_admission_protocol', None) != 1
+                    or getattr(adapter, '_brai_identity_batch_protocol', None) != 1
+                    or getattr(adapter, '_brai_identity_held_protocol', None) != 1):
+                raise RuntimeError('Native ordinary release hooks unavailable')
+            from .ordinary_admission import BatchOwnership
+            batch = BatchOwnership(adapter, mirror)
+            resolver.batch_ownership = batch
+            from .profile_release import ProfileRelease
+            resolver.profile_release = ProfileRelease(resolver, app)
+            mirror.recover = resolver.profile_release.recover_inbox
+            mirror.recover_external = resolver.profile_release.recover_external
+            mirror.app = app
+            hooks = {'_brai_identity_preflight': mirror,
+                     '_brai_identity_disposition': mirror.finish,
+                     '_brai_identity_duplicate': mirror.duplicate,
+                     '_brai_identity_tag_event': batch.tag,
+                     '_brai_identity_text_batch': batch.text,
+                     '_brai_identity_merge_batch': batch.merge,
+                     '_brai_identity_track_batch': batch.track,
+                     '_brai_identity_take_held': batch.take_held,
+                     '_brai_identity_finish_held': batch.finish_held,
+                     '_brai_identity_rehold_held': batch.rehold,
+                     '_brai_identity_preserve_held': batch.preserve_held,
+                     '_brai_identity_can_redispatch': batch.can_redispatch}
+            originals = {name: (hasattr(adapter, name), getattr(adapter, name, None)) for name in hooks}
+            for name, value in hooks.items():
+                setattr(adapter, name, value)
         bootstrap_operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
         bootstrap_source = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
         if bootstrap_operation is not None or bootstrap_source is not None:
@@ -237,6 +321,8 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             except Exception:
                 raise ApplicationHandlerStop from None
             if admitted is not True:
+                if mirror is not None:
+                    await mirror.handled(update)
                 raise ApplicationHandlerStop
             _admitted_message.set(identity)
         handler = TypeHandler(Update, guard)
@@ -251,10 +337,17 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             gate.restore()
             raise
         adapter._brai_identity_ingress_ready = True
-        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original, gate))
+        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original, gate, hooks, originals if hooks else {}))
 
     def close():
-        for adapter, original, forward, app, handler, loop, interactive_original, gate in reversed(installed):
+        for adapter, original, forward, app, handler, loop, interactive_original, gate, hooks, originals in reversed(installed):
+            for name, value in hooks.items():
+                if getattr(adapter, name, None) is value:
+                    existed, prior = originals[name]
+                    if existed:
+                        setattr(adapter, name, prior)
+                    else:
+                        delattr(adapter, name)
             gate.restore()
             app.remove_handler(handler, group=-100)
             if getattr(adapter, '_brai_identity_dispatch', None) is forward:

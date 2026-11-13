@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from contextlib import asynccontextmanager
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -212,8 +213,99 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': str(uuid.uuid4())}, clear=True):
             with self.assertRaises(RuntimeError):
                 self.release.bootstrap(source)
+            self.assertIn('BRAI_IDENTITY_RELEASE_HOLD_OPERATION', os.environ)
         self.assertTrue(self.retirement.acquire())
         self.retirement.release()
+
+    async def test_startup_consumes_only_verified_hold_and_process_metadata(self):
+        operation = str(uuid.uuid4())
+        payload = b'pinned worker source'
+        source = Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
+        retained = {'PATH': '/bin', 'SECRET': 'kept', 'BRAI_IDENTITY_PROFILE_ID': 'profile'}
+        env = {**retained, 'INVOCATION_ID': 'invocation', 'JOURNAL_STREAM': '1:2', 'SYSTEMD_EXEC_PID': '42',
+               'MEMORY_PRESSURE_WATCH': '/fixture/watch', 'MEMORY_PRESSURE_WRITE': 'fixture-write',
+               'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': operation,
+               'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': hashlib.sha256(payload).hexdigest()}
+        with patch.dict(os.environ, env, clear=True), patch.object(Path, 'read_bytes', return_value=payload):
+            self.release.bootstrap(source)
+            self.assertEqual(dict(os.environ), retained)
+            self.assertTrue(self.release.cold_start)
+            self.assertEqual(self.release.operation, operation)
+            self.assertFalse(self.release.open.is_set())
+        with patch.dict(os.environ, {'PATH': '/bin', 'INVOCATION_ID': 'normal'}, clear=True):
+            NativeRelease(self.worker).bootstrap(source)
+            self.assertEqual(dict(os.environ), {'PATH': '/bin'})
+        self.retirement.brai_resume(operation)
+
+    async def test_root_can_still_read_original_process_environment(self):
+        script = """import os, subprocess, sys
+from pathlib import Path
+from identity.release_native import NativeRelease
+NativeRelease(None).bootstrap(Path('/unused'))
+for key in ('INVOCATION_ID', 'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE'):
+    assert key not in os.environ
+    assert (key + '=fixture-' + key + '\\0').encode() in Path('/proc/self/environ').read_bytes()
+subprocess.check_call([sys.executable, '-c', 'import os; assert all(k not in os.environ for k in (\"INVOCATION_ID\", \"MEMORY_PRESSURE_WATCH\", \"MEMORY_PRESSURE_WRITE\"))'])
+"""
+        env={'PATH':'/usr/bin:/bin', 'PYTHONPATH':str(Path(__file__).resolve().parents[2]),
+             'INVOCATION_ID':'fixture-INVOCATION_ID',
+             'MEMORY_PRESSURE_WATCH':'fixture-MEMORY_PRESSURE_WATCH',
+             'MEMORY_PRESSURE_WRITE':'fixture-MEMORY_PRESSURE_WRITE'}
+        result=subprocess.run([sys.executable,'-B','-c',script],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    async def test_profile_attempt_caches_busy_then_rechecks_with_new_id(self):
+        profile = str(uuid.uuid4())
+        operation = str(uuid.uuid4())
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        start = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+        args = {'operationId': operation, 'attemptId': first, 'profileId': profile,
+                'targetPayloadHash': 'a' * 64, 'workerPid': os.getpid(), 'workerStartTime': start}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_PROFILE_ID': profile}):
+            self.worker.active['live'] = object()
+            self.assertEqual((await self.release.try_hold(**args))['state'], 'busy')
+            self.assertTrue(self.release.open.is_set())
+            self.worker.active.clear()
+            self.assertEqual((await self.release.try_hold(**args))['state'], 'busy')
+            new = {**args, 'attemptId': second}
+            self.assertEqual((await self.release.try_hold(**new))['state'], 'ready')
+            self.assertEqual((await self.release.try_status(**args))['state'], 'unknown')
+            self.assertEqual((await self.release.try_status(**new))['state'], 'ready')
+            self.assertFalse(self.release.open.is_set())
+            await self.release.resume(operation)
+            self.assertEqual((await self.release.try_status(**new))['state'], 'unknown')
+            following = {**new, 'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4())}
+            self.assertEqual((await self.release.try_hold(**following))['state'], 'ready')
+            await self.release.resume(following['operationId'])
+
+    async def test_profile_attempt_rejects_foreign_process_or_target(self):
+        profile = str(uuid.uuid4())
+        args = {'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4()), 'profileId': profile,
+                'targetPayloadHash': 'a' * 64, 'workerPid': os.getpid(),
+                'workerStartTime': Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_PROFILE_ID': profile}):
+            with self.assertRaises(ValueError): await self.release.try_hold(**{**args, 'workerPid': os.getpid()+1})
+            with self.assertRaises(ValueError): await self.release.try_hold(**{**args, 'workerStartTime': '0'})
+            self.assertEqual((await self.release.try_hold(**args))['state'], 'ready')
+            with self.assertRaises(ValueError): await self.release.try_hold(**{**args, 'targetPayloadHash': 'b'*64})
+            await self.release.resume(args['operationId'])
+
+    async def test_ingress_busy_receipt_never_closes_sources_or_takes_fence(self):
+        profile = str(uuid.uuid4())
+        args = {'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4()), 'profileId': profile,
+                'targetPayloadHash': 'a' * 64, 'workerPid': os.getpid(),
+                'workerStartTime': Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_PROFILE_ID': profile}):
+            self.assertEqual((await self.release.reject_attempt(**args))['state'], 'busy')
+            self.assertTrue(self.release.open.is_set())
+            self.assertTrue(self.retirement.acquire())
+            self.retirement.release()
+            self.assertEqual((await self.release.try_status(**args))['state'], 'busy')
+            self.assertTrue(self.retirement.brai_hold('foreign'))
+            self.assertEqual((await self.release.try_status(**args))['state'], 'unknown')
+            self.retirement.brai_resume('foreign')
+            await self.release.begin(str(uuid.uuid4()))
+            self.assertEqual((await self.release.try_status(**args))['state'], 'unknown')
 
     async def test_active_turn_keeps_native_child_admission_until_it_finishes(self):
         self.worker.active['turn'] = object()
