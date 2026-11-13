@@ -105,6 +105,26 @@ class PollingBoundaryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(inbox.observe(profile,123,41)['state'],'captured')
                 self.assertEqual(len(transport.pending()),1)
                 self.assertEqual(updater._last_update_id,42)
+                from telegram import Update
+                from telegram.ext import ApplicationBuilder, TypeHandler
+                from test_ordinary_admission import patched_module
+                module=patched_module(temp.name)
+                adapter=SimpleNamespace(_update_admission=None,_updates_dispatched_total=0,
+                    _seen_update_ids={},_inflight_update_ids={},_brai_identity_preflight=mirror,
+                    _brai_identity_disposition=mirror.finish,_brai_identity_duplicate=mirror.duplicate)
+                app=ApplicationBuilder().bot(bot).application_class(module.TelegramApplication,{'adapter':adapter}).build()
+                app._initialized=True;effects=[]
+                async def handler(value,context):
+                    effects.append(value.update_id)
+                    await mirror.accepted(SimpleNamespace(_brai_release_updates=[value.update_id]),
+                                          {'accepted':True,'turn_id':'synthetic'})
+                app.add_handler(TypeHandler(Update,handler),group=-100)
+                with patch.object(module,'_load_receipts',lambda *a:None), \
+                     patch.object(module,'_record_receipt',lambda *a:None):
+                    await app.process_update(update)
+                self.assertEqual(effects,[41])
+                self.assertEqual(inbox.observe(profile,123,41)['state'],'accepted')
+                self.assertEqual(transport.pending(),[])
         finally:
             if locked is not None:
                 locked.rollback();locked.close()
