@@ -18,8 +18,15 @@ RELEASE_CONTRACT = {'version':2,'profileGate':2,'telegramInbox':2,'routingIndex'
 
 def _verify_release_contract():
     """Reject missing or unknown provider contracts before touching the native app."""
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('Duplicate release contract field')
+            value[key] = item
+        return value
     try:
-        value = json.loads(RELEASE_CONTRACT_PATH.read_text(encoding='utf-8'))
+        value = json.loads(RELEASE_CONTRACT_PATH.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
     except (OSError,UnicodeError,ValueError) as error:
         raise RuntimeError('Identity release contract unavailable') from error
     if (not isinstance(value,dict) or set(value) != set(RELEASE_CONTRACT)

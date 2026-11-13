@@ -24,7 +24,8 @@ class ContractTest(unittest.TestCase):
     def test_old_missing_or_incompatible_provider_fails_before_resolver_or_poll(self):
         cases=[None,{}, {'version':1,'profileGate':2,'telegramInbox':2,'routingIndex':2,'legacyJournal':1},
                {**native_ingress.RELEASE_CONTRACT,'routingIndex':True},
-               {**native_ingress.RELEASE_CONTRACT,'extra':1}, 'not-json']
+               {**native_ingress.RELEASE_CONTRACT,'extra':1}, 'not-json',
+               '{"version":1,"version":2,"profileGate":2,"telegramInbox":2,"routingIndex":2,"legacyJournal":1}']
         for value in cases:
             with self.subTest(value=value):
                 if self.path.exists(): self.path.unlink()
