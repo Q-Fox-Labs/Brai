@@ -2,6 +2,7 @@
 # ABOUTME: Не меняет паузы, согласия, очереди и recovery; неизвестное состояние запрещает restart.
 """Операционный барьер конкретной версии immutable Hermes engine."""
 import asyncio
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 import re
 
@@ -98,7 +99,7 @@ class NativeRelease:
                 (adapter, '_pending_messages'), (adapter, '_active_sessions'),
                 (adapter, '_pending_text_batches'), (adapter, '_text_debounce')):
             value = getattr(owner, name)
-            if not isinstance(value, dict):
+            if not isinstance(value, Mapping):
                 raise RuntimeError('NATIVE_QUEUE_UNAVAILABLE')
             if any(value.values()):
                 return True

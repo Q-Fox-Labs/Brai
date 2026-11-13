@@ -58,6 +58,28 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.worker.policy_ready.set()
         self.release = NativeRelease(self.worker)
 
+    async def test_real_native_session_views_expose_idle_and_live_work(self):
+        import sys
+        name = '_test_release_session_state'
+        spec = importlib.util.spec_from_file_location(name, _FIXTURE / 'gateway/session_state.py')
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {name: module}):
+            spec.loader.exec_module(module)
+        state = module.SessionState()
+        holder = SimpleNamespace(_sessions={'session': state})
+        for field in ('_running_agents', '_queued_events'):
+            setattr(self.runner, field, module.SessionFieldView(holder, module.LEGACY_FIELD_SPECS[field]))
+        self.assertNotIsInstance(self.runner._running_agents, dict)
+        self.assertEqual((await self.release.begin('op'))['state'], 'ready')
+        state.turn.agent = object()
+        self.assertEqual((await self.release.status('op'))['state'], 'draining')
+        state.turn.agent = None
+        state.conversation.queued_events.append(object())
+        self.assertEqual((await self.release.status('op'))['state'], 'draining')
+        state.conversation.queued_events.clear()
+        self.assertEqual((await self.release.status('op'))['state'], 'ready')
+        await self.release.resume('op')
+
     async def test_ready_bootstrap_cannot_activate_native_after_proof(self):
         from identity.worker import Worker
         from identity.ipc import RpcError
