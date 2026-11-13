@@ -80,27 +80,25 @@ class PollingBoundaryTest(unittest.IsolatedAsyncioTestCase):
         inbox=UpdateInbox(journal);transport=TransportInbox(journal)
         profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'synthetic',
                  'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        inbox.install_v2(profile)
+        locked=journal.database(profile)
+        locked.execute('BEGIN IMMEDIATE')
         async def resolve(actor): return {'state':'known','profile':profile}
         mirror=Mirror(inbox,resolve,transport=transport);mirror.hydrated=True
         gate=ReleaseGate(SimpleNamespace(bot=bot,updater=updater,update_queue=queue))
         gate.resolver=SimpleNamespace(mirror=mirror)
-        original=transport.capture_batch
-        attempts=[]
-        def fail_once(staged,bot_id):
-            attempts.append(1)
-            if len(attempts)==1: raise OSError('synthetic commit failure')
-            return original(staged,bot_id)
         async def bootstrap(*args,**kwargs): pass
         try:
             await updater.initialize()
             gate.install()
-            with patch.object(transport,'capture_batch',side_effect=fail_once), \
-                 patch.object(Updater,'_bootstrap',bootstrap):
+            with patch.object(Updater,'_bootstrap',bootstrap):
                 await updater.start_polling()
                 await api.second.wait()
                 self.assertEqual(api.offsets[:2],[0,0])
                 self.assertTrue(queue.empty())
-                self.assertEqual(transport.pending(),[])
+                self.assertEqual(len(transport.pending()),1)
+                self.assertEqual(transport.pending()[0]['state'],'captured')
+                locked.rollback();locked.close();locked=None
                 api.allow_retry.set()
                 update=await queue.get();queue.task_done()
                 self.assertEqual(update.update_id,41)
@@ -108,6 +106,8 @@ class PollingBoundaryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(transport.pending()),1)
                 self.assertEqual(updater._last_update_id,42)
         finally:
+            if locked is not None:
+                locked.rollback();locked.close()
             api.allow_retry.set();api.release_later.set()
             if updater.running: await updater.stop()
             if gate.restore: gate.restore()
