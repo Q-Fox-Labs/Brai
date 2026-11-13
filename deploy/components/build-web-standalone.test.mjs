@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync,mkdtempSync,rmSync,symlinkSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {validateTraces,validateStandalone} from './build-web-standalone.mjs';
+import {validateTraces,validateStandalone,dependencyLocation} from './build-web-standalone.mjs';
 
 test('Next trace must resolve entirely inside the isolated source', t=>{
   const stage=mkdtempSync(join(tmpdir(),'web-trace-'));t.after(()=>rmSync(stage,{recursive:true,force:true}));
@@ -24,4 +24,15 @@ test('standalone output rejects links and environment files', t=>{
   writeFileSync(join(output,'.env.local'),'secret');assert.throws(()=>validateStandalone(output),/WEB_OUTPUT_SECRET/);
   rmSync(join(output,'.env.local'));symlinkSync('/etc/passwd',join(output,'external'));
   assert.throws(()=>validateStandalone(output),/WEB_OUTPUT_SYMLINK/);
+});
+
+test('dependency alias must name its exact prepared package, not a sibling', t=>{
+  const root=mkdtempSync(join(tmpdir(),'web-dependency-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const generation=join(root,'generation'),checkout=join(root,'checkout');
+  mkdirSync(join(generation,'node_modules','one'),{recursive:true});mkdirSync(join(generation,'node_modules','two'),{recursive:true});
+  mkdirSync(join(checkout,'node_modules'),{recursive:true});
+  const alias=join(checkout,'node_modules','one');symlinkSync(join(generation,'node_modules','one'),alias);
+  assert.equal(dependencyLocation(checkout,'node_modules/one',[generation],[join(generation,'node_modules')]),join(generation,'node_modules','one'));
+  rmSync(alias);symlinkSync(join(generation,'node_modules','two'),alias);
+  assert.throws(()=>dependencyLocation(checkout,'node_modules/one',[generation],[join(generation,'node_modules')]),/WEB_DEPENDENCY_LINK_INVALID/);
 });

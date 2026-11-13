@@ -20,6 +20,15 @@ function saveState(path,state) {
   writeFileSync(temporary,JSON.stringify(state)+'\n');
   renameSync(temporary,path);
 }
+export function runComponentCommand(root,c,text) {
+  if(process.env.BRAI_PUBLISHER_PROOF_FD!=='3')return command(root,c,text);
+  if(!text)return;
+  const environment={...process.env,NEXT_TELEMETRY_DISABLED:'1'};
+  delete environment.CODEX_TOOL_CALL_ID;
+  const result=spawnSync(text,{cwd:join(root,c.directory),shell:true,stdio:['inherit','inherit','inherit',3],env:environment});
+  if(result.error)throw result.error;
+  if(result.status!==0)throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
+}
 function dependencyInventory(root,c,development,cache) {
   if(process.env.NODE_PATH || process.env.NODE_OPTIONS)return null;
   const entries=lockInputs(root,c.npm.workspaces,{development});
@@ -179,7 +188,7 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
       catch(error) {if(['build','run'].includes(action))needsBuild=true;else throw error;}
     }
     if (needsBuild) {
-      command(root,c,c.commands.build); compiled=true;
+      runComponentCommand(root,c,c.commands.build); compiled=true;
       state.outputDigest=buildOutputDigest(root,c);
     }
     // Generated payload and dependency outputs are fingerprinted after this compilation.
@@ -199,7 +208,7 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
           const checks=checkGroupFingerprint(root,c,group), qualified={...c,commands:{...c.commands,checkTools:group.tools,pythonModules:group.pythonModules,pythonAbsent:group.pythonAbsent,absentPaths:group.absentPaths}};
           const key=dependencies && checkKey(qualified,{checks:checks+dependencies},toolCache);
           const proof=key && receipts[group.id]===key?'cached':'executed';
-          if(proof==='executed') {command(root,c,group.command);executed=true;}
+          if(proof==='executed') {runComponentCommand(root,c,group.command);executed=true;}
           if(checkGroupFingerprint(root,c,group)!==checks || (key && checkKey(qualified,{checks:checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
           inputs.push({group,checks});receipts[group.id]=key;checkGroups.push({id:group.id,proof});
         }
@@ -210,13 +219,19 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
       } else {
         const key=dependencies && checkKey(c,{checks:item.checks+dependencies},toolCache);
         if(key && state.checkReceipt?.key===key) checkProof='cached';
-        else {command(root,c,c.commands.check);checkProof='executed';}
+        else {runComponentCommand(root,c,c.commands.check);checkProof='executed';}
         if(fingerprints(root,c).checks!==item.checks || (key && checkKey(c,{checks:item.checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
         if(dependencies && dependencyInventory(root,c,true,new Map())!==dependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
         state.checkReceipt=key?{key}:null;
       }
       verifyBuildReceipt(root,c,state,item.build);checked=true;
       state.checks=item.checks;saveState(statePath,state);
+      if(c.id==='web' && c.delivery.strategy==='next-standalone') {
+        const {dependencyRoots}=await import('./build-web-standalone.mjs');
+        const {publishWebCache}=await import('./web-build-cache.mjs');
+        const roots=dependencyRoots(root).flatMap(base=>['node_modules','apps/web/node_modules','services/agent/node_modules'].map(path=>join(base,path))).filter(existsSync);
+        publishWebCache(root,c,roots);
+      }
     }
     let artifact,packaged=false;
     if (['package','run'].includes(action)) {

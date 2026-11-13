@@ -1,11 +1,12 @@
 // ABOUTME: Собирает Next standalone в закрытом staging namespace с подготовленными npm-зависимостями.
 // ABOUTME: Не устанавливает пакеты и не предоставляет сборке доступ к источникам хоста.
 import {execFileSync,spawnSync} from 'node:child_process';
-import {constants,copyFileSync,cpSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,renameSync,rmSync,statSync,symlinkSync,writeFileSync,chmodSync} from 'node:fs';
+import {constants,cpSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,renameSync,rmSync,statSync,symlinkSync,writeFileSync,chmodSync} from 'node:fs';
 import {dirname,join,relative,resolve,sep} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {sourceFiles} from './graph.mjs';
 import {lockInputs} from './lock-inputs.mjs';
+import {snapshotSources,snapshotDirectories,verifySources} from './source-snapshot.mjs';
+import {cacheIdentity,restoreWebCache,saveWebCacheMetadata,trustedHostGeneration} from './web-build-cache.mjs';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 const inside=(parent,path)=>path===parent||path.startsWith(parent+sep);
@@ -47,26 +48,22 @@ export function validateStandalone(directory) {
   visit(directory);
 }
 
-function dependencyRoots() {
-  const markerPath=join(root,'node_modules/.brai-worktree.json');
-  if(!existsSync(markerPath))return [root];
+export function dependencyLocation(sourceRoot,key,bases,allowedRoots) {
+  const source=realpathSync(join(sourceRoot,key));
+  if(!allowedRoots.some(base=>inside(base,source)) || !bases.some(base=>existsSync(join(base,key)) && realpathSync(join(base,key))===source) || !statSync(source).isDirectory())fail(`WEB_DEPENDENCY_LINK_INVALID: ${key}`);
+  return source;
+}
+
+export function dependencyRoots(sourceRoot=root) {
+  const markerPath=join(sourceRoot,'node_modules/.brai-worktree.json');
+  if(!existsSync(markerPath))return [sourceRoot];
   const marker=json(markerPath);
-  const common=realpathSync(execFileSync('git',['-C',root,'rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());
+  const common=realpathSync(execFileSync('git',['-C',sourceRoot,'rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());
   const source=realpathSync(marker.source),expected=realpathSync(dirname(common));
   if(source!==expected)fail('WEB_DEPENDENCY_SOURCE_INVALID');
   const generation=marker.dependencyRoot?realpathSync(marker.dependencyRoot):source;
-  if(generation!==source && !inside(join(common,'codeworks-dependencies'),generation))fail('WEB_DEPENDENCY_ROOT_INVALID');
+  if(generation!==source && !inside(join(common,'codeworks-dependencies'),generation) && !trustedHostGeneration(generation))fail('WEB_DEPENDENCY_ROOT_INVALID');
   return [generation];
-}
-
-function sourceSnapshot(stage) {
-  for(const file of sourceFiles(root)) {
-    const parts=file.split('/');
-    if(parts.some(part=>/^\.env(?:\.|$)/i.test(part)) || file.startsWith('docs/user-agent/usercustom/'))fail(`WEB_SOURCE_SECRET: ${file}`);
-    const source=join(root,file),target=join(stage,file);
-    if(lstatSync(source).isSymbolicLink())fail(`WEB_SOURCE_SYMLINK: ${file}`);
-    mkdirSync(dirname(target),{recursive:true});copyFileSync(source,target,constants.COPYFILE_FICLONE);
-  }
 }
 
 function build() {
@@ -74,8 +71,14 @@ function build() {
   const tmp=join(root,'tmp');mkdirSync(tmp,{recursive:true});
   const holder=mkdtempSync(join(tmp,'web-standalone-')),stage=join(holder,'source');mkdirSync(stage);
   try {
-    sourceSnapshot(stage);
-    const allowedRoots=dependencyRoots().flatMap(base=>['node_modules','apps/web/node_modules','services/agent/node_modules'].map(path=>join(base,path))).filter(existsSync).map(path=>realpathSync(path));
+    const bases=dependencyRoots(),allowedRoots=bases.flatMap(base=>['node_modules','apps/web/node_modules','services/agent/node_modules'].map(path=>join(base,path))).filter(existsSync).map(path=>realpathSync(path));
+    const cache=join(root,'apps/web/.next/cache'),stageCache=join(stage,'apps/web/.next/cache');
+    mkdirSync(cache,{recursive:true});
+    if(!inside(root,realpathSync(cache)))fail('WEB_CACHE_ESCAPE');
+    const identity=cacheIdentity(root,component,allowedRoots),previous=restoreWebCache(cache,identity);
+    rmSync(join(cache,'.brai-source-snapshot.json'),{force:true});
+    if(!previous)rmSync(join(cache,'webpack'),{recursive:true,force:true});
+    const files=snapshotSources(root,stage,previous??{});
     const entries=lockInputs(root,component.npm.workspaces,{development:true});
     const mounts=[];
     for(const {key,entry} of entries.filter(row=>row.key.split('/').includes('node_modules')).sort((a,b)=>a.key.split('/').length-b.key.split('/').length)) {
@@ -85,18 +88,18 @@ function build() {
         if(realpathSync(join(root,key))!==expected || !inside(root,expected))fail(`WEB_WORKSPACE_LINK_INVALID: ${key}`);
         symlinkSync(relative(dirname(target),join(stage,entry.resolved)),target);
       } else {
-        const source=realpathSync(join(root,key));
-        if(!allowedRoots.some(base=>inside(base,source)) || !statSync(source).isDirectory())fail(`WEB_DEPENDENCY_LINK_INVALID: ${key}`);
+        const source=dependencyLocation(root,key,bases,allowedRoots);
         mkdirSync(target,{recursive:true});mounts.push('--ro-bind',source,`/workspace/${key}`);
       }
     }
     const bin=join(stage,'node_modules/.bin');mkdirSync(bin,{recursive:true});
-    const node=process.execPath;
+    const node='/usr/local/libexec/brai-dev-release/check-tools/bin/node';
+    const toolRoot=dirname(dirname(realpathSync(process.execPath)));
+    const toolOverlay=toolRoot.startsWith('/opt/brai-shared/immutable-files-v1/npm-')?['--ro-bind',toolRoot,'/usr/local/libexec/brai-dev-release/check-tools']:[];
     const wrapper=join(bin,'next');writeFileSync(wrapper,`#!/bin/sh\nexec '${node}' /workspace/node_modules/next/dist/bin/next "$1" --webpack\n`,{mode:0o755});chmodSync(wrapper,0o755);
-    const cache=join(root,'apps/web/.next/cache'),stageCache=join(stage,'apps/web/.next/cache');
-    mkdirSync(cache,{recursive:true});mkdirSync(stageCache,{recursive:true});
-    if(!inside(root,realpathSync(cache)))fail('WEB_CACHE_ESCAPE');
-    const args=['--tmpfs','/','--dir','/workspace','--ro-bind','/usr','/usr','--symlink','usr/bin','/bin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--bind',stage,'/workspace',...mounts,'--bind',cache,'/workspace/apps/web/.next/cache','--unshare-net','--chdir','/workspace','--clearenv','--setenv','PATH','/usr/local/libexec/brai-dev-release/check-tools/bin:/usr/local/bin:/usr/bin:/bin','--setenv','HOME','/tmp','--setenv','CI','1','--setenv','NEXT_TELEMETRY_DISABLED','1','--setenv','BRAI_WEB_STANDALONE_OUTPUT','1','--setenv','LANG','C.UTF-8'];
+    mkdirSync(stageCache,{recursive:true});
+    const dirs=snapshotDirectories(stage,previous??{});
+    const args=['--tmpfs','/','--dir','/workspace','--ro-bind','/usr','/usr',...toolOverlay,'--symlink','usr/bin','/bin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--bind',stage,'/workspace',...mounts,'--bind',cache,'/workspace/apps/web/.next/cache','--unshare-net','--chdir','/workspace','--clearenv','--setenv','PATH','/usr/local/libexec/brai-dev-release/check-tools/bin:/usr/local/bin:/usr/bin:/bin','--setenv','HOME','/tmp','--setenv','CI','1','--setenv','NEXT_TELEMETRY_DISABLED','1','--setenv','BRAI_WEB_STANDALONE_OUTPUT','1','--setenv','LANG','C.UTF-8'];
     if(process.env.BRAI_WEB_VARIANT)args.push('--setenv','BRAI_WEB_VARIANT',process.env.BRAI_WEB_VARIANT);
     const result=spawnSync('/usr/bin/bwrap',[...args,'--','/usr/local/libexec/brai-dev-release/check-tools/bin/npm','run','build','--workspace=@brai/web'],{stdio:'inherit'});
     if(result.error)throw result.error;if(result.status!==0)fail(`WEB_STANDALONE_BUILD_FAILED: ${result.status}`);
@@ -105,6 +108,8 @@ function build() {
     const next=join(stage,'apps/web/.next'),output=join(next,'standalone');
     validateStandalone(output);
     if(!existsSync(join(output,'apps/web/server.js')))fail('WEB_STANDALONE_ENTRY_MISSING');
+    if(!verifySources(root,files) || (identity && cacheIdentity(root,component,allowedRoots)!==identity))fail('WEB_BUILD_INPUTS_CHANGED');
+    if(identity)saveWebCacheMetadata(cache,{identity,files,dirs});
     const destination=join(root,'apps/web/.next');mkdirSync(destination,{recursive:true});
     for(const name of ['standalone','static']) {
       const temporary=join(destination,`.${name}-${Date.now()}-${process.pid}`),target=join(destination,name),backup=temporary+'-previous';
