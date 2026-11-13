@@ -62,6 +62,42 @@ test('first-party delivery removes group and other write access without changing
   assert.equal(statSync(join(executable.path, 'services/example/main.mjs')).mode & 0o777, 0o755);
 });
 
+test('private sources and umask 077 produce service-readable canonical files', async t => {
+  const {root,write,component,build}=fixture(t);
+  const app={name:'@brai/example',version:'1.0.0',type:'module',dependencies:{dep:'1.0.0'}};
+  write('services/example/package.json',app);
+  write('services/example/migrations/001.sql','CREATE TABLE fixture (id integer);\n');
+  write('services/example/tool.mjs','export const tool = true;\n');
+  write('node_modules/dep/package.json',{name:'dep',version:'1.0.0'});
+  write('node_modules/dep/index.js','module.exports = 1;\n');
+  write('node_modules/dep/bin.js','#!/usr/bin/env node\n');
+  write('package-lock.json',{lockfileVersion:3,packages:{'services/example':app,'node_modules/dep':{name:'dep',version:'1.0.0'}}});
+  component.delivery.files.push('services/example/package.json','services/example/migrations','services/example/tool.mjs');
+  component.npm={workspaces:['services/example']};
+  for(const file of ['services/example/main.mjs','services/example/migrations/001.sql','node_modules/dep/index.js'])chmodSync(join(root,file),0o600);
+  for(const file of ['services/example/tool.mjs','node_modules/dep/bin.js'])chmodSync(join(root,file),0o700);
+  const previous=process.umask(0o077);let artifact;
+  try {artifact=await build();} finally {process.umask(previous);}
+  for(const row of artifact.files.filter(row=>!row.symlink)) {
+    assert.ok([0o644,0o755].includes(row.mode),row.path);
+    assert.equal(row.mode & 0o444,0o444,row.path);
+    assert.equal(statSync(join(artifact.path,row.path)).mode & 0o777,row.mode,row.path);
+  }
+  for(const file of ['services/example/main.mjs','services/example/migrations/001.sql','node_modules/dep/index.js']) {
+    assert.equal(statSync(join(artifact.path,file)).mode & 0o777,0o644);
+    assert.equal(artifact.files.find(row=>row.path===file).mode,0o644);
+    assert.equal(statSync(join(root,file)).mode & 0o777,0o600);
+  }
+  for(const file of ['services/example/tool.mjs','node_modules/dep/bin.js']) {
+    assert.equal(statSync(join(artifact.path,file)).mode & 0o777,0o755);
+    assert.equal(artifact.files.find(row=>row.path===file).mode,0o755);
+    assert.equal(statSync(join(root,file)).mode & 0o777,0o700);
+  }
+  assert.notEqual(statSync(join(artifact.path,'node_modules/dep/index.js')).ino,statSync(join(root,'node_modules/dep/index.js')).ino);
+  verifyPackage(artifact.path,'fixture');
+  assert.equal((await build()).payloadHash,artifact.payloadHash);
+});
+
 test('npm closure preserves workspace-local and nested lock paths and omits dev packages', async t => {
   const { write, component, build } = fixture(t);
   const manifest = { name: '@brai/example', version: '1.0.0', type: 'module', dependencies: { outer: '1.0.0' }, devDependencies: { unrelated: '1.0.0' } };

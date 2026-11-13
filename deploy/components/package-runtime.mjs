@@ -17,6 +17,8 @@ const hash = data => createHash('sha256').update(data).digest('hex');
 const inside = (parent, child) => child === parent || child.startsWith(`${parent}${sep}`);
 const fail = message => { throw new Error(message); };
 const present = path => lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+// AIDEV-NOTE: После Root import payload читается сервисом с другим UID.
+const deliveryMode = mode => mode & 0o111 ? 0o755 : 0o644;
 
 function repositoryPath(value) {
   if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0') || isAbsolute(value) || value === '.' || value !== posix.normalize(value) || value.startsWith('../')) fail(`INVALID_REPOSITORY_PATH: ${value}`);
@@ -45,7 +47,7 @@ function copyDelivery(root, stage, key) {
     const destination = join(stage, key);
     mkdirSync(dirname(destination), { recursive: true });
     cpSync(source, destination);
-    chmodSync(destination, info.mode & 0o755);
+    chmodSync(destination, deliveryMode(info.mode));
   } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
 }
 
@@ -82,7 +84,7 @@ function linkPackageFiles(source, destination, ancestors = new Set()) {
   } else if (info.isFile()) {
     if (info.mode & 0o022) fail(`PACKAGING_SOURCE_PERMISSIONS: ${source}: remove group and other write access from prepared dependencies`);
     copyFileSync(resolved, destination, constants.COPYFILE_FICLONE);
-    chmodSync(destination, info.mode & 0o755);
+    chmodSync(destination, deliveryMode(info.mode));
   } else fail(`UNSUPPORTED_PACKAGE_FILE: ${source}`);
 }
 

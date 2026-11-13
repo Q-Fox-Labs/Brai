@@ -243,7 +243,7 @@ test('build config and effective dependency delivery cannot reuse stale payload'
  assert.equal(readFileSync(join(changed.artifact.path,'services/neighbor/extra.json'),'utf8'),'{"revision":2}');
  const repeat=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(repeat.packaged,false);
  chmodSync(join(root,'services/neighbor/extra.json'),0o600);
- const modeChanged=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(modeChanged.packaged,true);assert.notEqual(modeChanged.artifact.payloadHash,repeat.artifact.payloadHash);
+ const modeChanged=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(modeChanged.packaged,true);assert.equal(modeChanged.artifact.payloadHash,repeat.artifact.payloadHash);
 });
 test('executable admission covers package bins, runtime flags and executable shebang files',t=>{
  const root=fixture(t),d=add(root,'probe');put(root,'services/probe/extra.mjs','export {};');
