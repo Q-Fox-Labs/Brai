@@ -63,14 +63,12 @@ function assertSupported(status, ids) {
 }
 
 async function prepareComponent(root, id, graph, status, ports, timed) {
-  const result = {};
-  for (const action of ['build', 'check', 'package']) {
-    const rows = await timed(action, () => ports.execute(root, action, [id], {base: status.current?.sourceSha, includeDependencies: false}), id);
-    if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== id) fail(`COMPONENT_RESULT_INVALID: ${id}: ${action}`);
-    result[action] = rows[0];
-  }
-  if (!result.check.checked) fail(`CHECK_NOT_EXECUTED: ${id}`);
-  const artifact = await timed('artifact-verify', () => ports.verify(result.package.artifact?.path, id), id);
+  const rows = await timed('prepare', () => ports.execute(root, 'run', [id], {base: status.current?.sourceSha, includeDependencies: false}), id);
+  if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== id) fail(`COMPONENT_RESULT_INVALID: ${id}: run`);
+  const result = rows[0];
+  if (!result.checked || !['executed', 'cached'].includes(result.checkProof)) fail(`CHECK_NOT_EXECUTED: ${id}`);
+  const artifact = result.artifact;
+  if (!artifact?.path) fail(`ARTIFACT_INVALID: ${id}`);
   if (!/^[a-f0-9]{64}$/.test(artifact.payloadHash ?? '')) fail(`ARTIFACT_INVALID: ${id}`);
   const manifestSha = await ports.manifestHash(artifact.path);
   const schemaRef = status.current?.components?.[id]?.schema?.after ?? status.supportedComponents[id].schemaRef ?? 'unchanged';
@@ -205,11 +203,10 @@ function run(program, args, input) {
 export async function localPorts() {
   const {discover, fingerprints} = await import('./components/graph.mjs');
   const {execute} = await import('./components/cli.mjs');
-  const {verifyPackage} = await import('./components/package-runtime.mjs');
   return {
     now: () => performance.now(), uuid: () => randomUUID(), assertSource,
     graph: (root, base) => discover(root, {base, allowMissingBuildOutputs: true}), fingerprint: fingerprints,
-    execute, verify: verifyPackage,
+    execute,
     manifestHash: path => hash(readFileSync(join(path, 'artifact-manifest.json'))),
     operator: async (...args) => JSON.parse(await run('/usr/bin/sudo', ['-n', '/usr/bin/python3', '-B', operatorPath, ...args])),
     preview: async request => JSON.parse(await run('/usr/bin/sudo', ['-n', previewPath], JSON.stringify(request))),

@@ -26,8 +26,7 @@ function fixture() {
     graph: async (_root, ref) => {calls.push(['graph', ref]); return graph;},
     fingerprint: async (_root, c) => next[c.id],
     sourceFingerprints: async (_root, ref, scoped) => {calls.push(['baseline', ref, [...scoped.components.keys()]]); return Object.fromEntries(scoped.order.map(id => [id, keys(id)]));},
-    execute: async (_root, action, ids, options) => {calls.push([action, ids, options]); return ids.map(id => ({id, checked: action === 'check', artifact: action === 'package' ? {path: `/packages/${id}`} : undefined}));},
-    verify: async (path, id) => {calls.push(['verify', path, id]); return {path, payloadHash: digest};},
+    execute: async (_root, action, ids, options) => {calls.push([action, ids, options]); return ids.map(id => ({id, checked: action === 'run', checkProof: 'executed', artifact: action === 'run' ? {path: `/packages/${id}`, payloadHash: digest} : undefined}));},
     manifestHash: async () => 'e'.repeat(64),
     saveCandidate: async (_root, candidate) => {state.candidate = candidate; calls.push(['candidate', candidate]); return '/candidate.json';},
     operator: async (action, arg) => {
@@ -75,14 +74,14 @@ test('release executes exact changed closure, manifests, CAS and accepted wait',
   assert.equal(result.state, 'accepted'); assert.deepEqual(result.components, ['auth', 'web']);
   assert.equal(state.candidate.expectedBase, base); assert.equal(state.candidate.sourceSha, source);
   assert.equal(state.candidate.target, 'dev'); assert.equal(state.candidate.version, 1);
-  assert.deepEqual(state.calls.filter(c => ['build', 'check', 'package'].includes(c[0])).map(c => c.slice(0, 2)), [
-    ['build', ['auth']], ['check', ['auth']], ['package', ['auth']], ['build', ['web']], ['check', ['web']], ['package', ['web']],
+  assert.deepEqual(state.calls.filter(c => c[0] === 'run').map(c => c.slice(0, 2)), [
+    ['run', ['auth']], ['run', ['web']],
   ]);
-  for (const call of state.calls.filter(c => ['build', 'check', 'package'].includes(c[0]))) assert.deepEqual(call[2], {base: oldSource, includeDependencies: false});
+  for (const call of state.calls.filter(c => c[0] === 'run')) assert.deepEqual(call[2], {base: oldSource, includeDependencies: false});
   assert.equal(state.candidate.components[0].artifact.digest, `sha256:${digest}`);
   assert.deepEqual(state.candidate.components[0].checks, [{kind: 'artifact-manifest', sha256: 'e'.repeat(64)}]);
   assert.deepEqual(state.candidate.components[0].schema, {before: 'schema-v1', after: 'schema-v1', rollbackCompatible: true});
-  assert.ok(result.timings.some(t => t.phase === 'build' && t.component === 'auth'));
+  assert.ok(result.timings.some(t => t.phase === 'prepare' && t.component === 'auth'));
   assert.deepEqual(result.operatorTimings, [{phase: 'smoke', durationMs: 4}]); assert.equal(state.report.state, 'accepted');
 });
 
@@ -117,7 +116,7 @@ test('installed component without valid source provenance fails before build', a
     state.current.sourceSha = null;
     state.current.components.auth.sourceSha = invalid;
     await assert.rejects(release({root: '/repository', source}, ports), /ACCEPTED_SOURCE_INVALID: auth/);
-    assert.ok(!state.calls.some(call => call[0] === 'build' || call[0] === 'baseline'));
+    assert.ok(!state.calls.some(call => call[0] === 'run' || call[0] === 'baseline'));
   }
 });
 
@@ -131,19 +130,19 @@ test('no source changes returns honest unchanged state with accepted source and 
   const {ports, state} = fixture(); state.next.auth = keys('auth');
   const result = await release({root: '/repository', source}, ports);
   assert.equal(result.state, 'unchanged'); assert.equal(result.acceptedSourceSha, oldSource); assert.equal(result.releaseId, base);
-  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'build'));
+  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'run'));
 });
 
 test('unsupported changed handler fails before build, candidate, seal or apply', async () => {
   const {ports, state} = fixture(); state.supportedComponents.web = {supported: false, handler: 'native-program'};
   await assert.rejects(release({root: '/repository', source}, ports), /UNSUPPORTED_HANDLER: web/);
-  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'build'));
+  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'run'));
 });
 
 test('retired accepted component cannot disappear into successful unchanged result', async () => {
   const {ports, state} = fixture(); state.graph.components.get('auth').status = 'retired'; state.graph.order = ['web', 'timer'];
   await assert.rejects(release({root: '/repository', source}, ports), /UNSUPPORTED_RETIREMENT: auth/);
-  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'build'));
+  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'run'));
 });
 
 test('wrong source failure precedes even operator status', async () => {
@@ -156,7 +155,7 @@ test('stale accepted base is rejected before build', async () => {
   const {ports, state} = fixture(), original = ports.operator; let statuses = 0;
   ports.operator = async (...args) => {const result = await original(...args); if (args[0] === 'status' && ++statuses === 2) return {...result, current: {...result.current, releaseId: 'new-base'}}; return result;};
   await assert.rejects(release({root: '/repository', source}, ports), /STALE_BASE/);
-  assert.ok(!state.calls.some(c => c[0] === 'build'));
+  assert.ok(!state.calls.some(c => c[0] === 'run'));
 });
 
 test('base changing during build blocks candidate and apply', async () => {
@@ -168,13 +167,23 @@ test('base changing during build blocks candidate and apply', async () => {
 
 test('failed component check stops before package and apply with recorded duration', async () => {
   const {ports, state} = fixture(), original = ports.execute;
-  ports.execute = async (...args) => {if (args[1] === 'check') throw Error('CHECK_FAILED'); return original(...args);};
+  ports.execute = async (...args) => {if (args[1] === 'run') throw Error('CHECK_FAILED'); return original(...args);};
   await assert.rejects(release({root: '/repository', source}, ports), error => {assert.equal(error.report.timings.at(-1).state, 'failed'); return /CHECK_FAILED/.test(error.message);});
-  assert.ok(!state.calls.some(c => c[0] === 'package')); assert.equal(state.candidate, null);
+  assert.equal(state.candidate, null); assert.ok(!state.calls.some(c => c[0] === 'operator' && c[1] === 'apply'));
+});
+
+test('release accepts a verified cached check and rejects an unproven result', async () => {
+  const {ports} = fixture(), original = ports.execute;
+  ports.execute = async (...args) => (await original(...args)).map(row => ({...row, checkProof: 'cached'}));
+  assert.equal((await release({root: '/repository', source}, ports)).state, 'accepted');
+  const missing = fixture(), execute = missing.ports.execute;
+  missing.ports.execute = async (...args) => (await execute(...args)).map(row => ({...row, checkProof: undefined}));
+  await assert.rejects(release({root: '/repository', source}, missing.ports), /CHECK_NOT_EXECUTED/);
+  assert.equal(missing.state.candidate, null);
 });
 
 test('package corruption never reaches apply', async () => {
-  const {ports, state} = fixture(); ports.verify = () => {throw Error('IMMUTABLE_OUTPUT_MISMATCH');};
+  const {ports, state} = fixture(); ports.execute = () => {throw Error('IMMUTABLE_OUTPUT_MISMATCH');};
   await assert.rejects(release({root: '/repository', source}, ports), /IMMUTABLE_OUTPUT_MISMATCH/);
   assert.equal(state.candidate, null);
 });
@@ -191,7 +200,7 @@ test('wait distinguishes queued, failed and changed operation without success', 
 test('new release refuses unreconciled operation before build', async () => {
   const {ports, state} = fixture(); state.operation = {releaseId, state: 'recovery-required'};
   await assert.rejects(release({root: '/repository', source}, ports), /RECONCILE_REQUIRED/);
-  assert.ok(!state.calls.some(c => c[0] === 'build'));
+  assert.ok(!state.calls.some(c => c[0] === 'run'));
 });
 
 test('parser enforces public commands, exact source and explicit option values', () => {
@@ -229,7 +238,7 @@ test('preview builds only web then seals, prepares and updates requested empty s
   const {ports, state} = fixture();
   const result = await preview({root: '/repository', source, slot: '02'}, ports);
   assert.equal(result.status, 'ready'); assert.equal(result.slot, '02');
-  assert.deepEqual(state.calls.filter(c => c[0] === 'build').map(c => c[1]), [['web']]);
+  assert.deepEqual(state.calls.filter(c => c[0] === 'run').map(c => c[1]), [['web']]);
   assert.ok(!state.calls.some(c => c[0] === 'operator' && c[1] === 'apply'));
   assert.deepEqual(state.calls.filter(c => c[0] === 'preview').map(c => c[1].action), ['status', 'prepare', 'update']);
   assert.deepEqual(state.calls.filter(c => c[0] === 'preview').at(-1)[1], {action: 'update', source, slot: '02', expected: null});
@@ -239,7 +248,7 @@ test('occupied preview slot requires explicit exact expected ID before build', a
   const {ports, state} = fixture(); state.slot = {status: 'ready', current: {release_id: digest}};
   await assert.rejects(preview({root: '/repository', source, slot: '01'}, ports), /PREVIEW_EXPECTED_REQUIRED/);
   await assert.rejects(preview({root: '/repository', source, slot: '01', expected: 'wrong'}, ports), /PREVIEW_STALE_BASE/);
-  assert.ok(!state.calls.some(c => c[0] === 'build'));
+  assert.ok(!state.calls.some(c => c[0] === 'run'));
 });
 
 test('preview rolled_back result exits with failure instead of claiming ready', async () => {

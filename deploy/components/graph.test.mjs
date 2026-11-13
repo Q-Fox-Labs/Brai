@@ -70,6 +70,26 @@ test('new described component enters pipeline without workflow editing; build on
  const second=await execute(root,'package',['probe']);assert.equal(second[0].artifact.payloadHash,result[0].artifact.payloadHash);assert.equal(second[0].compiled,false);assert.equal(second[0].packaged,false);
  put(result[0].artifact.path,'services/probe/main.mjs','export const value=9;');await assert.rejects(execute(root,'package',['probe']),/IMMUTABLE_OUTPUT_MISMATCH/);
 });
+test('check receipt is reused only for unchanged successful inputs',async t=>{
+ const root=fixture(t);const d=add(root,'probe');d.commands.checkTools=['node'];save(root,'probe',d);
+ const script="import{appendFileSync}from'node:fs';appendFileSync('../../tmp/check-count','1');\n";
+ put(root,'services/probe/tests.mjs',script);
+ let row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'executed');
+ row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'cached');
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'1');
+ put(root,'services/probe/tests.mjs',script+'throw Error("failed check");\n');
+ await assert.rejects(execute(root,'run',['probe']),/COMMAND_FAILED/);
+ await assert.rejects(execute(root,'run',['probe']),/COMMAND_FAILED/);
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'111');
+ put(root,'services/probe/tests.mjs',script+'// changed\n');
+ row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'executed');
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'1111');
+});
+test('unqualified check is always executed',async t=>{
+ const root=fixture(t);add(root,'probe');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+});
 test('strict schema, missing npm owner and missing executable are rejected',t=>{
  const root=fixture(t),d=add(root,'probe');d.typo=true;save(root,'probe',d);
  assert.throws(()=>discover(root),/COMPONENT_SCHEMA/);delete d.typo;save(root,'probe',d);
