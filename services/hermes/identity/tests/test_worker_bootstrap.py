@@ -173,6 +173,71 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(adapter._brai_identity_ingress_ready)
             self.assertIsNone(adapter._brai_identity_dispatch)
 
+    async def test_root_bootstrap_pair_holds_first_poll_until_explicit_resume(self):
+        import hashlib
+        from pathlib import Path
+        from types import SimpleNamespace, ModuleType
+        from identity import native_ingress
+        class Context:
+            def register_telegram_handler(self, callback): self.factory = callback
+            def on_unload(self, callback): self.close = callback
+        class Bot:
+            calls = 0
+            async def get_updates(self):
+                self.calls += 1
+                return ['update']
+        class App:
+            def __init__(self): self.bot, self.update_queue = Bot(), asyncio.Queue()
+            def add_handler(self, *args, **kwargs): pass
+            def remove_handler(self, *args, **kwargs): pass
+        class Resolver:
+            def __call__(self, source): pass
+            async def release_resume(self, operationId): return True
+        ctx, app, resolver = Context(), App(), Resolver()
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=lambda event: None))
+        def forward(event): pass
+        forward._brai_restore_authorize = lambda: None
+        telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
+        telegram.Update = type('Update', (), {})
+        ext.TypeHandler = lambda *a: object()
+        ext.ApplicationHandlerStop = type('ApplicationHandlerStop', (Exception,), {})
+        operation = '6115e95f-dd1d-4501-a9f2-31bc4c747818'
+        source = b'accepted ingress'
+        env = {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': operation,
+               'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': hashlib.sha256(source).hexdigest()}
+        with patch.dict(sys.modules, {'telegram': telegram, 'telegram.ext': ext}), \
+                patch.object(native_ingress, 'install', return_value=forward), \
+                patch.object(native_ingress, '__file__', '/opt/brai-profile/runtime/services/hermes/identity/native_ingress.py'), \
+                patch.object(Path, 'read_bytes', return_value=source), patch.dict(os.environ, env):
+            native_ingress.register(ctx, build_resolver=lambda *a: resolver)
+            ctx.factory(app, adapter)
+            self.assertEqual(resolver.release_gate.operation, operation)
+            poll = asyncio.create_task(app.bot.get_updates())
+            await resolver.release_gate.held.wait()
+            self.assertEqual(app.bot.calls, 0)
+            self.assertFalse(poll.done())
+            self.assertEqual((await resolver.release_gate.resume(operation))['state'], 'resumed')
+            self.assertEqual(await poll, ['update'])
+            ctx.close()
+
+    async def test_root_bootstrap_half_pair_and_wrong_source_fail_before_poll_install(self):
+        from types import SimpleNamespace
+        from identity import native_ingress
+        class Context:
+            def register_telegram_handler(self, callback): self.factory = callback
+            def on_unload(self, callback): pass
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=lambda event: None))
+        for env in ({'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': '6115e95f-dd1d-4501-a9f2-31bc4c747818'},
+                    {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': 'invalid', 'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': 'a'*64},
+                    {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': '6115e95f-dd1d-4501-a9f2-31bc4c747818', 'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': 'a'*64}):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), \
+                    patch.object(native_ingress.ReleaseGate, 'install') as install:
+                ctx = Context()
+                native_ingress.register(ctx, build_resolver=lambda *a: lambda source: None)
+                with self.assertRaises((RuntimeError, ValueError)):
+                    ctx.factory(SimpleNamespace(), adapter)
+                install.assert_not_called()
+
     def test_factory_fails_closed_without_runner(self):
         from types import SimpleNamespace
         from identity import native_ingress

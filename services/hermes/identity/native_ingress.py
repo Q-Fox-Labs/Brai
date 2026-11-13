@@ -2,7 +2,11 @@
 # ABOUTME: Доверенная фабрика задаётся оператором; при её отсутствии вход закрыт.
 """Плагин не запускает polling и не создаёт пользовательский agent в ingress."""
 import asyncio
+import hashlib
 import logging
+import os
+from pathlib import Path
+import uuid
 from contextvars import ContextVar
 from .ingress import install
 
@@ -81,8 +85,8 @@ class ReleaseGate:
         await self.held.wait()
         await self.app.update_queue.join()
 
-    async def begin(self, operationId):
-        """Зафиксировать операцию и ждать границу следующего polling без отмены запросов."""
+    def hold(self, operationId):
+        """Закрыть poll синхронно до startup; worker barrier запрашивается отдельно."""
         from .ipc import RpcError
         self._validate(operationId)
         if self.operation is not None and self.operation != operationId:
@@ -93,6 +97,10 @@ class ReleaseGate:
             self.held.clear()
             self.unlocked.clear()
             self.drain = asyncio.create_task(self._drain())
+
+    async def begin(self, operationId):
+        """Зафиксировать операцию и ждать границу следующего polling без отмены запросов."""
+        self.hold(operationId)
         return await self.status(operationId)
 
     async def status(self, operationId):
@@ -181,6 +189,16 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         adapter._drop_pending_on_cold_boot = False
         gate = ReleaseGate(app)
         gate.resolver = resolver
+        bootstrap_operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
+        bootstrap_source = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
+        if bootstrap_operation is not None or bootstrap_source is not None:
+            source = Path(__file__)
+            if (not bootstrap_operation or not bootstrap_source
+                    or str(uuid.UUID(bootstrap_operation)) != bootstrap_operation
+                    or source != Path('/opt/brai-profile/runtime/services/hermes/identity/native_ingress.py')
+                    or hashlib.sha256(source.read_bytes()).hexdigest() != bootstrap_source):
+                raise RuntimeError('Root startup release binding unavailable')
+            gate.hold(bootstrap_operation)
         gate.install()
         resolver.release_gate = gate
         journal = getattr(resolver, 'journal', None)
