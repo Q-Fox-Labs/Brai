@@ -167,7 +167,7 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   const checkLock=lockInputs(root,c.npm.workspaces,{...target,development:true});
   const toolchainPath=join(root,'deploy/components/toolchain.json');
   const toolchain=existsSync(toolchainPath)?json(toolchainPath):{node:process.versions.node,npm:'11.19.1',nodeBase:'node:24.22.1-bookworm-slim'};
-  const compatibility={platform,libc:target.platform==='linux'?(process.report.getReport().header.glibcVersionRuntime?'glibc':'musl'):null,node:toolchain.node,npm:toolchain.npm,...(c.id==='web'?{variant,standalone:false}:{})};
+  const compatibility={platform,libc:target.platform==='linux'?(process.report.getReport().header.glibcVersionRuntime?'glibc':'musl'):null,node:toolchain.node,npm:toolchain.npm,...(c.id==='web'?{variant,standalone:c.delivery.strategy==='next-standalone'}:{})};
   const build=buildKey(root,[...buildFiles,...deps],{formatVersion:c.formatVersion,build:c.commands.build,lock:buildLock,compatibility,outputs:c.delivery.files.filter(path=>/\/(?:dist|\.next)(?:\/|$)/.test(path))});
   const packagingEngine=digestFiles(dirname(fileURLToPath(import.meta.url)),['package-runtime.mjs','lock-inputs.mjs']);
   const deliveryFiles=[...new Set([...c.delivery.files,...c.dependencies.flatMap(d=>d.delivery)])].sort();

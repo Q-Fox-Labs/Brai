@@ -222,10 +222,12 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
     if (['package','run'].includes(action)) {
       const {packageComponent,verifyPackage}=await import('./package-runtime.mjs');
       const delivery={...c.delivery,files:[...new Set([...c.delivery.files,...c.dependencies.flatMap(d=>d.delivery)])]};
-      const dependencies=dependencyInventory(root,c,false,dependencyCache);
+      // Standalone packages use only the verified Next output, already included in item.runtime.
+      const dependencies=c.delivery.strategy==='next-standalone'?'next-standalone-output':dependencyInventory(root,c,false,dependencyCache);
       if(dependencies && state.runtimeDependencies===dependencies && state.runtime===item.runtime && state.packagePath && existsSync(state.packagePath)) artifact=verifyPackage(state.packagePath,c.id);
       else {artifact=await packageComponent(root,{...c,delivery},join(root,'tmp','component-packages'));packaged=true;}
-      if(dependencies && dependencyInventory(root,c,false,new Map())!==dependencies)throw Error(`PACKAGE_DEPENDENCIES_CHANGED: ${c.id}`);
+      if(dependencies && c.delivery.strategy!=='next-standalone' && dependencyInventory(root,c,false,new Map())!==dependencies)throw Error(`PACKAGE_DEPENDENCIES_CHANGED: ${c.id}`);
+      if(c.delivery.strategy==='next-standalone' && fingerprints(root,c).runtime!==item.runtime)throw Error(`PACKAGE_INPUTS_CHANGED: ${c.id}`);
       if(checkDependencies && dependencyInventory(root,c,true,new Map())!==checkDependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
       state.runtime=item.runtime;state.runtimeDependencies=dependencies;state.packagePath=artifact.path;saveState(statePath,state);
     }

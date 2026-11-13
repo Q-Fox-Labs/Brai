@@ -51,6 +51,18 @@ function copyDelivery(root, stage, key) {
   } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
 }
 
+// Next owns this traced closure; preserve its layout while copying independent inodes.
+function copyStandalone(source, stage, key = '') {
+  const path=join(source,key),info=lstatSync(path);
+  if(key.split('/').some(part=>/^\.env(?:\.|$)/i.test(part)||part==='.git'||part==='usercustom') || /(?:^|\/)credentials?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i.test(key) || /\.(?:key|pem|p12|pfx)$/i.test(key))fail(`FORBIDDEN_DELIVERY_FILE: ${key}`);
+  if(info.isSymbolicLink())fail(`DELIVERY_SYMLINK: ${key}`);
+  if(info.isDirectory())for(const name of readdirSync(path).sort(compare))copyStandalone(source,stage,key?`${key}/${name}`:name);
+  else if(info.isFile()) {
+    const target=join(stage,key);mkdirSync(dirname(target),{recursive:true});
+    copyFileSync(path,target,constants.COPYFILE_FICLONE);chmodSync(target,deliveryMode(info.mode));
+  } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
+}
+
 function collectPackages(root, workspaces) {
   const packages = new Map();
   for (const {key,entry} of lockInputs(root,workspaces)) {
@@ -117,6 +129,22 @@ function inventory(directory, prefix = '') {
   return files.sort((a, b) => compare(a.path, b.path));
 }
 
+// Root mounts the payload for a different UID; directories must also be traversable.
+function canonicalDirectories(path) {
+  chmodSync(path,0o755);
+  for(const name of readdirSync(path)) {
+    const child=join(path,name),info=lstatSync(child);
+    if(info.isDirectory())canonicalDirectories(child);
+  }
+}
+function verifyDirectories(path) {
+  if((lstatSync(path).mode & 0o777)!==0o755)fail(`IMMUTABLE_DIRECTORY_MODE: ${path}`);
+  for(const name of readdirSync(path)) {
+    const child=join(path,name),info=lstatSync(child);
+    if(info.isDirectory())verifyDirectories(child);
+  }
+}
+
 function payloadHash(files, runtime, runtimePackages) {
   return hash(JSON.stringify({files,runtime,runtimePackages}));
 }
@@ -172,9 +200,21 @@ export async function packageComponent(root, component, outputRoot) {
   const output = prepareOutput(root, outputRoot);
   const stage = mkdtempSync(join(output, '.component-stage-'));
   try {
-    for (const key of [...new Set(component.delivery.files)]) copyDelivery(root, stage, key);
-    const packages = collectPackages(root, component.npm?.workspaces ?? []);
-    copyPackages(root, stage, packages);
+    const standalone=component.delivery.strategy==='next-standalone';
+    if(standalone && (component.id!=='web' || component.directory!=='apps/web' || component.delivery.kind!=='oci-context'))fail('INVALID_STANDALONE_COMPONENT');
+    const standalonePath='apps/web/.next/standalone';
+    for (const key of [...new Set(component.delivery.files)]) {
+      if(standalone && key===standalonePath) {
+        const source=join(root,key);
+        if(!existsSync(source) || lstatSync(source).isSymbolicLink() || !inside(root,realpathSync(source)))fail('INVALID_STANDALONE_OUTPUT');
+        copyStandalone(source,stage);
+      } else copyDelivery(root, stage, key);
+    }
+    const packages = standalone ? new Map(lockInputs(root,component.npm?.workspaces ?? [])
+      .filter(({key})=>key.split('/').includes('node_modules') && existsSync(join(stage,key)))
+      .map(({key,entry})=>[key,{key,entry,version:entry.version??json(join(root,entry.resolved,'package.json')).version,...(entry.link?{target:entry.resolved}:{})}]))
+      : collectPackages(root, component.npm?.workspaces ?? []);
+    if(!standalone)copyPackages(root, stage, packages);
     if (component.delivery.kind === 'oci-context') {
       const entrypoint = component.delivery.entrypoints[0];
       if (!entrypoint) fail('OCI_ENTRYPOINT_REQUIRED');
@@ -186,6 +226,7 @@ export async function packageComponent(root, component, outputRoot) {
       writeFileSync(join(stage, 'Dockerfile'), `FROM ${base}\nWORKDIR ${JSON.stringify(`/app/${component.directory}`)}\nCOPY . /app\nCMD ${JSON.stringify(command)}\n`);
       chmodSync(join(stage, 'Dockerfile'), 0o644);
     }
+    if(standalone)canonicalDirectories(stage);
     await validateRuntime(stage, component);
     const files = inventory(stage);
     const runtimePackages = [...packages.values()].map(({ key, entry, version, target }) => ({ lockKey: key, version, ...(entry.integrity ? { integrity: entry.integrity } : {}), ...(target ? { link: true, target } : {}) })).sort((a, b) => compare(a.lockKey, b.lockKey));
@@ -196,6 +237,7 @@ export async function packageComponent(root, component, outputRoot) {
     writeFileSync(join(stage, manifestName), encoded);
     chmodSync(join(stage, manifestName), 0o644);
     if (present(path)) {
+      if(standalone)verifyDirectories(path);
       if (lstatSync(path).isSymbolicLink() || !lstatSync(path).isDirectory() || !lstatSync(join(path, manifestName), { throwIfNoEntry: false })?.isFile() || readFileSync(join(path, manifestName), 'utf8') !== encoded || JSON.stringify(inventory(path)) !== JSON.stringify(files)) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
       rmSync(stage, { recursive: true });
     } else renameSync(stage, path);
@@ -210,6 +252,7 @@ export async function packageComponent(root, component, outputRoot) {
 export function verifyPackage(path, componentId) {
   if (lstatSync(path).isSymbolicLink()) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
   const manifest=json(join(path,manifestName)),files=inventory(path);
+  if(componentId==='web' && manifest.runtime?.entrypoints?.[0]==='apps/web/server.js')verifyDirectories(path);
   if(manifest.format!==format || manifest.componentId!==componentId || manifest.payloadHash!==payloadHash(files,manifest.runtime,manifest.runtimePackages) || JSON.stringify(manifest.files)!==JSON.stringify(files) || manifest.bytes!==files.reduce((sum,file)=>sum+file.size,0) || JSON.stringify(manifest.systemRequirements)!==JSON.stringify(manifest.runtime.systemRequirements)) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
   return {...manifest,path};
 }

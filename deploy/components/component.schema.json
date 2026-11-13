@@ -163,6 +163,9 @@
         "systemRequirements"
       ],
       "properties": {
+        "strategy": {
+          "enum": ["next-standalone"]
+        },
         "kind": {
           "enum": [
             "ready-files",

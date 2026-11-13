@@ -24,6 +24,31 @@ function fixture(t) {
   return { root, write, component, build: () => packageComponent(root, component, 'tmp/output') };
 }
 
+test('Next standalone copies only traced output with safe modes and rejects secret or link output', async t => {
+  const {root,write,component,build}=fixture(t);
+  component.id='web';component.directory='apps/web';
+  component.delivery={kind:'oci-context',strategy:'next-standalone',files:['apps/web/.next/standalone','apps/web/.next/static','apps/web/public'],entrypoints:['apps/web/server.js'],smokeImports:[],systemRequirements:['Node.js 24.22.1'],command:['node','server.js']};
+  write('apps/web/.next/standalone/apps/web/server.js','console.log("ready");\n');
+  write('apps/web/.next/standalone/node_modules/traced/index.js','module.exports=1;\n');
+  write('apps/web/.next/static/test.js','static');write('apps/web/public/test.txt','public');
+  const source=join(root,'apps/web/.next/standalone/node_modules/traced/index.js');chmodSync(source,0o600);
+  const previous=process.umask(0o077);let artifact;
+  try {artifact=await build();} finally {process.umask(previous);}
+  for(const directory of ['', 'apps', 'apps/web', 'node_modules', 'node_modules/traced'])assert.equal(statSync(join(artifact.path,directory)).mode & 0o777,0o755,directory);
+  assert.equal(readFileSync(join(artifact.path,'node_modules/traced/index.js'),'utf8'),'module.exports=1;\n');
+  assert.equal(statSync(join(artifact.path,'node_modules/traced/index.js')).mode&0o777,0o644);
+  assert.notEqual(statSync(source).ino,statSync(join(artifact.path,'node_modules/traced/index.js')).ino);
+  assert.deepEqual(artifact.runtime.command,['node','server.js']);
+  chmodSync(join(artifact.path,'node_modules'),0o700);
+  assert.throws(()=>verifyPackage(artifact.path,'web'),/IMMUTABLE_DIRECTORY_MODE/);
+  chmodSync(join(artifact.path,'node_modules'),0o755);
+  write('apps/web/.next/standalone/.env.local','secret');
+  await assert.rejects(build(),/FORBIDDEN_DELIVERY_FILE/);
+  rmSync(join(root,'apps/web/.next/standalone/.env.local'));
+  symlinkSync('/etc/passwd',join(root,'apps/web/.next/standalone/escape'));
+  await assert.rejects(build(),/DELIVERY_SYMLINK/);
+});
+
 test('deterministic payloads preserve layout and mode; existing payload is verified', async t => {
   const { root, write, component, build } = fixture(t);
   write('services/neighbor/contract.mjs', 'export const value = 42;\n');
