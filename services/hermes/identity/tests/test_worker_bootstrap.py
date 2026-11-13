@@ -158,7 +158,7 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             return None
         async def admit_update(update, adapter):
             return True
-        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=admit, _is_user_authorized_for_source=lambda source, **kw: False), handle_message=original)
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=admit, _is_user_authorized_for_source=lambda source, **kw: False), handle_message=original, _drop_pending_on_cold_boot=True)
         telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
         telegram.Update = type('Update', (), {})
         ext.TypeHandler, ext.ApplicationHandlerStop = Handler, type('ApplicationHandlerStop', (Exception,), {})
@@ -166,6 +166,7 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             native_ingress.register(ctx, build_resolver=lambda adapter, runner: lambda source: None, admit_update=admit_update)
             ctx.factory(app, adapter)
             self.assertTrue(adapter._brai_identity_ingress_ready)
+            self.assertFalse(adapter._drop_pending_on_cold_boot)
             self.assertTrue(callable(adapter._brai_identity_dispatch))
             self.assertIs(adapter.handle_message, original)
             ctx.close()

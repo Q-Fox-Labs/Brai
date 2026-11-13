@@ -177,6 +177,8 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
         resolver = build_resolver(adapter, runner)
+        # Identity restart сохраняет Telegram backlog, включая сообщения во время release gate.
+        adapter._drop_pending_on_cold_boot = False
         gate = ReleaseGate(app)
         gate.resolver = resolver
         gate.install()
