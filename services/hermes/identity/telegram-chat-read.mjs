@@ -95,9 +95,18 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
         snapshot({ ...profile, home: join(profile.home, 'brai-files') }, db => {
           const query = db.prepare(`SELECT ref FROM items WHERE artifact IS NOT NULL AND ref IS NOT NULL
             AND json_extract(source,'$.platform')='telegram' AND json_extract(source,'$.chat')=?
-            AND json_extract(source,'$.thread') IN (?,?) AND json_extract(source,'$.messageId')=? ORDER BY position`);
+            AND json_extract(source,'$.thread') IN (?,?)
+            AND (json_extract(source,'$.messageId')=? OR (
+              json_type(source,'$.messageId') IS NULL
+              AND json_extract(source,'$.itemId') GLOB ?
+              AND substr(json_extract(source,'$.itemId'), length(?) + 2) NOT GLOB '*[^0-9]*'
+            )) ORDER BY position`);
           for (const message of incoming) {
-            for (const row of query.all(message.chat, message.thread, message.thread || '1', message.telegramId)) {
+            // AIDEV-NOTE: Личный FileStore сохраняет message:attachment в itemId;
+            // прежний общий gateway дополнительно сохранял messageId. Не связываем
+            // файлы по имени, подписи, соседнему сообщению или ключу альбома.
+            for (const row of query.all(message.chat, message.thread, message.thread || '1', message.telegramId,
+              message.telegramId + ':[0-9]*', message.telegramId)) {
               const file = ref(JSON.parse(row.ref));
               if (file && !message.attachments.some(item => item.artifactId === file.artifactId)) message.attachments.push(file);
             }

@@ -1,4 +1,5 @@
 /* ABOUTME: Единый контур рабочих разделов и внешние заголовки. */
+/* ABOUTME: Управляет панелями, обрезкой заголовков и временными мобильными панелями. */
 .workspace-frame { --frame-line: #d4d9e2; --frame-outer: #e9ebed; --frame-rail: #f1f2f3; --frame-surface: #fafafa; --frame-text: #202124; --frame-muted: #555b62; --frame-hover: #d9dcdf; --frame-outline: #c8cdd0; display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: 48px minmax(0, 1fr); padding: 0 8px 8px 0; box-sizing: border-box; background: var(--frame-outer); color: var(--frame-text); }
 .workspace-frame-header, .workspace-frame-body { display: grid; grid-template-columns: var(--frame-left) minmax(0, 1fr) var(--frame-right); min-width: 0; }
 .workspace-frame-header { align-items: stretch; }
@@ -41,3 +42,7 @@
 .workspace-frame-custom-tabs nav { height:100%; padding:0; border:0; }
 .workspace-frame-custom-tabs nav > div { height:100%; }
 .workspace-frame-right.workspace-frame-overlay > .workspace-frame-custom-tabs { height:48px; }
+
+.workspace-frame-heading-left.has-status > strong, .workspace-frame-overlay-heading > strong { flex: none; white-space: nowrap; }
+.workspace-frame-rail-status { flex: 1; min-width: 0; overflow: hidden; }
+.workspace-frame-overlay-heading { display: flex; align-items: center; gap: 12px; min-width: 0; padding-bottom: 12px; }

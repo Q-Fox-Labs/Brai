@@ -7,14 +7,14 @@ import "./workspace-frame.css";
 
 type Tab = { id: string; label: string; content: ReactNode };
 type Settings = { left: number; right: number; leftOpen: boolean; rightOpen: boolean; tab: string };
-type Props = { section: string; userId: string; title: string; railTitle?: string; rail?: ReactNode; children: ReactNode; tabs?: Tab[]; defaultRightOpen?: boolean; onRightOpen?: () => void; onRightClose?: () => void; openRightSignal?: string | null; externalRightHeader?: boolean };
+type Props = { section: string; userId: string; title: string; railTitle?: string; railStatus?: ReactNode; rail?: ReactNode; children: ReactNode; tabs?: Tab[]; defaultRightOpen?: boolean; onRightOpen?: () => void; onRightClose?: () => void; openRightSignal?: string | null; externalRightHeader?: boolean };
 const LEFT_MIN = 220, LEFT_MAX = 420, RIGHT_MIN = 320, RIGHT_MAX = 720, CENTER_MIN = 360;
 const RightHeader = createContext<HTMLElement | null>(null);
 export const useWorkspaceRightHeader = () => useContext(RightHeader);
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(value, Math.max(min, max)));
 
 /** Сохраняет размеры и открытое состояние отдельно для аккаунта и раздела. */
-export default function WorkspaceFrame({ section, userId, title, railTitle, rail, children, tabs = [], defaultRightOpen = false, onRightOpen, onRightClose, openRightSignal, externalRightHeader = false }: Props) {
+export default function WorkspaceFrame({ section, userId, title, railTitle, railStatus, rail, children, tabs = [], defaultRightOpen = false, onRightOpen, onRightClose, openRightSignal, externalRightHeader = false }: Props) {
  const key = `brai.workspace.${userId}.${section}`;
  const defaults = (): Settings => ({ left: 280, right: 440, leftOpen: !!rail, rightOpen: defaultRightOpen, tab: tabs[0]?.id ?? "" });
  const [settings, setSettings] = useState<Settings>(defaults);
@@ -106,12 +106,12 @@ export default function WorkspaceFrame({ section, userId, title, railTitle, rail
  const tabContents = tabs.map(tab => <div className="workspace-frame-tab-panel" key={tab.id} hidden={tab.id !== activeTab?.id}>{tab.content}</div>);
  return <RightHeader.Provider value={rightHeader}><div className="workspace-frame" style={style}>
   <header className="workspace-frame-header">
-   {leftVisible && <div className="workspace-frame-heading-left"><strong>{railTitle ?? title}</strong>{controls("left", true)}</div>}
+   {leftVisible && <div className={`workspace-frame-heading-left${railStatus ? " has-status" : ""}`}><strong>{railTitle ?? title}</strong>{railStatus && <div className="workspace-frame-rail-status">{railStatus}</div>}{controls("left", true)}</div>}
    <div className="workspace-frame-heading-center">{rail && !leftVisible && controls("left", temporary === "left")}<strong title={title}>{title}</strong>{!!tabs.length && !rightVisible && controls("right", temporary === "right")}</div>
    {rightVisible && <div className="workspace-frame-heading-right">{externalRightHeader ? <div ref={setRightHeader} className="workspace-frame-custom-tabs" /> : tabButtons}{controls("right", true)}</div>}
   </header>
   <div className="workspace-frame-body" ref={frame}>
-   {rail && <aside className={`workspace-frame-rail${temporary === "left" ? " workspace-frame-overlay is-left" : ""}`} hidden={!leftVisible && temporary !== "left"} onClick={event => { if (temporary === "left" && (event.target as HTMLElement).closest("[data-frame-close-rail]")) setTemporary(null); }}>{temporary === "left" && <button type="button" className="workspace-frame-overlay-close" onClick={() => { setTemporary(null); overlayOpener.current?.focus(); }}>Закрыть</button>}{rail}</aside>}
+   {rail && <aside className={`workspace-frame-rail${temporary === "left" ? " workspace-frame-overlay is-left" : ""}`} hidden={!leftVisible && temporary !== "left"} onClick={event => { if (temporary === "left" && (event.target as HTMLElement).closest("[data-frame-close-rail]")) setTemporary(null); }}>{temporary === "left" && (railStatus ? <div className="workspace-frame-overlay-heading"><strong>{railTitle ?? title}</strong><div className="workspace-frame-rail-status">{railStatus}</div><button type="button" className="workspace-frame-overlay-close workspace-frame-toggle" aria-label="Скрыть панель раздела" onClick={() => { setTemporary(null); overlayOpener.current?.focus(); }}><PanelLeftClose /></button></div> : <button type="button" className="workspace-frame-overlay-close" onClick={() => { setTemporary(null); overlayOpener.current?.focus(); }}>Закрыть</button>)}{rail}</aside>}
    {leftVisible && separator("left", leftWidth)}
    <div className="workspace-frame-center">{children}</div>
    {rightVisible && separator("right", rightWidth)}
