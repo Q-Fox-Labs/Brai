@@ -261,6 +261,40 @@ class Broker:
             self.login_state = LoginDeliveryState(path, self.config.get('maxLoginReceipts', 1_000_000))
         return self.login_state
 
+    async def backup(self, peer_uid, profile, method, params):
+        """Проверить текущую роль и вызвать только фиксированный root-owned сервис копирования."""
+        if profile['role'] not in TOOL_POLICY['managers']:
+            raise PermissionError('Role denied')
+        if params or method not in ('backup.status', 'backup.run'):
+            raise ValueError('Invalid backup operation')
+        current = await self.authorize(peer_uid)
+        if any(current[key] != profile[key] for key in ('userId', 'profileId', 'role', 'generation')):
+            raise PermissionError('Access changed')
+        program = Path('/usr/local/libexec/brai-recovery/recovery.py')
+        for path in (program, program.parent, *program.parent.parents):
+            info = path.lstat()
+            if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+                raise PermissionError('Backup unavailable')
+        if method == 'backup.run':
+            protected_json('/etc/duplicati/recovery.json')
+            argv = ['/usr/bin/systemctl', 'start', '--no-block', 'brai-recovery.service']
+        else:
+            argv = ['/usr/bin/python3', '-B', str(program), 'status']
+        process = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        raw, _ = await process.communicate()
+        if process.returncode:
+            raise PermissionError('Backup unavailable')
+        current = await self.authorize(peer_uid)
+        if any(current[key] != profile[key] for key in ('userId', 'profileId', 'role', 'generation')):
+            raise PermissionError('Access changed')
+        if method == 'backup.run':
+            return {'stage': 'starting', 'cloud_verified': False}
+        value = json.loads(raw)
+        allowed = {'stage', 'bundle_id', 'cloud_verified', 'verified_at'}
+        if not isinstance(value, dict) or set(value) - allowed:
+            raise ValueError('Invalid backup status')
+        return value
+
     def profiles(self):
         """Повторно прочитать защищённый реестр после каждого обновления."""
         return load_registry(self.config['registryPath'])
@@ -678,11 +712,15 @@ class Broker:
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if state['role'] == 'guest' else short in (
                     'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+            if name in ('mcp__brai__brai_backup_status', 'mcp__brai__brai_backup_run'):
+                allowed = state['role'] in TOOL_POLICY['managers']
             if name == 'mcp__brai__brai_dev_release':
                 allowed = state['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
             current = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
             return {'allowed': allowed and current == state, 'role': state['role'], 'generation': state['generation']}
         profile = await self.authorize(peer_uid)
+        if method.startswith('backup.'):
+            return await self.backup(peer_uid, profile, method, params)
         if method == 'dev.release':
             if self.config.get('registryPath') != '/etc/brai-dev/identity/registry.json' or profile['role'] not in ('creator', 'admin'):
                 raise PermissionError('DEV release unavailable')
@@ -714,6 +752,8 @@ class Broker:
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if profile['role'] == 'guest' else short in (
                     'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+            if name in ('mcp__brai__brai_backup_status', 'mcp__brai__brai_backup_run'):
+                allowed = profile['role'] in TOOL_POLICY['managers']
             if name == 'mcp__brai__brai_dev_release':
                 allowed = profile['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
             current = await self.authorize(peer_uid)

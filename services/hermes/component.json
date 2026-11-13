@@ -380,7 +380,8 @@
       "services/hermes/identity/tests/test_update_inbox.py",
       "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/adapter.py",
       "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/telegram_held_inbound.py",
-      "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/update_admission.py"
+      "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/update_admission.py",
+      "services/hermes/identity/tests/test_backup_roles.py"
     ]
   },
   "dependencies": [
