@@ -55,11 +55,12 @@
     },
     {
       "name": "ingress.profiles-strict",
-      "description": "Только ingress: полный перечень active профилей или ошибка при любом недоступном Auth.",
+      "description": "Только ingress: авторизованные active профили и UUID всех зарегистрированных профилей; ошибка при недоступном Auth.",
       "paramStructure": "by-name",
       "params": [],
-      "result": {"name": "result", "schema": {"type": "object", "required": ["profiles"],
-        "properties": {"profiles": {"type": "array", "items": {"type": "object"}}}}}
+      "result": {"name": "result", "schema": {"type": "object", "required": ["profiles", "allProfileIds"],
+        "properties": {"profiles": {"type": "array", "items": {"type": "object"}},
+          "allProfileIds": {"type": "array", "items": {"type": "string"}}}}}
     },
     {
       "name": "ingress.resolve-known",

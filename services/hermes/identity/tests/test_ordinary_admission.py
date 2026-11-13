@@ -128,6 +128,64 @@ class TestRealPTBClaims(unittest.IsolatedAsyncioTestCase):
         self.assertIn('123:3',self.adapter._inflight_update_ids)
 
 class MirrorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_crash_before_gate_receipt_keeps_orphan_held_input_unknown(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox, ProfileGateStore
+        import uuid
+        profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                 'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        bot=Bot('123:abc')
+        update=Update.de_json({'update_id':10,'message':{'message_id':10,'date':1,
+            'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'text':'synthetic'}},bot)
+        with tempfile.TemporaryDirectory() as directory:
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'))
+            inbox.capture(profile,update,123)
+            abandoned=str(uuid.uuid4())
+            inbox.disposition(profile,123,10,'held',operation_id=abandoned)
+            async def inventory(): return {'profiles':[profile]}
+            mirror=Mirror(inbox,lambda actor:None,inventory=inventory,
+                          gate_store=ProfileGateStore(inbox),boot_id=str(uuid.uuid4()))
+            mirror.recover=AsyncMock()
+            await mirror.hydrate()
+            self.assertEqual(mirror.rehydrated[1001]['record']['state'],'unknown')
+            self.assertIn(1001,mirror.tracker.gates)
+            self.assertEqual(inbox.observe(profile,123,10)['operation_id'],abandoned)
+            mirror.recover.assert_not_awaited()
+
+    async def test_global_only_commit_recovers_original_owner_and_keeps_inactive_visible(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox, ProfileGateStore
+        from identity.transport_inbox import TransportInbox
+        import uuid
+        profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                 'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+        update=Update.de_json({'update_id':6,'message':{'message_id':6,'date':1,
+            'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'text':'synthetic'}},bot)
+        with tempfile.TemporaryDirectory() as directory:
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'))
+            transport=TransportInbox(inbox.journal)
+            transport.capture_batch([(update,{'state':'known','profile':profile})],123)
+            async def inactive(): return {'profiles':[],'allProfileIds':[profile['profileId']]}
+            async def resolve(actor): return {'state':'known','profile':profile}
+            mirror=Mirror(inbox,resolve,transport=transport,inventory=inactive,
+                          gate_store=ProfileGateStore(inbox),boot_id=str(uuid.uuid4()))
+            mirror.app=SimpleNamespace(bot=bot)
+            await mirror.hydrate()
+            self.assertEqual(len(mirror.transport_unavailable),1)
+            self.assertIn(1001,mirror.transport_blocked)
+            self.assertFalse((inbox.journal.root/profile['profileId']).exists())
+            async def active(): return {'profiles':[profile],'allProfileIds':[profile['profileId']]}
+            restarted=Mirror(inbox,resolve,transport=transport,inventory=active,
+                             gate_store=ProfileGateStore(inbox),boot_id=str(uuid.uuid4()))
+            restarted.app=SimpleNamespace(bot=bot);restarted.recover=AsyncMock()
+            await restarted.hydrate()
+            await restarted.recovery_tasks[1001]
+            self.assertEqual(inbox.observe(profile,123,6)['state'],'held')
+            restarted.recover.assert_awaited_once()
+
     async def test_auth_generation_change_blocks_original_input(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox
@@ -249,6 +307,205 @@ class MirrorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mirror.snapshot('123:1')['profile']['uid'],1001)
 
 class FullAdmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_known_worker_receipt_closes_both_transport_and_profile_rows(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox
+        from identity.transport_inbox import TransportInbox
+        with tempfile.TemporaryDirectory() as directory:
+            global module
+            module=patched_module(directory)
+            profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                     'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'));transport=TransportInbox(inbox.journal)
+            async def resolve(actor): return {'state':'known','profile':profile}
+            mirror=Mirror(inbox,resolve,transport=transport);mirror.hydrated=True
+            bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+            update=Update.de_json({'update_id':5,'message':{'message_id':5,'date':1,
+                'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+                'text':'synthetic'}},bot)
+            await mirror.capture([update],123)
+            adapter=SimpleNamespace(_update_admission=None,_updates_dispatched_total=0,
+                _seen_update_ids={},_inflight_update_ids={},_brai_identity_preflight=mirror,
+                _brai_identity_disposition=mirror.finish,_brai_identity_duplicate=mirror.duplicate)
+            app=ApplicationBuilder().bot(bot).application_class(module.TelegramApplication,{'adapter':adapter}).build()
+            app._initialized=True
+            async def handler(value,context):
+                await mirror.accepted(SimpleNamespace(_brai_release_updates=[value.update_id]),
+                                      {'accepted':True,'turn_id':'synthetic'})
+            app.add_handler(TypeHandler(Update,handler),group=-100)
+            with patch.object(module,'_load_receipts',lambda *a:None), patch.object(module,'_record_receipt',lambda *a:None):
+                await app.process_update(update)
+            self.assertEqual(inbox.observe(profile,123,5)['state'],'accepted')
+            self.assertEqual(transport.pending(),[])
+
+    async def test_locked_global_index_fails_before_poll_return(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox
+        from identity.transport_inbox import TransportInbox
+        from identity.native_ingress import ReleaseGate
+        import sqlite3
+        profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                 'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+        update=Update.de_json({'update_id':3,'message':{'message_id':3,'date':1,
+            'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'text':'synthetic'}},bot)
+        with tempfile.TemporaryDirectory() as directory:
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'))
+            transport=TransportInbox(inbox.journal)
+            locked=transport._open()
+            async def resolve(actor): return {'state':'known','profile':profile}
+            mirror=Mirror(inbox,resolve,transport=transport);mirror.hydrated=True
+            gate=ReleaseGate(SimpleNamespace(bot=bot,update_queue=asyncio.Queue()))
+            gate.resolver=SimpleNamespace(mirror=mirror)
+            with patch.object(Bot,'get_updates',AsyncMock(return_value=[update])):
+                gate.install()
+                try:
+                    locked.execute('BEGIN IMMEDIATE')
+                    with self.assertRaises(sqlite3.OperationalError): await bot.get_updates()
+                finally:
+                    locked.rollback();locked.close()
+                self.assertFalse((inbox.journal.root/profile['profileId']).exists())
+                self.assertEqual(await bot.get_updates(),[update])
+                self.assertEqual(inbox.observe(profile,123,3)['state'],'captured')
+                gate.restore()
+
+    async def test_locked_profile_fails_before_poll_return_and_preserves_global_owner(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox
+        from identity.transport_inbox import TransportInbox
+        from identity.native_ingress import ReleaseGate
+        import sqlite3
+        profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                 'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        changed={**profile,'profileId':'22222222-2222-4222-8222-222222222222','userId':'u2','uid':1002}
+        bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+        update=Update.de_json({'update_id':4,'message':{'message_id':4,'date':1,
+            'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'text':'synthetic'}},bot)
+        with tempfile.TemporaryDirectory() as directory:
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'));inbox.install_v2(profile)
+            transport=TransportInbox(inbox.journal)
+            current=[profile]
+            async def resolve(actor): return {'state':'known','profile':current[0]}
+            mirror=Mirror(inbox,resolve,transport=transport);mirror.hydrated=True
+            gate=ReleaseGate(SimpleNamespace(bot=bot,update_queue=asyncio.Queue()))
+            gate.resolver=SimpleNamespace(mirror=mirror)
+            with patch.object(Bot,'get_updates',AsyncMock(return_value=[update])):
+                gate.install()
+                locked=inbox.journal.database(profile)
+                try:
+                    locked.execute('BEGIN IMMEDIATE')
+                    with self.assertRaises(sqlite3.OperationalError): await bot.get_updates()
+                finally:
+                    locked.rollback();locked.close()
+                self.assertEqual(transport.pending()[0]['state'],'captured')
+                current[0]=changed
+                self.assertEqual(await bot.get_updates(),[update])
+                self.assertEqual(mirror.snapshot('123:4')['state'],'binding_changed')
+                self.assertEqual(transport.pending()[0]['state'],'blocked')
+                self.assertFalse((inbox.journal.root/changed['profileId']).exists())
+                gate.restore()
+
+    async def test_unregistered_invite_replays_original_without_worker_routing(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox, ProfileGateStore
+        from identity.transport_inbox import TransportInbox
+        from identity.profile_release import ProfileRelease
+        from identity import telegram_runtime as runtime
+        from telegram.ext import ApplicationHandlerStop
+        import uuid
+        with tempfile.TemporaryDirectory() as directory:
+            global module
+            module=patched_module(directory)
+            journal=IdentityJournal(Path(directory)/'chats')
+            inbox=UpdateInbox(journal);transport=TransportInbox(journal)
+            bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+            update=Update.de_json({'update_id':8,'message':{'message_id':8,'date':1,
+                'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+                'text':'/start invite_abcdefghijklmnop'}},bot)
+            transport.capture_batch([(update,{'state':'unregistered'})],123)
+            async def inventory(): return {'profiles':[],'allProfileIds':[]}
+            async def resolve(actor): return {'state':'unregistered'}
+            mirror=Mirror(inbox,resolve,transport=transport,inventory=inventory,
+                          gate_store=ProfileGateStore(inbox),boot_id=str(uuid.uuid4()))
+            adapter=SimpleNamespace(_update_admission=None,_updates_dispatched_total=0,_bot=bot,
+                _seen_update_ids={},_inflight_update_ids={},_brai_identity_preflight=mirror,
+                _brai_identity_disposition=mirror.finish,_brai_identity_duplicate=mirror.duplicate)
+            app=ApplicationBuilder().bot(bot).application_class(module.TelegramApplication,{'adapter':adapter}).build()
+            app._initialized=True;mirror.app=app
+            owner=ProfileRelease(SimpleNamespace(mirror=mirror,batch_ownership=SimpleNamespace(busy=lambda uid:False)),app)
+            mirror.recover_external=owner.recover_external
+            effects=[];methods=[]
+            async def broker(method,params,**kwargs):
+                methods.append(method)
+                if method=='ingress.resolve-known': return {'state':'unregistered'}
+                if method=='identity.invite-redeem': return {'user':{'status':'active'}}
+                raise AssertionError('unexpected worker routing')
+            async def guard(value,context):
+                if not await runtime.admit_update(value,adapter):
+                    await mirror.handled(value)
+                    raise ApplicationHandlerStop
+            async def handler(value,context): effects.append(value.update_id)
+            app.add_handler(TypeHandler(Update,guard),group=-100)
+            app.add_handler(TypeHandler(Update,handler),group=0)
+            with patch.dict(runtime._resolvers,{id(adapter):SimpleNamespace(mirror=mirror,journal=None)}), \
+                 patch.object(runtime,'broker_call',broker), patch.object(runtime,'_notice',AsyncMock()), \
+                 patch.object(module,'_load_receipts',lambda *a:None), \
+                 patch.object(module,'_record_receipt',lambda *a:None):
+                await mirror.hydrate()
+                await mirror.recovery_tasks['123:8']
+            self.assertEqual(methods.count('identity.invite-redeem'),1)
+            self.assertNotIn('identity.resolve',methods)
+            self.assertEqual(effects,[])
+            self.assertEqual(transport.pending(),[])
+
+    async def test_redelivery_after_auth_rebind_never_reaches_new_owner(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox
+        from identity.transport_inbox import TransportInbox
+        from identity import telegram_runtime as runtime
+        from telegram.ext import ApplicationHandlerStop
+        with tempfile.TemporaryDirectory() as directory:
+            global module
+            module=patched_module(directory)
+            journal=IdentityJournal(Path(directory)/'chats')
+            inbox=UpdateInbox(journal); transport=TransportInbox(journal)
+            before={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                    'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+            after={**before,'profileId':'22222222-2222-4222-8222-222222222222','userId':'u2','uid':1002}
+            bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+            update=Update.de_json({'update_id':9,'message':{'message_id':9,'date':1,
+                'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+                'text':'synthetic'}},bot)
+            async def old_resolve(actor): return {'state':'known','profile':before}
+            old=Mirror(inbox,old_resolve,transport=transport)
+            await old.capture([update],123)  # crash before Telegram offset acknowledgement
+            async def new_resolve(actor): return {'state':'known','profile':after}
+            mirror=Mirror(inbox,new_resolve,transport=TransportInbox(journal))
+            await mirror.capture([update],123)
+            self.assertEqual(mirror.snapshot('123:9')['state'],'binding_changed')
+            self.assertFalse((journal.root / after['profileId']).exists())
+            adapter=SimpleNamespace(_update_admission=None,_updates_dispatched_total=0,_bot=bot,
+                _seen_update_ids={},_inflight_update_ids={},_brai_identity_preflight=mirror,
+                _brai_identity_disposition=mirror.finish,_brai_identity_duplicate=mirror.duplicate)
+            app=ApplicationBuilder().bot(bot).application_class(module.TelegramApplication,{'adapter':adapter}).build()
+            app._initialized=True
+            effects=[]
+            async def guard(value,context):
+                if not await runtime.admit_update(value,adapter): raise ApplicationHandlerStop
+            async def handler(value,context): effects.append(value.update_id)
+            app.add_handler(TypeHandler(Update,guard),group=-100)
+            app.add_handler(TypeHandler(Update,handler),group=0)
+            with patch.dict(runtime._resolvers,{id(adapter):SimpleNamespace(mirror=mirror)}), \
+                 patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':after})), \
+                 patch.object(runtime,'_notice',AsyncMock()), \
+                 patch.object(module,'_load_receipts',lambda *a:None), \
+                 patch.object(module,'_record_receipt',lambda *a:None):
+                await app.process_update(update)
+            self.assertEqual(effects,[])
+            self.assertEqual(transport.pending()[0]['state'],'blocked')
+
     async def test_restart_replay_and_concurrent_telegram_redelivery_have_one_effect(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox, ProfileGateStore

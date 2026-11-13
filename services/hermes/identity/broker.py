@@ -242,12 +242,12 @@ class Broker:
         """Повторно прочитать защищённый реестр после каждого обновления."""
         return load_registry(self.config['registryPath'])
 
-    async def authorize(self, uid):
+    async def authorize(self, uid, *, timeout=3):
         """Сверить профиль с текущим состоянием Auth."""
         profile = self.profiles().get(uid)
         if not profile or profile['status'] != 'active':
             raise PermissionError('Profile unavailable')
-        principal = await self.control.call('authorize', {'uid': uid}, timeout=3)
+        principal = await self.control.call('authorize', {'uid': uid}, timeout=timeout)
         if (principal.get('userId') != profile['userId'] or
                 principal.get('profileId') != profile['profileId']):
             raise PermissionError('Principal mismatch')
@@ -276,7 +276,7 @@ class Broker:
         if not isinstance(telegram_id, str) or not telegram_id.isascii() or not telegram_id.isdecimal():
             raise ValueError('Invalid Telegram identity')
         async def resolved():
-            answer = await self.control.call('identity.resolve', {'telegramId': telegram_id})
+            answer = await self.control.call('identity.resolve', {'telegramId': telegram_id}, timeout=None)
             if not isinstance(answer, dict) or 'user' not in answer:
                 raise ValueError('Auth identity response unavailable')
             user = answer['user']
@@ -297,7 +297,7 @@ class Broker:
         if len(matches) != 1:
             raise PermissionError('Profile unavailable')
         uid, profile = matches[0]
-        checked = await self.authorize(uid)
+        checked = await self.authorize(uid, timeout=None)
         if checked['userId'] != user['id'] or checked['profileId'] != user['profileId']:
             raise PermissionError('Principal changed')
         current = await resolved()
@@ -481,10 +481,11 @@ class Broker:
             return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
         if method == 'ingress.profiles-strict' and ingress and not params:
             profiles = []
-            for uid, candidate in self.profiles().items():
+            registry = self.profiles()
+            for uid, candidate in registry.items():
                 if candidate['status'] == 'active':
-                    profiles.append({'uid': uid, **(await self.authorize(uid))})
-            return {'profiles': profiles}
+                    profiles.append({'uid': uid, **(await self.authorize(uid, timeout=None))})
+            return {'profiles': profiles, 'allProfileIds': [candidate['profileId'] for candidate in registry.values()]}
         if method == 'ingress.profiles' and ingress and not params:
             profiles = []
             for uid, candidate in self.profiles().items():

@@ -60,6 +60,12 @@ class InboxTests(unittest.TestCase):
             self.inbox.capture(changed,update(1),'123')
         self.assertEqual(self.inbox.observe(PROFILE,'123',1)['state'],'captured')
 
+    def test_zero_update_id_is_valid_and_preserved(self):
+        self.capture(0)
+        self.assertEqual(self.inbox.observe(PROFILE,'123',0)['update_id'],'0')
+        result=self.inbox.claim_for_delivery(PROFILE,123,0)
+        self.assertEqual(result['update']['update_id'],0)
+
     def test_held_order_original_json_and_operation_binding(self):
         for ident in (3,1,2):
             self.capture(ident)
@@ -242,6 +248,23 @@ class GateStoreTests(InboxTests):
         changed={**PROFILE,'uid':PROFILE['uid']+1}
         with self.assertRaisesRegex(ValueError,'SCHEMA_OWNER_CHANGED'):
             self.store.current(changed,self.boot)
+
+    def test_malformed_gate_table_never_proves_rollback_safe(self):
+        from identity.update_inbox import GATE_SCHEMA
+        self.inbox.install_v2(PROFILE)
+        db=self.journal.database(PROFILE)
+        try:
+            db.execute('DROP TABLE release_profile_gates')
+            db.execute(GATE_SCHEMA.replace(' NOT NULL','').replace(',\n UNIQUE(operation_id, attempt_id)',''))
+            db.execute("INSERT INTO release_profile_gates(state) VALUES(NULL)")
+            db.commit()
+            with self.assertRaisesRegex(ValueError,'PROFILE_GATE_SCHEMA_CHANGED'):
+                self.inbox.disposition_summary(db,PROFILE)
+            with self.assertRaisesRegex(ValueError,'PROFILE_GATE_SCHEMA_CHANGED'):
+                self.store.begin(PROFILE,self.request,self.boot)
+            self.assertIsNone(db.execute('SELECT state FROM release_profile_gates').fetchone()[0])
+        finally:
+            db.close()
 
 
 class AdditiveBindingMigrationTests(InboxTests):

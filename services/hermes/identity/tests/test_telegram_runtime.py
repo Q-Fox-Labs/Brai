@@ -59,7 +59,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':after})) as broker, \
                 patch.object(runtime,'_notice',AsyncMock()):
             self.assertFalse(await runtime.admit_update(update,adapter))
-        broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'})
+        broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'},timeout=None)
         blocked.assert_called_once_with(before,123,7)
         self.assertEqual(snapshot['state'],'binding_changed')
 
@@ -73,7 +73,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':profile()})) as broker, \
                 patch.object(runtime,'_notice',AsyncMock()):
             self.assertFalse(await runtime.admit_update(update,adapter))
-        broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'})
+        broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'},timeout=None)
         self.assertEqual(snapshot['state'],'binding_changed')
 
     async def test_non_private_updates_are_ignored_before_broker_or_notice(self):

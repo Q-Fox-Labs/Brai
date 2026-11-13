@@ -52,6 +52,7 @@ class ReleaseGate:
         original = cls.get_updates
         owned = 'get_updates' in cls.__dict__
         async def gated(instance, *args, **kwargs):
+            cleanup = False
             if instance is bot and self.operation is not None:
                 timeout = kwargs.get('timeout')
                 seconds = timeout.total_seconds() if callable(getattr(timeout, 'total_seconds', None)) else timeout
@@ -63,12 +64,16 @@ class ReleaseGate:
                     await self.unlocked.wait()
             mirror = getattr(self.resolver, 'mirror', None)
             hydrate = getattr(mirror, 'hydrate', None)
-            if instance is bot and callable(hydrate):
+            if instance is bot and callable(hydrate) and not cleanup:
                 await hydrate()
             updates = await original(instance, *args, **kwargs)
             if instance is bot and mirror is not None and updates:
                 # PTB меняет offset после возврата: все profile commits должны успеть раньше.
                 await mirror.capture(updates, bot.id)
+                if cleanup:
+                    # PTB cleanup не помещает возвращённые updates в очередь.
+                    # При отмене остановки следующий poll обязан восстановить их.
+                    mirror.hydrated = False
             return updates
         cls.get_updates = gated
         def restore():
@@ -232,6 +237,8 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             from .profile_release import ProfileRelease
             resolver.profile_release = ProfileRelease(resolver, app)
             mirror.recover = resolver.profile_release.recover_inbox
+            mirror.recover_external = resolver.profile_release.recover_external
+            mirror.app = app
             hooks = {'_brai_identity_preflight': mirror,
                      '_brai_identity_disposition': mirror.finish,
                      '_brai_identity_duplicate': mirror.duplicate,

@@ -115,7 +115,15 @@ class UpdateInbox:
             LEFT JOIN release_inbox_auth AS a ON a.inbox_seq=i.seq WHERE a.inbox_seq IS NULL''').fetchone()[0]
         unfinished = sum(counts[key] for key in ('captured','held','handing_off','unknown','blocked','native_duplicate'))
         gates = db.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='release_profile_gates'").fetchone()[0]
-        active_gates = 0 if not gates else db.execute("SELECT count(*) FROM release_profile_gates WHERE state NOT IN ('busy','resumed')").fetchone()[0]
+        if gates:
+            validate_gate_schema(db)
+            states = {'arming','ready','reopening','resuming','unknown','busy','resumed'}
+            gate_states = [row[0] for row in db.execute('SELECT state FROM release_profile_gates')]
+            if any(state not in states for state in gate_states):
+                raise ValueError('PROFILE_GATE_STATE_UNKNOWN')
+            active_gates = sum(state not in ('busy','resumed') for state in gate_states)
+        else:
+            active_gates = 0
         return {'schemaVersion':2,'counts':counts,'unbound':unbound,
                 'activeGates':active_gates,'rollbackSafe':unfinished == 0 and active_gates == 0}
 
@@ -377,6 +385,24 @@ GATE_SCHEMA = '''CREATE TABLE IF NOT EXISTS release_profile_gates (
 )'''
 
 
+def validate_gate_schema(db):
+    expected = [('seq','INTEGER',0,1),('operation_id','TEXT',1,0),('attempt_id','TEXT',1,0),
+                ('profile_id','TEXT',1,0),('user_id','TEXT',1,0),('uid','INTEGER',1,0),
+                ('target_hash','TEXT',1,0),('worker_pid','INTEGER',1,0),('worker_start','TEXT',1,0),
+                ('boot_id','TEXT',1,0),('state','TEXT',1,0),('replacement_pid','INTEGER',0,0),
+                ('replacement_start','TEXT',0,0)]
+    info = list(db.execute('PRAGMA table_info(release_profile_gates)'))
+    if [(r[1],r[2].upper(),r[3],r[5]) for r in info] != expected:
+        raise ValueError('PROFILE_GATE_SCHEMA_CHANGED')
+    indexes = list(db.execute('PRAGMA index_list(release_profile_gates)'))
+    if not any(row[2] and [column[2] for column in db.execute(
+            'PRAGMA index_info(' + json.dumps(row[1]) + ')')] == ['operation_id','attempt_id']
+            and not row[4] for row in indexes):
+        raise ValueError('PROFILE_GATE_SCHEMA_CHANGED')
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='release_profile_gates'").fetchone():
+        raise ValueError('PROFILE_GATE_SCHEMA_CHANGED')
+
+
 class ProfileGateStore:
     """Root-bound operation receipts внутри того же защищённого журнала профиля."""
     def __init__(self, inbox):
@@ -387,12 +413,7 @@ class ProfileGateStore:
         db = self.inbox._open(profile)
         try:
             db.execute(GATE_SCHEMA)
-            names = [row['name'] for row in db.execute('PRAGMA table_info(release_profile_gates)')]
-            if names != ['seq','operation_id','attempt_id','profile_id','user_id','uid','target_hash',
-                         'worker_pid','worker_start','boot_id','state','replacement_pid','replacement_start']:
-                raise ValueError('PROFILE_GATE_SCHEMA_CHANGED')
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='release_profile_gates'").fetchone():
-                raise ValueError('PROFILE_GATE_SCHEMA_CHANGED')
+            validate_gate_schema(db)
             return db
         except BaseException:
             db.close()

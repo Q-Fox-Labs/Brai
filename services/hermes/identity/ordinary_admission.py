@@ -103,8 +103,9 @@ class Tracker:
 
 class Mirror:
     """Сохранить зарегистрированные Update до возврата всей Telegram-пачки."""
-    def __init__(self, inbox, resolve, *, inventory=None, observe=None, gate_store=None, boot_id=None):
+    def __init__(self, inbox, resolve, *, inventory=None, observe=None, gate_store=None, boot_id=None, transport=None):
         self.inbox = inbox
+        self.transport = transport
         self.resolve = resolve
         self.inventory, self.observe, self.gate_store = inventory, observe, gate_store
         self.boot_id = boot_id
@@ -112,6 +113,10 @@ class Mirror:
         self.hydration_lock = None
         self.rehydrated = {}
         self.recover = None
+        self.recover_external = None
+        self.app = None
+        self.transport_unavailable = []
+        self.transport_blocked = set()
         self.recovery_tasks = {}
         self.snapshots = {}
         self.snapshot_refs = {}
@@ -156,6 +161,61 @@ class Mirror:
             profiles = result.get('profiles') if isinstance(result, dict) else None
             if not isinstance(profiles, list):
                 raise ValueError('INGRESS_HYDRATION_UNAVAILABLE')
+            if self.transport is not None:
+                all_ids = result.get('allProfileIds')
+                if (not isinstance(all_ids,list) or any(not isinstance(value,str) for value in all_ids)
+                        or '00000000-0000-0000-0000-000000000000' in all_ids):
+                    raise ValueError('TRANSPORT_PROFILE_COLLISION')
+            outsiders = []
+            if self.transport is not None:
+                import json
+                from telegram import Update
+                if self.app is None:
+                    raise ValueError('TRANSPORT_RECOVERY_UNAVAILABLE')
+                rows = await asyncio.to_thread(self.transport.pending)
+                for row in rows:
+                    state = row['state']
+                    snapshot = json.loads(row['binding'])
+                    original = snapshot.get('profile') if isinstance(snapshot,dict) else None
+                    original_uid = original.get('uid') if isinstance(original,dict) else None
+                    if state == 'handing_off':
+                        await asyncio.to_thread(self.transport.transition,row['bot_id'],row['update_id'],
+                                                'handing_off','unknown')
+                        state = 'unknown'
+                    if state != 'captured':
+                        self.transport_unavailable.append(row)
+                        if type(original_uid) is int:
+                            self.transport_blocked.add(original_uid)
+                        continue
+                    if str(self.app.bot.id) != row['bot_id']:
+                        raise ValueError('TRANSPORT_BOT_CHANGED')
+                    update = Update.de_json(json.loads(row['payload']),self.app.bot)
+                    actor = str(getattr(getattr(update,'effective_user',None),'id','') or '')
+                    if actor != row['actor_id']:
+                        raise ValueError('TRANSPORT_BINDING_CHANGED')
+                    if snapshot.get('state') == 'unregistered':
+                        outsiders.append((update,snapshot))
+                    elif snapshot.get('state') == 'known':
+                        original = snapshot.get('profile') or {}
+                        candidates = [p for p in profiles if isinstance(p,dict)
+                            and all(p.get(k) == original.get(k) for k in ('uid','profileId','userId'))]
+                        if len(candidates) != 1:
+                            self.transport_unavailable.append(row)
+                            if type(original_uid) is int:
+                                self.transport_blocked.add(original_uid)
+                            continue
+                        fresh = await self.resolve(original.get('telegramId'))
+                        current = fresh.get('profile') if isinstance(fresh,dict) and fresh.get('state') == 'known' else None
+                        if not isinstance(current,dict) or any(current.get(k) != original.get(k) for k in
+                                ('uid','profileId','userId','telegramId','authorTelegramId','role','generation')):
+                            await asyncio.to_thread(self.transport.transition,row['bot_id'],row['update_id'],'captured','blocked')
+                            self.transport_unavailable.append(row)
+                            self.transport_blocked.add(original_uid)
+                            continue
+                        # Recreate a profile row if crash followed the global commit.
+                        await asyncio.to_thread(self.inbox.capture,current,update,self.app.bot.id)
+                    else:
+                        raise ValueError('TRANSPORT_STATE_INVALID')
             found = {}
             for profile in profiles:
                 if (not isinstance(profile, dict) or type(profile.get('uid')) is not int
@@ -203,7 +263,7 @@ class Mirror:
                             await asyncio.to_thread(self.inbox.disposition, profile, item['botId'], item['updateId'],
                                                     'held', operation_id=recovery)
                             item['state'], item['operationId'] = 'held', recovery
-                    if any(item['state'] != 'held' or item['operationId'] != recovery for item in outstanding):
+                    if uid in self.transport_blocked or any(item['state'] != 'held' or item['operationId'] != recovery for item in outstanding):
                         record = {'state':'unknown', 'operation_id':recovery}
                     else:
                         if self.recover is None:
@@ -211,8 +271,20 @@ class Mirror:
                         found[uid] = {'profile':profile, 'record':record, 'recovery':recovery}
                         continue
                 found[uid] = {'profile': profile, 'record': record}
+            if outsiders and self.recover_external is None:
+                raise ValueError('TRANSPORT_RECOVERY_UNAVAILABLE')
             self.rehydrated = found
             self.hydrated = True
+            for update,snapshot in outsiders:
+                key = f'{self.app.bot.id}:{update.update_id}'
+                self.bot_id = self.app.bot.id
+                self.register_snapshot(key,snapshot)
+                task = asyncio.create_task(self.recover_external(update))
+                self.recovery_tasks[key] = task
+                def external_done(done):
+                    if not done.cancelled() and done.exception() is not None:
+                        self.tracker.changed.set()
+                task.add_done_callback(external_done)
             for uid, value in found.items():
                 if 'recovery' in value:
                     task = asyncio.create_task(self.recover(value['profile'], value['recovery']))
@@ -258,6 +330,19 @@ class Mirror:
                             raise ValueError('INGRESS_IDENTITY_UNAVAILABLE')
                         known.append((profile, update))
                     staged.append((update, snapshot))
+                # Global binding precedes every profile insert and Telegram ack.
+                if self.transport is not None:
+                    global_states = await asyncio.to_thread(self.transport.capture_batch, staged, bot_id)
+                    if len(global_states) != len(staged):
+                        raise ValueError('TRANSPORT_CAPTURE_UNAVAILABLE')
+                    filtered = []
+                    for (update, snapshot), state in zip(staged,global_states):
+                        if state in ('binding_changed','blocked','unknown','handing_off'):
+                            snapshot = {'state':'binding_changed'}
+                        filtered.append((update,snapshot))
+                    staged = filtered
+                    known = [(snapshot['profile'],update) for update,snapshot in staged
+                             if snapshot.get('state') == 'known']
                 # Ошибка частичной записи не разрешает updater продвинуть offset.
                 receipts = await asyncio.to_thread(self.inbox.capture_batch, known, bot_id)
                 if not isinstance(receipts, list) or len(receipts) != len(known):
@@ -293,7 +378,9 @@ class Mirror:
     async def _authorize(self, update):
         import asyncio
         snapshot = self.snapshot(f'{self.bot_id}:{update.update_id}')
-        if snapshot.get('state') in ('outside', 'unregistered', 'forbidden'):
+        if snapshot.get('state') == 'unregistered' and self.transport is not None:
+            await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'captured','handing_off')
+        if snapshot.get('state') in ('outside', 'unregistered', 'forbidden', 'binding_changed'):
             return None
         before = snapshot.get('profile')
         if snapshot.get('state') != 'known' or not isinstance(before, dict):
@@ -304,6 +391,8 @@ class Mirror:
                 or any(before.get(key) != after.get(key) for key in
                        ('uid','profileId','userId','telegramId','authorTelegramId','role','generation'))):
             await asyncio.to_thread(self.inbox.markblocked, before, self.bot_id, update.update_id)
+            if self.transport is not None:
+                await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'captured','blocked')
             snapshot['state'] = 'binding_changed'
             raise PermissionError('INGRESS_BINDING_CHANGED')
         return before['uid']
@@ -318,6 +407,8 @@ class Mirror:
             await asyncio.to_thread(self.inbox.disposition, profile, self.bot_id, update.update_id,
                                     'held', operation_id=operation)
             return True
+        if self.transport is not None:
+            await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'captured','handing_off')
         await asyncio.to_thread(self.inbox.claim_for_delivery, profile, self.bot_id, update.update_id,
                                 operation_id=operation)
         return False
@@ -329,9 +420,17 @@ class Mirror:
         import asyncio
         key = f'{self.bot_id}:{update.update_id}'
         snapshot = self.snapshot(key)
+        if snapshot.get('state') == 'unregistered' and self.transport is not None:
+            await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'handing_off','handled')
+            return
+        if snapshot.get('state') == 'outcome_unknown' and self.transport is not None:
+            await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'handing_off','unknown')
+            return
         if snapshot.get('state') != 'known':
             return
         await asyncio.to_thread(self.inbox.markhandled, snapshot['profile'], self.bot_id, update.update_id)
+        if self.transport is not None:
+            await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'handing_off','handled')
         self.tracker.settle(key)
 
     async def accepted(self, event, receipt):
@@ -347,8 +446,12 @@ class Mirror:
             profile = snapshot['profile']
             if receipt.get('accepted') is True:
                 await asyncio.to_thread(self.inbox.markaccepted, profile, self.bot_id, update_id, receipt)
+                terminal = 'accepted'
             else:
                 await asyncio.to_thread(self.inbox.markhandled, profile, self.bot_id, update_id)
+                terminal = 'handled'
+            if self.transport is not None:
+                await asyncio.to_thread(self.transport.transition, self.bot_id, update_id, 'handing_off',terminal)
             self.tracker.settle(key)
 
     async def block_event(self, event):
@@ -360,6 +463,8 @@ class Mirror:
             key = f'{self.bot_id}:{update_id}'
             snapshot = self.snapshot(key)
             await asyncio.to_thread(self.inbox.markblocked, snapshot['profile'], self.bot_id, update_id)
+            if self.transport is not None:
+                await asyncio.to_thread(self.transport.transition, self.bot_id, update_id, 'handing_off','blocked')
             snapshot['state'] = 'binding_changed'
 
     async def duplicate(self, update, key, reason):

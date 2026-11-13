@@ -16,6 +16,29 @@ class ProfileRelease:
         self.store = self.mirror.gate_store
         self.boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         self.tasks = {}
+        self.task_lock = asyncio.Lock()
+        self.reapers = set()
+
+    def _track_task(self, key, binding, task, request):
+        self.tasks[key] = (binding, task)
+        def completed(done):
+            async def release_receipt():
+                if done.cancelled() or done.exception() is not None:
+                    return
+                try:
+                    profile = await self._profile(request['profileId'])
+                    row = await asyncio.to_thread(self.store.status,profile,request,self.boot)
+                    if row is None or row['state'] not in ('ready','busy','resumed','unknown'):
+                        return
+                except Exception:
+                    return
+                async with self.task_lock:
+                    if self.tasks.get(key) == (binding,done):
+                        self.tasks.pop(key,None)
+            reaper = asyncio.create_task(release_receipt())
+            self.reapers.add(reaper)
+            reaper.add_done_callback(self.reapers.discard)
+        task.add_done_callback(completed)
 
     async def _profile(self, ident):
         result = await self.mirror.inventory()
@@ -52,25 +75,35 @@ class ProfileRelease:
     async def try_profile(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime):
         request = self._request(operationId,attemptId,profileId,targetPayloadHash,workerPid,workerStartTime)
         key = (operationId,attemptId)
-        prior = self.tasks.get(key)
-        if prior is None:
-            task = asyncio.create_task(self._try(request))
-            self.tasks[key] = (request,task)
-        else:
-            if prior[0] != request:
-                raise ValueError('PROFILE_GATE_BINDING_CHANGED')
-            task = prior[1]
-            if task.done():
-                return await self.status(**request)
+        async with self.task_lock:
+            prior = self.tasks.get(key)
+            if prior is None:
+                task = asyncio.create_task(self._try_or_status(request))
+                self._track_task(key,request,task,request)
+            else:
+                if prior[0] != request:
+                    raise ValueError('PROFILE_GATE_BINDING_CHANGED')
+                task = prior[1]
+        if task.done():
+            return await self.status(**request)
         return await asyncio.shield(task)
+
+    async def _try_or_status(self, request):
+        profile = await self._profile(request['profileId'])
+        row = await asyncio.to_thread(self.store.status,profile,request,self.boot)
+        if row is not None:
+            return await self.status(**request)
+        return await self._try(request)
 
     async def _try(self, request):
         profile = await self._profile(request['profileId'])
         self.store._binding(profile,request,self.boot)
         uid, op = profile['uid'], request['operationId']
+        if (uid in self.mirror.transport_blocked or (self.mirror.transport is not None
+                and await asyncio.to_thread(self.mirror.transport.blocked_for,uid))):
+            return self._receipt(request,'blocked','transport_input_unknown')
         tracker = self.mirror.tracker
         batch = getattr(self.resolver, 'batch_ownership', None)
-        acquired = False
         try:
             # Проверить SO_PEERCRED до любого busy/ready receipt; до proof проверим повторно.
             await self._peer(profile, request['workerPid'], request['workerStartTime'])
@@ -78,20 +111,19 @@ class ProfileRelease:
                     or batch.busy(uid) or not tracker.try_gate(uid,op)):
                 await asyncio.to_thread(self.store.begin,profile,request,self.boot)
                 peer = await self._peer(profile, request['workerPid'], request['workerStartTime'])
-                result = await peer.call('release.reject_attempt', request)
+                result = await peer.call('release.reject_attempt', request, timeout=None)
                 if (not isinstance(result, dict) or result.get('state') != 'busy'
                         or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId'))):
                     raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
                 await asyncio.to_thread(self.store.transition,profile,request,self.boot,'arming','reopening')
                 await asyncio.to_thread(self.store.transition,profile,request,self.boot,'reopening','busy')
                 return self._receipt(request,'busy','ingress_work')
-            acquired = True
             await asyncio.to_thread(self.store.begin,profile,request,self.boot)
             await asyncio.to_thread(self.mirror.inbox.install_v2,profile)
             rows = await asyncio.to_thread(self.mirror.inbox.unsettled,profile)
             if any(row['state'] != 'held' or row['operationId'] != op for row in rows):
                 peer = await self._peer(profile, request['workerPid'], request['workerStartTime'])
-                result = await peer.call('release.reject_attempt', request)
+                result = await peer.call('release.reject_attempt', request, timeout=None)
                 if (not isinstance(result, dict) or result.get('state') != 'busy'
                         or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId'))):
                     raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
@@ -99,7 +131,7 @@ class ProfileRelease:
                 await self._reopen(profile,request,'reopening','busy')
                 return self._receipt(request,'busy','ingress_work')
             peer = await self._peer(profile, request['workerPid'], request['workerStartTime'])
-            result = await peer.call('release.try', request)
+            result = await peer.call('release.try', request, timeout=None)
             if not isinstance(result,dict) or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId')):
                 raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
             if result.get('state') == 'busy':
@@ -111,11 +143,10 @@ class ProfileRelease:
             await asyncio.to_thread(self.store.transition,profile,request,self.boot,'arming','ready')
             return self._receipt(request,'ready')
         except Exception:
-            if acquired:
-                try:
-                    await asyncio.to_thread(self.store.transition,profile,request,self.boot,'arming','unknown')
-                except Exception:
-                    pass
+            try:
+                await asyncio.to_thread(self.store.transition,profile,request,self.boot,'arming','unknown')
+            except Exception:
+                pass
             return self._receipt(request,'blocked','attempt_unconfirmed')
 
     async def status(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime,
@@ -137,8 +168,11 @@ class ProfileRelease:
                 if any(not row['bound'] or row['state'] in ('unknown', 'blocked', 'handing_off', 'captured')
                        or row['operationId'] != operationId for row in outstanding):
                     raise ValueError('PROFILE_INBOX_UNCONFIRMED')
+                if self.mirror.transport is not None and await asyncio.to_thread(
+                        self.mirror.transport.blocked_for,profile['uid']):
+                    raise ValueError('PROFILE_TRANSPORT_UNCONFIRMED')
                 peer = await self._peer(profile,workerPid,workerStartTime)
-                result = await peer.call('release.try_status',request)
+                result = await peer.call('release.try_status',request,timeout=None)
                 if (not isinstance(result,dict) or result.get('state') != 'ready'
                         or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId'))):
                     raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
@@ -160,7 +194,7 @@ class ProfileRelease:
                 return self._receipt(request,'unknown','ingress_gate_unconfirmed')
             try:
                 peer = await self._peer(profile,workerPid,workerStartTime)
-                result = await peer.call('release.try_status',request)
+                result = await peer.call('release.try_status',request,timeout=None)
                 if (not isinstance(result, dict) or result.get('state') != 'busy'
                         or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId'))):
                     raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
@@ -176,14 +210,15 @@ class ProfileRelease:
         request = self._request(operationId,attemptId,profileId,targetPayloadHash,workerPid,workerStartTime)
         key = (operationId,attemptId,'resume')
         binding = (request,replacementPid,replacementStartTime)
-        prior = self.tasks.get(key)
-        if prior is None:
-            task = asyncio.create_task(self._resume(request,replacementPid,replacementStartTime))
-            self.tasks[key] = (binding,task)
-        else:
-            if prior[0] != binding:
-                raise ValueError('PROFILE_GATE_REPLACEMENT_CHANGED')
-            task = prior[1]
+        async with self.task_lock:
+            prior = self.tasks.get(key)
+            if prior is None:
+                task = asyncio.create_task(self._resume(request,replacementPid,replacementStartTime))
+                self._track_task(key,binding,task,request)
+            else:
+                if prior[0] != binding:
+                    raise ValueError('PROFILE_GATE_REPLACEMENT_CHANGED')
+                task = prior[1]
         return await asyncio.shield(task)
 
     async def _resume(self, request, replacement_pid, replacement_start):
@@ -250,7 +285,18 @@ class ProfileRelease:
                 continue
             async with self.mirror.capture_lock:
                 # Параллельная пачка не может пройти durable capture до открытия gate.
-                if tracker.counts.get(uid,0) or batch.busy(uid):
+                if (self.mirror.pending or tracker.counts.get(uid,0)
+                        or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
+                    continue
+                # Предыдущий SELECT выполнялся в другом потоке и мог устареть,
+                # пока capture завершал транзакцию. Перечитать под тем же lock,
+                # который сериализует запись перед Telegram ack.
+                try:
+                    fresh = await asyncio.to_thread(self.mirror.inbox.held,profile,op)
+                except ValueError:
+                    continue
+                if (fresh or self.mirror.pending or tracker.counts.get(uid,0)
+                        or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
                     continue
                 if expected is not None:
                     await asyncio.to_thread(self.store.transition,profile,request,self.boot,expected,target,
@@ -261,3 +307,13 @@ class ProfileRelease:
     async def recover_inbox(self, profile, operationId):
         """Вернуть только не переданные до crash inputs без повторения unknown."""
         await self._reopen(profile, {'operationId':operationId}, None, None)
+
+    async def recover_external(self, update):
+        """Replay only an original outsider input which was not handed off."""
+        try:
+            await self.app.update_processor.process_update(update,self.app.process_update(update))
+        finally:
+            row = await asyncio.to_thread(self.mirror.transport.observe,self.app.bot.id,update.update_id)
+            if row['state'] == 'handing_off':
+                await asyncio.to_thread(self.mirror.transport.transition,self.app.bot.id,update.update_id,
+                                        'handing_off','unknown')
