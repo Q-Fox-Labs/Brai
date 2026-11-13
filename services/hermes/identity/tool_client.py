@@ -68,7 +68,7 @@ def handle(method, params):
         if not isinstance(result, dict) or not isinstance(result.get('tools'), list):
             raise RuntimeError('Broker tools unavailable')
         tools = result['tools']
-        if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'brai_telegram_link_account', 'brai_telegram_unlink_account', 'publish_file', 'fetch_file') for item in tools):
+        if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'brai_telegram_link_account', 'brai_telegram_unlink_account', 'publish_file', 'fetch_file', 'brai_dev_release') for item in tools):
             raise RuntimeError('Invalid tool catalog')
         role = result.get('role')
         if role not in TOOL_POLICY['roles']:
@@ -98,6 +98,12 @@ def handle(method, params):
         workbook = {'type': 'object', 'properties': {'sheets': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': sheet}}, 'required': ['sheets'], 'additionalProperties': False}
         for name, field, structure in [('create_document_file', 'document', document), ('create_spreadsheet_file', 'workbook', workbook)]:
             client_tools.append({'name': name, 'description': 'Создать и опубликовать файл из структурированных данных без пути, кода и формул. Используй стабильный requestId. Не более 1 МиБ JSON и 20000 ячеек.', 'inputSchema': {'type': 'object', 'properties': {'filename': {'type': 'string', 'minLength': 1, 'maxLength': 180}, 'requestId': {'type': 'string', 'minLength': 1, 'maxLength': 256}, field: structure}, 'required': ['filename', 'requestId', field], 'additionalProperties': False}})
+        if role in ('creator', 'admin') and result.get('devRelease') is True:
+            client_tools.append({'name':'brai_dev_release',
+                'description':'Запустить выпуск точного commit в DEV или проверить состояние по идентификатору операции. При неизвестном результате проверяй тот же идентификатор, не повторяй выпуск.',
+                'inputSchema':{'type':'object','properties':{'action':{'enum':['release','status']},
+                    'requestId':{'type':'string'},'sourceSha':{'type':'string'},'expectedBase':{'type':'string'},
+                    'operationId':{'type':'string'}},'required':['action'],'additionalProperties':False}})
         return {'tools': [*tools, *(item for item in client_tools if role != 'guest' or item['name'] in TOOL_POLICY['guestClient'])]}
     if method == 'tools/call':
         name, arguments = params.get('name'), params.get('arguments', {})
@@ -107,6 +113,17 @@ def handle(method, params):
             operation = {'create_text_file': 'files.create-text', 'read_text_file': 'files.read-text', 'create_document_file': 'files.create-document', 'create_spreadsheet_file': 'files.create-spreadsheet'}[name]
             value = broker_call(operation, arguments)
             return {'content':[{'type':'text','text':value.get('markdown') or json.dumps(value,ensure_ascii=False)}], 'structuredContent':value}
+        if name == 'brai_dev_release':
+            if arguments.get('action') == 'release' and set(arguments) == {'action','requestId','sourceSha','expectedBase'}:
+                pass
+            elif arguments.get('action') == 'status' and set(arguments) == {'action','operationId'}:
+                pass
+            else:
+                raise ValueError('Invalid DEV release request')
+            result = broker_call('dev.release', arguments, timeout=None)
+            if not isinstance(result, dict):
+                raise RuntimeError('DEV release unavailable')
+            return {'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False)}], 'structuredContent':result}
         if name in ('brai_telegram_link_account', 'brai_telegram_unlink_account'):
             link = name == 'brai_telegram_link_account'
             if link:
