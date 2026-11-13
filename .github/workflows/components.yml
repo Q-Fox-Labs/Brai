@@ -1,9 +1,11 @@
-# ABOUTME: Проверяет и собирает активные компоненты из исходников.
+# ABOUTME: Проверяет описания и инструменты компонентов; полный прогон запускается вручную.
 # ABOUTME: Результаты сборки не развёртывают службы и не требуют Codeworks.
 name: Components
 on:
   push:
     branches: [dev, main, 'feature/**', 'hotfix/**', 'codex/**']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,7 +30,11 @@ jobs:
         run: test "$(npm --version)" = '11.19.1'
       - name: Verify component tooling
         run: node --test --test-isolation=none deploy/components/*.test.mjs
+      - name: Validate component graph and documentation
+        run: node deploy/components/cli.mjs plan
       - name: Prepare dependencies
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: npm ci --no-audit --no-fund
       - name: Build, check and package active components
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: node deploy/components/cli.mjs run

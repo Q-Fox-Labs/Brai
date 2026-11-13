@@ -117,6 +117,7 @@ Prepared timer также использует `services/timer/Dockerfile.prepar
 
 ## Связанные материалы
 
+- [DEV_RELEASE.md](DEV_RELEASE.md) — подготовка и выпуск DEV.
 - [ALERTS.md](ALERTS.md).
 - [tests/artifacts-acceptance/README.md](tests/artifacts-acceptance/README.md).
 - [tests/artifacts-acceptance/browser-checklist.md](tests/artifacts-acceptance/browser-checklist.md).
