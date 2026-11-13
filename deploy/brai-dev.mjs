@@ -163,9 +163,10 @@ export async function release({root, source, prepareOnly = false}, ports) {
     if (prepareOnly) return {state:'prepared',releaseId:candidate.releaseId,sourceSha:source,expectedBase,components:selected,candidatePath,timings,durationMs:ports.now()-started};
     const queued = await timed('apply', () => ports.operator('apply', candidatePath));
     if (queued.releaseId !== candidate.releaseId) fail('APPLY_RELEASE_MISMATCH');
-    const accepted = await timed('wait', () => waitForOperation(candidate.releaseId, ports));
-    if (accepted.current?.releaseId !== candidate.releaseId || accepted.operation?.state !== 'accepted') fail('RELEASE_NOT_ACCEPTED');
+    const accepted = await timed('wait', () => waitForOperation(candidate.releaseId, ports, {action:'apply', sourceSha:source}));
+    if (accepted.operation?.state !== 'accepted') fail('RELEASE_NOT_ACCEPTED');
     const result = {releaseId: candidate.releaseId, sourceSha: source, state: 'accepted', components: selected, candidatePath,
+      currentDesiredReleaseId: accepted.current?.releaseId ?? null,
       timings, operatorTimings: accepted.operation?.timings ?? [], durationMs: ports.now() - started};
     try { await ports.saveReport?.(root, candidate.releaseId, result); }
     catch (error) { result.reportError = error.message; }
@@ -208,11 +209,12 @@ export async function preview({root, source, slot, expected}, ports) {
 }
 
 /** Ждёт терминальное состояние точной операции без скрытого срока; прерывание CLI не отменяет root-операцию. */
-export async function waitForOperation(releaseId, ports) {
+export async function waitForOperation(releaseId, ports, {action, sourceSha} = {}) {
   for (;;) {
-    const status = await ports.operator('status');
+    const status = await ports.operator('status', releaseId);
     const operation = status.operation;
     if (operation?.releaseId !== releaseId) fail('OPERATION_CHANGED: inspect brai-dev status');
+    if ((action && operation.action !== action) || (sourceSha !== undefined && operation.sourceSha !== sourceSha)) fail('OPERATION_IDENTITY_MISMATCH: inspect brai-dev status');
     if (['accepted', 'rolled-back'].includes(operation.state)) return status;
     if (['failed', 'recovery-required'].includes(operation.state)) fail(`OPERATION_${operation.state.toUpperCase()}: ${releaseId}: ${operation.error ?? 'inspect status'}`);
     await ports.pause();
@@ -316,9 +318,9 @@ export async function main(args = process.argv.slice(2), ports, root = process.c
     const status = await ports.operator('status'); assertReady(status);
     if (!status.current || status.previous?.releaseId !== options.release) fail('ROLLBACK_RELEASE_NOT_PREVIOUS');
     const queued = await ports.operator('rollback', status.current.releaseId);
-    const result = await waitForOperation(queued.releaseId, ports);
-    if (result.current?.releaseId !== options.release || result.operation?.state !== 'rolled-back') fail('ROLLBACK_NOT_ACCEPTED');
-    return result;
+    const result = await waitForOperation(queued.releaseId, ports, {action:'rollback',sourceSha:status.previous.sourceSha});
+    if (result.operation?.targetReleaseId !== options.release || result.operation?.state !== 'rolled-back') fail('ROLLBACK_NOT_ACCEPTED');
+    return {...result,currentDesiredReleaseId:result.current?.releaseId ?? null};
   }
   if (options.command === 'preview') {
     return preview({root, ...options}, ports);
