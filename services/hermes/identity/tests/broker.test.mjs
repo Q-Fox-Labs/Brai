@@ -12,7 +12,7 @@ const root = resolve(directory, '../../../..');
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'brai-broker-tests-'));
 
 try {
- for (const pattern of ['test_broker.py', 'test_lifecycle.py', 'test_diagnostics.py', 'test_backup_roles.py']) {
+ for (const pattern of ['test_broker.py', 'test_lifecycle.py', 'test_diagnostics.py']) {
   const result = spawnSync('python3', [
     '-B',
     '-m',

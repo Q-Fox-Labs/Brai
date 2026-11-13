@@ -2134,68 +2134,6 @@
           "$ref": "#/components/errors/Unavailable"
         }
       ]
-    },
-    {
-      "name": "backup.status",
-      "description": "Worker UID is authenticated via SO_PEERCRED and current Auth. Only admin/creator; role, owner, path and command arguments are forbidden. Run queues the fixed root-only systemd job; it does not mean cloud success. No automatic replay after unknown outcome.",
-      "paramStructure": "by-name",
-      "params": [],
-      "result": {
-        "name": "status",
-        "schema": {
-          "type": "object",
-          "properties": {
-            "stage": {
-              "type": "string"
-            },
-            "bundle_id": {
-              "type": "string"
-            },
-            "cloud_verified": {
-              "type": "boolean"
-            },
-            "verified_at": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "stage",
-            "cloud_verified"
-          ],
-          "additionalProperties": false
-        }
-      }
-    },
-    {
-      "name": "backup.run",
-      "description": "Worker UID is authenticated via SO_PEERCRED and current Auth. Only admin/creator; role, owner, path and command arguments are forbidden. Run queues the fixed root-only systemd job; it does not mean cloud success. No automatic replay after unknown outcome.",
-      "paramStructure": "by-name",
-      "params": [],
-      "result": {
-        "name": "status",
-        "schema": {
-          "type": "object",
-          "properties": {
-            "stage": {
-              "type": "string"
-            },
-            "bundle_id": {
-              "type": "string"
-            },
-            "cloud_verified": {
-              "type": "boolean"
-            },
-            "verified_at": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "stage",
-            "cloud_verified"
-          ],
-          "additionalProperties": false
-        }
-      }
     }
   ],
   "components": {
