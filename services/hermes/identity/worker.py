@@ -144,9 +144,9 @@ class Worker:
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            self._install_telegram_profile()
             from .native_policy import install
             install(cold_start=self.release.cold_start)
-            self._install_telegram_profile()
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
