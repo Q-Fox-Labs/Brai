@@ -249,6 +249,52 @@ class MirrorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mirror.snapshot('123:1')['profile']['uid'],1001)
 
 class FullAdmissionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_replay_and_concurrent_telegram_redelivery_have_one_effect(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox, ProfileGateStore
+        from identity.profile_release import ProfileRelease
+        import uuid
+        with tempfile.TemporaryDirectory() as directory:
+            global module
+            module=patched_module(directory)
+            profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'u1',
+                     'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'member','generation':1}
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'))
+            bot=Bot('123:abc');bot._bot_user=User(123,'synthetic',True)
+            update=Update.de_json({'update_id':1,'message':{'message_id':1,'date':1,
+                'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+                'text':'synthetic'}},bot)
+            # The first ingress died after fsync but before handing off this update.
+            inbox.capture(profile,update,123)
+            async def inventory(): return {'profiles':[profile]}
+            async def resolve(actor): return {'state':'known','profile':profile}
+            mirror=Mirror(inbox,resolve,inventory=inventory,gate_store=ProfileGateStore(inbox),boot_id=str(uuid.uuid4()))
+            adapter=SimpleNamespace(_update_admission=None,_updates_dispatched_total=0,
+                _seen_update_ids={},_inflight_update_ids={},_brai_identity_preflight=mirror,
+                _brai_identity_disposition=mirror.finish,_brai_identity_duplicate=mirror.duplicate)
+            app=ApplicationBuilder().bot(bot).application_class(module.TelegramApplication,{'adapter':adapter}).build()
+            app._initialized=True
+            resolver=SimpleNamespace(mirror=mirror,batch_ownership=SimpleNamespace(busy=lambda uid:False))
+            owner=ProfileRelease(resolver,app);mirror.recover=owner.recover_inbox
+            entered,finish=asyncio.Event(),asyncio.Event();effects=[]
+            async def handler(value,context):
+                effects.append(value.update_id);entered.set();await finish.wait()
+                await mirror.accepted(SimpleNamespace(_brai_release_updates=[value.update_id]),
+                                      {'accepted':True,'turn_id':'synthetic'})
+            app.add_handler(TypeHandler(Update,handler),group=-100)
+            def record(adapter,key): adapter._seen_update_ids[key]=1
+            with patch.object(module,'_load_receipts',lambda *a:None), patch.object(module,'_record_receipt',record):
+                await mirror.hydrate()
+                await entered.wait()
+                await mirror.capture([update],123)
+                await app.process_update(update)
+                self.assertEqual(effects,[1])
+                finish.set()
+                await mirror.recovery_tasks[1001]
+            self.assertEqual(effects,[1])
+            self.assertNotIn(1001,mirror.tracker.gates)
+            self.assertEqual(inbox.observe(profile,123,1)['state'],'accepted')
+
     async def test_preack_claim_worker_receipt_and_per_profile_gate(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox
