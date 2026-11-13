@@ -2,7 +2,7 @@
 // ABOUTME: Не устанавливает зависимости, не собирает исходники и не включает внешние runtime или данные.
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, statSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
@@ -72,6 +72,23 @@ function collectPackages(root, workspaces) {
   return packages;
 }
 
+function linkPackageFiles(source, destination, ancestors = new Set()) {
+  if (basename(source) === 'node_modules') return;
+  const resolved = realpathSync(source), info = statSync(resolved);
+  if (info.isDirectory()) {
+    if (ancestors.has(resolved)) fail(`PACKAGE_SYMLINK_CYCLE: ${source}`);
+    const next = new Set(ancestors).add(resolved);
+    mkdirSync(destination, { recursive: true });
+    for (const name of readdirSync(resolved).sort(compare)) linkPackageFiles(join(resolved, name), join(destination, name), next);
+  } else if (info.isFile()) {
+    try { linkSync(resolved, destination); }
+    catch (error) {
+      if (error.code === 'EXDEV') fail(`PACKAGE_CROSS_FILESYSTEM: ${source}: prepared dependencies and output must be on the same filesystem`);
+      throw error;
+    }
+  } else fail(`UNSUPPORTED_PACKAGE_FILE: ${source}`);
+}
+
 function copyPackages(root, stage, packages) {
   for (const { key, entry, installed, target } of [...packages.values()].sort((a, b) => compare(a.key, b.key))) {
     const destination = join(stage, key);
@@ -80,7 +97,7 @@ function copyPackages(root, stage, packages) {
       if (!existsSync(join(stage, target, 'package.json'))) fail(`WORKSPACE_RUNTIME_NOT_SELECTED: ${target}/package.json`);
       symlinkSync(relative(dirname(destination), join(stage, target)), destination);
     } else {
-      cpSync(installed, destination, { recursive: true, dereference: true, filter: source => basename(source) !== 'node_modules' });
+      linkPackageFiles(installed, destination);
     }
   }
 }

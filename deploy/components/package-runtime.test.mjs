@@ -2,10 +2,10 @@
 // ABOUTME: Использует небольшие временные репозитории без сети и установки пакетов.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { packageComponent } from './package-runtime.mjs';
+import { packageComponent, verifyPackage } from './package-runtime.mjs';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'brai-package-test-'));
@@ -201,4 +201,35 @@ test('personal documentation is rejected even through a selected parent director
   write('docs/user-agent/usercustom/personal.md','local only');
   component.delivery.files.push('docs/user-agent');
   await assert.rejects(build(), /FORBIDDEN_DELIVERY_FILE: docs\/user-agent\/usercustom/);
+});
+
+
+test('code-only releases share dependency files and detect dependency tampering', async t => {
+  const {root, write, component, build} = fixture(t);
+  const app = {name:'@brai/example', version:'1.0.0', type:'module', dependencies:{dep:'1.0.0'}};
+  write('services/example/package.json', app);
+  write('node_modules/dep/package.json', {name:'dep', version:'1.0.0', type:'module', exports:'./index.js'});
+  write('prepared-dep/index.js', 'export const value = 7;\n');
+  symlinkSync('../../prepared-dep/index.js', join(root, 'node_modules/dep/index.js'));
+  write('package-lock.json', {lockfileVersion:3, packages:{'services/example':app,'node_modules/dep':{version:'1.0.0'}}});
+  component.delivery.files.push('services/example/package.json');
+  component.npm = {workspaces:['services/example']};
+  write('services/example/main.mjs', "import {value} from 'dep'; export const result = value;\n");
+  const first = await build();
+  write('services/example/main.mjs', "import {value} from 'dep'; export const result = value + 1;\n");
+  const second = await build();
+  const source = join(root,'prepared-dep/index.js');
+  const oldDependency = join(first.path,'node_modules/dep/index.js');
+  const newDependency = join(second.path,'node_modules/dep/index.js');
+  const identity = path => {const {dev,ino} = statSync(path); return [dev,ino];};
+  assert.notEqual(first.payloadHash, second.payloadHash);
+  assert.ok(lstatSync(oldDependency).isFile());
+  assert.deepEqual(identity(oldDependency), identity(source));
+  assert.deepEqual(identity(newDependency), identity(source));
+  assert.notDeepEqual(identity(join(first.path,'services/example/main.mjs')), identity(join(second.path,'services/example/main.mjs')));
+  assert.notDeepEqual(identity(join(second.path,'services/example/main.mjs')), identity(join(root,'services/example/main.mjs')));
+  verifyPackage(first.path, 'fixture'); verifyPackage(second.path, 'fixture');
+  writeFileSync(source, 'export const value = 8;\n');
+  assert.throws(() => verifyPackage(first.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
+  assert.throws(() => verifyPackage(second.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
 });
