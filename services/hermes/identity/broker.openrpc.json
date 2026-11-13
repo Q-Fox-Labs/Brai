@@ -54,6 +54,24 @@
       ]
     },
     {
+      "name": "ingress.profiles-strict",
+      "description": "Только ingress: полный перечень active профилей или ошибка при любом недоступном Auth.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {"name": "result", "schema": {"type": "object", "required": ["profiles"],
+        "properties": {"profiles": {"type": "array", "items": {"type": "object"}}}}}
+    },
+    {
+      "name": "ingress.resolve-known",
+      "description": "Только ingress: подтверждённый null Auth отличает незарегистрированный аккаунт от отказа и недоступности.",
+      "paramStructure": "by-name",
+      "params": [
+        {"name": "telegramId", "required": true, "schema": {"type": "string", "pattern": "^[0-9]+$"}}
+      ],
+      "result": {"name": "result", "schema": {"type": "object", "required": ["state"],
+        "properties": {"state": {"enum": ["known", "unregistered", "forbidden"]}, "profile": {"type": "object"}}}}
+    },
+    {
       "name": "identity.resolve",
       "description": "Только trusted ingress. telegramId в результате — фактический связанный аккаунт запроса; authorTelegramId — стабильный автор UID-профиля. Отвязанный аккаунт не проходит свежий Auth.",
       "paramStructure": "by-name",

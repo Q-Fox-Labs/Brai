@@ -93,6 +93,37 @@ class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await gate.status('one'))['state'], 'resumed')
         self.assertEqual(await bot.get_updates(), ['update'])
 
+    async def test_batch_is_durable_before_get_updates_returns(self):
+        entered, commit = asyncio.Event(), asyncio.Event()
+        class RecordedBot:
+            id = 123
+            async def get_updates(self, **kwargs): return ['synthetic']
+        class Mirror:
+            async def capture(self, updates, bot_id):
+                self.values=(updates,bot_id)
+                entered.set()
+                await commit.wait()
+        bot=RecordedBot();mirror=Mirror()
+        gate=ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.resolver=SimpleNamespace(mirror=mirror)
+        gate.install();self.addCleanup(gate.restore)
+        fetching=asyncio.create_task(bot.get_updates())
+        await entered.wait()
+        self.assertFalse(fetching.done())
+        self.assertEqual(mirror.values,(['synthetic'],123))
+        commit.set()
+        self.assertEqual(await fetching,['synthetic'])
+
+    async def test_preack_storage_error_propagates_instead_of_returning_batch(self):
+        class RecordedBot:
+            id=123
+            async def get_updates(self, **kwargs): return ['synthetic']
+        class Mirror:
+            async def capture(self, updates, bot_id): raise OSError('synthetic disk failure')
+        bot=RecordedBot();gate=ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.resolver=SimpleNamespace(mirror=Mirror());gate.install();self.addCleanup(gate.restore)
+        with self.assertRaisesRegex(OSError,'disk failure'): await bot.get_updates()
+
     async def test_resume_before_poll_does_not_wait_for_queue(self):
         bot = Bot()
         gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))

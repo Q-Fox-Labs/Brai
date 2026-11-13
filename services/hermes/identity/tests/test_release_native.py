@@ -215,6 +215,59 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.retirement.acquire())
         self.retirement.release()
 
+    async def test_profile_attempt_caches_busy_then_rechecks_with_new_id(self):
+        profile = str(uuid.uuid4())
+        operation = str(uuid.uuid4())
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        start = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+        args = {'operationId': operation, 'attemptId': first, 'profileId': profile,
+                'targetPayloadHash': 'a' * 64, 'workerPid': os.getpid(), 'workerStartTime': start}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_PROFILE_ID': profile}):
+            self.worker.active['live'] = object()
+            self.assertEqual((await self.release.try_hold(**args))['state'], 'busy')
+            self.assertTrue(self.release.open.is_set())
+            self.worker.active.clear()
+            self.assertEqual((await self.release.try_hold(**args))['state'], 'busy')
+            new = {**args, 'attemptId': second}
+            self.assertEqual((await self.release.try_hold(**new))['state'], 'ready')
+            self.assertEqual((await self.release.try_status(**args))['state'], 'unknown')
+            self.assertEqual((await self.release.try_status(**new))['state'], 'ready')
+            self.assertFalse(self.release.open.is_set())
+            await self.release.resume(operation)
+            self.assertEqual((await self.release.try_status(**new))['state'], 'unknown')
+            following = {**new, 'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4())}
+            self.assertEqual((await self.release.try_hold(**following))['state'], 'ready')
+            await self.release.resume(following['operationId'])
+
+    async def test_profile_attempt_rejects_foreign_process_or_target(self):
+        profile = str(uuid.uuid4())
+        args = {'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4()), 'profileId': profile,
+                'targetPayloadHash': 'a' * 64, 'workerPid': os.getpid(),
+                'workerStartTime': Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_PROFILE_ID': profile}):
+            with self.assertRaises(ValueError): await self.release.try_hold(**{**args, 'workerPid': os.getpid()+1})
+            with self.assertRaises(ValueError): await self.release.try_hold(**{**args, 'workerStartTime': '0'})
+            self.assertEqual((await self.release.try_hold(**args))['state'], 'ready')
+            with self.assertRaises(ValueError): await self.release.try_hold(**{**args, 'targetPayloadHash': 'b'*64})
+            await self.release.resume(args['operationId'])
+
+    async def test_ingress_busy_receipt_never_closes_sources_or_takes_fence(self):
+        profile = str(uuid.uuid4())
+        args = {'operationId': str(uuid.uuid4()), 'attemptId': str(uuid.uuid4()), 'profileId': profile,
+                'targetPayloadHash': 'a' * 64, 'workerPid': os.getpid(),
+                'workerStartTime': Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_PROFILE_ID': profile}):
+            self.assertEqual((await self.release.reject_attempt(**args))['state'], 'busy')
+            self.assertTrue(self.release.open.is_set())
+            self.assertTrue(self.retirement.acquire())
+            self.retirement.release()
+            self.assertEqual((await self.release.try_status(**args))['state'], 'busy')
+            self.assertTrue(self.retirement.brai_hold('foreign'))
+            self.assertEqual((await self.release.try_status(**args))['state'], 'unknown')
+            self.retirement.brai_resume('foreign')
+            await self.release.begin(str(uuid.uuid4()))
+            self.assertEqual((await self.release.try_status(**args))['state'], 'unknown')
+
     async def test_active_turn_keeps_native_child_admission_until_it_finishes(self):
         self.worker.active['turn'] = object()
         self.assertEqual((await self.release.begin('op'))['state'], 'draining')

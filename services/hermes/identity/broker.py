@@ -271,6 +271,41 @@ class Broker:
         uid, profile = matches[0]
         return {'uid': uid, **profile, 'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}
 
+    async def resolve_known(self, telegram_id):
+        """Различить достоверное отсутствие Auth от отказа или сбоя до Telegram ack."""
+        if not isinstance(telegram_id, str) or not telegram_id.isascii() or not telegram_id.isdecimal():
+            raise ValueError('Invalid Telegram identity')
+        async def resolved():
+            answer = await self.control.call('identity.resolve', {'telegramId': telegram_id})
+            if not isinstance(answer, dict) or 'user' not in answer:
+                raise ValueError('Auth identity response unavailable')
+            user = answer['user']
+            if user is None:
+                return None
+            if (not isinstance(user, dict) or any(not isinstance(user.get(key), str) or not user[key]
+                    for key in ('id', 'profileId', 'telegramId', 'status'))):
+                raise ValueError('Auth identity response unavailable')
+            return user
+        user = await resolved()
+        if user is None:
+            return {'state': 'unregistered'}
+        if user['status'] != 'active':
+            return {'state': 'forbidden'}
+        matches = [(uid, profile) for uid, profile in self.profiles().items()
+                   if profile['userId'] == user['id'] and profile['profileId'] == user['profileId']
+                   and str(profile['telegramId']) == user['telegramId'] and profile['status'] == 'active']
+        if len(matches) != 1:
+            raise PermissionError('Profile unavailable')
+        uid, profile = matches[0]
+        checked = await self.authorize(uid)
+        if checked['userId'] != user['id'] or checked['profileId'] != user['profileId']:
+            raise PermissionError('Principal changed')
+        current = await resolved()
+        if current is None or any(current[key] != user[key] for key in ('id', 'profileId', 'telegramId', 'status')):
+            raise PermissionError('Telegram binding changed')
+        return {'state': 'known', 'profile': {'uid': uid, **checked,
+                'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}}
+
     async def publish(self, uid, profile, params):
         """Сохранить внутренний порт публикации через owner-bound snapshot."""
         return await self.files.publish(uid, profile, params)
@@ -444,6 +479,12 @@ class Broker:
             uid = params['uid']
             profile = await self.authorize(uid)
             return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
+        if method == 'ingress.profiles-strict' and ingress and not params:
+            profiles = []
+            for uid, candidate in self.profiles().items():
+                if candidate['status'] == 'active':
+                    profiles.append({'uid': uid, **(await self.authorize(uid))})
+            return {'profiles': profiles}
         if method == 'ingress.profiles' and ingress and not params:
             profiles = []
             for uid, candidate in self.profiles().items():
@@ -465,6 +506,10 @@ class Broker:
                 return {'allowed': True}
             except Exception:
                 return {'allowed': False}
+        if method == 'ingress.resolve-known' and ingress:
+            if set(params) != {'telegramId'}:
+                raise ValueError('Invalid identity request')
+            return await self.resolve_known(params['telegramId'])
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
         if method == 'identity.link-redeem' and ingress:
@@ -828,6 +873,7 @@ PARAMETERS = {
     'authorize': ({'uid'}, set()),
     'dialogues.authorize': (set(), set()),
     'identity.resolve': ({'telegramId'}, set()),
+    'ingress.resolve-known': ({'telegramId'}, set()),
     'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'accountAnswer', 'expectedUid', 'accountRefused'}),
@@ -850,6 +896,7 @@ PARAMETERS = {
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
     'ingress.profiles': (set(), set()),
+    'ingress.profiles-strict': (set(), set()),
     'ingress.delivery-artifact': ({'uid', 'artifactId'}, set()),
     'files.configuration': (set(), set()),
     'files.publish': ({'path', 'requestId'}, set()),

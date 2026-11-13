@@ -115,6 +115,33 @@ async def admit_update(update, adapter):
     telegram = str(getattr(user, 'id', ''))
     if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
         return False
+    resolver = _resolvers.get(id(adapter))
+    mirror = getattr(resolver, 'mirror', None)
+    snapshot = mirror.snapshot(f'{adapter._bot.id}:{update.update_id}') if mirror is not None else None
+    if snapshot is not None and snapshot.get('state') == 'forbidden':
+        return False
+    if snapshot is not None:
+        try:
+            latest = await broker_call('ingress.resolve-known', {'telegramId': telegram})
+            same = isinstance(latest, dict) and latest.get('state') == snapshot.get('state')
+            if same and snapshot.get('state') == 'known':
+                before, after = snapshot['profile'], latest.get('profile')
+                same = isinstance(after, dict) and all(before.get(key) == after.get(key)
+                    for key in ('uid','profileId','userId','telegramId','authorTelegramId','role','generation'))
+            if not same:
+                if snapshot.get('state') == 'known':
+                    await asyncio.to_thread(mirror.inbox.markblocked, snapshot['profile'], adapter._bot.id, update.update_id)
+                snapshot['state'] = 'binding_changed'
+                await _notice(adapter, telegram, message, 'Состояние доступа изменилось. Отправьте сообщение ещё раз после проверки доступа.')
+                return False
+        except Exception:
+            if snapshot.get('state') == 'known':
+                try:
+                    await asyncio.to_thread(mirror.inbox.markblocked, snapshot['profile'], adapter._bot.id, update.update_id)
+                except Exception:
+                    pass
+                snapshot['state'] = 'binding_unknown'
+            return False
     raw = (getattr(message, 'text', '') or '').strip()
     link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
     if link:
@@ -143,8 +170,18 @@ async def admit_update(update, adapter):
         await _control_reply(adapter, telegram, message, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
+        if snapshot is not None and snapshot.get('state') == 'unregistered':
+            # После проверки исходный outsider проходит только onboarding.
+            raise PermissionError('Snapshot was unregistered')
+        if snapshot is not None and snapshot.get('state') != 'known':
+            return False
         profile = await broker_call('identity.resolve', {'telegramId': telegram})
-        resolver = _resolvers.get(id(adapter))
+        if snapshot is not None:
+            before = snapshot['profile']
+            if any(profile.get(key) != before.get(key) for key in ('uid','profileId','userId','telegramId','authorTelegramId','role','generation')):
+                await asyncio.to_thread(mirror.inbox.markblocked, before, adapter._bot.id, update.update_id)
+                snapshot['state'] = 'binding_changed'
+                return False
         if resolver is not None and resolver.journal is not None:
             try:
                 await asyncio.to_thread(resolver.journal.incoming, profile, message, chat, user)
@@ -154,11 +191,14 @@ async def admit_update(update, adapter):
                 if not resolver.journal.chat_admission(profile, route, str(message.message_id)):
                     return False
             except Exception:
+                if snapshot is not None:
+                    snapshot['state'] = 'processing_failed'
                 _logger.warning('BRAI_TELEGRAM_JOURNAL_WRITE_FAILED')
                 return False
         return True
     except Exception:
-        pass
+        if snapshot is not None and snapshot.get('state') != 'unregistered':
+            return False
     # Приглашение принимается только из личного сообщения самого нового пользователя.
     raw = getattr(message, 'text', '') or ''
     invitation = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+(?:invite_)?([A-Za-z0-9_-]{16,128})', raw.strip())
@@ -203,6 +243,29 @@ class Resolver:
     def __init__(self, adapter, runner=None, ledger=None, journal=None):
         self.adapter, self.runner = adapter, runner
         self.journal = journal
+        self.mirror = None
+        if journal is not None:
+            from .ordinary_admission import Mirror
+            from .update_inbox import UpdateInbox, ProfileGateStore
+            inbox = UpdateInbox(journal)
+            async def resolve_known(actor):
+                return await broker_call('ingress.resolve-known', {'telegramId': actor})
+            async def inventory():
+                return await broker_call('ingress.profiles-strict', {})
+            async def observe(profile):
+                reader, writer = await asyncio.open_unix_connection(profile['workerSocket'])
+                try:
+                    sock = writer.get_extra_info('socket')
+                    pid, uid, _ = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                    if uid != profile['uid']:
+                        raise PermissionError('Worker UID changed')
+                    stat = Path(f'/proc/{pid}/stat').read_text()
+                    return pid, stat.rsplit(')', 1)[1].split()[19]
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+            self.mirror = Mirror(inbox, resolve_known, inventory=inventory, observe=observe,
+                                 gate_store=ProfileGateStore(inbox))
         self.bridges, self.turns = {}, {}
         self.ledger = ledger if ledger is not None else RouteLedger()
         self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
@@ -378,6 +441,8 @@ class Resolver:
         if self.journal is not None:
             self.journal.routes[str(profile['telegramId'])] = profile
         bridge = self._account_bridge(profile)
+        if self.mirror is not None:
+            bridge.input_receipt = self.mirror.accepted
         if self.journal is not None:
             bridge.chat_state = lambda route: self.journal.chat_state(profile, route)
             bridge.chat_admission = lambda route, mid: self.journal.chat_admission(profile, route, mid)
@@ -391,6 +456,27 @@ class Resolver:
                 telegram_api=lambda owner, method, payload, scope_id: self.telegram_api(binding, owner, method, payload, scope_id),
                 require_scope=True)
         return bridge
+
+    async def input_filtered(self, event):
+        if self.mirror is not None:
+            await self.mirror.accepted(event, {'accepted': False})
+
+    async def input_blocked(self, event):
+        if self.mirror is not None:
+            await self.mirror.block_event(event)
+
+    async def validate_event_binding(self, event):
+        """Recheck the original Auth snapshot after native debounce or media batching."""
+        binding = getattr(event, '_brai_release_binding', None)
+        if not isinstance(binding, tuple) or len(binding) != 7:
+            raise PermissionError('Ingress profile binding unavailable')
+        resolved = await broker_call('ingress.resolve-known', {'telegramId':binding[3]})
+        profile = resolved.get('profile') if isinstance(resolved, dict) and resolved.get('state') == 'known' else None
+        current = None if not isinstance(profile, dict) else tuple(profile.get(key) for key in
+            ('uid','profileId','userId','telegramId','authorTelegramId','role','generation'))
+        if current != binding:
+            await self.input_blocked(event)
+            raise PermissionError('Ingress profile binding changed')
 
     def _account_bridge(self, profile):
         """Закрепить единственный канал worker за стабильным владельцем UID."""
@@ -763,6 +849,16 @@ class Resolver:
             raise PermissionError('Unsupported interactive update')
         if not query_id or len(query_id) > 256:
             raise PermissionError('Invalid interactive query')
+        if getattr(self, 'mirror', None) is not None:
+            snapshot = self.mirror.snapshot(f'{self.adapter._bot.id}:{update.update_id}')
+            before = snapshot.get('profile')
+            if (snapshot.get('state') != 'known' or not isinstance(before, dict)
+                    or any(profile.get(key) != before.get(key) for key in
+                           ('uid','profileId','userId','telegramId','authorTelegramId','role','generation'))):
+                if snapshot.get('state') == 'known' and isinstance(before, dict):
+                    await asyncio.to_thread(self.mirror.inbox.markblocked, before, self.adapter._bot.id, update.update_id)
+                snapshot['state'] = 'binding_changed'
+                raise PermissionError('Interactive binding changed')
         return profile, route, query_id, kind, generation
 
     async def interactive_admit(self, update):
@@ -791,6 +887,9 @@ class Resolver:
                                 'actor_telegram_id': str(profile['telegramId']), 'chat_generation': generation})
         if not isinstance(result, dict) or result.get('accepted') is not True:
             raise PermissionError('Interactive dispatch unconfirmed')
+        if self.mirror is not None:
+            from types import SimpleNamespace
+            await self.mirror.accepted(SimpleNamespace(_brai_release_updates=[update.update_id]), result)
         return result
 
     async def telegram_api(self, profile, owner, method, payload, scope_id):

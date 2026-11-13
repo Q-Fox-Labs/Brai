@@ -670,6 +670,285 @@
       }
     },
     {
+      "name": "release.try",
+      "paramStructure": "by-name",
+      "summary": "Удержать только свободный worker с exact привязкой попытки.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "attemptId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "targetPayloadHash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "workerPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "workerStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "attemptId",
+            "profileId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "attemptId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "busy",
+                "ready",
+                "blocked",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.reject_attempt",
+      "paramStructure": "by-name",
+      "summary": "Прочитать решение exact попытки без повторного действия.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "attemptId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "targetPayloadHash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "workerPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "workerStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "attemptId",
+            "profileId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "attemptId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "busy",
+                "ready",
+                "blocked",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.try_status",
+      "paramStructure": "by-name",
+      "summary": "Прочитать решение exact попытки без повторного действия.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "attemptId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "targetPayloadHash",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "workerPid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "workerStartTime",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "attemptId",
+            "profileId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "attemptId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "busy",
+                "ready",
+                "blocked",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "release.begin",
       "paramStructure": "by-name",
       "summary": "Закрыть допуск источников и дождаться завершения принятой работы.",

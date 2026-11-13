@@ -388,6 +388,9 @@ class InteractiveProvenanceTest(unittest.IsolatedAsyncioTestCase):
                               edit_message_reply_markup=AsyncMock(return_value={'message_id': 200, 'chat': {'id': 456}}),
                               answer_callback_query=AsyncMock(return_value=True))
         resolver = Resolver(SimpleNamespace(_bot=bot), journal=journal)
+        # These tests exercise legacy presentation provenance without the
+        # Telegram polling/mirror fixture (covered separately).
+        resolver.mirror = None
         self.addCleanup(resolver.ledger.close)
         resolver.ledger.admit(profile, ('456', ''), {})
         resolver.ledger.record(profile, ('456', ''), 200)

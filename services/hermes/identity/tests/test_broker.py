@@ -707,6 +707,56 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 await self.broker.publish(WORKER_UID, self.profile, params)
         self.assertFalse(any(method == "artifacts.publish" for method, _params, _timeout in self.control.calls[before:]))
 
+    async def test_strict_profile_inventory_fails_instead_of_hiding_auth_error(self):
+        result = await self.broker.call(INGRESS_UID, 'ingress.profiles-strict', {})
+        self.assertEqual(result['profiles'][0]['uid'], WORKER_UID)
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'ingress.profiles-strict', {})
+        with mock.patch.object(self.control, 'call', side_effect=PermissionError('synthetic Auth outage')):
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'ingress.profiles-strict', {})
+
+    async def test_preack_identity_distinguishes_null_inactive_alias_and_failure(self):
+        params = {'telegramId': '333444'}
+        self.control.aliases['333444'] = self.profile['telegramId']
+        receipt = await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params)
+        self.assertEqual(receipt['state'], 'known')
+        self.assertEqual(receipt['profile']['uid'], WORKER_UID)
+        self.assertEqual(receipt['profile']['telegramId'], '333444')
+        self.assertEqual(receipt['profile']['authorTelegramId'], self.profile['telegramId'])
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'ingress.resolve-known', params)
+        with self.assertRaises(ValueError):
+            await self.broker.call(INGRESS_UID, 'ingress.resolve-known', {**params, 'extra': True})
+        async def null(*args, **kwargs): return {'user': None}
+        with mock.patch.object(self.control, 'call', side_effect=null):
+            self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params), {'state':'unregistered'})
+        async def inactive(*args, **kwargs):
+            return {'user': {'id':'user', 'profileId':'profile', 'telegramId':'111222', 'status':'blocked'}}
+        with mock.patch.object(self.control, 'call', side_effect=inactive):
+            self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params), {'state':'forbidden'})
+        for answer in ({}, {'user': {}}, {'user': 'bad'}):
+            with mock.patch.object(self.control, 'call', return_value=answer):
+                with self.assertRaises(ValueError):
+                    await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params)
+        with mock.patch.object(self.control, 'call', side_effect=PermissionError('synthetic outage')):
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params)
+
+    async def test_preack_identity_rechecks_alias_after_authorization(self):
+        initial = {'id':self.profile['userId'], 'profileId':self.profile['profileId'],
+                   'telegramId':self.profile['telegramId'], 'status':'active'}
+        changed = {**initial, 'status':'blocked'}
+        async def control(method, params, timeout=35):
+            if method == 'identity.resolve':
+                control.reads += 1
+                return {'user': initial if control.reads == 1 else changed}
+            return {'userId':initial['id'], 'profileId':initial['profileId'], 'role':'user'}
+        control.reads = 0
+        with mock.patch.object(self.control, 'call', side_effect=control):
+            with self.assertRaisesRegex(PermissionError, 'binding changed'):
+                await self.broker.call(INGRESS_UID, 'ingress.resolve-known', {'telegramId':'111222'})
+
     async def test_profile_inventory_is_ingress_only_and_keeps_stable_owner(self):
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, 'ingress.profiles', {})

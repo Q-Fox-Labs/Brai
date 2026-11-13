@@ -969,3 +969,128 @@
              await asyncio.sleep(interval)
 
      @staticmethod
+--- a/plugins/platforms/telegram/update_admission.py
++++ b/plugins/platforms/telegram/update_admission.py
+@@ -101,0 +102 @@
++    deferred: bool = False
+@@ -190,0 +192 @@
++    _brai_identity_admission_protocol = 1
+@@ -274,0 +277,4 @@
++        disposition = getattr(self.adapter, '_brai_identity_disposition', None)
++        if callable(disposition):
++            disposition(claim.key, {'deferred': claim.deferred, 'accepted': claim.accepted,
++                                    'completed': claim.completed, 'failed': claim.failed})
+@@ -276 +282 @@
+-        if claim.accepted or (claim.completed and not claim.failed):
++        if not claim.deferred and (claim.accepted or (claim.completed and not claim.failed)):
+@@ -297,0 +304,5 @@
++            duplicate = getattr(self.adapter, '_brai_identity_duplicate', None)
++            if duplicate is not None:
++                if not callable(duplicate):
++                    raise RuntimeError('BRAI_DUPLICATE_UNAVAILABLE')
++                await duplicate(update, key, 'seen' if key in seen else 'pending')
+@@ -304,0 +316,13 @@
++            gate = getattr(self.adapter, '_brai_identity_preflight', None)
++            if gate is not None:
++                if not callable(getattr(gate, 'enter', None)) or not callable(getattr(gate, 'classify', None)):
++                    raise RuntimeError('BRAI_PREFLIGHT_UNAVAILABLE')
++                ticket = gate.enter(claim.key, update)
++                deferred = await gate.classify(ticket, update)
++                if type(deferred) is not bool:
++                    raise RuntimeError('BRAI_PREFLIGHT_INVALID')
++                if deferred:
++                    if claim.owners != 1 or claim.accepted or claim.completed:
++                        raise RuntimeError('BRAI_PREFLIGHT_LATE')
++                    claim.deferred = True
++                    return
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -530,0 +531 @@
++    _brai_identity_batch_protocol = 1
+@@ -6595,0 +6597,4 @@
++        hook = getattr(self, "_brai_identity_text_batch", None)
++        previous = dict(self._pending_text_batch_tasks) if callable(hook) else None
++        if previous is not None:
++            hook(event, previous, "before")
+@@ -6596,0 +6602,2 @@
++        if previous is not None:
++            hook(event, previous, "after")
+@@ -6694,0 +6702,3 @@
++        hook = getattr(self, "_brai_identity_merge_batch", None)
++        if callable(hook):
++            hook(existing, event)
+@@ -6712 +6722,5 @@
+-        self._pending_photo_batch_tasks[batch_key] = asyncio.create_task(self._flush_photo_batch(batch_key))
++        task = asyncio.create_task(self._flush_photo_batch(batch_key))
++        self._pending_photo_batch_tasks[batch_key] = task
++        hook = getattr(self, "_brai_identity_track_batch", None)
++        if callable(hook):
++            hook(task, event)
+@@ -6951 +6965,5 @@
+-        self._media_group_tasks[media_group_id] = asyncio.create_task(self._flush_media_group_event(media_group_id))
++        task = asyncio.create_task(self._flush_media_group_event(media_group_id))
++        self._media_group_tasks[media_group_id] = task
++        hook = getattr(self, "_brai_identity_track_batch", None)
++        if callable(hook):
++            hook(task, event)
+@@ -7208 +7226 @@
+-        return MessageEvent(
++        event = MessageEvent(
+@@ -7213,0 +7232,4 @@
++        hook = getattr(self, "_brai_identity_tag_event", None)
++        if callable(hook):
++            hook(event, update_id)
++        return event
+--- a/plugins/platforms/telegram/telegram_held_inbound.py
++++ b/plugins/platforms/telegram/telegram_held_inbound.py
+@@ -16,0 +17 @@
++    _brai_identity_held_protocol = 1
+@@ -46,0 +48,4 @@
++            preserve = getattr(self, "_brai_identity_preserve_held", None)
++            if callable(preserve):
++                preserve(event, where)
++                return
+@@ -62 +67 @@
+-        while len(held) >= max_n:
++        while len(held) >= max_n and not callable(getattr(self, "_brai_identity_preserve_held", None)):
+@@ -106,3 +111,8 @@
+-                n = len(held)
+-                held.clear()
+-                logger.warning("[Telegram] Redispatch aborted; discarded %d held inbound under non-retryable fatal", n)
++                preserve = getattr(self, "_brai_identity_preserve_held", None)
++                if callable(preserve):
++                    for event in held:
++                        preserve(event, "redispatch-fatal")
++                else:
++                    n = len(held)
++                    held.clear()
++                    logger.warning("[Telegram] Redispatch aborted; discarded %d held inbound under non-retryable fatal", n)
+@@ -113,0 +124,3 @@
++        hook = getattr(self, "_brai_identity_take_held", None)
++        if callable(hook):
++            hook(events)
+@@ -118,0 +132,8 @@
++                can_redispatch = getattr(self, "_brai_identity_can_redispatch", None)
++                if callable(can_redispatch) and not can_redispatch(event):
++                    self._rehold_from(events, idx, "redispatch-unknown")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-unknown")
++                    allow_followup_schedule = False
++                    return
+@@ -120,0 +142,3 @@
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-interrupted")
+@@ -123,0 +148,3 @@
++                    hook = getattr(self, "_brai_identity_finish_held", None)
++                    if callable(hook):
++                        hook(event)
+@@ -125,0 +153,3 @@
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-cancelled")
+@@ -132,0 +163,3 @@
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-failed")

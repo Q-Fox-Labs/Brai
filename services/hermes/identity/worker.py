@@ -104,7 +104,8 @@ class Worker:
 
         peer = Peer(reader, writer, {'health': check_health, 'dispatch': primary(self.dispatch),
                     'cancel': primary(self.cancel), 'interactive': primary(self.interactive),
-                    'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin),
+                    'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin), 'release.try': primary(self.release.try_hold),
+                    'release.try_status': primary(self.release.try_status), 'release.reject_attempt': primary(self.release.reject_attempt),
                     'release.status': primary(self.release.status), 'release.resume': primary(self.release.resume)})
         reading = asyncio.create_task(peer.run())
         claimed_wait = asyncio.create_task(claimed.wait())
