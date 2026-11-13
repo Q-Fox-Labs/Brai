@@ -107,6 +107,8 @@ class ReleaseGate:
         """Сообщить границу транспорта; неподтверждённые worker блокируют release."""
         from .ipc import RpcError
         self._validate(operationId)
+        if self.operation is None:
+            return {'operationId': operationId, 'state': 'resumed', 'reason': None}
         if self.operation != operationId:
             raise RpcError(-32602, 'Release operation does not own ingress')
         if self.drain is None or not self.drain.done():
@@ -137,6 +139,8 @@ class ReleaseGate:
         """Снять gate только владельцу операции; не отменять текущую обработку."""
         from .ipc import RpcError
         self._validate(operationId)
+        if self.operation is None:
+            return {'operationId': operationId, 'state': 'resumed', 'reason': None}
         if self.operation != operationId:
             raise RpcError(-32602, 'Release operation does not own ingress')
         async with self.lock:

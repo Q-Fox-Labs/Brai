@@ -81,6 +81,18 @@ class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(normal, return_exceptions=True)
         await gate.resume('one')
 
+    async def test_open_gate_probe_and_repeated_resume_are_idempotent(self):
+        bot = Bot()
+        gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.install()
+        self.addCleanup(gate.restore)
+        self.assertEqual((await gate.status('one'))['state'], 'resumed')
+        await gate.begin('one')
+        self.assertEqual((await gate.resume('one'))['state'], 'resumed')
+        self.assertEqual((await gate.resume('one'))['state'], 'resumed')
+        self.assertEqual((await gate.status('one'))['state'], 'resumed')
+        self.assertEqual(await bot.get_updates(), ['update'])
+
     async def test_resume_before_poll_does_not_wait_for_queue(self):
         bot = Bot()
         gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
