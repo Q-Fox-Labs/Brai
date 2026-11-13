@@ -45,7 +45,7 @@ function copyDelivery(root, stage, key) {
     const destination = join(stage, key);
     mkdirSync(dirname(destination), { recursive: true });
     cpSync(source, destination);
-    chmodSync(destination, info.mode & 0o777);
+    chmodSync(destination, info.mode & 0o755);
   } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
 }
 

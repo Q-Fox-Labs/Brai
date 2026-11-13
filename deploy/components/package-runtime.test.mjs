@@ -47,6 +47,21 @@ test('deterministic payloads preserve layout and mode; existing payload is verif
   assert.match(readFileSync(join(executable.path, 'services/example/main.mjs'), 'utf8'), /value = 0/);
 });
 
+test('first-party delivery removes group and other write access without changing source', async t => {
+  const {root, build} = fixture(t);
+  const source = join(root, 'services/example/main.mjs');
+  chmodSync(source, 0o664);
+  const regular = await build();
+  const file = join(regular.path, 'services/example/main.mjs');
+  assert.equal(statSync(source).mode & 0o777, 0o664);
+  assert.equal(statSync(file).mode & 0o777, 0o644);
+  assert.equal(regular.files.find(item => item.path === 'services/example/main.mjs').mode, 0o644);
+  chmodSync(source, 0o775);
+  const executable = await build();
+  assert.equal(statSync(source).mode & 0o777, 0o775);
+  assert.equal(statSync(join(executable.path, 'services/example/main.mjs')).mode & 0o777, 0o755);
+});
+
 test('npm closure preserves workspace-local and nested lock paths and omits dev packages', async t => {
   const { write, component, build } = fixture(t);
   const manifest = { name: '@brai/example', version: '1.0.0', type: 'module', dependencies: { outer: '1.0.0' }, devDependencies: { unrelated: '1.0.0' } };
