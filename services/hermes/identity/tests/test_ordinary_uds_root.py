@@ -30,7 +30,8 @@ def synthetic_worker(path, control):
         async def release_resume(operationId):
             state['effect']+=1
             control.send(('effect',state['effect']))
-            await asyncio.to_thread(control.recv)
+            if state['effect'] == 1:
+                await asyncio.to_thread(control.recv)
             return {'operationId':operationId,'state':'resumed'}
         async def serve(reader,writer):
             try:
