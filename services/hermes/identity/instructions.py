@@ -33,8 +33,8 @@ def read_context(root, skills_root=None):
             + '\n\n'.join(texts) + '\n[Конец системных инструкций Brai]\n\n')
 
 
-def system_context():
-    """Прочитать одно неизменяемое поколение и текущие личные настройки."""
+def selected_generation():
+    """Вернуть только закреплённое Root поколение для одного чтения."""
     current = ROOT / 'current'
     for item in (ROOT, *ROOT.parents):
         info = item.lstat()
@@ -47,6 +47,15 @@ def system_context():
     if not re.fullmatch(r'\.generations/[0-9a-f]{64}', target):
         raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
     generation = ROOT / target
+    info = generation.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
+    return generation
+
+
+def system_context():
+    """Прочитать одно неизменяемое поколение и текущие личные настройки."""
+    generation = selected_generation()
     skills_root = generation / 'skills'
     for path in [generation / relative for relative in FILES] + [skills_root / SKILL]:
         for item in (path, *path.parents):

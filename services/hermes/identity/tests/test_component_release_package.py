@@ -27,13 +27,15 @@ class ReleasePackageTest(unittest.TestCase):
     def test_system_instructions_and_all_public_skills_are_packaged_and_fingerprinted(self):
         component=json.loads(COMPONENT.read_text())
         skill_root='docs/user-agent/instructions/hermes/skills'
+        workflow_root='docs/user-agent/instructions/skills/brai-task-workflows'
         self.assertIn(skill_root,component['delivery']['files'])
+        self.assertIn(workflow_root,component['delivery']['files'])
         spec=importlib.util.spec_from_file_location('hermes_instruction_contract',ROOT/PREFIX/'instructions.py')
         contract=importlib.util.module_from_spec(spec);spec.loader.exec_module(contract)
         mandatory={'docs/user-agent/instructions/context.md',
                    *('docs/user-agent/instructions/hermes/'+name for name in contract.FILES if name!='context.md'),
                    skill_root+'/'+contract.SKILL}
-        tracked=subprocess.run(['git','-C',str(ROOT),'ls-files','-z','--',skill_root],check=True,capture_output=True).stdout
+        tracked=subprocess.run(['git','-C',str(ROOT),'ls-files','-z','--',skill_root,workflow_root],check=True,capture_output=True).stdout
         skills={name.decode() for name in tracked.split(b'\0') if name}
         self.assertIn(skill_root+'/'+contract.SKILL,skills)
         graph=(ROOT/'deploy/components/graph.mjs').as_uri()
@@ -46,6 +48,7 @@ class ReleasePackageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             shutil.copytree(ROOT/skill_root,root/skill_root)
+            shutil.copytree(ROOT/workflow_root,root/workflow_root)
             for path in required_files:
                 dest=root/path;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/path,dest)
             script='''const {packageComponent}=await import(process.argv[1]);
@@ -54,7 +57,7 @@ const component={id:'hermes-instructions-proof',directory:'services/hermes',
 const result=await packageComponent(process.argv[2],component,'tmp/out');
 process.stdout.write(JSON.stringify({path:result.path,files:result.files}));'''
             built=subprocess.run(['node','--input-type=module','-e',script,(ROOT/'deploy/components/package-runtime.mjs').as_uri(),
-                                  str(root),json.dumps([skill_root,*required_files])],check=True,text=True,capture_output=True)
+                                  str(root),json.dumps([skill_root,workflow_root,*required_files])],check=True,text=True,capture_output=True)
             result=json.loads(built.stdout);files={row['path'] for row in result['files']}
             self.assertTrue((skills | mandatory) <= files)
             self.assertFalse(any('usercustom' in path.split('/') for path in files))

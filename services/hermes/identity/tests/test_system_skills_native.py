@@ -72,7 +72,8 @@ class NativeSystemSkillsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/run', prefix='brai-skill-test-') as directory:
             root = Path(directory)
             root.chmod(0o755)
-            system, bundled = root / 'system', root / 'bundled'
+            stable, bundled = root / 'stable', root / 'bundled'
+            system = stable / '.generations' / ('a' * 64) / 'skills'
             for base, relative, text in [(system, 'creative/common', 'System common'),
                                          (bundled, 'builtin', 'Bundled common')]:
                 path = base / relative / 'SKILL.md'
@@ -81,7 +82,10 @@ class NativeSystemSkillsTests(unittest.TestCase):
                 path.chmod(0o644)
             for directory in (system, bundled, *(path for path in root.rglob('*') if path.is_dir())):
                 directory.chmod(0o755)
-            policy.SYSTEM_SKILLS, policy.BUNDLED_SKILLS = system, bundled
+            (stable / 'current').symlink_to('.generations/' + 'a' * 64)
+            from identity import instructions
+            instructions.ROOT = policy.SYSTEM_SKILLS = stable
+            policy.BUNDLED_SKILLS = bundled
             users = []
             for number, uid in enumerate((62001, 62002)):
                 home = root / ('user-' + str(number))
@@ -152,14 +156,15 @@ import json, os, sys
 from pathlib import Path
 from identity import skills as policy
 root=Path(sys.argv[1]); mode=sys.argv[2]
-policy.SYSTEM_SKILLS=root/'shared'; policy.BUNDLED_SKILLS=root/'bundled'
+from identity import instructions
+instructions.ROOT=policy.SYSTEM_SKILLS=root/'stable'; policy.BUNDLED_SKILLS=root/'bundled'
 policy.install_policy()
 from tools import skill_manager_tool as manager, skills_tool as view
 home=Path(os.environ['HERMES_HOME']); personal=home/'usercustom/userdata/skills'
 def manage(**kw): return json.loads(manager.skill_manage(**kw))
 def load(name='common'):return json.loads(view._skill_view_with_bump({'name':name},task_id='same-task'))
 if mode=='seed':
-    before=(root/'shared/category/common/SKILL.md').read_bytes()
+    before=(root/'stable/current/skills/category/common/SKILL.md').read_bytes()
     for name in ['common','category/common','builtin']:
         for action in ['create','edit','patch','delete','write_file','remove_file']:
             result=manage(action=action,name=name,content='replace',old_string='Base',new_string='attack',file_path='references/x.md',file_content='attack')
@@ -197,7 +202,7 @@ if mode=='seed':
     assert not load()['success']
     lesson.unlink();lesson.write_bytes(saved)
     assert (root/'outside.txt').read_text()=='untouched'
-    assert (root/'shared/category/common/SKILL.md').read_bytes()==before
+    assert (root/'stable/current/skills/category/common/SKILL.md').read_bytes()==before
 elif mode=='recall':
     assert 'PERSONAL-74' in load()['content']
     assert 'personal_addition' in load()
@@ -213,9 +218,10 @@ print(mode+'-ok')
         with tempfile.TemporaryDirectory(dir='/run', prefix='brai-personal-skills-') as directory:
             root=Path(directory)
             root.chmod(0o755)
-            for base, rel in [('shared','category/common'), ('bundled','builtin')]:
+            for base, rel in [('stable/.generations/'+'a'*64+'/skills','category/common'), ('bundled','builtin')]:
                 p=root/base/rel/'SKILL.md'; p.parent.mkdir(parents=True)
                 p.write_text('---\nname: '+p.parent.name+'\ndescription: Shared fixture\n---\nBase rule')
+            (root/'stable/current').symlink_to('.generations/'+'a'*64)
             (root/'outside.txt').write_text('untouched')
             for name in ['alice','bob']:
                 home=root/name; home.mkdir()

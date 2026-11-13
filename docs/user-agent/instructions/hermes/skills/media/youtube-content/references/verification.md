@@ -4,7 +4,7 @@
 
 ## Exact CLI
 
-Invoke through the Hermes `terminal` tool with `python SKILL_DIR/scripts/video_workflow.py` followed by:
+Invoke through the Hermes `terminal` tool with `python ${HERMESCUSTOM_ROOT}/skill-scripts/media/youtube-content/scripts/video_workflow.py` followed by:
 
 - `info URL`
 - `links FILE`

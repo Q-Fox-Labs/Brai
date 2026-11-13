@@ -37,6 +37,8 @@ class SystemTests(unittest.TestCase):
         package.skill_utils = utils
         with patch.dict(sys.modules, agent=package), patch.dict(os.environ, HERMES_HOME=str(self.root)), \
              patch.object(system_skills, 'protected_root'), patch.object(system_skills, 'install_personal_policy'), \
+             patch.object(system_skills, 'system_root', return_value=system_skills.SYSTEM_SKILLS), \
+             patch.object(system_skills, 'system_relative', side_effect=lambda path: Path('_root') if Path(path)==system_skills.SYSTEM_SKILLS/'_root' else None), \
              patch.object(system_skills, 'system_aliases', side_effect=lambda value: set(aliases)):
             system_skills.install_policy()
             roots = utils.get_skill_search_roots(self.root / 'malicious')
@@ -54,6 +56,38 @@ class SystemTests(unittest.TestCase):
         self.root.chmod(0o777)
         with self.assertRaises(PermissionError):
             system_skills.protected_root(self.root)
+
+    def test_skill_discovery_tracks_one_verified_generation_and_stable_personal_id(self):
+        stable=self.root/'stable';bundled=self.root/'bundled';bundled.mkdir()
+        roots=[]
+        for ident, names in [('a'*64, ('old','shared')),('b'*64, ('new','shared'))]:
+            generation=stable/'.generations'/ident/'skills';roots.append(generation)
+            for name in names:
+                path=generation/name/'SKILL.md';path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text('---\nname: '+name+'\n---\n'+ident)
+        current=stable/'current';current.symlink_to('.generations/'+'a'*64)
+        utils=NS(get_disabled_skill_names=lambda platform=None: {'old','new','shared','private'},
+                 is_disabled_entry=lambda entry,disabled: entry['name'] in disabled,
+                 ESSENTIAL_SKILLS=frozenset({'base'}),
+                 iter_skill_index_files=lambda root,filename: sorted(root.rglob(filename)),
+                 parse_frontmatter=lambda text: ({'name':text.split('\n')[1].split(': ',1)[1]},''))
+        package=ModuleType('agent');package.skill_utils=utils
+        original=Path.lstat
+        def trusted(path):
+            info=original(path);return NS(st_uid=0,st_mode=info.st_mode & ~0o022,st_size=info.st_size)
+        with patch.dict(sys.modules,agent=package),patch.dict(os.environ,HERMES_HOME=str(self.root)), \
+             patch.object(system_skills,'SYSTEM_SKILLS',stable),patch.object(system_skills,'BUNDLED_SKILLS',bundled), \
+             patch.object(instructions,'ROOT',stable),patch.object(Path,'lstat',trusted), \
+             patch.object(system_skills,'install_personal_policy'):
+            system_skills.install_policy()
+            self.assertEqual(utils.get_skill_search_roots()[0][1],roots[0])
+            self.assertEqual(system_skills.system_relative(roots[0]/'shared').as_posix(),'shared')
+            self.assertEqual(utils.get_disabled_skill_names(),{'new','private'})
+            current.unlink();current.symlink_to('.generations/'+'b'*64)
+            self.assertEqual(utils.get_skill_search_roots()[0][1],roots[1])
+            self.assertEqual(system_skills.system_relative(roots[1]/'shared').as_posix(),'shared')
+            self.assertEqual(utils.get_disabled_skill_names(),{'old','private'})
+            self.assertEqual(utils.ESSENTIAL_SKILLS,frozenset({'base'}))
 
     def test_shared_instruction_is_read_fresh_without_changing_base_instructions(self):
         base = self.root / 'base'
@@ -124,12 +158,10 @@ class SystemTests(unittest.TestCase):
             path.write_bytes(raw)
         files = catalog_files(bundled, product)
         self.assertEqual(files['research/arxiv/scripts/search.py'], b'print("shared")')
-        self.assertIn(b'/opt/brai-profile/system-instructions/current/skills/creative/context-gifs/SKILL.md',
-                      files['creative/context-gifs/SKILL.md'])
-        self.assertNotIn(b'Old skill', files['creative/context-gifs/SKILL.md'])
-        self.assertIn('brai-task-workflows/SKILL.md', files)
-        self.assertEqual(files['brai-task-workflows/references/work.md'], b'Canonical reference')
-        self.assertEqual(files['media/youtube-content/scripts/video_workflow.py'], b'private downloads')
+        self.assertIn(b'Old skill', files['creative/context-gifs/SKILL.md'])
+        self.assertNotIn('brai-task-workflows/SKILL.md', files)
+        self.assertNotIn('brai-task-workflows/references/work.md', files)
+        self.assertNotIn('media/youtube-content/scripts/video_workflow.py', files)
         self.assertFalse(any('personal' in key for key in files))
 
     def test_catalog_rejects_links_to_personal_files(self):

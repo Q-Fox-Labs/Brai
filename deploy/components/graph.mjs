@@ -193,7 +193,7 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
 export function checkGroupFingerprint(root,c,group) {
   if(c.commands.build)throw Error(`CHECK_GROUP_BUILD_UNSUPPORTED: ${c.id}`);
   const inputs=expand(root,[...c.inputs.build,...c.inputs.runtime,...c.inputs.checks,...c.dependencies.flatMap(d=>d.inputs)]);
-  const excluded=new Set(group.excludedInputs);
+  const excluded=new Set(expand(root,group.excludedInputs));
   if([...excluded].some(path=>!inputs.includes(path)))throw Error(`CHECK_GROUP_INPUT_UNKNOWN: ${c.id}: ${group.id}`);
   const files=[...inputs.filter(path=>!excluded.has(path)),...expand(root,group.extraInputs),...(group.allSources?sourceFiles(root):[]),...(c.descriptor?[c.descriptor]:[])];
   const lock=lockInputs(root,c.npm.workspaces,{development:true});

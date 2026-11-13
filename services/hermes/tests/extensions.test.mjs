@@ -7,17 +7,16 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { buildOutputInventory } from '../../../deploy/components/cli.mjs';
 
-test('delivery includes every extension file and keeps skill documentation separate', () => {
+test('delivery includes every extension file', () => {
   const root = fileURLToPath(new URL('../../../', import.meta.url));
   const component = JSON.parse(readFileSync(new URL('../component.json', import.meta.url), 'utf8'));
   const manifest = JSON.parse(readFileSync(new URL('../extensions/manifest.json', import.meta.url), 'utf8'));
-  const delivered = new Set(buildOutputInventory(root, component).map(item => item.path));
+  const scoped = {...component,delivery:{...component.delivery,files:component.delivery.files.filter(path=>path.startsWith('services/hermes/extensions/'))}};
+  const delivered = new Set(buildOutputInventory(root, scoped).map(item => item.path));
   for (const relative of [...manifest.runtimeFiles, 'manifest.json']) {
     const path = `services/hermes/extensions/${relative}`;
     assert.ok(delivered.has(path), `Missing delivered extension: ${path}`);
   }
-  const skill = 'docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md';
-  assert.ok(!delivered.has(skill), 'Skill documentation must be installed independently');
 });
 
 for (const name of ['test_xlsx.py', 'test_connect.py', 'test_context_gif.py', 'test_shared_codex_search.py', 'test_skill_helpers.py', 'test_codex_cli_owner.py', 'test_memory_quality.py', 'test_memory_bridge.py', 'test_conversation_approval.py', 'test_consent_regressions.py', 'test_return_notices.py', 'test_native_memory.py', 'test_native_turn_budget.py', 'test_native_composition.py']) {

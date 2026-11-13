@@ -142,6 +142,13 @@ test('Hermes check groups select instructions and adapter consumers independentl
  const instruction='docs/user-agent/instructions/context.md';
  put(root,instruction,readFileSync(join(root,instruction),'utf8')+'\nfixture change\n');
  assert.deepEqual(changed(before,keys()),['instructions']);
+ put(root,instruction,readFileSync(join(repository,instruction),'utf8'));
+ for(const path of ['docs/user-agent/instructions/hermes/skills/creative/art-director/SKILL.md',
+                    'docs/user-agent/instructions/skills/brai-task-workflows/SKILL.md']) {
+  put(root,path,readFileSync(join(root,path),'utf8')+'\nfixture change\n');
+  assert.deepEqual(changed(before,keys()),['instructions']);
+  put(root,path,readFileSync(join(repository,path),'utf8'));
+ }
 });
 test('strict schema, missing npm owner and missing executable are rejected',t=>{
  const root=fixture(t),d=add(root,'probe');d.typo=true;save(root,'probe',d);

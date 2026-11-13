@@ -64,6 +64,7 @@
       "docs/user-agent/instructions/hermes/BASE.md",
       "docs/user-agent/instructions/hermes/INDEX.md",
       "docs/user-agent/instructions/hermes/skills/**/*",
+      "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
       "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
       "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
       "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
@@ -527,6 +528,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -577,6 +580,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -627,6 +632,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -675,6 +682,8 @@
           "youtube_transcript_api"
         ],
         "excludedInputs": [
+          "docs/user-agent/instructions/hermes/skills/**/*",
+          "docs/user-agent/instructions/skills/brai-task-workflows/**/*",
           "docs/user-agent/instructions/context.md",
           "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
           "docs/user-agent/instructions/hermes/BASE.md",
@@ -726,6 +735,7 @@
       "docs/user-agent/instructions/hermes/BASE.md",
       "docs/user-agent/instructions/hermes/INDEX.md",
       "docs/user-agent/instructions/hermes/skills",
+      "docs/user-agent/instructions/skills/brai-task-workflows",
       "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
       "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
       "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
