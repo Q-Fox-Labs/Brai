@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {assertSource, selectComponents, release, preview, main, parseArguments, waitForOperation, localPorts} from './brai-dev.mjs';
+import {assertSource, assertAncestry, selectComponents, release, preview, main, parseArguments, waitForOperation, localPorts} from './brai-dev.mjs';
 import {execFileSync} from 'node:child_process';
 import {packageComponent, verifyPackage} from './components/package-runtime.mjs';
 import {createHash} from 'node:crypto';
@@ -35,6 +35,7 @@ function fixture() {
   const ports = {
     now: () => ++tick, uuid: () => releaseId,
     assertSource: async (_root, value) => {calls.push(['source', value]); if (value !== source) throw Error('SOURCE_NOT_HEAD');},
+    assertAncestry: async (_root, accepted, candidate) => {calls.push(['ancestry', accepted, candidate]);},
     graph: async (_root, ref) => {calls.push(['graph', ref]); return graph;},
     fingerprint: async (_root, c) => next[c.id],
     sourceFingerprints: async (_root, ref, scoped) => {calls.push(['baseline', ref, [...scoped.components.keys()]]); return Object.fromEntries(scoped.order.map(id => [id, keys(id)]));},
@@ -104,7 +105,7 @@ test('accepted fingerprint fallback uses the accepted source, never remote branc
   assert.ok(!JSON.stringify(state.calls).includes('origin/dev'));
 });
 
-test('mixed observed baseline groups installed components by exact source and selects new component', async () => {
+test('mixed observed baseline requires explicit initial composition reconciliation', async () => {
   const {ports, state} = fixture(), otherSource = 'c'.repeat(40);
   state.current.sourceSha = null;
   state.current.provenance = {kind: 'observed-dev-baseline-v1'};
@@ -115,21 +116,39 @@ test('mixed observed baseline groups installed components by exact source and se
   state.graph.order.push('new-service'); state.next['new-service'] = keys('new-service');
   state.supportedComponents['new-service'] = {supported: true, handler: 'compose-payload'};
   state.next.auth = keys('auth');
-  const result = await release({root: '/repository', source}, ports);
-  assert.deepEqual(state.calls.filter(c => c[0] === 'baseline'), [
-    ['baseline', oldSource, ['auth', 'web']], ['baseline', otherSource, ['timer']],
-  ]);
-  assert.deepEqual(result.components, ['new-service']);
+  await assert.rejects(release({root: '/repository', source}, ports), /INITIAL_COMPOSITION_RECONCILE_REQUIRED/);
+  assert.ok(!state.calls.some(c => ['graph', 'baseline', 'run', 'candidate'].includes(c[0])));
 });
 
 test('installed component without valid source provenance fails before build', async () => {
-  for (const invalid of [null, 'dev']) {
+  for (const invalid of ['dev']) {
     const {ports, state} = fixture();
-    state.current.sourceSha = null;
     state.current.components.auth.sourceSha = invalid;
     await assert.rejects(release({root: '/repository', source}, ports), /ACCEPTED_SOURCE_INVALID: auth/);
     assert.ok(!state.calls.some(call => call[0] === 'run' || call[0] === 'baseline'));
   }
+});
+
+test('divergent source is rejected before graph, build and apply', async () => {
+  const {ports,state}=fixture();
+  ports.assertAncestry=async()=>{throw Error('SOURCE_NOT_DESCENDANT');};
+  await assert.rejects(release({root:'/repository',source},ports),/SOURCE_NOT_DESCENDANT/);
+  assert.ok(!state.calls.some(c=>['graph','run','candidate'].includes(c[0])));
+  assert.ok(!state.calls.some(c=>c[0]==='operator' && c[1]==='apply'));
+});
+
+test('actual Git history permits descendants and rejects a diverged branch', t => {
+  const root=mkdtempSync('/tmp/brai-ancestry-');t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const git=(...args)=>execFileSync('git',['-C',root,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  const commit=message=>git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm',message);
+  git('init','-q');writeFileSync(join(root,'file'),'base');git('add','file');commit('base');
+  const baseCommit=git('rev-parse','HEAD');
+  writeFileSync(join(root,'file'),'accepted');git('add','file');commit('accepted');const accepted=git('rev-parse','HEAD');
+  writeFileSync(join(root,'file'),'descendant');git('add','file');commit('descendant');const descendant=git('rev-parse','HEAD');
+  assert.doesNotThrow(()=>assertAncestry(root,accepted,descendant));
+  git('checkout','--detach','-q',baseCommit);writeFileSync(join(root,'file'),'divergent');git('add','file');commit('divergent');
+  assert.throws(()=>assertAncestry(root,accepted,git('rev-parse','HEAD')),/SOURCE_NOT_DESCENDANT/);
+  assert.throws(()=>assertAncestry(root,'f'.repeat(40),descendant),/ANCESTRY_CHECK_FAILED/);
 });
 
 test('report write failure does not misreport an already accepted runtime release', async () => {

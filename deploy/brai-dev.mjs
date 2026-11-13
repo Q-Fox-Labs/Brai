@@ -22,6 +22,17 @@ export function assertSource(root, source, git = args => execFileSync('git', ['-
   return source;
 }
 
+/** Не допустить установку источника, утратившего уже принятый DEV commit. */
+export function assertAncestry(root, accepted, source) {
+  if (!sha.test(accepted ?? '')) fail('ACCEPTED_SOURCE_INVALID');
+  if (!sha.test(source ?? '')) fail('SOURCE_SHA_REQUIRED');
+  try { execFileSync('git', ['-C', root, 'merge-base', '--is-ancestor', accepted, source], {stdio: 'ignore'}); }
+  catch (error) {
+    if (error.status === 1) fail('SOURCE_NOT_DESCENDANT: source must include the accepted DEV commit');
+    fail('ANCESTRY_CHECK_FAILED: accepted and source commits must be available locally');
+  }
+}
+
 /** Выбирает изменённые DEV-компоненты и всех их потребителей в топологическом порядке. */
 export function selectComponents(graph, current, next, before) {
   const active = graph.order.filter(id => graph.components.get(id).environments.includes('dev'));
@@ -89,6 +100,11 @@ export async function release({root, source}, ports) {
     const status = await timed('status', () => ports.operator('status'));
     assertReady(status);
     const expectedBase = baseId(status);
+    if (status.current) {
+      if (status.current.sourceSha == null) fail('INITIAL_COMPOSITION_RECONCILE_REQUIRED');
+      if (!sha.test(status.current.sourceSha)) fail('ACCEPTED_SOURCE_INVALID');
+      await timed('ancestry', () => ports.assertAncestry(root, status.current.sourceSha, source));
+    }
     const graph = await timed('graph', () => ports.graph(root, status.current?.sourceSha));
     for (const id of Object.keys(status.current?.components ?? {})) {
       if (graph.components.get(id)?.status !== 'active') fail(`UNSUPPORTED_RETIREMENT: ${id}: explicit lifecycle handler required`);
@@ -204,7 +220,7 @@ export async function localPorts() {
   const {discover, fingerprints} = await import('./components/graph.mjs');
   const {execute} = await import('./components/cli.mjs');
   return {
-    now: () => performance.now(), uuid: () => randomUUID(), assertSource,
+    now: () => performance.now(), uuid: () => randomUUID(), assertSource, assertAncestry,
     graph: (root, base) => discover(root, {base, allowMissingBuildOutputs: true}), fingerprint: fingerprints,
     execute,
     manifestHash: path => hash(readFileSync(join(path, 'artifact-manifest.json'))),
