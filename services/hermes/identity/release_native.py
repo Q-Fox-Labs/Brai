@@ -139,6 +139,9 @@ class NativeRelease:
             raise ValueError('RELEASE_NOT_BEGUN')
         result = {'operationId': operationId, 'state': 'draining', 'reason': 'native_work'}
         try:
+            # Уже принятый async turn может ещё создавать дочерние units: сначала ждём его.
+            if self._busy():
+                return result
             if self.worker.activation.is_set():
                 from hermes_cli.backend_retirement import retirement
                 hold = getattr(retirement, 'brai_hold', None)

@@ -58,6 +58,18 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.worker.policy_ready.set()
         self.release = NativeRelease(self.worker)
 
+    async def test_active_turn_keeps_native_child_admission_until_it_finishes(self):
+        self.worker.active['turn'] = object()
+        self.assertEqual((await self.release.begin('op'))['state'], 'draining')
+        self.assertTrue(self.retirement.acquire())
+        self.retirement.release()
+        self.worker.active.clear()
+        self.assertEqual((await self.release.status('op'))['state'], 'ready')
+        self.assertFalse(self.retirement.acquire())
+        await self.release.resume('op')
+        self.assertTrue(self.retirement.acquire())
+        self.retirement.release()
+
     async def test_actual_disabled_guest_cron_is_a_supported_empty_source(self):
         import threading
         spec = importlib.util.spec_from_file_location('_test_release_disabled_cron', _FIXTURE / 'gateway/run.py')
