@@ -5,16 +5,22 @@ import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 const schemas=JSON.parse(readFileSync(new URL('../../bug-hunt/schemas/messages.schema.json',import.meta.url))).definitions;
 const systemDocument=JSON.parse(readFileSync(new URL('../../bug-hunt/schemas/v2.schema.json',import.meta.url)));
+const verificationDocument=JSON.parse(readFileSync(new URL('../../bug-hunt/schemas/verification-v3.schema.json',import.meta.url)));
 const agentGuide=JSON.parse(readFileSync(new URL('../../bug-hunt/contracts/agent-guide.json',import.meta.url)));
 const ajv=new Ajv({strict:false});addFormats(ajv);
-ajv.addSchema(systemDocument);
+ajv.addSchema(systemDocument);ajv.addSchema(verificationDocument);
+const verificationOperations={bug_hunt_verification_run:"run-request",bug_hunt_verification_get:"get",bug_hunt_verification_list:"list",bug_hunt_verification_evidence:"evidence-get"};
 const operations={bug_hunt_report:'report',bug_hunt_get:'get',bug_hunt_list:'list'};
 const systemOperations={bug_hunt_search:'search',bug_hunt_similar:'similar',bug_hunt_enrichment:'enrichment',bug_hunt_groups_list:'groups-list',bug_hunt_groups_get:'groups-get'};
-const allOperations={...operations,...systemOperations};
+const allOperations={...operations,...systemOperations,...verificationOperations};
 const helpInput=ajv.compile(agentGuide.inputSchema);
-const inputSchema=(name,op)=>Object.hasOwn(systemOperations,name)?systemDocument.definitions[op]:schemas[op];
-const validate=Object.fromEntries(Object.entries(allOperations).map(([name,op])=>[name,Object.hasOwn(systemOperations,name)?ajv.getSchema(systemDocument.$id+'#/definitions/'+op):ajv.compile(schemas[op])]));
+const inputSchema=(name,op)=>Object.hasOwn(verificationOperations,name)?{...verificationDocument.definitions[op],definitions:verificationDocument.definitions}:Object.hasOwn(systemOperations,name)?systemDocument.definitions[op]:schemas[op];
+const validate=Object.fromEntries(Object.entries(allOperations).map(([name,op])=>[name,Object.hasOwn(verificationOperations,name)?ajv.getSchema(verificationDocument.$id+'#/definitions/'+op):Object.hasOwn(systemOperations,name)?ajv.getSchema(systemDocument.$id+'#/definitions/'+op):ajv.compile(schemas[op])]));
 const descriptions={
+ bug_hunt_verification_run:'Явно запросить проверку своей case/group или ограниченной pending порции.',
+ bug_hunt_verification_get:'Прочитать состояние, вывод, evidence и применимость своей проверки.',
+ bug_hunt_verification_list:'Прочитать страницу своих расследований.',
+ bug_hunt_verification_evidence:'Прочитать разрешённый фрагмент свидетельства своей проверки.',
  bug_hunt_report:'Зарегистрировать наблюдение о сбое; сначала прочитай bug_hunt_help.',
  bug_hunt_get:'Прочитать свою карточку наблюдения с ограниченной страницей ручного разбора.',
  bug_hunt_list:'Прочитать страницу своих наблюдений о сбоях.',
@@ -28,15 +34,15 @@ const descriptions={
 export function createBugHuntCatalog(request,identity){
  if(!identity?.userId||!identity.profileId)throw new Error('FORBIDDEN');
  return {
-  list(){return [{name:'bug_hunt_help',description:'Как зарегистрировать наблюдение: правила и пример.',inputSchema:agentGuide.inputSchema,annotations:{readOnlyHint:true,idempotentHint:true}},...Object.entries(allOperations).map(([name,op])=>({name,description:descriptions[name],inputSchema:inputSchema(name,op),...(Object.hasOwn(systemOperations,name)?{annotations:{readOnlyHint:true,idempotentHint:true}}:{})}))];},
+  list(){return [{name:'bug_hunt_help',description:'Как зарегистрировать наблюдение: правила и пример.',inputSchema:agentGuide.inputSchema,annotations:{readOnlyHint:true,idempotentHint:true}},...Object.entries(allOperations).map(([name,op])=>({name,description:descriptions[name],inputSchema:inputSchema(name,op),...((Object.hasOwn(systemOperations,name)||Object.hasOwn(verificationOperations,name)&&name!=='bug_hunt_verification_run')?{annotations:{readOnlyHint:true,idempotentHint:true}}:{})}))];},
   async call(name,args,signal){
    if(name==='bug_hunt_help'){if(!helpInput(args))throw new Error('INVALID_ARGUMENT');return {instructions:agentGuide.help};}
    if(!Object.hasOwn(allOperations,name)||!validate[name](args)||Buffer.byteLength(JSON.stringify(args))>65536)throw new Error('INVALID_ARGUMENT');
    try{
-    return await request((Object.hasOwn(systemOperations,name)?'brai.bug_hunt.v2.':'brai.bug_hunt.v1.')+allOperations[name],{context:{kind:'hermes',userId:identity.userId,profileId:identity.profileId},input:args},signal,10000);
+    return await request((Object.hasOwn(verificationOperations,name)?'brai.bug_hunt.v3.verification.':Object.hasOwn(systemOperations,name)?'brai.bug_hunt.v2.':'brai.bug_hunt.v1.')+(Object.hasOwn(verificationOperations,name)?allOperations[name].replaceAll('-','.'):allOperations[name]),{context:{kind:'hermes',userId:identity.userId,profileId:identity.profileId},input:args},signal,10000);
    }catch(error){
     const code=typeof error?.code==='string'&&/^[A-Z_]+$/.test(error.code)?error.code:'DEPENDENCY_UNAVAILABLE';
-    return {isError:true,content:[{type:'text',text:JSON.stringify({code,outcome:name==='bug_hunt_report'?'unknown':'not_accepted',request_id:args.request_id,next_action:'Сохрани исходный request_id и точный вход. Регистрация не подтверждена; не отправляй это наблюдение рекурсивно.'})}]};
+    return {isError:true,content:[{type:'text',text:JSON.stringify({code,outcome:['bug_hunt_report','bug_hunt_verification_run'].includes(name)?'unknown':'not_accepted',request_id:args.request_id,next_action:'Сохрани исходный request_id и точный вход. Регистрация не подтверждена; не отправляй это наблюдение рекурсивно.'})}]};
    }
   },
  };

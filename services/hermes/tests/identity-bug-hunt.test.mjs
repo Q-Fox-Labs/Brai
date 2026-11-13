@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {createBugHuntCatalog} from '../identity/bug-hunt.mjs';
 test('broker назначает owner и не предоставляет review',async()=>{
  const calls=[];const catalog=createBugHuntCatalog(async(...args)=>{calls.push(args);return {registered:true};},{userId:'owner-a',profileId:'profile-a'});
- assert.deepEqual(catalog.list().map(x=>x.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list','bug_hunt_search','bug_hunt_similar','bug_hunt_enrichment','bug_hunt_groups_list','bug_hunt_groups_get']);
+ assert.deepEqual(catalog.list().map(x=>x.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list','bug_hunt_search','bug_hunt_similar','bug_hunt_enrichment','bug_hunt_groups_list','bug_hunt_groups_get','bug_hunt_verification_run','bug_hunt_verification_get','bug_hunt_verification_list','bug_hunt_verification_evidence']);
  const guide=await catalog.call('bug_hunt_help',{});
  assert.ok(guide.instructions.includes('request_id'));assert.ok(guide.instructions.includes('Пример входа'));assert.equal(calls.length,0);
  await assert.rejects(catalog.call('bug_hunt_help',{owner_id:'forged'}));
@@ -20,6 +20,12 @@ test('broker назначает owner и не предоставляет review'
  await assert.rejects(catalog.call('bug_hunt_membership_update',{}));
  await assert.rejects(catalog.call('bug_hunt_search',{query:'x',owner_id:'foreign'}));
  assert.equal(calls.length,3);
+ await catalog.call('bug_hunt_verification_run',{request_id:'verify-one',target:{kind:'pending'}});
+ assert.equal(calls[3][0],'brai.bug_hunt.v3.verification.run.request');
+ assert.deepEqual(calls[3][1].context,{kind:'hermes',userId:'owner-a',profileId:'profile-a'});
+ for(const name of ['bug_hunt_verification_review','bug_hunt_verification_cancel','bug_hunt_verification_pause'])await assert.rejects(catalog.call(name,{}));
+ await assert.rejects(catalog.call('bug_hunt_verification_run',{request_id:'v',target:{kind:'pending'},owner_id:'foreign'}));
+ assert.equal(calls.length,4);
 });
 
 test('личный runtime публикует каталог при выключенном bug-hunt и закрывает его',async()=>{

@@ -21,7 +21,7 @@ export async function migrate(pool:Pool,ownerRole:string,appRole:string){
   await db.query("REVOKE ALL ON DATABASE "+database+" FROM PUBLIC");
   await db.query("REVOKE CREATE,TEMPORARY ON DATABASE "+database+" FROM "+app);
   await db.query("GRANT CONNECT ON DATABASE "+database+" TO "+app);
-  for(const name of ["001.sql","002.sql","003.sql","004.sql"])await db.query(readFileSync(new URL("../migrations/"+name,import.meta.url),"utf8"));
+  for(const name of ["001.sql","002.sql","003.sql","004.sql","005.sql"])await db.query(readFileSync(new URL("../migrations/"+name,import.meta.url),"utf8"));
   await db.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC,"+app);
   await db.query("GRANT USAGE ON SCHEMA public TO "+app);
   // AIDEV-NOTE: Не снимаем права будущих миграций при повторном запуске предыдущего migrator.
@@ -47,6 +47,14 @@ export async function migrate(pool:Pool,ownerRole:string,appRole:string){
   await db.query("REVOKE ALL ON "+generationTables+" FROM PUBLIC,"+app);
   await db.query("GRANT SELECT,INSERT ON "+generationTables+" TO "+app);
   await db.query("GRANT UPDATE(active_generation,activation_revision,updated_at) ON embedding_generation_control TO "+app);
+  const verificationTables="verification_run,verification_schedule,verification_investigation,verification_mutation,verification_effect,verification_evidence,verification_result,verification_review,verification_budget";
+  await db.query("REVOKE ALL ON "+verificationTables+" FROM PUBLIC,"+app);
+  await db.query("GRANT SELECT,INSERT ON "+verificationTables+" TO "+app);
+  await db.query("GRANT UPDATE(selected,outcome) ON verification_run TO "+app);
+  await db.query("GRANT UPDATE(revision,next_due_at,last_tick_id,last_outcome,last_selected,paused,updated_at) ON verification_schedule TO "+app);
+  await db.query("GRANT UPDATE(model,state,stage,fence,cancel_requested,code,workflow_state,current_result_id,manual_revision,updated_at,deadline_at,active_ms) ON verification_investigation TO "+app);
+  await db.query("GRANT UPDATE(checkpoint,updated_at) ON verification_effect TO "+app);
+  await db.query("GRANT UPDATE(calls,tokens,tool_calls,runner_runs) ON verification_budget TO "+app);
   await db.query("COMMIT");
  }catch(error){await db.query("ROLLBACK");throw error;}finally{db.release();}
 }

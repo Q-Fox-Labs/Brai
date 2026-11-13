@@ -241,6 +241,7 @@
       "services/hermes/identity/ingress.openrpc.json",
       "services/hermes/identity/pause_preseed.py",
       "services/hermes/identity/schemas/pause-preseed.schema.json",
+      "services/bug-hunt/schemas/verification-v3.schema.json",
       "services/hermes/identity/guest_tools.py",
       "services/hermes/identity/guest_browser.py",
       "services/hermes/identity/browser-defaults.json",
