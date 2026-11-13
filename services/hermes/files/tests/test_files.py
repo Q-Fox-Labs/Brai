@@ -984,6 +984,26 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         restored = self.store.resolve(material, 'legacy-path')
         self.assertEqual(Path(restored['localPath']).read_bytes(), b'fixture-99')
 
+    async def test_migration_exclusions_are_relative_to_approved_root(self):
+        from files.migrate import digest, inventory, migrate
+        approved = self.input / '.codex' / 'project'
+        approved.mkdir(parents=True)
+        material = approved / 'material.txt'
+        material.write_text('approved material')
+        secret = approved / '.codex' / 'private.txt'
+        secret.parent.mkdir()
+        secret.write_text('secret')
+        self.store.legacy_roots = (approved,)
+        manifest = inventory([approved])
+        self.assertEqual([item['path'] for item in manifest['items']], [str(material)])
+        size, checksum = digest(secret)
+        forged = {**manifest, 'items': [*manifest['items'],
+                  {'path': str(secret), 'sizeBytes': size, 'sha256': checksum}]}
+        with self.assertRaisesRegex(FileError, 'MIGRATION_FILE_INVALID'):
+            migrate(self.store, forged)
+        self.assertEqual(migrate(self.store, manifest)['filesVerified'], 1)
+        self.assertTrue(secret.exists())
+
     async def test_migration_partial_failure_never_retires_sources(self):
         from files.migrate import inventory, migrate
         paths = [self.file(1, '.txt'), self.file(2, '.txt')]

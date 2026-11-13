@@ -64,9 +64,11 @@ def migrate(store, manifest, retire=False):
         raise FileError('MIGRATION_MANIFEST_INVALID')
     for item in items:
         path = Path(item['path'])
-        if (not path.is_absolute() or path.resolve() != path or not any(path.is_relative_to(root) for root in roots)
-                or set(item) != {'path', 'sizeBytes', 'sha256'} or any(part in EXCLUDED for part in path.parts)
-                or path.suffix.lower() in SECRET_SUFFIXES or path.name.startswith('.env.')):
+        matching = [root for root in roots if path.is_relative_to(root)]
+        if (not path.is_absolute() or path.resolve() != path or not matching
+                or set(item) != {'path', 'sizeBytes', 'sha256'}
+                or all(any(part in EXCLUDED for part in path.relative_to(root).parts) for root in matching)
+                or path.suffix.lower() in SECRET_SUFFIXES or path.name.startswith(('.env.', 'id_'))):
             raise FileError('MIGRATION_FILE_INVALID')
         if path.exists() and digest(path) != (item['sizeBytes'], item['sha256']):
             raise FileError('MIGRATION_SOURCE_CHANGED')
