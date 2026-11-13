@@ -85,6 +85,10 @@ def handle(method, params):
                  'inputSchema': {'type':'object', 'properties':{'path':{'type':'string'}, 'requestId':{'type':'string'}}, 'required':['path'], 'additionalProperties':False}},
                 {'name': 'fetch_file', 'description': 'Получить собственный опубликованный файл.',
                  'inputSchema': {'type':'object', 'properties':{'artifactId':{'type':'string'}}, 'required':['artifactId'], 'additionalProperties':False}}]
+        if role in TOOL_POLICY['managers']:
+            client_tools += [
+                {'name': 'brai_backup_status', 'description': 'Проверить состояние резервной копии всей клиентской установки. Только admin/creator. prepared не означает наличие копии на Google Диске.', 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+                {'name': 'brai_backup_run', 'description': 'По просьбе администратора начать свежую зашифрованную копию всей клиентской установки. Возвращает только принятие запуска; результат проверяй через brai_backup_status. Пароли, роль, пути и назначения не принимает.', 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}]
         client_tools += [
             {'name':'create_text_file','description':'Создать и опубликовать точные UTF-8 байты. Передай безопасное имя без пути, содержимое и стабильный requestId. Код в файле не исполняется.',
              'inputSchema':{'type':'object','properties':{'filename':{'type':'string','maxLength':180},'content':{'type':'string'},'requestId':{'type':'string','maxLength':256}},'required':['filename','content','requestId'],'additionalProperties':False}},
@@ -103,6 +107,11 @@ def handle(method, params):
         name, arguments = params.get('name'), params.get('arguments', {})
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ValueError('Invalid tool call')
+        if name in ('brai_backup_status', 'brai_backup_run'):
+            if arguments:
+                raise ValueError('Backup tools accept no arguments')
+            value = broker_call('backup.status' if name == 'brai_backup_status' else 'backup.run', {})
+            return {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}], 'structuredContent': value}
         if name in ('create_text_file', 'read_text_file', 'create_document_file', 'create_spreadsheet_file'):
             operation = {'create_text_file': 'files.create-text', 'read_text_file': 'files.read-text', 'create_document_file': 'files.create-document', 'create_spreadsheet_file': 'files.create-spreadsheet'}[name]
             value = broker_call(operation, arguments)

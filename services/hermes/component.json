@@ -357,7 +357,8 @@
       "services/hermes/identity/tests/fixtures/release_native/gateway/run_watchers.py",
       "services/hermes/identity/tests/fixtures/release_native/gateway/run.py",
       "services/hermes/identity/tests/fixtures/release_native/gateway/run_startup.py",
-      "services/hermes/identity/tests/fixtures/release_native/gateway/session_state.py"
+      "services/hermes/identity/tests/fixtures/release_native/gateway/session_state.py",
+      "services/hermes/identity/tests/test_backup_roles.py"
     ]
   },
   "dependencies": [

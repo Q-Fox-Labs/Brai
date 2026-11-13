@@ -52,6 +52,8 @@
     "local_ai_models_unload",
     "local_ai_models_remove",
     "local_ai_cancel",
-    "transcription_settings_set"
+    "transcription_settings_set",
+    "brai_backup_status",
+    "brai_backup_run"
   ]
 }
