@@ -219,7 +219,7 @@ test('personal documentation is rejected even through a selected parent director
 });
 
 
-test('code-only releases share dependency files and detect dependency tampering', async t => {
+test('code-only releases retain independent dependency bytes', async t => {
   const {root, write, component, build} = fixture(t);
   const app = {name:'@brai/example', version:'1.0.0', type:'module', dependencies:{dep:'1.0.0'}};
   write('services/example/package.json', app);
@@ -239,14 +239,15 @@ test('code-only releases share dependency files and detect dependency tampering'
   const identity = path => {const {dev,ino} = statSync(path); return [dev,ino];};
   assert.notEqual(first.payloadHash, second.payloadHash);
   assert.ok(lstatSync(oldDependency).isFile());
-  assert.deepEqual(identity(oldDependency), identity(source));
-  assert.deepEqual(identity(newDependency), identity(source));
+  assert.notDeepEqual(identity(oldDependency), identity(source));
+  assert.notDeepEqual(identity(newDependency), identity(source));
   assert.notDeepEqual(identity(join(first.path,'services/example/main.mjs')), identity(join(second.path,'services/example/main.mjs')));
   assert.notDeepEqual(identity(join(second.path,'services/example/main.mjs')), identity(join(root,'services/example/main.mjs')));
   verifyPackage(first.path, 'fixture'); verifyPackage(second.path, 'fixture');
   writeFileSync(source, 'export const value = 8;\n');
-  assert.throws(() => verifyPackage(first.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
-  assert.throws(() => verifyPackage(second.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
+  verifyPackage(first.path, 'fixture'); verifyPackage(second.path, 'fixture');
+  assert.equal(readFileSync(oldDependency,'utf8'),'export const value = 7;\n');
+  assert.equal(readFileSync(newDependency,'utf8'),'export const value = 7;\n');
 });
 
 

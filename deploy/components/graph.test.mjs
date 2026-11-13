@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { discover, fingerprints, sourceFiles } from './graph.mjs';
+import { discover, fingerprints, checkGroupFingerprint, sourceFiles } from './graph.mjs';
 import { execute } from './cli.mjs';
 const repository=resolve(import.meta.dirname,'../..');
 function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
@@ -71,17 +71,17 @@ test('new described component enters pipeline without workflow editing; build on
  put(result[0].artifact.path,'services/probe/main.mjs','export const value=9;');await assert.rejects(execute(root,'package',['probe']),/IMMUTABLE_OUTPUT_MISMATCH/);
 });
 test('check receipt is reused only for unchanged successful inputs',async t=>{
- const root=fixture(t);const d=add(root,'probe');d.commands.checkTools=['node'];save(root,'probe',d);
- const script="import{appendFileSync}from'node:fs';appendFileSync('../../tmp/check-count','1');\n";
+ const root=fixture(t);const d=add(root,'probe');d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];save(root,'probe',d);
+ const script="printf 1 >> ../../tmp/check-count\n";
  put(root,'services/probe/tests.mjs',script);
  let row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'executed');
  row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'cached');
  assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'1');
- put(root,'services/probe/tests.mjs',script+'throw Error("failed check");\n');
+ put(root,'services/probe/tests.mjs',script+'exit 1\n');
  await assert.rejects(execute(root,'run',['probe']),/COMMAND_FAILED/);
  await assert.rejects(execute(root,'run',['probe']),/COMMAND_FAILED/);
  assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'111');
- put(root,'services/probe/tests.mjs',script+'// changed\n');
+ put(root,'services/probe/tests.mjs',script+'# changed\n');
  row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'executed');
  assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'1111');
 });
@@ -89,6 +89,59 @@ test('unqualified check is always executed',async t=>{
  const root=fixture(t);add(root,'probe');
  assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
  assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+});
+test('check groups reuse only proofs whose declared inputs are unchanged',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/other.mjs');
+ d.commands.checkGroups=[
+  {id:'all',command:'sh tests.mjs',tools:['sh'],excludedInputs:[],extraInputs:[]},
+  {id:'other',command:'sh other.mjs',tools:['sh'],excludedInputs:['services/probe/main.mjs'],extraInputs:[]}
+ ];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs','printf 1 >> ../../tmp/all-count\n');
+ put(root,'services/probe/other.mjs','printf 1 >> ../../tmp/other-count\n');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'cached');
+ put(root,'services/probe/main.mjs','export const value=2;');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal(readFileSync(join(root,'tmp/all-count'),'utf8'),'11');
+ assert.equal(readFileSync(join(root,'tmp/other-count'),'utf8'),'1');
+});
+test('changing installed dependency bytes invalidates check and package reuse',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];d.npm.workspaces=['services/probe'];
+ d.inputs.runtime.push('services/probe/package.json');save(root,'probe',d);
+ const manifest={name:'probe',version:'1.0.0',dependencies:{sample:'1.0.0'}};
+ put(root,'services/probe/package.json',JSON.stringify(manifest));
+ put(root,'package-lock.json',JSON.stringify({lockfileVersion:3,packages:{'services/probe':manifest,'node_modules/sample':{name:'sample',version:'1.0.0'}}}));
+ put(root,'node_modules/sample/package.json',JSON.stringify({name:'sample',version:'1.0.0'}));
+ put(root,'node_modules/sample/index.js','module.exports=1;');
+ put(root,'services/probe/tests.mjs','exit 0\n');
+ const first=(await execute(root,'run',['probe']))[0];
+ const second=(await execute(root,'run',['probe']))[0];
+ assert.equal(second.checkProof,'cached');assert.equal(second.packaged,false);
+ put(root,'node_modules/sample/index.js','module.exports=2;');
+ const third=(await execute(root,'run',['probe']))[0];
+ assert.equal(third.checkProof,'executed');assert.equal(third.packaged,true);
+ assert.notEqual(third.artifact.payloadHash,first.artifact.payloadHash);
+ assert.equal(readFileSync(join(first.artifact.path,'node_modules/sample/index.js'),'utf8'),'module.exports=1;');
+ put(root,'services/probe/tests.mjs','printf changed > ../../node_modules/sample/index.js\n');
+ await assert.rejects(execute(root,'check',['probe']),/CHECK_DEPENDENCIES_CHANGED/);
+});
+test('Hermes check groups select instructions and adapter consumers independently',t=>{
+ const root=fixture(t);
+ for(const path of sourceFiles(repository)) {
+  mkdirSync(dirname(join(root,path)),{recursive:true});cpSync(join(repository,path),join(root,path));
+ }
+ const descriptor='services/hermes/component.json';
+ const component={...JSON.parse(readFileSync(join(root,descriptor),'utf8')),directory:'services/hermes',descriptor};
+ const keys=()=>Object.fromEntries(component.commands.checkGroups.map(group=>[group.id,checkGroupFingerprint(root,component,group)]));
+ const changed=(a,b)=>Object.keys(a).filter(id=>a[id]!==b[id]);
+ const before=keys(), adapter='services/hermes/identity/adapter.py';
+ put(root,adapter,readFileSync(join(root,adapter),'utf8')+'\n# fixture change\n');
+ const adapterChanged=keys();assert.deepEqual(changed(before,adapterChanged),['instructions','identity']);
+ put(root,adapter,readFileSync(join(repository,adapter),'utf8'));
+ const instruction='docs/user-agent/instructions/context.md';
+ put(root,instruction,readFileSync(join(root,instruction),'utf8')+'\nfixture change\n');
+ assert.deepEqual(changed(before,keys()),['instructions']);
 });
 test('strict schema, missing npm owner and missing executable are rejected',t=>{
  const root=fixture(t),d=add(root,'probe');d.typo=true;save(root,'probe',d);

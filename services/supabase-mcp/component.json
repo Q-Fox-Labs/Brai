@@ -34,7 +34,8 @@
   "dependencies": [],
   "commands": {
     "build": "npm run build",
-    "check": "node --test test/unit.test.mjs"
+    "check": "node --test test/unit.test.mjs",
+    "checkTools": ["node"]
   },
   "delivery": {
     "kind": "oci-context",

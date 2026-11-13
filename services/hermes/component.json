@@ -265,6 +265,8 @@
       "services/hermes/files/tests/test_delegation.py",
       "services/hermes/files/tests/test_engine.py",
       "services/hermes/tests/extensions.test.mjs",
+      "services/hermes/tests/skill-connect.test.mjs",
+      "services/hermes/tests/native-conversation.test.mjs",
       "services/hermes/extensions/**/*.py",
       "services/hermes/extensions/tests/**",
       "services/hermes/telegram/tests/test_observer.py",
@@ -305,6 +307,7 @@
       "services/hermes/identity/tests/memory_gateway_cli.test.mjs",
       "services/hermes/identity/tests/profiles.test.mjs",
       "services/hermes/identity/tests/worker.test.mjs",
+      "services/hermes/identity/tests/worker-instructions.test.mjs",
       "services/hermes/identity/tests/test_profiles.py",
       "services/hermes/files/tests/identity.test.mjs",
       "services/hermes/files/tests/test_identity.py",
@@ -455,7 +458,225 @@
   ],
   "commands": {
     "build": null,
-    "check": "npm run test && npm run test:identity && node --test --test-isolation=none memos/embedding/*.test.mjs memos/tests/*.test.mjs files/tests/identity.test.mjs"
+    "check": "npm run test && npm run test:identity && node --test --test-isolation=none memos/embedding/*.test.mjs memos/tests/*.test.mjs files/tests/identity.test.mjs",
+    "checkGroups": [
+      {
+        "id": "instructions",
+        "command": "node --test --test-isolation=none tests/skill-documentation.test.mjs tests/skill-connect.test.mjs identity/tests/worker-instructions.test.mjs",
+        "tools": [
+          "node",
+          "python3",
+          "git",
+          "sh"
+        ],
+        "pythonModules": ["_distutils_hack"],
+        "pythonAbsent": [],
+        "allSources": true,
+        "excludedInputs": [],
+        "extraInputs": [
+          "docs/user-agent/instructions/**"
+        ]
+      },
+      {
+        "id": "core",
+        "command": "set --; for path in tests/*.test.mjs; do case \"$path\" in tests/extensions.test.mjs|tests/skill-documentation.test.mjs|tests/skill-connect.test.mjs|tests/native-conversation.test.mjs) ;; *) set -- \"$@\" \"$path\";; esac; done; node --test --test-isolation=none \"$@\"",
+        "tools": [
+          "node",
+          "python3",
+          "git",
+          "sh",
+          "ffmpeg",
+          "ffprobe"
+        ],
+        "pythonModules": [
+          "_distutils_hack",
+          "yaml"
+        ],
+        "pythonAbsent": [
+          "fastapi",
+          "uvicorn",
+          "psycopg2",
+          "PIL",
+          "PyPDF2",
+          "openpyxl",
+          "httpx",
+          "pytest",
+          "youtube_transcript_api"
+        ],
+        "excludedInputs": [
+          "docs/user-agent/instructions/context.md",
+          "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
+          "docs/user-agent/instructions/hermes/BASE.md",
+          "docs/user-agent/instructions/hermes/INDEX.md",
+          "docs/user-agent/instructions/hermes/BUG_HUNT.md",
+          "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
+          "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
+          "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
+          "docs/user-agent/instructions/hermes/policies/LOCAL_VOICE.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_POLICY.md",
+          "docs/user-agent/instructions/hermes/policies/OWNER_IDENTITY.md",
+          "docs/user-agent/instructions/hermes/policies/PERMISSIONS_RU.md",
+          "docs/user-agent/instructions/hermes/policies/RUSSIAN_HELP.txt",
+          "docs/user-agent/instructions/hermes/policies/SECRETS.md",
+          "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/prompts/telegram-reply.md",
+          "services/hermes/identity/adapter.py"
+        ],
+        "extraInputs": [
+          "services/hermes/tests/*.test.mjs"
+        ]
+      },
+      {
+        "id": "identity",
+        "command": "set --; for path in identity/tests/*.test.mjs; do case \"$path\" in identity/tests/worker-instructions.test.mjs) ;; *) set -- \"$@\" \"$path\";; esac; done; node --test --test-isolation=none \"$@\" tests/native-conversation.test.mjs",
+        "tools": [
+          "node",
+          "python3",
+          "git",
+          "sh",
+          "ffmpeg",
+          "ffprobe"
+        ],
+        "pythonModules": [
+          "_distutils_hack",
+          "yaml"
+        ],
+        "pythonAbsent": [
+          "fastapi",
+          "uvicorn",
+          "psycopg2",
+          "PIL",
+          "PyPDF2",
+          "openpyxl",
+          "httpx",
+          "pytest",
+          "youtube_transcript_api"
+        ],
+        "excludedInputs": [
+          "docs/user-agent/instructions/context.md",
+          "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
+          "docs/user-agent/instructions/hermes/BASE.md",
+          "docs/user-agent/instructions/hermes/INDEX.md",
+          "docs/user-agent/instructions/hermes/BUG_HUNT.md",
+          "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
+          "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
+          "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
+          "docs/user-agent/instructions/hermes/policies/LOCAL_VOICE.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_POLICY.md",
+          "docs/user-agent/instructions/hermes/policies/OWNER_IDENTITY.md",
+          "docs/user-agent/instructions/hermes/policies/PERMISSIONS_RU.md",
+          "docs/user-agent/instructions/hermes/policies/RUSSIAN_HELP.txt",
+          "docs/user-agent/instructions/hermes/policies/SECRETS.md",
+          "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/prompts/telegram-reply.md"
+        ],
+        "extraInputs": [
+          "services/hermes/identity/tests/*.test.mjs"
+        ]
+      },
+      {
+        "id": "extensions",
+        "absentPaths": ["/opt/brai-identity/dev/software/release-fb5e7fb91bee427182e4da0f56466b3a/engine"],
+        "command": "node --test --test-isolation=none tests/extensions.test.mjs",
+        "tools": [
+          "node",
+          "python3",
+          "git",
+          "sh",
+          "ffmpeg",
+          "ffprobe"
+        ],
+        "pythonModules": [
+          "_distutils_hack",
+          "yaml"
+        ],
+        "pythonAbsent": [
+          "fastapi",
+          "uvicorn",
+          "psycopg2",
+          "PIL",
+          "PyPDF2",
+          "openpyxl",
+          "httpx",
+          "pytest",
+          "youtube_transcript_api"
+        ],
+        "excludedInputs": [
+          "docs/user-agent/instructions/context.md",
+          "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
+          "docs/user-agent/instructions/hermes/BASE.md",
+          "docs/user-agent/instructions/hermes/INDEX.md",
+          "docs/user-agent/instructions/hermes/BUG_HUNT.md",
+          "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
+          "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
+          "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
+          "docs/user-agent/instructions/hermes/policies/LOCAL_VOICE.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_POLICY.md",
+          "docs/user-agent/instructions/hermes/policies/OWNER_IDENTITY.md",
+          "docs/user-agent/instructions/hermes/policies/PERMISSIONS_RU.md",
+          "docs/user-agent/instructions/hermes/policies/RUSSIAN_HELP.txt",
+          "docs/user-agent/instructions/hermes/policies/SECRETS.md",
+          "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/prompts/telegram-reply.md",
+          "services/hermes/identity/adapter.py"
+        ],
+        "extraInputs": []
+      },
+      {
+        "id": "files-memos",
+        "command": "node --test --test-isolation=none memos/embedding/*.test.mjs memos/tests/*.test.mjs files/tests/identity.test.mjs",
+        "tools": [
+          "node",
+          "python3",
+          "git",
+          "sh",
+          "ffmpeg",
+          "ffprobe"
+        ],
+        "pythonModules": [
+          "_distutils_hack",
+          "yaml"
+        ],
+        "pythonAbsent": [
+          "fastapi",
+          "uvicorn",
+          "psycopg2",
+          "PIL",
+          "PyPDF2",
+          "openpyxl",
+          "httpx",
+          "pytest",
+          "youtube_transcript_api"
+        ],
+        "excludedInputs": [
+          "docs/user-agent/instructions/context.md",
+          "docs/user-agent/instructions/hermes/ARCHITECTURE.md",
+          "docs/user-agent/instructions/hermes/BASE.md",
+          "docs/user-agent/instructions/hermes/INDEX.md",
+          "docs/user-agent/instructions/hermes/BUG_HUNT.md",
+          "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
+          "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
+          "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
+          "docs/user-agent/instructions/hermes/policies/LOCAL_VOICE.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/policies/MEMORY_POLICY.md",
+          "docs/user-agent/instructions/hermes/policies/OWNER_IDENTITY.md",
+          "docs/user-agent/instructions/hermes/policies/PERMISSIONS_RU.md",
+          "docs/user-agent/instructions/hermes/policies/RUSSIAN_HELP.txt",
+          "docs/user-agent/instructions/hermes/policies/SECRETS.md",
+          "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
+          "docs/user-agent/instructions/hermes/prompts/telegram-reply.md",
+          "services/hermes/identity/adapter.py"
+        ],
+        "extraInputs": [
+          "services/hermes/memos/embedding/*.test.mjs",
+          "services/hermes/memos/tests/*.test.mjs"
+        ]
+      }
+    ]
   },
   "delivery": {
     "kind": "ready-files",

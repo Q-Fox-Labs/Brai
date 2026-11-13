@@ -189,6 +189,18 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   return {build,runtime,checks,artifact,compatibility};
 }
 
+/** Groups must explicitly exclude only inputs their checker does not read. */
+export function checkGroupFingerprint(root,c,group) {
+  if(c.commands.build)throw Error(`CHECK_GROUP_BUILD_UNSUPPORTED: ${c.id}`);
+  const inputs=expand(root,[...c.inputs.build,...c.inputs.runtime,...c.inputs.checks,...c.dependencies.flatMap(d=>d.inputs)]);
+  const excluded=new Set(group.excludedInputs);
+  if([...excluded].some(path=>!inputs.includes(path)))throw Error(`CHECK_GROUP_INPUT_UNKNOWN: ${c.id}: ${group.id}`);
+  const files=[...inputs.filter(path=>!excluded.has(path)),...expand(root,group.extraInputs),...(group.allSources?sourceFiles(root):[]),...(c.descriptor?[c.descriptor]:[])];
+  const lock=lockInputs(root,c.npm.workspaces,{development:true});
+  const engine=digestFiles(dirname(fileURLToPath(import.meta.url)),['graph.mjs','cli.mjs','build-engine.mjs','lock-inputs.mjs']);
+  return digestFiles(root,files,{group,lock,engine,platform:process.platform,arch:process.arch});
+}
+
 // AIDEV-NOTE: Навигация проверяется в том же доверенном recipe, что и component graph.
 const privateRoot='docs/user-agent/usercustom';
 const insidePrivate=p=>p===privateRoot||p.startsWith(privateRoot+'/');

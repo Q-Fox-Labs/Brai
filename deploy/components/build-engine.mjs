@@ -39,7 +39,9 @@ export function verifyBuildReceipt(root,c,state,build) {
 }
 export function command(root,c,text) {
   if(!text)return;
-  const result=spawnSync(text,{cwd:join(root,c.directory),shell:true,stdio:'inherit',env:{...process.env,NEXT_TELEMETRY_DISABLED:'1'}});
+  const environment={...process.env,NEXT_TELEMETRY_DISABLED:'1'};
+  delete environment.CODEX_TOOL_CALL_ID;
+  const result=spawnSync(text,{cwd:join(root,c.directory),shell:true,stdio:'inherit',env:environment});
   if(result.error)throw result.error;
   if(result.status!==0)throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
 }

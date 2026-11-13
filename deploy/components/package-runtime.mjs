@@ -2,7 +2,7 @@
 // ABOUTME: Не устанавливает зависимости, не собирает исходники и не включает внешние runtime или данные.
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, statSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { cpSync, copyFileSync, constants, existsSync, lstatSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -81,11 +81,8 @@ function linkPackageFiles(source, destination, ancestors = new Set()) {
     for (const name of readdirSync(resolved).sort(compare)) linkPackageFiles(join(resolved, name), join(destination, name), next);
   } else if (info.isFile()) {
     if (info.mode & 0o022) fail(`PACKAGING_SOURCE_PERMISSIONS: ${source}: remove group and other write access from prepared dependencies`);
-    try { linkSync(resolved, destination); }
-    catch (error) {
-      if (error.code === 'EXDEV') fail(`PACKAGE_CROSS_FILESYSTEM: ${source}: prepared dependencies and output must be on the same filesystem`);
-      throw error;
-    }
+    copyFileSync(resolved, destination, constants.COPYFILE_FICLONE);
+    chmodSync(destination, info.mode & 0o755);
   } else fail(`UNSUPPORTED_PACKAGE_FILE: ${source}`);
 }
 
