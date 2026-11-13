@@ -31,6 +31,11 @@ class ResumeHealth(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(result['state'],'resumed')
   self.assertLess(self.events.index('health'),self.events.index('release.resume'))
   self.assertEqual(self.owner._peer.await_count,2)
+ async def test_missing_policy_status_fails_closed(self):
+  async def call(method,params,**kwargs):return {'userId':'owner','ready':True,'operational':True}
+  self.owner._peer=AsyncMock(return_value=SimpleNamespace(call=call))
+  result=await self.owner._resume(self.request,222,'200')
+  self.assertEqual(result['state'],'blocked');self.owner._reopen.assert_not_awaited()
  async def test_wrong_health_identity_does_not_open_gate(self):
   async def call(method,params,**kwargs):return {'userId':'other','ready':True,'operational':True,'policyReady':True}
   self.owner._peer=AsyncMock(return_value=SimpleNamespace(call=call))

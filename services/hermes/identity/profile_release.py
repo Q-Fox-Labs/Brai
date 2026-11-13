@@ -238,7 +238,8 @@ class ProfileRelease:
             while True:
                 health = await peer.call('health', {'require_tools':True}, timeout=None)
                 if (not isinstance(health,dict) or health.get('userId') != profile['userId']
-                        or health.get('ready') is not True or health.get('operational') is not True):
+                        or health.get('ready') is not True or health.get('operational') is not True
+                        or type(health.get('policyReady')) is not bool):
                     raise ValueError('WORKER_ACTIVATION_UNCONFIRMED')
                 if health.get('policyReady') is True:
                     break
