@@ -381,3 +381,13 @@ test('real ready-files package integrates exact manifest hash and payload verifi
     assert.throws(() => verifyPackage(artifact.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
   } finally {rmSync(root, {recursive: true, force: true});}
 });
+
+
+test('planner compares logical fingerprints while retaining actual program fingerprints', async () => {
+  const {ports, state} = fixture();
+  state.current.components.auth.fingerprints = keys('previous-program');
+  state.current.components.auth.comparisonFingerprints = state.next.auth;
+  const result = await release({root:'/repo', source}, ports);
+  assert.equal(result.state, 'unchanged');
+  assert.equal(state.current.components.auth.fingerprints.build, keys('previous-program').build);
+});

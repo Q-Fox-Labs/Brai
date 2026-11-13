@@ -133,7 +133,7 @@ export async function release({root, source, prepareOnly = false}, ports) {
         if (!installed) continue;
         const previousSource = installed.sourceSha ?? status.current.sourceSha;
         if (!sha.test(previousSource ?? '')) fail(`ACCEPTED_SOURCE_INVALID: ${id}`);
-        if (installed.fingerprints) before[id] = installed.fingerprints;
+        if (installed.comparisonFingerprints ?? installed.fingerprints) before[id] = installed.comparisonFingerprints ?? installed.fingerprints;
         else {
           if (!groups.has(previousSource)) groups.set(previousSource, []);
           groups.get(previousSource).push(id);
