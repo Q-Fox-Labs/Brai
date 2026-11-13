@@ -223,6 +223,7 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         source = Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
         retained = {'PATH': '/bin', 'SECRET': 'kept', 'BRAI_IDENTITY_PROFILE_ID': 'profile'}
         env = {**retained, 'INVOCATION_ID': 'invocation', 'JOURNAL_STREAM': '1:2', 'SYSTEMD_EXEC_PID': '42',
+               'MEMORY_PRESSURE_WATCH': '/fixture/watch', 'MEMORY_PRESSURE_WRITE': 'fixture-write',
                'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': operation,
                'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': hashlib.sha256(payload).hexdigest()}
         with patch.dict(os.environ, env, clear=True), patch.object(Path, 'read_bytes', return_value=payload):
@@ -241,13 +242,15 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
 from pathlib import Path
 from identity.release_native import NativeRelease
 NativeRelease(None).bootstrap(Path('/unused'))
-assert 'INVOCATION_ID' not in os.environ
-assert b'INVOCATION_ID=fixture-invocation\\0' in Path('/proc/self/environ').read_bytes()
-child = subprocess.check_output([sys.executable, '-c', 'import os; print(os.getenv(\"INVOCATION_ID\", \"missing\"))'], text=True)
-assert child.strip() == 'missing'
+for key in ('INVOCATION_ID', 'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE'):
+    assert key not in os.environ
+    assert (key + '=fixture-' + key + '\\0').encode() in Path('/proc/self/environ').read_bytes()
+subprocess.check_call([sys.executable, '-c', 'import os; assert all(k not in os.environ for k in (\"INVOCATION_ID\", \"MEMORY_PRESSURE_WATCH\", \"MEMORY_PRESSURE_WRITE\"))'])
 """
         env={'PATH':'/usr/bin:/bin', 'PYTHONPATH':str(Path(__file__).resolve().parents[2]),
-             'INVOCATION_ID':'fixture-invocation'}
+             'INVOCATION_ID':'fixture-INVOCATION_ID',
+             'MEMORY_PRESSURE_WATCH':'fixture-MEMORY_PRESSURE_WATCH',
+             'MEMORY_PRESSURE_WRITE':'fixture-MEMORY_PRESSURE_WRITE'}
         result=subprocess.run([sys.executable,'-B','-c',script],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
 

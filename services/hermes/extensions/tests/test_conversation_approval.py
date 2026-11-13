@@ -198,7 +198,8 @@ class ConsentTests(unittest.TestCase):
             from identity.release_native import NativeRelease
             command='remove trip'; args={'command':command}
             base={'PATH':'/usr/bin:/bin','HOME':self.temp.name,'EXECUTION_SECRET':'same'}
-            metadata={'INVOCATION_ID':'old','JOURNAL_STREAM':'old','SYSTEMD_EXEC_PID':'10'}
+            metadata={'INVOCATION_ID':'old','JOURNAL_STREAM':'old','SYSTEMD_EXEC_PID':'10',
+                      'MEMORY_PRESSURE_WATCH':'old-watch','MEMORY_PRESSURE_WRITE':'old-write'}
             with patch.dict(os.environ,{**base,**metadata},clear=True):
                 NativeRelease(None).bootstrap(Path('/unused'))
                 with consent.turn_scope(self.db,source(),'session','Поручение','1'), consent.tool_scope('terminal',args,'first'), patch.object(consent,'review_action',return_value=REVIEW):
@@ -207,6 +208,7 @@ class ConsentTests(unittest.TestCase):
             row=self.store.query(self.scope.key);self.assertEqual(self.authorize(row),'authorized')
             payload=b'pinned worker'; operation='6115e95f-dd1d-4501-a9f2-31bc4c747818'
             cold={**base,'INVOCATION_ID':'new','JOURNAL_STREAM':'new','SYSTEMD_EXEC_PID':'20',
+                  'MEMORY_PRESSURE_WATCH':'new-watch','MEMORY_PRESSURE_WRITE':'new-write',
                   'BRAI_IDENTITY_RELEASE_HOLD_OPERATION':operation,
                   'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256':hashlib.sha256(payload).hexdigest()}
             retirement=types.SimpleNamespace(brai_hold=lambda value:value==operation)
