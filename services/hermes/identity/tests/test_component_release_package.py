@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет, что delivery включает фактическую Python closure нового ingress.
 # ABOUTME: Использует существующий упаковщик и только временный synthetic root.
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -23,6 +24,45 @@ FIXTURES = {PREFIX + 'tests/fixtures/ordinary_release/plugins/platforms/telegram
 
 
 class ReleasePackageTest(unittest.TestCase):
+    def test_system_instructions_and_all_public_skills_are_packaged_and_fingerprinted(self):
+        component=json.loads(COMPONENT.read_text())
+        skill_root='docs/user-agent/instructions/hermes/skills'
+        self.assertIn(skill_root,component['delivery']['files'])
+        spec=importlib.util.spec_from_file_location('hermes_instruction_contract',ROOT/PREFIX/'instructions.py')
+        contract=importlib.util.module_from_spec(spec);spec.loader.exec_module(contract)
+        mandatory={'docs/user-agent/instructions/context.md',
+                   *('docs/user-agent/instructions/hermes/'+name for name in contract.FILES if name!='context.md'),
+                   skill_root+'/'+contract.SKILL}
+        tracked=subprocess.run(['git','-C',str(ROOT),'ls-files','-z','--',skill_root],check=True,capture_output=True).stdout
+        skills={name.decode() for name in tracked.split(b'\0') if name}
+        self.assertIn(skill_root+'/'+contract.SKILL,skills)
+        graph=(ROOT/'deploy/components/graph.mjs').as_uri()
+        query="const {expand}=await import(process.argv[1]);console.log(JSON.stringify(expand(process.argv[2],JSON.parse(process.argv[3]))));"
+        expanded=subprocess.run(['node','--input-type=module','-e',query,graph,str(ROOT),json.dumps(component['inputs']['runtime'])],
+                                check=True,text=True,capture_output=True)
+        self.assertTrue((skills | mandatory) <= set(json.loads(expanded.stdout)))
+        required_files=sorted(mandatory-{skill_root+'/'+contract.SKILL})
+        self.assertTrue(set(required_files) <= set(component['delivery']['files']))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            shutil.copytree(ROOT/skill_root,root/skill_root)
+            for path in required_files:
+                dest=root/path;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/path,dest)
+            script='''const {packageComponent}=await import(process.argv[1]);
+const component={id:'hermes-instructions-proof',directory:'services/hermes',
+ delivery:{kind:'ready-files',files:JSON.parse(process.argv[3]),entrypoints:[],smokeImports:[]},npm:{workspaces:[]}};
+const result=await packageComponent(process.argv[2],component,'tmp/out');
+process.stdout.write(JSON.stringify({path:result.path,files:result.files}));'''
+            built=subprocess.run(['node','--input-type=module','-e',script,(ROOT/'deploy/components/package-runtime.mjs').as_uri(),
+                                  str(root),json.dumps([skill_root,*required_files])],check=True,text=True,capture_output=True)
+            result=json.loads(built.stdout);files={row['path'] for row in result['files']}
+            self.assertTrue((skills | mandatory) <= files)
+            self.assertFalse(any('usercustom' in path.split('/') for path in files))
+            for path in skills | mandatory:
+                self.assertEqual((Path(result['path'])/path).read_bytes(),(ROOT/path).read_bytes(),path)
+            for path in mandatory:
+                self.assertGreater((Path(result['path'])/path).stat().st_size,0,path)
+
     def test_real_packager_delivers_importable_factory_closure_and_contract(self):
         component=json.loads(COMPONENT.read_text())
         self.assertTrue(REQUIRED <= set(component['inputs']['runtime']))
