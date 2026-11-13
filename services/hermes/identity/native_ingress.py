@@ -3,6 +3,7 @@
 """Плагин не запускает polling и не создаёт пользовательский agent в ingress."""
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -11,6 +12,20 @@ from contextvars import ContextVar
 from .ingress import install
 
 _admitted_message = ContextVar('brai_identity_admitted_message', default=None)
+RELEASE_CONTRACT_PATH = Path(__file__).with_name('release-contract.json')
+RELEASE_CONTRACT = {'version':2,'profileGate':2,'telegramInbox':2,'routingIndex':2,'legacyJournal':1}
+
+
+def _verify_release_contract():
+    """Reject missing or unknown provider contracts before touching the native app."""
+    try:
+        value = json.loads(RELEASE_CONTRACT_PATH.read_text(encoding='utf-8'))
+    except (OSError,UnicodeError,ValueError) as error:
+        raise RuntimeError('Identity release contract unavailable') from error
+    if (not isinstance(value,dict) or set(value) != set(RELEASE_CONTRACT)
+            or any(type(value[key]) is not int or value[key] != expected
+                   for key,expected in RELEASE_CONTRACT.items())):
+        raise RuntimeError('Identity release contract incompatible')
 
 
 def _message_identity(message):
@@ -216,6 +231,7 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             loop.call_soon_threadsafe(start)
 
     def factory(app, adapter):
+        _verify_release_contract()
         runner = getattr(adapter, 'gateway_runner', None)
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
