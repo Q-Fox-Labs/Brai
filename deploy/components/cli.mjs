@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { discover, fingerprints, checkGroupFingerprint, json, validateDocumentation } from './graph.mjs';
 import {lockInputs} from './lock-inputs.mjs';
+import {verifiedProof} from './web-build-cache.mjs';
+import {sealedInventory} from './sealed-dependencies.mjs';
 import {buildOutputDigest, verifyBuildReceipt as verifyPreparedBuild, command} from './build-engine.mjs';
 export {buildOutputInventory, buildOutputDigest} from './build-engine.mjs';
 const defaultRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
@@ -29,9 +31,24 @@ export function runComponentCommand(root,c,text) {
   if(result.error)throw result.error;
   if(result.status!==0)throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
 }
-function dependencyInventory(root,c,development,cache) {
+function sealedDependencies(root,entries) {
+  try {
+    const marker=json(join(root,'node_modules/.brai-worktree.json'));
+    const generation=marker.dependencyRoot;
+    if(typeof generation!=='string')return null;
+    const proof=verifiedProof(root,[join(generation,'node_modules')]);
+    if(!proof)return null;
+    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'
+      ?join(dirname(root),'repo/.git/codeworks-dependencies/prepared'):proof.root;
+    if(generation!==expected)return null;
+    return sealedInventory(root,entries,proof,generation);
+  } catch {return null;}
+}
+export function dependencyInventory(root,c,development,cache=new Map()) {
   if(process.env.NODE_PATH || process.env.NODE_OPTIONS)return null;
   const entries=lockInputs(root,c.npm.workspaces,{development});
+  const sealed=sealedDependencies(root,entries);
+  if(sealed)return sealed;
   const cacheName=JSON.stringify(entries);
   if(cache.has(cacheName))return cache.get(cacheName);
   try {
@@ -182,18 +199,21 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
     const state=existsSync(statePath)?json(statePath):{};
     let compiled=false;
     // package also verifies build identity; check invokes only declared check commands, never npm test's legacy build prefix.
-    let needsBuild=c.commands.build && state.build!==item.build;
+    const buildDependencies=c.commands.build && sealedDependencies(root,lockInputs(root,c.npm.workspaces,{development:true}));
+    let needsBuild=c.commands.build && (state.build!==item.build || (buildDependencies && state.buildDependencies!==buildDependencies));
     if(c.commands.build && !needsBuild) {
       try {verifyBuildReceipt(root,c,state,item.build);}
       catch(error) {if(['build','run'].includes(action))needsBuild=true;else throw error;}
     }
     if (needsBuild) {
       runComponentCommand(root,c,c.commands.build); compiled=true;
+      if(buildDependencies && sealedDependencies(root,lockInputs(root,c.npm.workspaces,{development:true}))!==buildDependencies)throw Error(`BUILD_DEPENDENCIES_CHANGED: ${c.id}`);
       state.outputDigest=buildOutputDigest(root,c);
     }
     // Generated payload and dependency outputs are fingerprinted after this compilation.
     item={id:item.id,...fingerprints(root,c)};
     state.build=item.build;
+    if(buildDependencies)state.buildDependencies=buildDependencies;
     saveState(statePath,state);
     let checked=false, checkProof, checkGroups, checkDependencies;
     if (['check','run'].includes(action)) {
