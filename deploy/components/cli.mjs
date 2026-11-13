@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync, realpat
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { discover, fingerprints, checkGroupFingerprint, json, validateDocumentation } from './graph.mjs';
 import {lockInputs} from './lock-inputs.mjs';
@@ -30,6 +30,20 @@ export function runComponentCommand(root,c,text) {
   const result=spawnSync(text,{cwd:join(root,c.directory),shell:true,stdio:['inherit','inherit','inherit',3],env:environment});
   if(result.error)throw result.error;
   if(result.status!==0)throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
+}
+function runCheckCommand(root,c,text) {
+  if(!text)return Promise.resolve();
+  const environment={...process.env,NEXT_TELEMETRY_DISABLED:'1'};
+  delete environment.CODEX_TOOL_CALL_ID;
+  const stdio=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?['inherit','inherit','inherit',3]:'inherit';
+  return new Promise((resolve,reject)=>{
+    const child=spawn(text,{cwd:join(root,c.directory),shell:true,stdio,env:environment});
+    child.once('error',reject);
+    child.once('close',(status,signal)=>{
+      if(status===0)resolve();
+      else reject(Error(`COMMAND_FAILED: ${c.id}: ${text}: ${status ?? signal}`));
+    });
+  });
 }
 function sealedDependencies(root,entries) {
   try {
@@ -222,20 +236,26 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
       if(c.commands.checkGroups) {
         const groups=c.commands.checkGroups, ids=new Set(groups.map(g=>g.id));
         if(ids.size!==groups.length)throw Error(`CHECK_GROUP_DUPLICATE: ${c.id}`);
-        const receipts={...state.checkGroups},inputs=[];let executed=false;
-        checkGroups=[];
+        const receipts={...state.checkGroups},inputs=[];
         for(const group of groups) {
           const checks=checkGroupFingerprint(root,c,group), qualified={...c,commands:{...c.commands,checkTools:group.tools,pythonModules:group.pythonModules,pythonAbsent:group.pythonAbsent,absentPaths:group.absentPaths}};
           const key=dependencies && checkKey(qualified,{checks:checks+dependencies},toolCache);
           const proof=key && receipts[group.id]===key?'cached':'executed';
-          if(proof==='executed') {runComponentCommand(root,c,group.command);executed=true;}
+          inputs.push({group,checks,qualified,key,proof});
+        }
+        // Wait for every started process even on failure; no partial receipts escape.
+        const outcomes=await Promise.allSettled(inputs.filter(row=>row.proof==='executed').map(({group})=>runCheckCommand(root,c,group.command)));
+        const failed=outcomes.find(result=>result.status==='rejected');
+        if(failed)throw failed.reason;
+        checkGroups=[];
+        for(const {group,checks,qualified,key,proof} of inputs) {
           if(checkGroupFingerprint(root,c,group)!==checks || (key && checkKey(qualified,{checks:checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
-          inputs.push({group,checks});receipts[group.id]=key;checkGroups.push({id:group.id,proof});
+          receipts[group.id]=key;checkGroups.push({id:group.id,proof});
         }
         if(inputs.some(({group,checks})=>checkGroupFingerprint(root,c,group)!==checks))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
         if(dependencies && dependencyInventory(root,c,true,new Map())!==dependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
         state.checkGroups=receipts;
-        checkProof=executed?'executed':'cached';
+        checkProof=outcomes.length?'executed':'cached';
       } else {
         const key=dependencies && checkKey(c,{checks:item.checks+dependencies},toolCache);
         if(key && state.checkReceipt?.key===key) checkProof='cached';
