@@ -97,13 +97,23 @@ export async function release({root, source}, ports) {
     }
     const next = {}, before = {};
     await timed('fingerprints', async () => {
+      const groups = new Map();
       for (const id of graph.order) {
         next[id] = await ports.fingerprint(root, graph.components.get(id));
-        if (status.current?.components?.[id]?.fingerprints) before[id] = status.current.components[id].fingerprints;
+        const installed = status.current?.components?.[id];
+        if (!installed) continue;
+        const previousSource = installed.sourceSha ?? status.current.sourceSha;
+        if (!sha.test(previousSource ?? '')) fail(`ACCEPTED_SOURCE_INVALID: ${id}`);
+        if (installed.fingerprints) before[id] = installed.fingerprints;
+        else {
+          if (!groups.has(previousSource)) groups.set(previousSource, []);
+          groups.get(previousSource).push(id);
+        }
       }
-      if (status.current && graph.order.some(id => !before[id])) {
-        const baseline = await ports.sourceFingerprints(root, status.current.sourceSha, graph);
-        for (const id of graph.order) before[id] ??= baseline[id];
+      for (const [previousSource, ids] of groups) {
+        const scoped = {...graph, order: ids, components: new Map(ids.map(id => [id, graph.components.get(id)]))};
+        const baseline = await ports.sourceFingerprints(root, previousSource, scoped);
+        for (const id of ids) if (baseline[id]) before[id] = baseline[id];
       }
     });
     const selected = selectComponents(graph, status.current, next, before);

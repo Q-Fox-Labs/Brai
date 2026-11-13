@@ -182,7 +182,7 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   deliveryFiles.forEach(collect);
   const delivery={...c.delivery,files:deliveryFiles};
   const sourcePayload=payloadInputs.filter(path=>!/\/(?:dist|\.next)(?:\/|$)/.test(path));
-  const artifact=digestFiles(root,[...expand(root,c.inputs.runtime),...deps,...sourcePayload],{build,delivery,npm:runtimeLock,packagingEngine,compatibility,sourceModes:sourcePayload.map(path=>[path,lstatSync(join(root,path)).mode & 0o777]),base:c.delivery.kind==='oci-context'?toolchain.nodeBase:null,recipe:c.id==='instaloader'?toolchain.pythonBase:null});
+  const artifact=digestFiles(root,[...expand(root,c.inputs.runtime),...deps,...sourcePayload],{build,delivery,npm:runtimeLock,packagingEngine,compatibility,sourceModes:sourcePayload.map(path=>[path,lstatSync(join(root,path)).mode & 0o755]),base:c.delivery.kind==='oci-context'?toolchain.nodeBase:null,recipe:c.id==='instaloader'?toolchain.pythonBase:null});
   const runtime=digestFiles(root,payloadInputs,{artifact,modes:payloadInputs.map(path=>[path,lstatSync(join(root,path)).mode & 0o777])});
   const checks=digestFiles(root,[...buildFiles,...deps,...expand(root,c.inputs.checks)],{build,check:c.commands.check,lock:checkLock,delivery});
   return {build,runtime,checks,artifact,compatibility};

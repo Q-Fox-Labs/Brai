@@ -25,7 +25,7 @@ function fixture() {
     assertSource: async (_root, value) => {calls.push(['source', value]); if (value !== source) throw Error('SOURCE_NOT_HEAD');},
     graph: async (_root, ref) => {calls.push(['graph', ref]); return graph;},
     fingerprint: async (_root, c) => next[c.id],
-    sourceFingerprints: async (_root, ref) => {calls.push(['baseline', ref]); return Object.fromEntries(graph.order.map(id => [id, keys(id)]));},
+    sourceFingerprints: async (_root, ref, scoped) => {calls.push(['baseline', ref, [...scoped.components.keys()]]); return Object.fromEntries(scoped.order.map(id => [id, keys(id)]));},
     execute: async (_root, action, ids, options) => {calls.push([action, ids, options]); return ids.map(id => ({id, checked: action === 'check', artifact: action === 'package' ? {path: `/packages/${id}`} : undefined}));},
     verify: async (path, id) => {calls.push(['verify', path, id]); return {path, payloadHash: digest};},
     manifestHash: async () => 'e'.repeat(64),
@@ -91,6 +91,34 @@ test('accepted fingerprint fallback uses the accepted source, never remote branc
   await release({root: '/repository', source}, ports);
   assert.ok(state.calls.some(c => c[0] === 'baseline' && c[1] === oldSource));
   assert.ok(!JSON.stringify(state.calls).includes('origin/dev'));
+});
+
+test('mixed observed baseline groups installed components by exact source and selects new component', async () => {
+  const {ports, state} = fixture(), otherSource = 'c'.repeat(40);
+  state.current.sourceSha = null;
+  state.current.provenance = {kind: 'observed-dev-baseline-v1'};
+  state.current.components.auth = {sourceSha: oldSource};
+  state.current.components.web = {sourceSha: oldSource};
+  state.current.components.timer = {sourceSha: otherSource};
+  state.graph.components.set('new-service', component('new-service'));
+  state.graph.order.push('new-service'); state.next['new-service'] = keys('new-service');
+  state.supportedComponents['new-service'] = {supported: true, handler: 'compose-payload'};
+  state.next.auth = keys('auth');
+  const result = await release({root: '/repository', source}, ports);
+  assert.deepEqual(state.calls.filter(c => c[0] === 'baseline'), [
+    ['baseline', oldSource, ['auth', 'web']], ['baseline', otherSource, ['timer']],
+  ]);
+  assert.deepEqual(result.components, ['new-service']);
+});
+
+test('installed component without valid source provenance fails before build', async () => {
+  for (const invalid of [null, 'dev']) {
+    const {ports, state} = fixture();
+    state.current.sourceSha = null;
+    state.current.components.auth.sourceSha = invalid;
+    await assert.rejects(release({root: '/repository', source}, ports), /ACCEPTED_SOURCE_INVALID: auth/);
+    assert.ok(!state.calls.some(call => call[0] === 'build' || call[0] === 'baseline'));
+  }
 });
 
 test('report write failure does not misreport an already accepted runtime release', async () => {

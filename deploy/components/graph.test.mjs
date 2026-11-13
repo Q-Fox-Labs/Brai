@@ -249,3 +249,13 @@ test('cold source plan excludes generated bundle; built delivery admits its exac
  put(root,'services/probe/main.mjs',"export const bundle=new URL('./dist/other.js',import.meta.url);\n");
  assert.throws(()=>discover(root),/UNDECLARED_LOCAL_INPUT/);
 });
+
+
+test('artifact fingerprint reflects canonical delivery mode and executable bits', t => {
+ const root=fixture(t), c=add(root,'probe'), path=join(root,'services/probe/main.mjs');
+ chmodSync(path,0o644); const original=fingerprints(root,c);
+ chmodSync(path,0o664); const groupWritable=fingerprints(root,c);
+ assert.equal(groupWritable.artifact,original.artifact);
+ chmodSync(path,0o755); const executable=fingerprints(root,c);
+ assert.notEqual(executable.artifact,original.artifact);
+});
