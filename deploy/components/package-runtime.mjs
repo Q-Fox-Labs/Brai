@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, statSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
-import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { lockInputs } from './lock-inputs.mjs';
@@ -81,6 +80,7 @@ function linkPackageFiles(source, destination, ancestors = new Set()) {
     mkdirSync(destination, { recursive: true });
     for (const name of readdirSync(resolved).sort(compare)) linkPackageFiles(join(resolved, name), join(destination, name), next);
   } else if (info.isFile()) {
+    if (info.mode & 0o022) fail(`PACKAGING_SOURCE_PERMISSIONS: ${source}: remove group and other write access from prepared dependencies`);
     try { linkSync(resolved, destination); }
     catch (error) {
       if (error.code === 'EXDEV') fail(`PACKAGE_CROSS_FILESYSTEM: ${source}: prepared dependencies and output must be on the same filesystem`);
@@ -127,23 +127,21 @@ async function validateRuntime(stage, component) {
     repositoryPath(key);
     if (!existsSync(join(stage, key)) || !lstatSync(join(stage, key)).isFile()) fail(`MISSING_RUNTIME_ENTRYPOINT: ${key}`);
   }
-  // AIDEV-NOTE: Внутри root/tmp Node мог бы найти исходные node_modules выше поставки и скрыть недостающую зависимость.
-  const isolated = mkdtempSync(join(tmpdir(), 'brai-component-smoke-'));
+  // A read-only mount at /tmp prevents both ancestor node_modules resolution and mutation of shared files.
+  const isolated = '/tmp/brai-component-smoke';
+  const env = { PATH: process.env.PATH ?? '', NODE_PATH: '', NODE_OPTIONS: '' };
+  const options = { env, timeout: 30_000, maxBuffer: 1024 * 1024 };
+  const sandbox = ['--die-with-parent', '--ro-bind', '/', '/', '--tmpfs', '/tmp', '--ro-bind', stage, isolated, '--unshare-net', '--chdir', isolated, '--'];
   try {
-    cpSync(stage, isolated, { recursive: true, dereference: false, verbatimSymlinks: true });
-    const env = { PATH: process.env.PATH ?? '', NODE_PATH: '', NODE_OPTIONS: '' };
-    const options = { cwd: isolated, env, timeout: 30_000, maxBuffer: 1024 * 1024 };
     for (const key of component.delivery.entrypoints.filter(key => /\.(?:mjs|cjs|js)$/.test(key))) {
-      await run(process.execPath, ['--check', join(isolated, key)], options);
+      await run('/usr/bin/bwrap', [...sandbox, process.execPath, '--check', join(isolated, key)], options);
     }
     if (component.delivery.smokeImports.length) {
       const script = component.delivery.smokeImports.map(key => `await import(${JSON.stringify(pathToFileURL(join(isolated, key)).href)}${key.endsWith('.json') ? ", { with: { type: 'json' } }" : ''});`).join('\n');
-      await run(process.execPath, ['--input-type=module', '--eval', script], options);
+      await run('/usr/bin/bwrap', [...sandbox, process.execPath, '--input-type=module', '--eval', script], options);
     }
   } catch (error) {
     fail(`ARTIFACT_SMOKE_FAILED: ${error.stderr?.trim() || error.message}`);
-  } finally {
-    rmSync(isolated, { recursive: true, force: true });
   }
 }
 

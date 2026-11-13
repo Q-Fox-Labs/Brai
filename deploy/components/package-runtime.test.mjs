@@ -233,3 +233,29 @@ test('code-only releases share dependency files and detect dependency tampering'
   assert.throws(() => verifyPackage(first.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
   assert.throws(() => verifyPackage(second.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
 });
+
+
+test('shared dependencies reject group-writable sources without changing their mode', async t => {
+  const {root,write,component,build}=fixture(t);
+  const app={name:'@brai/example',version:'1.0.0',dependencies:{dep:'1.0.0'}};
+  write('services/example/package.json',app);
+  write('node_modules/dep/package.json',{name:'dep',version:'1.0.0'});
+  write('package-lock.json',{lockfileVersion:3,packages:{'services/example':app,'node_modules/dep':{version:'1.0.0'}}});
+  component.npm={workspaces:['services/example']};
+  const source=join(root,'node_modules/dep/package.json'); chmodSync(source,0o664);
+  await assert.rejects(build(),/PACKAGING_SOURCE_PERMISSIONS/);
+  assert.equal(statSync(source).mode & 0o777,0o664);
+});
+
+test('smoke cannot mutate prepared dependency files through the read-only package', async t => {
+  const {root,write,component,build}=fixture(t);
+  const app={name:'@brai/example',version:'1.0.0',type:'module',dependencies:{dep:'1.0.0'}};
+  write('services/example/package.json',app);
+  write('node_modules/dep/package.json',{name:'dep',version:'1.0.0',type:'module',exports:'./index.js'});
+  write('node_modules/dep/index.js',"import {writeFileSync} from 'node:fs'; try { writeFileSync(new URL('./index.js', import.meta.url), 'corrupted'); throw Error('write succeeded'); } catch (error) { if (!['EROFS','EACCES'].includes(error.code)) throw error; } export const value = 7;\n");
+  write('services/example/main.mjs',"import {value} from 'dep'; if(value !== 7) throw Error('bad dependency');\n");
+  write('package-lock.json',{lockfileVersion:3,packages:{'services/example':app,'node_modules/dep':{version:'1.0.0'}}});
+  component.npm={workspaces:['services/example']};
+  const source=join(root,'node_modules/dep/index.js'),before=readFileSync(source,'utf8');
+  await build(); assert.equal(readFileSync(source,'utf8'),before);
+});
