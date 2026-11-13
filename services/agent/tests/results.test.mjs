@@ -181,19 +181,15 @@ test('ordinary native text never queries an unresponsive results store', async t
 });
 
 test('native reads and slow incoming/outgoing metadata share one request deadline and preserve native text', async t => {
+  let logicalNow = 0; t.mock.method(performance, 'now', () => logicalNow);
   const f = fixture(markdown, true, 200); t.after(() => f.app.close());
-  const nativeCall = f.native.call; f.native.call = async (...args) => { if (args[0] === 'thread/read') await new Promise(resolve => setTimeout(resolve, 40)); return nativeCall(...args); };
+  const nativeCall = f.native.call; f.native.call = async (...args) => { if (args[0] === 'thread/read') logicalNow += 40; return nativeCall(...args); };
   const incoming = f.incomingPort.request; const metadataTimeouts = [];
-  f.incomingPort.request = async (subject, value, options) => { metadataTimeouts.push({ phase: 'incoming', timeoutMs: options.timeoutMs }); await new Promise(resolve => setTimeout(resolve, 140)); return incoming(subject, value, options); };
-  f.outputPort.request = async (_subject, _value, options) => { metadataTimeouts.push({ phase: 'outgoing', timeoutMs: options.timeoutMs }); await new Promise(resolve => setTimeout(resolve, options.timeoutMs)); throw new Error('outgoing timeout'); };
-  let timer;
-  const work = f.app.request(command);
-  const result = await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve(null), 350); })]); clearTimeout(timer); await work;
-  assert.ok(result, 'Metadata must return before the external read deadline');
+  f.incomingPort.request = async (subject, value, options) => { metadataTimeouts.push({ phase: 'incoming', timeoutMs: options.timeoutMs }); logicalNow += 140; return incoming(subject, value, options); };
+  f.outputPort.request = async (_subject, _value, options) => { metadataTimeouts.push({ phase: 'outgoing', timeoutMs: options.timeoutMs }); logicalNow += options.timeoutMs; throw new Error('outgoing timeout'); };
+  const result = await f.app.request(command);
   assert.equal(result.items[0].text, markdown); assert.equal(result.items[0].resultsState, 'unavailable');
-  assert.equal(metadataTimeouts.filter(entry => entry.phase === 'outgoing').length, 1);
-  assert.ok(metadataTimeouts.find(entry => entry.phase === 'incoming').timeoutMs < 200, 'Native read consumes the same deadline');
-  assert.ok(metadataTimeouts.find(entry => entry.phase === 'outgoing').timeoutMs < 60, 'Incoming read cannot reset the outgoing budget');
+  assert.deepEqual(metadataTimeouts, [{phase: 'incoming', timeoutMs: 160}, {phase: 'outgoing', timeoutMs: 20}]);
 });
 
 test('incoming history recovery consumes the read budget before both decorators', async t => {
