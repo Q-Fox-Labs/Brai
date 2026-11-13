@@ -39,7 +39,7 @@ def catalog_files(bundled, instructions):
         front = re.match(r'\A---\n.*?\n---\n', text, re.S)
         if not front or not re.search(r'^name:\s*\S+', front.group(), re.M):
             raise ValueError('SYSTEM_SKILL_METADATA')
-        destination = '/opt/brai-profile/instructions/skills/' + relative.as_posix()
+        destination = '/opt/brai-profile/system-instructions/current/skills/' + relative.as_posix()
         result[str(relative)] = (front.group() + '\nПеред выполнением полностью прочитай '
             '[каноническую инструкцию](' + destination + ').\n').encode()
     if not any(Path(name).name == 'SKILL.md' for name in result):

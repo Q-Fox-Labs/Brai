@@ -72,6 +72,44 @@ class SystemTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             instructions.read_context(base, shared)
 
+    def test_same_process_reads_switched_generation_and_personal_files(self):
+        root = self.root / 'stable'
+        generations = root / '.generations'
+        home = self.root / 'home'
+        home.mkdir()
+        (home / 'USER.md').write_text('личное')
+        (home / 'SOUL.md').write_text('стиль')
+        for ident, text in [('a' * 64, 'первое'),
+                            ('b' * 64, 'второе')]:
+            generation = generations / ident
+            for name in instructions.FILES:
+                path = generation / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text + name)
+            skill = generation / 'skills' / instructions.SKILL
+            skill.parent.mkdir(parents=True)
+            skill.write_text('---\nname: context-gifs\n---\n' + text)
+        current = root / 'current'
+        current.symlink_to('.generations/' + 'a' * 64)
+        original = Path.lstat
+        def trusted(path):
+            info = original(path)
+            return NS(st_uid=0, st_mode=info.st_mode & ~0o022)
+        with patch.object(instructions, 'ROOT', root), patch.object(Path, 'lstat', trusted), \
+             patch.dict(os.environ, HERMES_HOME=str(home)):
+            first = instructions.system_context()
+            replacement = root / '.next'
+            replacement.symlink_to('.generations/' + 'b' * 64)
+            os.replace(replacement, current)
+            second = instructions.system_context()
+        self.assertIn('первоеcontext.md', first)
+        self.assertIn('второеcontext.md', second)
+        self.assertNotIn('первоеcontext.md', second)
+        self.assertIn('личное', first)
+        self.assertIn('личное', second)
+        self.assertEqual((home / 'USER.md').read_text(), 'личное')
+        self.assertEqual((home / 'SOUL.md').read_text(), 'стиль')
+
     def test_system_catalog_retains_bundled_assets_and_product_routes(self):
         bundled, product = self.root / 'bundled', self.root / 'instructions/skills'
         for root, relative, raw in [
@@ -86,7 +124,7 @@ class SystemTests(unittest.TestCase):
             path.write_bytes(raw)
         files = catalog_files(bundled, product)
         self.assertEqual(files['research/arxiv/scripts/search.py'], b'print("shared")')
-        self.assertIn(b'/opt/brai-profile/instructions/skills/creative/context-gifs/SKILL.md',
+        self.assertIn(b'/opt/brai-profile/system-instructions/current/skills/creative/context-gifs/SKILL.md',
                       files['creative/context-gifs/SKILL.md'])
         self.assertNotIn(b'Old skill', files['creative/context-gifs/SKILL.md'])
         self.assertIn('brai-task-workflows/SKILL.md', files)

@@ -4,12 +4,12 @@
 from pathlib import Path
 import json
 import os
+import re
 import stat
 
-ROOT = Path('/opt/brai-profile/instructions')
+ROOT = Path('/opt/brai-profile/system-instructions')
 FILES = ('context.md', 'INDEX.md', 'BASE.md', 'BUG_HUNT.md')
 SKILL = 'creative/context-gifs/SKILL.md'
-SKILLS_ROOT = Path('/opt/brai-profile/system-skills/skills')
 
 
 def read_context(root, skills_root=None):
@@ -34,15 +34,28 @@ def read_context(root, skills_root=None):
 
 
 def system_context():
-    """Проверить root-owned readonly источники и вернуть полный контекст текущего хода."""
-    for path in [ROOT / relative for relative in FILES] + [SKILLS_ROOT / SKILL]:
+    """Прочитать одно неизменяемое поколение и текущие личные настройки."""
+    current = ROOT / 'current'
+    for item in (ROOT, *ROOT.parents):
+        info = item.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
+    info = current.lstat()
+    if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+        raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
+    target = os.readlink(current)
+    if not re.fullmatch(r'\.generations/[0-9a-f]{64}', target):
+        raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
+    generation = ROOT / target
+    skills_root = generation / 'skills'
+    for path in [generation / relative for relative in FILES] + [skills_root / SKILL]:
         for item in (path, *path.parents):
             info = item.lstat()
             if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
                 raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
         if not path.is_file():
             raise ValueError('SYSTEM_INSTRUCTIONS_INVALID')
-    return read_context(ROOT, SKILLS_ROOT) + personal_context(os.environ.get('HERMES_HOME', ''))
+    return read_context(generation, skills_root) + personal_context(os.environ.get('HERMES_HOME', ''))
 
 
 def personal_context(home):
