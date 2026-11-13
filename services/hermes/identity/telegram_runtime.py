@@ -209,6 +209,8 @@ class Resolver:
         self.interactive_scopes = {}
         self.supervisor = None
         self.control_server = None
+        self.release_gate = None
+        self.release_workers = {}
         self.control_locks = {}
         self.closed = False
         self.retired = False
@@ -223,7 +225,7 @@ class Resolver:
         """Держать native lifetime всех active профилей без нового сообщения."""
         path = os.environ.get('BRAI_IDENTITY_INGRESS_CONTROL_SOCKET')
         if path and not self.closed and self.control_server is None:
-            self.control_server = asyncio.create_task(serve_chat_control(path, self.chat_control))
+            self.control_server = asyncio.create_task(serve_chat_control(path, self.chat_control, self.release_gate))
         if not self.closed and self.supervisor is None:
             self.supervisor = asyncio.create_task(self._supervise())
 
@@ -255,6 +257,67 @@ class Resolver:
                 # чтобы новый input после ответа не был принят за накопленный backlog.
                 await asyncio.sleep(max(0, state['resumeAfter'] - time.time()))
             return {'paused': state['paused'], 'state': ('stopping' if stopping else 'stopped') if state['paused'] else 'resumed'}
+
+    async def release_status(self, operationId):
+        """Проверить каждого active worker после удержания входного транспорта."""
+        blocked = {'operationId': operationId, 'state': 'blocked', 'reason': 'worker_control_unavailable'}
+        try:
+            # Native batch callbacks outlive PTB queue.task_done and can still dispatch.
+            for name in ('_pending_text_batches', '_pending_text_batch_tasks',
+                         '_pending_photo_batches', '_pending_photo_batch_tasks',
+                         '_media_group_events', '_media_group_tasks', '_held_inbound_events'):
+                pending = getattr(self.adapter, name, None)
+                if not isinstance(pending, (dict, list)):
+                    return blocked
+                if pending:
+                    return {'operationId': operationId, 'state': 'draining', 'reason': 'telegram_batches'}
+            if not hasattr(self.adapter, '_held_inbound_redispatch_task'):
+                return blocked
+            redispatch = self.adapter._held_inbound_redispatch_task
+            if redispatch is not None and not redispatch.done():
+                return {'operationId': operationId, 'state': 'draining', 'reason': 'telegram_batches'}
+            if any(bridge.dispatch_inflight for bridge in self.bridges.values()):
+                return {'operationId': operationId, 'state': 'draining', 'reason': 'telegram_dispatch'}
+            response = await broker_call('ingress.profiles', {})
+            profiles = response.get('profiles') if isinstance(response, dict) else None
+            if not isinstance(profiles, list):
+                return blocked
+            for profile in profiles:
+                bridge = self._bridge(profile)
+                # AIDEV-NOTE: Учитываем worker до RPC: timeout не доказывает отказ begin.
+                self.release_workers[bridge.worker_uid] = bridge
+            states = []
+            for bridge in self.release_workers.values():
+                peer = await bridge.connect()
+                for method in ('release.begin', 'release.status'):
+                    result = await peer.call(method, {'operationId': operationId})
+                    if (not isinstance(result, dict) or result.get('operationId') != operationId
+                            or result.get('state') not in ('draining', 'blocked', 'ready')):
+                        return blocked
+                states.append(result)
+            if any(item['state'] == 'blocked' for item in states):
+                reason = next(item.get('reason') for item in states if item['state'] == 'blocked')
+                return {'operationId': operationId, 'state': 'blocked',
+                        'reason': reason if isinstance(reason, str) and reason else 'worker_blocked'}
+            if any(item['state'] == 'draining' for item in states):
+                return {'operationId': operationId, 'state': 'draining', 'reason': 'workers'}
+            return {'operationId': operationId, 'state': 'ready', 'reason': None}
+        except Exception:
+            return blocked
+
+    async def release_resume(self, operationId):
+        """Снять все подтверждённые и неопределённые worker fences до входного gate."""
+        try:
+            for bridge in self.release_workers.values():
+                peer = await bridge.connect()
+                result = await peer.call('release.resume', {'operationId': operationId})
+                if (not isinstance(result, dict) or result.get('operationId') != operationId
+                        or result.get('state') != 'resumed'):
+                    return False
+        except Exception:
+            return False
+        self.release_workers.clear()
+        return True
 
     async def close(self):
         """Закрыть только каналы этого ingress instance."""

@@ -38,7 +38,10 @@ class GuestBrowserTest(unittest.TestCase):
         unit = worker_unit(profile, engine_root='/software/engine', runtime_root='/software/runtime',
             python='/software/python/bin/python3', ingress_uid=995, broker_socket='/run/broker.sock',
             memory_socket='/run/memory.sock', egress_socket='/run/egress.sock')
-        self.assertIn('Wants=brai-hermes-dev-browser-' + profile['profileId'], unit)
+        browser = 'brai-hermes-dev-browser-' + profile['profileId'] + '.service'
+        for key in ('After', 'Requires', 'BindsTo', 'JoinsNamespaceOf'):
+            self.assertIn(key + '=' + browser + '\n', unit)
+        self.assertIn('PrivateNetwork=yes\n', unit)
         self.assertIn('BindReadOnlyPaths=/run/egress.sock.browser:/run/brai-profile/browser-egress.sock', unit)
         self.assertIn('Environment=AGENT_BROWSER_CONFIG=/opt/brai-profile/browser-defaults.json', unit)
         config = native_profile(profile, instructions_root='/software/instructions', model='fixture')

@@ -251,6 +251,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
     if not re.fullmatch(r'braiu-[0-9a-f]{20}', user):
         raise ValueError('Invalid profile account')
     prefix = 'brai-hermes-' + instance + '-identity-'
+    browser = 'brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service'
     python_root = str(PurePosixPath(python).parent.parent)
     python_name = PurePosixPath(python).name
     # AIDEV-NOTE: SDK telegram должен разрешаться раньше локального каталога адаптера telegram.
@@ -260,7 +261,8 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         '[Unit]', 'Description=Brai personal Hermes ' + profile['profileId'],
         'After=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
         'Requires=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
-        'Wants=brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service',
+        'After=' + browser, 'Requires=' + browser, 'BindsTo=' + browser,
+        'JoinsNamespaceOf=' + browser,
         '[Service]', 'Type=simple', 'User=' + user, 'Group=' + user,
         'WorkingDirectory=' + home + '/workspace',
         'Environment=HOME=' + home, 'Environment=HERMES_HOME=' + home,

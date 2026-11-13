@@ -249,7 +249,7 @@ class Bridge:
 _authorized_telegram = ContextVar('brai_identity_authorized_telegram', default=None)
 
 
-async def serve_chat_control(path, handler):
+async def serve_chat_control(path, handler, release=None):
     """Открыть private UDS существующего ingress только для root Control."""
     target = Path(path)
     if not target.is_absolute() or not target.parent.is_dir():
@@ -298,7 +298,11 @@ async def serve_chat_control(path, handler):
         task = asyncio.current_task()
         clients.add(task)
         try:
-            await asyncio.wait_for(Peer(reader, writer, {'chats.control': handler}).run(), 30)
+            methods = {'chats.control': handler}
+            if release is not None:
+                methods.update({'release.begin': release.begin, 'release.status': release.status,
+                                'release.resume': release.resume, 'release.commit': release.commit})
+            await asyncio.wait_for(Peer(reader, writer, methods).run(), 30)
         finally:
             clients.discard(task)
             writer.close()

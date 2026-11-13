@@ -53,3 +53,11 @@ test('native system skills remain shared across two users', {
     {encoding: 'utf8', timeout: 30000});
   assert.equal(result.status, 0, result.stderr || result.error?.message);
 });
+
+// Native fixture is pinned in the repository; no installed worker or user data is required.
+test('Hermes non-destructive release barrier', () => {
+  const result = spawnSync(process.env.PYTHON || 'python3',
+    ['-B', '-m', 'unittest', 'discover', '-s', here, '-p', 'test_release*.py', '-v'],
+    { encoding: 'utf8', env: { ...process.env, PYTHONPATH: join(here, '../..') } });
+  assert.equal(result.status, 0, result.stderr || result.error?.message || 'Release tests failed');
+});

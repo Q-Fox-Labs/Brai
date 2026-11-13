@@ -25,7 +25,7 @@ def browser_identity(profile):
 
 
 def browser_unit(profile, *, chrome_root, instance='dev'):
-    """Сформировать unit собственного Chrome в сетевом пространстве worker."""
+    """Сформировать unit Chrome с отдельным стабильным сетевым пространством."""
     identity = browser_identity(profile)
     home, name, browser = identity['home'], identity['username'], identity['browser']
     root = _path(chrome_root)
@@ -33,12 +33,9 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
     guest = profile.get('role') == 'guest'
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', instance):
         raise ValueError('Invalid instance')
-    worker = 'brai-hermes-' + instance + '-user-' + profile_id + '.service'
     chrome = str(PurePosixPath(root) / 'chrome')
     lines = [
         '[Unit]', 'Description=Brai personal browser ' + profile_id,
-        'After=' + worker, 'Requires=' + worker, 'BindsTo=' + worker,
-        'PartOf=' + worker, 'JoinsNamespaceOf=' + worker,
         '[Service]', 'Type=simple', 'User=' + name, 'Group=' + name,
         'Environment=HOME=' + home, 'Environment=TMPDIR=' + browser + '/tmp',
         'Environment=XDG_CACHE_HOME=' + browser + '/cache',

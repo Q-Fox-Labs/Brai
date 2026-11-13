@@ -26,6 +26,125 @@ def message_admitted(message):
     return identity is not None and identity == _admitted_message.get()
 
 
+
+class ReleaseGate:
+    """Удерживать следующий Telegram poll до явного завершения операции."""
+    def __init__(self, app):
+        self.app = app
+        self.operation = None
+        self.held = asyncio.Event()
+        self.unlocked = asyncio.Event()
+        self.unlocked.set()
+        self.drain = None
+        self.restore = None
+        self.resolver = None
+        self.committed = False
+        self.lock = asyncio.Lock()
+
+    def install(self):
+        """Установить gate на Bot данного приложения до начала polling."""
+        bot = self.app.bot
+        cls = type(bot)
+        original = cls.get_updates
+        owned = 'get_updates' in cls.__dict__
+        async def gated(instance, *args, **kwargs):
+            if instance is bot and self.operation is not None:
+                timeout = kwargs.get('timeout')
+                seconds = timeout.total_seconds() if callable(getattr(timeout, 'total_seconds', None)) else timeout
+                updater = getattr(self.app, 'updater', None)
+                # PTB stop отменяет удержанный action и отдельно подтверждает обработанный offset.
+                cleanup = self.committed and updater is not None and updater.running is False and seconds == 0
+                if not cleanup:
+                    self.held.set()
+                    await self.unlocked.wait()
+            return await original(instance, *args, **kwargs)
+        cls.get_updates = gated
+        def restore():
+            self.operation = None
+            self.unlocked.set()
+            if self.drain is not None:
+                self.drain.cancel()
+            if cls.__dict__.get('get_updates') is gated:
+                if owned:
+                    cls.get_updates = original
+                else:
+                    delattr(cls, 'get_updates')
+        self.restore = restore
+
+    @staticmethod
+    def _validate(operationId):
+        if not isinstance(operationId, str) or not operationId:
+            from .ipc import RpcError
+            raise RpcError(-32602, 'Invalid release operation')
+
+    async def _drain(self):
+        await self.held.wait()
+        await self.app.update_queue.join()
+
+    async def begin(self, operationId):
+        """Зафиксировать операцию и ждать границу следующего polling без отмены запросов."""
+        from .ipc import RpcError
+        self._validate(operationId)
+        if self.operation is not None and self.operation != operationId:
+            raise RpcError(-32602, 'Another release operation holds ingress')
+        if self.operation is None:
+            self.operation = operationId
+            self.committed = False
+            self.held.clear()
+            self.unlocked.clear()
+            self.drain = asyncio.create_task(self._drain())
+        return await self.status(operationId)
+
+    async def status(self, operationId):
+        """Сообщить границу транспорта; неподтверждённые worker блокируют release."""
+        from .ipc import RpcError
+        self._validate(operationId)
+        if self.operation != operationId:
+            raise RpcError(-32602, 'Release operation does not own ingress')
+        if self.drain is None or not self.drain.done():
+            return {'operationId': operationId, 'state': 'draining', 'reason': 'telegram_polling'}
+        if self.drain.cancelled() or self.drain.exception() is not None:
+            return {'operationId': operationId, 'state': 'blocked', 'reason': 'telegram_drain_failed'}
+        if self.resolver is None:
+            return {'operationId': operationId, 'state': 'blocked', 'reason': 'worker_control_unavailable'}
+        async with self.lock:
+            if self.operation != operationId:
+                raise RpcError(-32602, 'Release operation does not own ingress')
+            return await self.resolver.release_status(operationId)
+
+    async def commit(self, operationId):
+        """Разрешить только завершающий PTB cleanup после полной проверки drain."""
+        from .ipc import RpcError
+        drain = self.drain
+        result = await self.status(operationId)
+        if result['state'] != 'ready':
+            return result
+        async with self.lock:
+            if self.operation != operationId or self.drain is not drain:
+                raise RpcError(-32602, 'Release operation changed')
+            self.committed = True
+            return {'operationId': operationId, 'state': 'committed', 'reason': None}
+
+    async def resume(self, operationId):
+        """Снять gate только владельцу операции; не отменять текущую обработку."""
+        from .ipc import RpcError
+        self._validate(operationId)
+        if self.operation != operationId:
+            raise RpcError(-32602, 'Release operation does not own ingress')
+        async with self.lock:
+            if self.operation != operationId:
+                raise RpcError(-32602, 'Release operation does not own ingress')
+            if self.resolver is not None and not await self.resolver.release_resume(operationId):
+                return {'operationId': operationId, 'state': 'blocked', 'reason': 'worker_resume_unconfirmed'}
+            drain, self.drain = self.drain, None
+            if drain is not None:
+                drain.cancel()
+                await asyncio.gather(drain, return_exceptions=True)
+            self.operation = None
+            self.committed = False
+            self.unlocked.set()
+        return {'operationId': operationId, 'state': 'resumed', 'reason': None}
+
 def register(ctx, *, build_resolver=None, admit_update=None):
     """Зарегистрировать заводской hook до native Telegram polling.
 
@@ -58,6 +177,10 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
         resolver = build_resolver(adapter, runner)
+        gate = ReleaseGate(app)
+        gate.resolver = resolver
+        gate.install()
+        resolver.release_gate = gate
         journal = getattr(resolver, 'journal', None)
         if journal is not None:
             journal.install(app.bot)
@@ -101,12 +224,14 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             forward = install(runner, adapter, resolver)
         except Exception:
             app.remove_handler(handler, group=-100)
+            gate.restore()
             raise
         adapter._brai_identity_ingress_ready = True
-        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original))
+        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original, gate))
 
     def close():
-        for adapter, original, forward, app, handler, loop, interactive_original in reversed(installed):
+        for adapter, original, forward, app, handler, loop, interactive_original, gate in reversed(installed):
+            gate.restore()
             app.remove_handler(handler, group=-100)
             if getattr(adapter, '_brai_identity_dispatch', None) is forward:
                 adapter._brai_identity_dispatch = original

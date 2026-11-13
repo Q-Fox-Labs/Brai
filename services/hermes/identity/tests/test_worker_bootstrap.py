@@ -1,5 +1,6 @@
 # ABOUTME: Проверяет конфигурацию личного worker и ограниченный MCP-клиент.
 # ABOUTME: Учетные данные и настоящие сетевые службы не используются.
+import asyncio
 import json
 import os
 import sys
@@ -149,6 +150,8 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, kind, callback):
                 self.callback = callback
         ctx, app = Context(), App()
+        app.bot = type('Bot', (), {'get_updates': lambda self: None})()
+        app.update_queue = asyncio.Queue()
         async def admit(event):
             return None
         async def original(event):
@@ -231,6 +234,8 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         async def native_admit(event):
             return None
         ctx, app = Context(), App()
+        app.bot = type('Bot', (), {'get_updates': lambda self: None})()
+        app.update_queue = asyncio.Queue()
         adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=native_admit, _is_user_authorized_for_source=lambda s, **k: False), handle_message=None)
         telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
         telegram.Update, ext.TypeHandler, ext.ApplicationHandlerStop = object, Handler, Stop

@@ -159,7 +159,9 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('/.install.lock\n', value)
         self.assertIn('/software/runtime:/opt/brai-profile/runtime', value)
         self.assertIn('/software/site-packages:/opt/brai-profile/site-packages', value)
-        self.assertIn('Wants=brai-hermes-dev-browser-' + self.profile()['profileId'] + '.service', value)
+        browser = 'brai-hermes-dev-browser-' + self.profile()['profileId'] + '.service'
+        for key in ('After', 'Requires', 'BindsTo', 'JoinsNamespaceOf'):
+            self.assertIn(key + '=' + browser + '\n', value)
         self.assertIn('brai-hermes-dev-identity-broker.service', value)
         self.assertNotIn('EnvironmentFile=', value)
         self.assertNotIn('docker.sock', value)
@@ -192,13 +194,14 @@ class ProfileTests(unittest.TestCase):
                                     cwd=temp, env=env, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
 
-    def test_browser_joins_only_own_worker_and_keeps_sandbox(self):
+    def test_browser_owns_network_and_keeps_sandbox(self):
         profile = self.profile()
         value = browser_unit(profile, chrome_root='/software/chrome')
         worker = 'brai-hermes-dev-user-' + profile['profileId'] + '.service'
-        self.assertIn('JoinsNamespaceOf=' + worker, value)
-        self.assertIn('BindsTo=' + worker, value)
-        self.assertIn('PartOf=' + worker, value)
+        self.assertIn('PrivateNetwork=yes\n', value)
+        self.assertNotIn(worker, value)
+        for key in ('JoinsNamespaceOf=', 'BindsTo=', 'PartOf=', 'Requires=', 'After='):
+            self.assertNotIn(key, value)
         self.assertIn('User=' + profile['username'], value)
         self.assertIn('TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro', value)
         self.assertIn('BindPaths=' + profile['home'] + '\n', value)

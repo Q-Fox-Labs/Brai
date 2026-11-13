@@ -537,3 +537,434 @@
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
 +            return None  # Automatic topic is resolved by the trusted Brai ingress.
          cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)
+
+--- a/hermes_cli/backend_retirement.py
++++ b/hermes_cli/backend_retirement.py
+@@ -21,6 +21,7 @@
+     def __init__(self):
+         self._lock = threading.Lock()
+         self._active = 0
++        self._brai_release_owner = None
+         self._preparing = False
+         self._token = None
+         self._committed = False
+@@ -34,7 +35,7 @@
+     def acquire(self):
+         with self._lock:
+             self._expire()
+-            if self._preparing or self._token is not None:
++            if self._preparing or self._token is not None or self._brai_release_owner is not None:
+                 return False
+             self._active += 1
+             return True
+@@ -42,6 +43,23 @@
+     def release(self):
+         with self._lock:
+             self._active -= 1
++
++    def brai_hold(self, owner):
++        """Freeze new source reservations once already admitted scans have ended."""
++        with self._lock:
++            if self._brai_release_owner not in (None, owner):
++                raise ValueError("BRAI_RELEASE_OWNER_CHANGED")
++            if self._active:
++                return False
++            self._brai_release_owner = owner
++            return True
++
++    def brai_resume(self, owner):
++        """Release only the matching operation, without changing Desktop permits."""
++        with self._lock:
++            if self._brai_release_owner not in (None, owner):
++                raise ValueError("BRAI_RELEASE_OWNER_CHANGED")
++            self._brai_release_owner = None
+
+     def active_count(self):
+         with self._lock:
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3890,6 +3890,19 @@
+         except Exception:
+             return None
+
++    _brai_release_protocol = 1
++
++    def _brai_release_source(self):
++        from contextlib import nullcontext
++        return nullcontext()
++
++    def _brai_release_completion(self):
++        from contextlib import nullcontext
++        return nullcontext()
++
++    def _brai_release_track(self, task):
++        return task
++
+     def _running_agent_count(self) -> int:
+         return len(self._running_agents)
+
+@@ -4680,6 +4693,14 @@
+ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
+     """Drain each profile's worker queue through its matching live adapters. A credential-less satellite
+     profile (empty adapter map) drains through the primary's adapters routed by its own profile routes."""
++    from hermes_cli.backend_retirement import retirement
++    with retirement.work() as admitted:
++        if not admitted:
++            return
++        return _brai_admitted_cron_deliveries(adapters, loop, runner)
++
++
++def _brai_admitted_cron_deliveries(adapters, loop, runner=None):
+     from cron import scheduler as cron_scheduler
+     from cron import scheduler_preflight as sched_preflight
+
+@@ -4766,7 +4787,10 @@
+         tick_count += 1
+         for every, label, fn in chores:
+             if tick_count % every == 0:
+-                _housekeeping_chore(label, fn)
++                from hermes_cli.backend_retirement import retirement
++                with retirement.work() as admitted:
++                    if admitted:
++                        _housekeeping_chore(label, fn)
+         wait_for_next_tick(stop_event, interval, queue_watch, _housekeeping_chore)
+     logger.info("Gateway housekeeping stopped")
+
+@@ -5612,6 +5636,7 @@
+     # External providers own one unscoped remote registry, so they can only serve a single home.
+     cron_provider = scheduler_for_profile_mode(
+         resolve_cron_scheduler(), multiplex_profiles=len(cron_profile_homes) > 1)
++    runner._brai_release_cron_supported = isinstance(cron_provider, InProcessCronScheduler)
+     cron_start_kwargs: dict[str, Any] = {"adapters": runner.adapters, "loop": asyncio.get_running_loop()}
+
+     if isinstance(cron_provider, InProcessCronScheduler) and cron_profile_homes:
+--- a/gateway/run_adapters.py
++++ b/gateway/run_adapters.py
+@@ -587,6 +587,7 @@
+                 inflight[session_id] = asyncio.ensure_future(
+                     _dispatch(row, session_id, session_db, profile_name)
+                 )
++                self._brai_release_track(inflight[session_id])
+
+         # A row still 'running' at startup died mid-dispatch and blocks request_handoff until reclaimed.
+         def _scope(profile_home):  # local: tests bind this watcher onto bare SimpleNamespace runners
+@@ -600,19 +601,20 @@
+                     await _reclaim_stale(self)
+         try:
+             while self._running:
+-                try:
+-                    for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
+-                        # Idle gate (run_idle_gates): skip the scope entry when the profile's store
+-                        # holds no pending handoff. The root poll (None) is unscoped and stays cheap.
+-                        if profile_home is not None and not await off_loop_gate(
+-                                self, lambda home=profile_home: profile_has_pending_handoff(home)):
+-                            continue
+-                        async with _scope(profile_home):
+-                            await _tick(profile_name)
+-                except asyncio.CancelledError:
+-                    raise
+-                except Exception as exc:
+-                    logger.debug("Handoff watcher tick error: %s", exc, exc_info=True)
++                async with self._brai_release_source():
++                    try:
++                        for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
++                            # Idle gate (run_idle_gates): skip the scope entry when the profile's store
++                            # holds no pending handoff. The root poll (None) is unscoped and stays cheap.
++                            if profile_home is not None and not await off_loop_gate(
++                                    self, lambda home=profile_home: profile_has_pending_handoff(home)):
++                                continue
++                            async with _scope(profile_home):
++                                await _tick(profile_name)
++                    except asyncio.CancelledError:
++                        raise
++                    except Exception as exc:
++                        logger.debug("Handoff watcher tick error: %s", exc, exc_info=True)
+                 await asyncio.sleep(interval)
+         finally:
+             # Bounded drain: cancelling would strand in-flight rows in 'running'.
+--- a/gateway/run_goals.py
++++ b/gateway/run_goals.py
+@@ -496,17 +496,18 @@
+                 await self._loop_wakeup_fire_one(sid, state, now, warned_no_route, profile_name)
+
+         while self._running:
+-            try:
+-                # Multiplex resolution walks the filesystem off-loop; a stalled walk on the loop
+-                # trips the loop-liveness watchdog (exit 75).
+-                for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
+-                    # Idle gate (run_idle_gates): skip the scope entry when the profile's store holds
+-                    # no active loop. The root scan (None) is unscoped and stays cheap.
+-                    if profile_home is not None and not await self._run_in_executor_with_context(
+-                            profile_has_active_loop, profile_home):
+-                        continue
+-                    async with _scope(profile_home):
+-                        await _scan_one_store(profile_name)
+-            except Exception as exc:
+-                logger.debug("loop wakeup watcher error: %s", exc)
++            async with self._brai_release_source():
++                try:
++                    # Multiplex resolution walks the filesystem off-loop; a stalled walk on the loop
++                    # trips the loop-liveness watchdog (exit 75).
++                    for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
++                        # Idle gate (run_idle_gates): skip the scope entry when the profile's store holds
++                        # no active loop. The root scan (None) is unscoped and stays cheap.
++                        if profile_home is not None and not await self._run_in_executor_with_context(
++                                profile_has_active_loop, profile_home):
++                            continue
++                        async with _scope(profile_home):
++                            await _scan_one_store(profile_name)
++                except Exception as exc:
++                    logger.debug("loop wakeup watcher error: %s", exc)
+             await asyncio.sleep(interval)
+--- a/gateway/kanban_watchers.py
++++ b/gateway/kanban_watchers.py
+@@ -101,23 +101,24 @@
+         _gc_next_at = 0.0
+
+         while self._running:
+-            try:
+-                _gc_due = time.monotonic() >= _gc_next_at
+-                _retention = 30
+-                if _gc_due:
+-                    _gc_next_at = time.monotonic() + _GC_INTERVAL_SECONDS
+-                    _retention = _gc_retention_days()
+-
+-                deliveries = await asyncio.to_thread(
+-                    _notifier_collect, self, _kb,
+-                    notifier_profile=notifier_profile, gc_due=_gc_due, gc_retention_days=_retention,
+-                )
+-                for d in deliveries:
+-                    await _KanbanNotification(
+-                        self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
+-                    ).deliver()
+-            except Exception as exc:
+-                logger.warning("kanban notifier tick failed: %s", exc)
++            async with self._brai_release_source():
++                try:
++                    _gc_due = time.monotonic() >= _gc_next_at
++                    _retention = 30
++                    if _gc_due:
++                        _gc_next_at = time.monotonic() + _GC_INTERVAL_SECONDS
++                        _retention = _gc_retention_days()
++
++                    deliveries = await asyncio.to_thread(
++                        _notifier_collect, self, _kb,
++                        notifier_profile=notifier_profile, gc_due=_gc_due, gc_retention_days=_retention,
++                    )
++                    for d in deliveries:
++                        await _KanbanNotification(
++                            self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
++                        ).deliver()
++                except Exception as exc:
++                    logger.warning("kanban notifier tick failed: %s", exc)
+             await self._sleep_between_ticks(interval)
+
+     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> None:
+@@ -283,49 +284,50 @@
+
+         logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
+         while self._running:
+-            try:
+-                # Reap zombies before per-board work so a board DB failure
+-                # cannot block cleanup of unrelated workers.
+-                from hermes_cli import kanban_db_dispatch as _kbd
+-                pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
+-                if pids:
+-                    logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
+-            except Exception:
+-                logger.exception("kanban dispatcher: zombie reaper failed")
+-
+-            try:
+-                # Emergency stop (`hermes pause`): no auto-decompose or
+-                # dispatch while paused; running workers finish naturally.
+-                if not _kanban_dispatch_allowed():
+-                    bad_ticks = 0
+-                else:
+-                    # Re-read the auto-decompose toggle live so disabling it
+-                    # takes effect on the next tick, not on restart.
+-                    _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
+-                    # See #49638.
+-                    if _ad_enabled:
+-                        await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
+-                    results = await _to_thread_process_service(dispatcher.tick_once)
+-                    any_spawned = _log_spawn_results(results)
+-                    ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
+-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+-                now = int(time.time())
+-                if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
+-                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+-                    logger.warning(
+-                        "kanban dispatcher stuck: ready queue non-empty for "
+-                        "%d consecutive ticks but 0 workers spawned.%s Check "
+-                        "profile health (venv, PATH, credentials) and "
+-                        "`hermes kanban list --status ready`.",
+-                        bad_ticks, f" Last tick held back: {held}." if held else "",
+-                    )
+-                    last_warn_at = now
+-            except asyncio.CancelledError:
+-                logger.debug("kanban dispatcher: cancelled")
+-                self._release_kanban_dispatcher_lock()
+-                raise
+-            except Exception:
+-                logger.exception("kanban dispatcher: unexpected watcher error")
++            async with self._brai_release_source():
++                try:
++                    # Reap zombies before per-board work so a board DB failure
++                    # cannot block cleanup of unrelated workers.
++                    from hermes_cli import kanban_db_dispatch as _kbd
++                    pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
++                    if pids:
++                        logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
++                except Exception:
++                    logger.exception("kanban dispatcher: zombie reaper failed")
++
++                try:
++                    # Emergency stop (`hermes pause`): no auto-decompose or
++                    # dispatch while paused; running workers finish naturally.
++                    if not _kanban_dispatch_allowed():
++                        bad_ticks = 0
++                    else:
++                        # Re-read the auto-decompose toggle live so disabling it
++                        # takes effect on the next tick, not on restart.
++                        _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
++                        # See #49638.
++                        if _ad_enabled:
++                            await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
++                        results = await _to_thread_process_service(dispatcher.tick_once)
++                        any_spawned = _log_spawn_results(results)
++                        ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
++                        bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
++                    now = int(time.time())
++                    if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
++                        held = _kbd.describe_suppression(res for _slug, res in (results or []))
++                        logger.warning(
++                            "kanban dispatcher stuck: ready queue non-empty for "
++                            "%d consecutive ticks but 0 workers spawned.%s Check "
++                            "profile health (venv, PATH, credentials) and "
++                            "`hermes kanban list --status ready`.",
++                            bad_ticks, f" Last tick held back: {held}." if held else "",
++                        )
++                        last_warn_at = now
++                except asyncio.CancelledError:
++                    logger.debug("kanban dispatcher: cancelled")
++                    self._release_kanban_dispatcher_lock()
++                    raise
++                except Exception:
++                    logger.exception("kanban dispatcher: unexpected watcher error")
+
+             await self._sleep_between_ticks(interval)
+
+--- a/gateway/run_watchers.py
++++ b/gateway/run_watchers.py
+@@ -41,10 +41,11 @@
+         """Reclaim resources without ending durable conversations."""
+         await asyncio.sleep(60)
+         while self._running:
+-            try:
+-                await self._session_housekeeping()
+-            except Exception as e:
+-                logger.debug("Session housekeeping error: %s", e)
++            async with self._brai_release_source():
++                try:
++                    await self._session_housekeeping()
++                except Exception as e:
++                    logger.debug("Session housekeeping error: %s", e)
+             await _interruptible_sleep(self, interval)
+
+     async def _session_housekeeping(self) -> None:
+--- a/gateway/return_notices.py
++++ b/gateway/return_notices.py
+@@ -198,8 +198,9 @@
+         from gateway.run import _planned_restart_notification_path
+
+         while self._running:
+-            if read_return_notices(_planned_restart_notification_path()) is not None:
+-                await self._replay_pending_planned_restart_notification()
++            async with self._brai_release_source():
++                if read_return_notices(_planned_restart_notification_path()) is not None:
++                    await self._replay_pending_planned_restart_notification()
+             await asyncio.sleep(interval)
+
+     async def _replay_pending_planned_restart_notification(self) -> None:
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1872,43 +1872,44 @@
+         from tools.process_registry import process_registry as _pr
+         last_orphan_sweep = None
+         while self._running:
+-            with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
+-                # Completions whose owner process died while this gateway runs (#97202).
+-                if last_orphan_sweep is None or time.monotonic() - last_orphan_sweep >= ORPHAN_SWEEP_INTERVAL_S:
+-                    last_orphan_sweep = time.monotonic()
+-                    await asyncio.to_thread(self._sweep_orphaned_completion_ledgers)
+-                # Pattern events also need an idle consumer; foreground turns are optional.
+-                await self._drain_watch_notifications(_pr.completion_queue)
+-                # Process completions remain owned by their per-process watchers.
+-                requeue = []
+-                async_events = []
+-                while not _pr.completion_queue.empty():
+-                    try:
+-                        evt = _pr.completion_queue.get_nowait()
+-                    except Exception:
+-                        break
+-                    (async_events if evt.get("type") == "async_delegation" else requeue).append(evt)
+-                for evt in requeue:
+-                    _pr.completion_queue.put(evt)
+-                # A fan-out finishing together yields N completions for one session; group by full route +
+-                # parent session so each group becomes ONE consolidated turn.
+-                # A same-tick drain often carries several completions for the SAME originating session (a
+-                # fan-out of background subagents finishing together). Events for different sessions never
+-                # coalesce. See #70300.
+-                groups: dict[tuple[str, ...], list[dict]] = {}
+-                for evt in async_events:
+-                    self._enrich_async_delegation_routing(evt)
+-                    groups.setdefault(self._event_route_key(evt, self._ASYNC_GROUP_KEY_FIELDS), []).append(evt)
+-                for group in groups.values():
+-                    try:
+-                        delivered = await self._deliver_async_delegation_group(group)
+-                        if delivered is False:
++            async with self._brai_release_completion():
++                with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
++                    # Completions whose owner process died while this gateway runs (#97202).
++                    if last_orphan_sweep is None or time.monotonic() - last_orphan_sweep >= ORPHAN_SWEEP_INTERVAL_S:
++                        last_orphan_sweep = time.monotonic()
++                        await asyncio.to_thread(self._sweep_orphaned_completion_ledgers)
++                    # Pattern events also need an idle consumer; foreground turns are optional.
++                    await self._drain_watch_notifications(_pr.completion_queue)
++                    # Process completions remain owned by their per-process watchers.
++                    requeue = []
++                    async_events = []
++                    while not _pr.completion_queue.empty():
++                        try:
++                            evt = _pr.completion_queue.get_nowait()
++                        except Exception:
++                            break
++                        (async_events if evt.get("type") == "async_delegation" else requeue).append(evt)
++                    for evt in requeue:
++                        _pr.completion_queue.put(evt)
++                    # A fan-out finishing together yields N completions for one session; group by full route +
++                    # parent session so each group becomes ONE consolidated turn.
++                    # A same-tick drain often carries several completions for the SAME originating session (a
++                    # fan-out of background subagents finishing together). Events for different sessions never
++                    # coalesce. See #70300.
++                    groups: dict[tuple[str, ...], list[dict]] = {}
++                    for evt in async_events:
++                        self._enrich_async_delegation_routing(evt)
++                        groups.setdefault(self._event_route_key(evt, self._ASYNC_GROUP_KEY_FIELDS), []).append(evt)
++                    for group in groups.values():
++                        try:
++                            delivered = await self._deliver_async_delegation_group(group)
++                            if delivered is False:
++                                for evt in group:
++                                    _pr.completion_queue.put(evt)
++                        except Exception as e:
+                             for evt in group:
+                                 _pr.completion_queue.put(evt)
+-                    except Exception as e:
+-                        for evt in group:
+-                            _pr.completion_queue.put(evt)
+-                        logger.error("Async delegation injection error: %s", e)
++                            logger.error("Async delegation injection error: %s", e)
+             await asyncio.sleep(interval)
+
+     @staticmethod

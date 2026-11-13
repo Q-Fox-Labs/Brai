@@ -53,6 +53,8 @@ class Worker:
         self.chat_locks = {}
         self.peer_released = asyncio.Event()
         self.peer_released.set()
+        from .release_native import NativeRelease
+        self.release = NativeRelease(self)
 
     async def serve_connection(self, reader, writer):
         """Читать duplex RPC до startup sends; не допускать второй native runtime."""
@@ -81,7 +83,9 @@ class Worker:
                 pass
             return
         peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel,
-                    'health': self.health, 'interactive': self.interactive, 'chat_pause': self.chat_pause})
+                    'health': self.health, 'interactive': self.interactive, 'chat_pause': self.chat_pause,
+                    'release.begin': self.release.begin, 'release.status': self.release.status,
+                    'release.resume': self.release.resume})
         self.peer = peer
         self.peer_released.clear()
         reading = asyncio.create_task(peer.run())
@@ -120,6 +124,7 @@ class Worker:
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
+        self.release.install(self.runner)
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             from .native_policy import revalidate_startup
             revalidate_startup()
@@ -328,6 +333,8 @@ class Worker:
     async def ensure_tools(self):
         """Однократно активировать полный startup и дождаться operational-ready."""
         async with self.tools_lock:
+            if self.release.operation is not None and not self.activation.is_set():
+                raise RpcError(-32603, 'Release holds native activation')
             if self.operational.is_set():
                 return
             if self.lifecycle_task is None or self.lifecycle_task.done():
@@ -406,6 +413,8 @@ class Worker:
         """Принять только событие привязанного владельца, не доверяя его metadata."""
         from gateway.platforms.event import MessageEvent, MessageType
         from gateway.session import SessionSource
+        if self.release.operation is not None:
+            raise RpcError(-32603, 'Release holds new dispatch')
         if owner != self.user_id or not isinstance(event, dict):
             raise RpcError(-32602, 'Invalid owner or event')
         from .native_policy import guest_mode

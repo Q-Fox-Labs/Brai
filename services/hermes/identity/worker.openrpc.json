@@ -663,6 +663,144 @@
           }
         }
       }
+    },
+    {
+      "name": "release.begin",
+      "paramStructure": "by-name",
+      "summary": "Закрыть допуск источников и дождаться завершения принятой работы.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.status",
+      "paramStructure": "by-name",
+      "summary": "Проверить активную работу и очереди без их изменения.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.resume",
+      "paramStructure": "by-name",
+      "summary": "Снять барьер только той же операции.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
     }
   ]
 }

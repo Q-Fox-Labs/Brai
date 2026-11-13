@@ -70,6 +70,191 @@
           "message": "Internal error"
         }
       ]
+    },
+    {
+      "name": "release.begin",
+      "paramStructure": "by-name",
+      "summary": "Удержать следующий polling и начать drain.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.status",
+      "paramStructure": "by-name",
+      "summary": "Проверить polling, очередь и каждый active worker.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.resume",
+      "paramStructure": "by-name",
+      "summary": "Снять worker fences, затем возобновить polling.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "release.commit",
+      "paramStructure": "by-name",
+      "summary": "После ready разрешить только завершающий cleanup при остановке polling.",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "release",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "draining",
+                "blocked",
+                "ready",
+                "resumed",
+                "committed"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
     }
   ]
 }

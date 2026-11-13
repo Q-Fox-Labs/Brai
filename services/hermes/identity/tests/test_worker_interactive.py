@@ -199,7 +199,11 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         class Stop(Exception):
             pass
         removed = []
-        app = NS(add_handler=lambda *a, **kw: None, remove_handler=lambda *a, **kw: removed.append(a))
+        class Bot:
+            async def get_updates(self, **kwargs):
+                return []
+        app = NS(bot=Bot(), update_queue=asyncio.Queue(),
+                 add_handler=lambda *a, **kw: None, remove_handler=lambda *a, **kw: removed.append(a))
         ctx = NS(register_telegram_handler=lambda factory: setattr(ctx, 'factory', factory),
                  on_unload=lambda close: setattr(ctx, 'close', close))
         adapter = NS(gateway_runner=NS(_hm_admit_event=lambda event: None))
@@ -235,7 +239,12 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
     async def test_callbacks_and_inline_require_trusted_root_then_stop_root_handlers(self):
         class Stop(Exception):
             pass
-        app = NS(add_handler=lambda handler, **kw: setattr(app, 'guard', handler.callback), remove_handler=lambda *a, **kw: None)
+        class Bot:
+            async def get_updates(self, **kwargs):
+                return []
+        app = NS(bot=Bot(), update_queue=asyncio.Queue(),
+                 add_handler=lambda handler, **kw: setattr(app, 'guard', handler.callback),
+                 remove_handler=lambda *a, **kw: None)
         ctx = NS(register_telegram_handler=lambda factory: setattr(ctx, 'factory', factory), on_unload=lambda close: None)
         adapter = NS(gateway_runner=NS(_hm_admit_event=lambda event: None))
         ext = ModuleType('telegram.ext')
