@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from contextlib import asynccontextmanager
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -212,8 +213,43 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': str(uuid.uuid4())}, clear=True):
             with self.assertRaises(RuntimeError):
                 self.release.bootstrap(source)
+            self.assertIn('BRAI_IDENTITY_RELEASE_HOLD_OPERATION', os.environ)
         self.assertTrue(self.retirement.acquire())
         self.retirement.release()
+
+    async def test_startup_consumes_only_verified_hold_and_process_metadata(self):
+        operation = str(uuid.uuid4())
+        payload = b'pinned worker source'
+        source = Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
+        retained = {'PATH': '/bin', 'SECRET': 'kept', 'BRAI_IDENTITY_PROFILE_ID': 'profile'}
+        env = {**retained, 'INVOCATION_ID': 'invocation', 'JOURNAL_STREAM': '1:2', 'SYSTEMD_EXEC_PID': '42',
+               'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': operation,
+               'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': hashlib.sha256(payload).hexdigest()}
+        with patch.dict(os.environ, env, clear=True), patch.object(Path, 'read_bytes', return_value=payload):
+            self.release.bootstrap(source)
+            self.assertEqual(dict(os.environ), retained)
+            self.assertTrue(self.release.cold_start)
+            self.assertEqual(self.release.operation, operation)
+            self.assertFalse(self.release.open.is_set())
+        with patch.dict(os.environ, {'PATH': '/bin', 'INVOCATION_ID': 'normal'}, clear=True):
+            NativeRelease(self.worker).bootstrap(source)
+            self.assertEqual(dict(os.environ), {'PATH': '/bin'})
+        self.retirement.brai_resume(operation)
+
+    async def test_root_can_still_read_original_process_environment(self):
+        script = """import os, subprocess, sys
+from pathlib import Path
+from identity.release_native import NativeRelease
+NativeRelease(None).bootstrap(Path('/unused'))
+assert 'INVOCATION_ID' not in os.environ
+assert b'INVOCATION_ID=fixture-invocation\\0' in Path('/proc/self/environ').read_bytes()
+child = subprocess.check_output([sys.executable, '-c', 'import os; print(os.getenv(\"INVOCATION_ID\", \"missing\"))'], text=True)
+assert child.strip() == 'missing'
+"""
+        env={'PATH':'/usr/bin:/bin', 'PYTHONPATH':str(Path(__file__).resolve().parents[2]),
+             'INVOCATION_ID':'fixture-invocation'}
+        result=subprocess.run([sys.executable,'-B','-c',script],env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
 
     async def test_profile_attempt_caches_busy_then_rechecks_with_new_id(self):
         profile = str(uuid.uuid4())

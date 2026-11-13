@@ -391,7 +391,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             profile.attach = attach
             self.calls.append('plugin_discovery')
         with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules):
-            with patch('identity.native_policy.revalidate_startup'), patch('identity.native_policy.install', side_effect=lambda: self.calls.append('role_policy')), patch('identity.images.install_shared_provider', side_effect=discover):
+            with patch('identity.native_policy.revalidate_startup'), patch('identity.native_policy.install', side_effect=lambda **_kwargs: self.calls.append('role_policy')), patch('identity.images.install_shared_provider', side_effect=discover):
                 worker = await self.worker()
             try:
                 self.assertIs(sys.modules['_brai_identity_human'].attach, attach)

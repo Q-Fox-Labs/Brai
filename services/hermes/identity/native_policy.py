@@ -245,7 +245,7 @@ def install_executor_guard():
     agent_runtime_helpers.invoke_tool = guarded_invoke
 
 
-def install():
+def install(*, cold_start=False):
     """Закрепить гостевой startup и общий guard registry до обнаружения инструментов."""
     global _installed, _guest, _role, _suspended, _startup_state
     state = broker_call('permissions.bootstrap', {})
@@ -336,7 +336,7 @@ def install():
             trusted_tts=trusted_silero('/opt/brai-profile/runtime'))
 
     _installed = True
-    if _suspended or state.get('staged') is True or os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION'):
+    if _suspended or state.get('staged') is True or cold_start:
         from gateway.run import GatewayRunner
         recovery = GatewayRunner._start_recover_previous_run
         finish = GatewayRunner._start_finish_wiring

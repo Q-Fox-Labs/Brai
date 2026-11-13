@@ -145,7 +145,7 @@ class Worker:
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             from .native_policy import install
-            install()
+            install(cold_start=self.release.cold_start)
             self._install_telegram_profile()
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
@@ -831,13 +831,13 @@ async def run(config_path):
     from .tool_client import broker_call
     # У файлового bootstrap только привязанный по UID broker; старый fixed-owner порт запрещён.
     os.environ['BRAI_IDENTITY_MODE'] = 'worker'
-    from .skills import install_policy
-    install_policy()
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
     worker = Worker(ingress, owner, telegram, publish_delivery_file)
     worker.release.bootstrap(Path(__file__))
+    from .skills import install_policy
+    install_policy()
     relay = await start_relay(egress, port=18080)
     browser_relay = None
     try:

@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 import re
 
+_STARTUP_HOLD = ('BRAI_IDENTITY_RELEASE_HOLD_OPERATION', 'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
+_PROCESS_METADATA = ('INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID')
+
 
 class NativeRelease:
     """Сериализовать один release; готовность означает отсутствие живой работы."""
@@ -34,13 +37,18 @@ class NativeRelease:
         """Root-bound cold startup closes both sources before native construction."""
         operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
         digest = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
-        if operation is None and digest is None:
-            return
-        if (not operation or not digest or str(uuid.UUID(operation)) != operation
+        held = operation is not None or digest is not None
+        if held and (not operation or not digest or str(uuid.UUID(operation)) != operation
                 or not re.fullmatch('[a-f0-9]{64}', digest)
                 or Path(source) != Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
                 or hashlib.sha256(Path(source).read_bytes()).hexdigest() != digest):
             raise RuntimeError('Root startup release binding unavailable')
+        # The startup-only values must not leak into executable tool environments.
+        # /proc/<pid>/environ retains the original systemd binding for Root checks.
+        for name in (*_STARTUP_HOLD, *_PROCESS_METADATA):
+            os.environ.pop(name, None)
+        if not held:
+            return
         from hermes_cli.backend_retirement import retirement
         if not callable(getattr(retirement, 'brai_hold', None)) or not retirement.brai_hold(operation):
             raise RuntimeError('Root startup release fence unavailable')

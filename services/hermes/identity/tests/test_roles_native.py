@@ -219,7 +219,7 @@ class ExclusiveLoaderTests(unittest.TestCase):
 class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
     """Ordinary startup возвращается после Auth; sticky old jobs остаются закрытыми."""
 
-    async def exercise(self, sticky):
+    async def exercise(self, sticky, *, cold=False, staged=True):
         from unittest.mock import patch
         active, effects = {'value': False}, []
         class Runner:
@@ -241,7 +241,7 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
         client = types.ModuleType('identity.tool_client')
         def broker(method, args):
             if method == 'permissions.bootstrap':
-                return {'role': 'user', 'generation': 4, 'staged': True, 'backgroundsSuspended': sticky}
+                return {'role': 'user', 'generation': 4, 'staged': staged, 'backgroundsSuspended': sticky}
             if method == 'permissions.get' and active['value']:
                 return {'role': 'user', 'generation': 4}
             raise PermissionError('not active')
@@ -276,17 +276,18 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
             policy.protected_config = lambda path: {'source': 'trusted'}
             policy.restrict_exclusive_plugins = lambda product: None
             policy.install_executor_guard = lambda: None
-            policy.install()
+            policy.install(cold_start=cold)
             runner = Runner()
             await runner._start_recover_previous_run()
             await runner._start_finish_wiring(1)
             runner._start_spawn_background_watchers()
             self.assertEqual(effects, ['trusted', 'reconnect'] if sticky else ['trusted'])
             self.assertEqual(policy.backgrounds_suspended(), sticky)
-            self.assertEqual(tools_config.load_config()['source'], 'trusted')
-            self.assertEqual(effective.load_user_config_effective()['source'], 'trusted')
-            self.assertEqual(raw.read_yaml_layers(Path('/untrusted/home'))['source'], 'trusted')
-            self.assertEqual(raw.load_legacy_gateway_json(Path('/untrusted/home')), {})
+            expected_initial = 'trusted' if staged else 'HOME'
+            self.assertEqual(tools_config.load_config()['source'], expected_initial)
+            self.assertEqual(effective.load_user_config_effective()['source'], expected_initial)
+            self.assertEqual(raw.read_yaml_layers(Path('/untrusted/home'))['source'], expected_initial)
+            self.assertEqual(raw.load_legacy_gateway_json(Path('/untrusted/home')), {} if staged else {'legacy': True})
             active['value'] = True
             async def check(): self.assertEqual(policy.principal(), {'role': 'user', 'generation': 4})
             await policy.activate_deferred_startup(runner, object(), check)
@@ -307,6 +308,9 @@ class DeferredStartupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_promoted_guest_does_not_restore_old_backgrounds(self):
         await self.exercise(True)
+
+    async def test_cold_active_user_defers_startup_without_environment_hold(self):
+        await self.exercise(False, cold=True, staged=False)
 
 
 if __name__ == '__main__':
