@@ -128,6 +128,19 @@ class TestRealPTBClaims(unittest.IsolatedAsyncioTestCase):
         self.assertIn('123:3',self.adapter._inflight_update_ids)
 
 class MirrorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reserved_profile_collision_is_rejected_before_global_journal_open(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.update_inbox import UpdateInbox, ProfileGateStore
+        from identity.transport_inbox import TransportInbox, TRANSPORT_PROFILE
+        with tempfile.TemporaryDirectory() as directory:
+            inbox=UpdateInbox(IdentityJournal(Path(directory)/'chats'))
+            async def inventory(): return {'profiles':[],'allProfileIds':[TRANSPORT_PROFILE['profileId']]}
+            mirror=Mirror(inbox,lambda actor:None,transport=TransportInbox(inbox.journal),
+                          inventory=inventory,gate_store=ProfileGateStore(inbox),boot_id='synthetic')
+            with self.assertRaisesRegex(ValueError,'TRANSPORT_PROFILE_COLLISION'):
+                await mirror.hydrate()
+            self.assertFalse(inbox.journal.root.exists())
+
     async def test_crash_before_gate_receipt_keeps_orphan_held_input_unknown(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox, ProfileGateStore
