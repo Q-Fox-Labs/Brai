@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
@@ -13,6 +13,21 @@ const previewPath = '/usr/local/sbin/brai-dev-preview';
 const sha = /^[a-f0-9]{40}$/;
 const hash = data => createHash('sha256').update(data).digest('hex');
 const fail = message => { throw Error(message); };
+
+/** Совпадает с Root storage.schema_ref: порядок и поля строк манифеста сохраняются. */
+export function schemaRef(manifest) {
+  if (!Array.isArray(manifest?.files) || manifest.files.some(row => !row || typeof row.path !== 'string')) fail('ARTIFACT_MANIFEST_INVALID');
+  const rows=manifest.files.filter(row => (`/${row.path}`).includes('/migrations/') || posix.extname(row.path)==='.sql' || ['migrate.js','migrate.mjs','migrate.py'].includes(posix.basename(row.path)));
+  return `sha256:${hash(JSON.stringify(rows))}`;
+}
+
+/** Вычислить hash и migration inputs из одних и тех же байтов manifest. */
+export function manifestInfo(path, id, payloadHash) {
+  const bytes=readFileSync(join(path,'artifact-manifest.json'));
+  const manifest=JSON.parse(bytes.toString('utf8'));
+  if(manifest.componentId!==id || manifest.payloadHash!==payloadHash)fail('ARTIFACT_MANIFEST_INVALID');
+  return {sha256:hash(bytes),schemaRef:schemaRef(manifest)};
+}
 
 /** Проверяет неизменяемый source: принимается полный SHA текущего чистого HEAD, без разрешения branch/ref. */
 export function assertSource(root, source, git = args => execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'})) {
@@ -81,12 +96,12 @@ async function prepareComponent(root, id, graph, status, ports, timed) {
   const artifact = result.artifact;
   if (!artifact?.path) fail(`ARTIFACT_INVALID: ${id}`);
   if (!/^[a-f0-9]{64}$/.test(artifact.payloadHash ?? '')) fail(`ARTIFACT_INVALID: ${id}`);
-  const manifestSha = await ports.manifestHash(artifact.path);
-  const schemaRef = status.current?.components?.[id]?.schema?.after ?? status.supportedComponents[id].schemaRef ?? 'unchanged';
+  const manifest = await ports.manifestInfo(artifact.path,id,artifact.payloadHash);
+  const before = status.current?.components?.[id]?.schema?.after ?? status.supportedComponents[id].schemaRef ?? 'unchanged';
   return {id,
     artifact: {path: artifact.path, digest: `sha256:${artifact.payloadHash}`, metadata: {payloadHash: artifact.payloadHash}},
-    schema: {before: schemaRef, after: schemaRef, rollbackCompatible: true},
-    checks: [{kind: 'artifact-manifest', sha256: manifestSha}],
+    schema: {before, after: manifest.schemaRef, rollbackCompatible: true},
+    checks: [{kind: 'artifact-manifest', sha256: manifest.sha256}],
     fingerprints: await ports.fingerprint(root, graph.components.get(id))};
 }
 
@@ -223,7 +238,7 @@ export async function localPorts() {
     now: () => performance.now(), uuid: () => randomUUID(), assertSource, assertAncestry,
     graph: (root, base) => discover(root, {base, allowMissingBuildOutputs: true}), fingerprint: fingerprints,
     execute,
-    manifestHash: path => hash(readFileSync(join(path, 'artifact-manifest.json'))),
+    manifestInfo,
     operator: async (...args) => JSON.parse(await run('/usr/bin/sudo', ['-n', '/usr/bin/python3', '-B', operatorPath, ...args])),
     preview: async request => JSON.parse(await run('/usr/bin/sudo', ['-n', previewPath], JSON.stringify(request))),
     pause: () => new Promise(done => setTimeout(done, 1000)),

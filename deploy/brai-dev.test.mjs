@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {assertSource, assertAncestry, selectComponents, release, preview, main, parseArguments, waitForOperation, localPorts} from './brai-dev.mjs';
+import {assertSource, assertAncestry, schemaRef, manifestInfo, selectComponents, release, preview, main, parseArguments, waitForOperation, localPorts} from './brai-dev.mjs';
 import {execFileSync} from 'node:child_process';
 import {packageComponent, verifyPackage} from './components/package-runtime.mjs';
 import {createHash} from 'node:crypto';
@@ -40,7 +40,7 @@ function fixture() {
     fingerprint: async (_root, c) => next[c.id],
     sourceFingerprints: async (_root, ref, scoped) => {calls.push(['baseline', ref, [...scoped.components.keys()]]); return Object.fromEntries(scoped.order.map(id => [id, keys(id)]));},
     execute: async (_root, action, ids, options) => {calls.push([action, ids, options]); return ids.map(id => ({id, checked: action === 'run', checkProof: 'executed', artifact: action === 'run' ? {path: `/packages/${id}`, payloadHash: digest} : undefined}));},
-    manifestHash: async () => 'e'.repeat(64),
+    manifestInfo: async () => ({sha256:'e'.repeat(64),schemaRef:'schema-v1'}),
     saveCandidate: async (_root, candidate) => {state.candidate = candidate; calls.push(['candidate', candidate]); return '/candidate.json';},
     operator: async (action, arg) => {
       calls.push(['operator', action, arg]);
@@ -96,6 +96,24 @@ test('release executes exact changed closure, manifests, CAS and accepted wait',
   assert.deepEqual(state.candidate.components[0].schema, {before: 'schema-v1', after: 'schema-v1', rollbackCompatible: true});
   assert.ok(result.timings.some(t => t.phase === 'prepare' && t.component === 'auth'));
   assert.deepEqual(result.operatorTimings, [{phase: 'smoke', durationMs: 4}]); assert.equal(state.report.state, 'accepted');
+});
+
+test('candidate uses accepted migration ref before and packaged migration ref after', async () => {
+  const {ports,state}=fixture();
+  ports.manifestInfo=async (_path,id)=>({sha256:'e'.repeat(64),schemaRef:id==='auth'?'sha256:new':'schema-v1'});
+  await release({root:'/repository',source},ports);
+  assert.deepEqual(state.candidate.components[0].schema,{before:'schema-v1',after:'sha256:new',rollbackCompatible:true});
+});
+
+test('migration ref matches Root encoding and includes only migration rows', () => {
+  const row=(path,letter,size,mode)=>({path,sha256:letter.repeat(64),size,mode});
+  const rows=[row('services/тест/migrations/001.sql','a',7,420),row('services/x/migrate.mjs','b',8,493),row('services/x/aux.sql','c',9,420),row('services/x/migrations/readme.md','d',10,420)];
+  const manifest={files:[rows[0],row('services/x/main.mjs','e',3,420),...rows.slice(1)]};
+  assert.equal(schemaRef(manifest),'sha256:ec71034d31652a1503299214a9412eaa0975ff0960d617beb424af7ee14ecadf');
+  assert.equal(schemaRef({files:[]}), 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945');
+  assert.notEqual(schemaRef({...manifest,files:[...manifest.files].reverse()}),schemaRef(manifest));
+  assert.notEqual(schemaRef({files:[{...rows[0],mode:493}]}),schemaRef({files:[rows[0]]}));
+  assert.throws(()=>schemaRef({files:[{}]}),/ARTIFACT_MANIFEST_INVALID/);
 });
 
 test('accepted fingerprint fallback uses the accepted source, never remote branch', async () => {
@@ -293,12 +311,17 @@ test('real ready-files package integrates exact manifest hash and payload verifi
   try {
     mkdirSync(join(root, 'services/fixture'), {recursive: true});
     writeFileSync(join(root, 'services/fixture/main.mjs'), 'export const value = 42;\n');
+    mkdirSync(join(root, 'services/fixture/migrations'));
+    writeFileSync(join(root, 'services/fixture/migrations/001.sql'), 'CREATE TABLE fixture (id integer);\n');
     writeFileSync(join(root, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages: {'': {name: 'fixture'}}}));
-    const c = {id: 'fixture', directory: 'services/fixture', npm: {workspaces: []}, delivery: {kind: 'ready-files', files: ['services/fixture/main.mjs'], entrypoints: ['services/fixture/main.mjs'], smokeImports: []}};
+    const c = {id: 'fixture', directory: 'services/fixture', npm: {workspaces: []}, delivery: {kind: 'ready-files', files: ['services/fixture/main.mjs','services/fixture/migrations'], entrypoints: ['services/fixture/main.mjs'], smokeImports: []}};
     const artifact = await packageComponent(root, c, join(root, 'tmp/packages'));
     assert.equal(verifyPackage(artifact.path, 'fixture').payloadHash, artifact.payloadHash);
     const manifest = readFileSync(join(artifact.path, 'artifact-manifest.json'));
     const manifestSha = createHash('sha256').update(manifest).digest('hex'); assert.equal(manifestSha.length, 64);
+    assert.deepEqual(manifestInfo(artifact.path,'fixture',artifact.payloadHash),{sha256:manifestSha,schemaRef:schemaRef(JSON.parse(manifest))});
+    assert.notEqual(manifestInfo(artifact.path,'fixture',artifact.payloadHash).schemaRef,schemaRef({files:[]}));
+    assert.throws(()=>manifestInfo(artifact.path,'other',artifact.payloadHash),/ARTIFACT_MANIFEST_INVALID/);
     writeFileSync(join(artifact.path, 'services/fixture/main.mjs'), 'export const value = 43;\n');
     assert.throws(() => verifyPackage(artifact.path, 'fixture'), /IMMUTABLE_OUTPUT_MISMATCH/);
   } finally {rmSync(root, {recursive: true, force: true});}
