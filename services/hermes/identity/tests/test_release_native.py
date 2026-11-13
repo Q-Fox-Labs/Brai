@@ -58,6 +58,26 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.worker.policy_ready.set()
         self.release = NativeRelease(self.worker)
 
+    async def test_actual_disabled_guest_cron_is_a_supported_empty_source(self):
+        import threading
+        spec = importlib.util.spec_from_file_location('_test_release_disabled_cron', _FIXTURE / 'gateway/run.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.os, module.threading = os, threading
+        policy = ModuleType('identity.native_policy')
+        policy.guest_mode = lambda: True
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict('sys.modules', {'identity.native_policy': policy}):
+            stop, provider, cron_thread, housekeeping_thread = module._start_gateway_start_cron_and_housekeeping(self.runner)
+        try:
+            self.assertTrue(self.runner._brai_release_cron_supported)
+            self.assertEqual(type(provider).__name__, '_DisabledCron')
+            self.assertEqual((await self.release.begin('op'))['state'], 'ready')
+            await self.release.resume('op')
+        finally:
+            stop.set()
+            cron_thread.join()
+            housekeeping_thread.join()
+
     async def test_real_native_session_views_expose_idle_and_live_work(self):
         import sys
         name = '_test_release_session_state'

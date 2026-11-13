@@ -99,12 +99,13 @@
          if not self._bot:
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -5623,6 +5623,17 @@
+@@ -5623,6 +5623,18 @@
  def _start_gateway_start_cron_and_housekeeping(runner):
      """Start the cron scheduler thread + gateway housekeeping thread; returns
      ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
 +    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram" or (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and __import__("identity.native_policy", fromlist=["guest_mode"]).guest_mode()):
 +        # Общий gateway не исполняет пользовательские задания и связанные housekeeping jobs.
++        runner._brai_release_cron_supported = True
 +        stop = threading.Event()
 +        class _DisabledCron:
 +            def stop(self):
