@@ -336,4 +336,4 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
             await worker.health()
         worker.runner = object()
         worker.adapter = object()
-        self.assertEqual(await worker.health(), {'role':None, 'rolePolicyVersion':1, 'ready':True, 'operational':False, 'userId':'owner', 'telegramId':'123'})
+        self.assertEqual(await worker.health(), {'role':None, 'rolePolicyVersion':1, 'ready':True, 'operational':False, 'policyReady':False, 'userId':'owner', 'telegramId':'123'})

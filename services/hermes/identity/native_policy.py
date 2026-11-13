@@ -336,7 +336,7 @@ def install():
             trusted_tts=trusted_silero('/opt/brai-profile/runtime'))
 
     _installed = True
-    if _suspended or state.get('staged') is True:
+    if _suspended or state.get('staged') is True or os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION'):
         from gateway.run import GatewayRunner
         recovery = GatewayRunner._start_recover_previous_run
         finish = GatewayRunner._start_finish_wiring
@@ -347,7 +347,7 @@ def install():
                 pending = runner._brai_deferred_startup = []
             pending.append((callback, args))
         async def prepared_recovery(self):
-            if not _suspended and active_configuration():
+            if not _suspended and active_configuration() and not getattr(self, '_brai_release_cold', False):
                 return await recovery(self)
             # Только trusted discovery нужен admission health/human bridge.
             from hermes_cli.plugins import get_plugin_manager
@@ -355,13 +355,13 @@ def install():
             if not _suspended:
                 defer(self, recovery)
         async def prepared_finish(self, connected_count):
-            if not _suspended and active_configuration():
+            if not _suspended and active_configuration() and not getattr(self, '_brai_release_cold', False):
                 return await finish(self, connected_count)
             self._startup_restore_in_progress = False
             if not _suspended:
                 defer(self, finish, connected_count)
         def prepared_watchers(self):
-            if not _suspended and active_configuration():
+            if not _suspended and active_configuration() and not getattr(self, '_brai_release_cold', False):
                 return watchers(self)
             if _suspended:
                 self._spawn_reconnect_watcher()
@@ -382,7 +382,7 @@ def has_deferred_startup(runner):
     return bool(getattr(runner, '_brai_deferred_startup', ()))
 
 
-async def activate_deferred_startup(runner, adapter, check):
+async def activate_deferred_startup(runner, adapter, check, *, release_open=None):
     """Однократно вернуть ordinary user startup после fresh active generation."""
     from hermes_cli.plugins import get_plugin_manager
     import inspect
@@ -404,16 +404,27 @@ async def activate_deferred_startup(runner, adapter, check):
         raise PermissionError('Worker human plugin unavailable')
     await attach(adapter)
     await check()
-    runner._startup_restore_in_progress = True
-    try:
-        for callback, args in pending:
-            await check()
-            result = callback(runner, *args)
-            if inspect.isawaitable(result):
-                await result
-            await check()
-    finally:
-        runner._startup_restore_in_progress = False
+    async def restore():
+        if release_open is not None:
+            await release_open.wait()
+        await check()
+        runner._startup_restore_in_progress = True
+        try:
+            for callback, args in pending:
+                await check()
+                result = callback(runner, *args)
+                if inspect.isawaitable(result):
+                    await result
+                await check()
+        finally:
+            runner._startup_restore_in_progress = False
+
+    if release_open is not None:
+        # Auth and attachment are settled; source recovery remains held and durable.
+        import asyncio
+        return asyncio.create_task(restore())
+    await restore()
+
 
 
 def revalidate_startup():

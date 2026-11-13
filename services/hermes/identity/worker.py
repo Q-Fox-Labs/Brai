@@ -37,6 +37,7 @@ class Worker:
         self.operational = asyncio.Event()
         self.lifecycle_task = None
         self.policy_task = None
+        self.cold_recovery_task = None
         self.policy_ready = asyncio.Event()
         self.policy_ready.set()
         self.policy_error = None
@@ -51,68 +52,92 @@ class Worker:
         self.chat_dispatches = {}
         self.chat_interactive = {}
         self.chat_locks = {}
+        self.peer_lock = asyncio.Lock()
         self.peer_released = asyncio.Event()
         self.peer_released.set()
         from .release_native import NativeRelease
         self.release = NativeRelease(self)
 
     async def serve_connection(self, reader, writer):
-        """Читать duplex RPC до startup sends; не допускать второй native runtime."""
+        """Разрешить health-наблюдателя без захвата основного duplex канала."""
         if peer_uid(writer) != self.ingress_uid:
             writer.close()
             await writer.wait_closed()
             return
-        if self.peer is not None and self.peer.closed:
-            # EOF уже получен, но native drain ещё удерживает прежний канал.
-            try:
-                await asyncio.wait_for(self.peer_released.wait(), 30)
-            except TimeoutError:
-                writer.close()
-                await writer.wait_closed()
-                return
-        if self.peer is not None:
-            # Операторская health-проверка не забирает основной duplex канал
-            # и не останавливает работающий native lifecycle при своём EOF.
-            async def inspect_health(require_tools=False):
-                if require_tools:
+        claimed = asyncio.Event()
+        peer = None
+
+        async def claim():
+            async with self.peer_lock:
+                if self.peer is peer:
+                    return
+                if self.peer is not None and self.peer.closed:
+                    await self.peer_released.wait()
+                if self.peer is not None:
                     raise RpcError(-32602, 'Operational health requires the active ingress channel')
-                return await self.health()
-            try:
-                await asyncio.wait_for(Peer(reader, writer, {'health': inspect_health}).run(), 15)
-            except (TimeoutError, ConnectionError):
-                pass
-            return
-        peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel,
-                    'health': self.health, 'interactive': self.interactive, 'chat_pause': self.chat_pause,
-                    'release.begin': self.release.begin, 'release.status': self.release.status,
-                    'release.resume': self.release.resume})
-        self.peer = peer
-        self.peer_released.clear()
+                self.peer = peer
+                self.peer_released.clear()
+                try:
+                    await self.start(peer)
+                except BaseException as error:
+                    if isinstance(error, Exception):
+                        self.lifecycle_error = error
+                        self.exit_code = 1
+                        self.exited.set()
+                    claimed.set()
+                    raise
+                claimed.set()
+
+        async def check_health(require_tools=False):
+            if type(require_tools) is not bool:
+                raise RpcError(-32602, 'Invalid health check')
+            if require_tools:
+                await claim()
+            return await self.health(require_tools=require_tools)
+
+        def primary(method):
+            async def call(**params):
+                if self.peer is not peer:
+                    raise RpcError(-32601, 'Method not found')
+                return await method(**params)
+            return call
+
+        peer = Peer(reader, writer, {'health': check_health, 'dispatch': primary(self.dispatch),
+                    'cancel': primary(self.cancel), 'interactive': primary(self.interactive),
+                    'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin),
+                    'release.status': primary(self.release.status), 'release.resume': primary(self.release.resume)})
         reading = asyncio.create_task(peer.run())
+        claimed_wait = asyncio.create_task(claimed.wait())
         try:
-            await self.start(peer)
-            await asyncio.wait((reading, self.lifecycle_task), return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait((reading, claimed_wait), return_when=asyncio.FIRST_COMPLETED)
+            if claimed.is_set() and self.peer is peer and self.lifecycle_task is not None:
+                await asyncio.wait((reading, self.lifecycle_task), return_when=asyncio.FIRST_COMPLETED)
         except Exception as error:
             self.lifecycle_error = error
             self.exit_code = 1
             self.exited.set()
         finally:
-            try:
-                await self.stop_runtime()
-            finally:
-                writer.close()
-                if not reading.done():
-                    reading.cancel()
+            claimed_wait.cancel()
+            await asyncio.gather(claimed_wait, return_exceptions=True)
+            if self.peer is peer:
+                try:
+                    await self.stop_runtime()
+                finally:
+                    if not reading.done():
+                        reading.cancel()
+                    await asyncio.gather(reading, return_exceptions=True)
+                    for task in list(self.typing.values()):
+                        task.cancel()
+                    await asyncio.gather(*self.typing.values(), return_exceptions=True)
+                    self.typing.clear()
+                    self.active.clear()
+                    self.turn_scopes.clear()
+                    self.operational.clear()
+                    self.adapter = self.runner = self.peer = None
+                    self.peer_released.set()
+            elif not reading.done():
+                reading.cancel()
                 await asyncio.gather(reading, return_exceptions=True)
-                for task in list(self.typing.values()):
-                    task.cancel()
-                await asyncio.gather(*self.typing.values(), return_exceptions=True)
-                self.typing.clear()
-                self.active.clear()
-                self.turn_scopes.clear()
-                self.operational.clear()
-                self.adapter = self.runner = self.peer = None
-                self.peer_released.set()
 
     async def start(self, peer):
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
@@ -267,7 +292,30 @@ class Worker:
                 if current != expected:
                     raise PermissionError('Runtime preparation changed')
                 break
-            await activate_deferred_startup(runner, adapter, check)
+            if self.release.cold_start:
+                self.cold_recovery_task = await activate_deferred_startup(
+                    runner, adapter, check, release_open=self.release.recovery_open)
+                def recovery_done(task):
+                    if task.cancelled():
+                        return
+                    error = task.exception()
+                    if error is not None:
+                        self.policy_error = self.lifecycle_error = error
+                        self.exit_code = 1
+                        runner._exit_code = 1
+                        runner._request_clean_exit('role-activation-failed')
+                    else:
+                        try:
+                            self.release.finish_cold_recovery()
+                        except Exception as failure:
+                            self.policy_error = self.lifecycle_error = failure
+                            self.exit_code = 1
+                            runner._exit_code = 1
+                            runner._request_clean_exit('role-activation-failed')
+                if self.cold_recovery_task is not None:
+                    self.cold_recovery_task.add_done_callback(recovery_done)
+            else:
+                await activate_deferred_startup(runner, adapter, check)
             alive()
         except asyncio.CancelledError:
             raise
@@ -314,6 +362,13 @@ class Worker:
 
     async def stop_runtime(self):
         """Дождаться native drain и внешней обвязки до освобождения peer."""
+        recovery = self.cold_recovery_task
+        if recovery is not None and not recovery.done() and not self.release.recovery_open.is_set():
+            # Nothing was admitted while the cold source remained held.
+            recovery.cancel()
+        if recovery is not None:
+            await asyncio.gather(recovery, return_exceptions=True)
+        self.cold_recovery_task = None
         self.policy_stopping = True
         policy = self.policy_task
         if policy is not None and not policy.done():
@@ -333,7 +388,7 @@ class Worker:
     async def ensure_tools(self):
         """Однократно активировать полный startup и дождаться operational-ready."""
         async with self.tools_lock:
-            if self.release.operation is not None and not self.activation.is_set():
+            if self.release.operation is not None and not self.release.cold_start and not self.activation.is_set():
                 raise RpcError(-32603, 'Release holds native activation')
             if self.operational.is_set():
                 return
@@ -359,10 +414,14 @@ class Worker:
             await self.ensure_tools()
         from .native_policy import role_state
         return {'role': role_state(), 'rolePolicyVersion': 1, 'ready': True, 'operational': self.operational.is_set(),
+                'policyReady': bool(self.operational.is_set() and self.policy_ready.is_set()
+                                    and self.policy_error is None and not self.policy_stopping),
                 'userId': self.user_id, 'telegramId': self.telegram_id}
 
     async def interactive(self, update, owner, scope_id, actor_telegram_id, chat_generation=None):
         """Передать проверенное интерактивное событие owner-bound адаптеру."""
+        if self.release.operation is not None:
+            raise RpcError(-32603, 'Release holds new dispatch')
         if (owner != self.user_id or not isinstance(update, dict)
                 or not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128
                 or not isinstance(actor_telegram_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', actor_telegram_id)):
@@ -775,6 +834,7 @@ async def run(config_path):
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
     worker = Worker(ingress, owner, telegram, publish_delivery_file)
+    worker.release.bootstrap(Path(__file__))
     relay = await start_relay(egress, port=18080)
     browser_relay = None
     try:

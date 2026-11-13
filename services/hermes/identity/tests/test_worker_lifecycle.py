@@ -200,6 +200,72 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 server.close()
                 await server.wait_closed()
 
+    async def test_bootstrap_observer_never_claims_primary_and_supervisor_can_start(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            observer = Peer(reader, writer, {})
+            reading = asyncio.create_task(observer.run())
+            try:
+                with self.assertRaises(RpcError):
+                    await observer.call('health', {}, timeout=2)
+                self.assertIsNone(worker.peer)
+                self.assertIsNone(worker.runner)
+                writer.close()
+                await reading
+                reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+                supervisor = Peer(reader, writer, {})
+                reading = asyncio.create_task(supervisor.run())
+                receipt = await supervisor.call('health', {'require_tools': True}, timeout=2)
+                self.assertTrue(receipt['policyReady'])
+                self.assertIsNotNone(worker.peer)
+            finally:
+                writer.close()
+                await reading
+                if worker.peer is not None:
+                    await worker.peer_released.wait()
+                server.close()
+                await server.wait_closed()
+
+    async def test_stopping_waits_for_already_admitted_recovery(self):
+        worker = await self.worker()
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def recovery():
+            started.set()
+            await finish.wait()
+        worker.release.recovery_open.set()
+        worker.cold_recovery_task = asyncio.create_task(recovery())
+        await started.wait()
+        stopping = asyncio.create_task(worker.stop_runtime())
+        await asyncio.sleep(0)
+        self.assertFalse(stopping.done())
+        self.assertFalse(worker.policy_stopping)
+        self.assertFalse(worker.cold_recovery_task.cancelled())
+        finish.set()
+        await stopping
+        self.assertTrue(worker.policy_stopping)
+
+    async def test_health_policy_ready_requires_settled_live_policy(self):
+        worker = await self.worker()
+        try:
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.operational.set()
+            self.assertTrue((await worker.health())['policyReady'])
+            worker.policy_ready.clear()
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.policy_ready.set()
+            worker.policy_error = RuntimeError('failed')
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.policy_error = None
+            worker.policy_stopping = True
+            self.assertFalse((await worker.health())['policyReady'])
+        finally:
+            await worker.stop_runtime()
+
     async def test_secondary_operator_health_preserves_the_active_ingress_and_runtime(self):
         worker = await self.worker()
         primary = NS(closed=False)
@@ -344,6 +410,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self.methods = methods
             async def run(self):
                 reading.set()
+                await self.methods['health'](require_tools=True)
                 await self_wait.wait()
         class Writer:
             def close(self):

@@ -314,6 +314,16 @@ class Resolver:
                 if (not isinstance(result, dict) or result.get('operationId') != operationId
                         or result.get('state') != 'resumed'):
                     return False
+                while True:
+                    result = await peer.call('release.status', {'operationId': operationId})
+                    if not isinstance(result, dict) or result.get('operationId') != operationId:
+                        return False
+                    if result.get('state') == 'resumed':
+                        break
+                    if result.get('state') != 'draining' or result.get('reason') != 'native_recovery':
+                        return False
+                    # Same cadence as the existing worker supervisor; no deadline is imposed.
+                    await asyncio.sleep(10)
         except Exception:
             return False
         self.release_workers.clear()

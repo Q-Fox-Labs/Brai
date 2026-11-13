@@ -2,6 +2,10 @@
 # ABOUTME: Не меняет паузы, согласия, очереди и recovery; неизвестное состояние запрещает restart.
 """Операционный барьер конкретной версии immutable Hermes engine."""
 import asyncio
+import hashlib
+import os
+from pathlib import Path
+import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 import re
@@ -13,13 +17,36 @@ class NativeRelease:
     def __init__(self, worker):
         self.worker = worker
         self.operation = None
+        self.last_resumed = None
         self.open = asyncio.Event()
         self.open.set()
         self.completions_open = asyncio.Event()
         self.completions_open.set()
+        self.recovery_open = asyncio.Event()
         self.sources = 0
         self.tasks = set()
         self.fence = None
+        self.cold_start = False
+
+    def bootstrap(self, source):
+        """Root-bound cold startup closes both sources before native construction."""
+        operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
+        digest = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256')
+        if operation is None and digest is None:
+            return
+        if (not operation or not digest or str(uuid.UUID(operation)) != operation
+                or not re.fullmatch('[a-f0-9]{64}', digest)
+                or Path(source) != Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
+                or hashlib.sha256(Path(source).read_bytes()).hexdigest() != digest):
+            raise RuntimeError('Root startup release binding unavailable')
+        from hermes_cli.backend_retirement import retirement
+        if not callable(getattr(retirement, 'brai_hold', None)) or not retirement.brai_hold(operation):
+            raise RuntimeError('Root startup release fence unavailable')
+        self.fence = retirement
+        self.operation = operation
+        self.cold_start = True
+        self.open.clear()
+        self.completions_open.clear()
 
     def _owner(self, operation):
         if not isinstance(operation, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.:-]*', operation):
@@ -29,6 +56,7 @@ class NativeRelease:
 
     def install(self, runner):
         """Подключить hooks до запуска native recovery, ticker и watchers."""
+        runner._brai_release_cold = self.cold_start
         runner._brai_release_source = self.source
         runner._brai_release_completion = self.completion
         runner._brai_release_track = self.track
@@ -136,8 +164,14 @@ class NativeRelease:
         """Не выдавать idle по недоступному reader, несовместимому hook или startup."""
         self._owner(operationId)
         if self.operation != operationId:
+            if self.operation is None and self.last_resumed == operationId:
+                return {'operationId': operationId, 'state': 'resumed', 'reason': None}
             raise ValueError('RELEASE_NOT_BEGUN')
         result = {'operationId': operationId, 'state': 'draining', 'reason': 'native_work'}
+        if self.cold_start and self.recovery_open.is_set():
+            if self.worker.policy_error is not None:
+                return {**result, 'state': 'blocked', 'reason': 'native_state_unavailable'}
+            return {**result, 'reason': 'native_recovery'}
         try:
             # Уже принятый async turn может ещё создавать дочерние units: сначала ждём его.
             if self._busy():
@@ -160,13 +194,41 @@ class NativeRelease:
         self.completions_open.clear()
         return {**result, 'state': 'ready', 'reason': None}
 
+    def finish_cold_recovery(self):
+        """Open all admissions only after the one owned recovery completed."""
+        if not self.cold_start or not self.recovery_open.is_set():
+            raise RuntimeError('Cold recovery is not released')
+        if self.fence is not None:
+            self.fence.brai_resume(self.operation)
+            self.fence = None
+        self.completions_open.set()
+        self.open.set()
+        self.last_resumed = self.operation
+        self.operation = None
+        self.cold_start = False
+        if self.worker.runner is not None:
+            self.worker.runner._brai_release_cold = False
+
     async def resume(self, operationId):
-        """Снять только свой fence; повтор после потерянного ответа безопасен."""
+        """Снять свой hold; cold recovery завершается до открытия источников."""
         self._owner(operationId)
+        if self.operation is None:
+            if self.last_resumed != operationId:
+                raise ValueError('RELEASE_NOT_BEGUN')
+            return {'operationId': operationId, 'state': 'resumed', 'reason': None}
+        if self.cold_start:
+            if (not self.worker.operational.is_set() or not self.worker.policy_ready.is_set()
+                    or self.worker.policy_error is not None or self.worker.policy_stopping):
+                raise RuntimeError('Cold policy is not ready')
+            self.recovery_open.set()
+            if self.worker.cold_recovery_task is None:
+                self.finish_cold_recovery()
+            return {'operationId': operationId, 'state': 'resumed', 'reason': None}
         if self.fence is not None:
             self.fence.brai_resume(operationId)
             self.fence = None
         self.completions_open.set()
         self.open.set()
+        self.last_resumed = self.operation
         self.operation = None
         return {'operationId': operationId, 'state': 'resumed', 'reason': None}

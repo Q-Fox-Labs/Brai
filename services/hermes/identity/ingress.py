@@ -302,7 +302,7 @@ async def serve_chat_control(path, handler, release=None):
             if release is not None:
                 methods.update({'release.begin': release.begin, 'release.status': release.status,
                                 'release.resume': release.resume, 'release.commit': release.commit})
-            await asyncio.wait_for(Peer(reader, writer, methods).run(), 30)
+            await Peer(reader, writer, methods).run()
         finally:
             clients.discard(task)
             writer.close()

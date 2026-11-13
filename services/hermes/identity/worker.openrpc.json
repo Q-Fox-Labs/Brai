@@ -364,6 +364,7 @@
             "userId",
             "telegramId",
             "operational",
+            "policyReady",
             "role",
             "rolePolicyVersion"
           ],
@@ -378,6 +379,10 @@
               "type": "string"
             },
             "operational": {
+              "type": "boolean"
+            },
+            "policyReady": {
+              "description": "Auth и подключение policy завершены; удержанное восстановление может ещё ожидать release.resume.",
               "type": "boolean"
             },
             "role": {

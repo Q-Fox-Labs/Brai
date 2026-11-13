@@ -113,7 +113,9 @@ class ReleaseWorkersTest(unittest.IsolatedAsyncioTestCase):
                 self.calls = []
             async def call(self, method, params):
                 self.calls.append(method)
-                state = 'resumed' if method == 'release.resume' else self.state
+                if method == 'release.resume':
+                    self.state = 'resumed'
+                state = self.state
                 return {'operationId': params['operationId'], 'state': state, 'reason': None}
         class Bridge:
             def __init__(self, uid, peer):
@@ -140,6 +142,45 @@ class ReleaseWorkersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.calls.count('release.resume'), 1)
         self.assertEqual(second.calls.count('release.resume'), 1)
         self.assertEqual(resolver.release_workers, {})
+
+    async def test_resume_waits_for_worker_recovery_before_polling_opens(self):
+        from unittest.mock import patch
+        from identity.telegram_runtime import Resolver
+        recovering, complete = asyncio.Event(), asyncio.Event()
+        class Peer:
+            async def call(self, method, params):
+                if method == 'release.resume':
+                    return {'operationId': params['operationId'], 'state': 'resumed', 'reason': None}
+                recovering.set()
+                if not complete.is_set():
+                    return {'operationId': params['operationId'], 'state': 'draining', 'reason': 'native_recovery'}
+                return {'operationId': params['operationId'], 'state': 'resumed', 'reason': None}
+        class Bridge:
+            async def connect(self): return Peer()
+        resolver = Resolver.__new__(Resolver)
+        resolver.release_workers = {1: Bridge()}
+        async def wait_tick(_): await complete.wait()
+        with patch('identity.telegram_runtime.asyncio.sleep', wait_tick):
+            task = asyncio.create_task(resolver.release_resume('one'))
+            await recovering.wait()
+            self.assertFalse(task.done())
+            self.assertTrue(resolver.release_workers)
+            complete.set()
+            self.assertTrue(await task)
+            self.assertFalse(resolver.release_workers)
+
+    async def test_resume_failure_keeps_workers_recorded(self):
+        from identity.telegram_runtime import Resolver
+        class Peer:
+            async def call(self, method, params):
+                state = 'resumed' if method == 'release.resume' else 'blocked'
+                return {'operationId': params['operationId'], 'state': state, 'reason': None}
+        class Bridge:
+            async def connect(self): return Peer()
+        resolver = Resolver.__new__(Resolver)
+        resolver.release_workers = {1: Bridge()}
+        self.assertFalse(await resolver.release_resume('one'))
+        self.assertTrue(resolver.release_workers)
 
 
 class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):

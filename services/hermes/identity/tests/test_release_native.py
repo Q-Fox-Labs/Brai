@@ -1,13 +1,17 @@
 # ABOUTME: Проверяет безопасное завершение работы native Hermes перед обновлением.
 # ABOUTME: Использует настоящий закреплённый retirement fence без пользовательских данных.
 import asyncio
+import hashlib
+import uuid
+import sys
+from contextlib import nullcontext
 from contextlib import asynccontextmanager
 import importlib.util
 import os
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from identity.release_native import NativeRelease
 
@@ -57,6 +61,134 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
         self.worker.operational.set()
         self.worker.policy_ready.set()
         self.release = NativeRelease(self.worker)
+
+    async def test_cold_start_holds_real_fence_and_pinned_recovery_until_resume(self):
+        import ast
+        from identity.native_policy import activate_deferred_startup
+        path = Path(os.environ.get('BRAI_STARTUP_FIXTURE', str(_FIXTURE))) / 'gateway/run_startup.py'
+        if not path.is_file():
+            self.skipTest('Pinned gateway startup fixture required')
+        startup = ast.parse(path.read_text())
+        method = next(node for node in ast.walk(startup)
+                      if isinstance(node, ast.AsyncFunctionDef) and node.name == '_start_recover_previous_run')
+        unit = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
+        import logging
+        logger = SimpleNamespace(info=lambda *args: None, warning=lambda *args: None)
+        scope = {'os': os, 'logging': logging, 'logger': logger,
+                 '_log_suppressed': lambda *args, **kwargs: nullcontext()}
+        exec(compile(unit, str(path), 'exec'), scope)
+        operation = str(uuid.uuid4())
+        source = Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
+        payload = b'pinned worker source'
+        env = {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': operation,
+               'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': hashlib.sha256(payload).hexdigest(),
+               'BRAI_IDENTITY_MODE': 'worker'}
+        with patch.dict(os.environ, env), patch.object(Path, 'read_bytes', return_value=payload):
+            self.release.bootstrap(source)
+        self.assertFalse(self.retirement.acquire())
+        self.assertFalse(self.release.open.is_set())
+        self.assertFalse(self.release.completions_open.is_set())
+        self.worker.policy_stopping = False
+        self.worker.cold_recovery_task = None
+        self.runner._brai_deferred_startup = [(scope['_start_recover_previous_run'], ())]
+        self.runner._start_register_plugins_relay_hooks = lambda: None
+        self.runner._subscribe_plugin_rewire = lambda manager: None
+        self.runner._rewire_plugin_handlers = lambda: None
+        self.runner.hooks = SimpleNamespace(discover_and_load=lambda: None)
+        self.runner._recover_secondary_process_checkpoints = lambda registry: 0
+        recovery_started, recovery_finish = asyncio.Event(), asyncio.Event()
+        durable_queue = ['preserved']
+        async def recover():
+            recovery_started.set()
+            await recovery_finish.wait()
+            self.assertEqual(durable_queue, ['preserved'])
+            return (0, 0)
+        self.runner._recover_unclean_sessions = AsyncMock(side_effect=recover)
+        self.runner._suspend_stuck_loop_sessions = lambda: 0
+        self.registry.recover_from_checkpoint = lambda: 0
+        manager = SimpleNamespace(discover_and_load=lambda **kwargs: None)
+        plugins = ModuleType('hermes_cli.plugins')
+        plugins.get_plugin_manager = lambda: manager
+        gateway = ModuleType('gateway.run')
+        gateway._hermes_home = Path('/nonexistent-synthetic-profile')
+        human = SimpleNamespace(attach=AsyncMock())
+        async def check(): pass
+        with patch.dict(sys.modules, {'hermes_cli.plugins': plugins, 'gateway.run': gateway,
+                                      '_brai_identity_human': human}):
+            task = await activate_deferred_startup(self.runner, self.adapter, check,
+                                                    release_open=self.release.recovery_open)
+            self.worker.cold_recovery_task = task
+            self.assertEqual((await self.release.status(operation))['state'], 'ready')
+            await asyncio.sleep(0)
+            self.runner._recover_unclean_sessions.assert_not_awaited()
+            with self.assertRaises(ValueError):
+                await self.release.resume(str(uuid.uuid4()))
+            await self.release.resume(operation)
+            await recovery_started.wait()
+            self.assertEqual((await self.release.status(operation))['reason'], 'native_recovery')
+            self.assertFalse(self.retirement.acquire())
+            self.assertFalse(self.release.open.is_set())
+            self.assertEqual(durable_queue, ['preserved'])
+            recovery_finish.set()
+            await task
+            self.runner._recover_unclean_sessions.assert_awaited_once()
+            self.release.finish_cold_recovery()
+            self.assertEqual((await self.release.status(operation))['state'], 'resumed')
+            self.assertEqual((await self.release.resume(operation))['state'], 'resumed')
+        self.assertTrue(self.release.open.is_set())
+        self.assertTrue(self.retirement.acquire())
+        self.retirement.release()
+
+    async def test_lost_resume_response_reholds_without_replaying_recovery(self):
+        operation = 'lost-response'
+        self.assertEqual((await self.release.begin(operation))['state'], 'ready')
+        self.assertEqual((await self.release.resume(operation))['state'], 'resumed')
+        self.assertEqual((await self.release.status(operation))['state'], 'resumed')
+        self.worker.active['new-work'] = object()
+        self.assertEqual((await self.release.begin(operation))['state'], 'draining')
+        self.assertFalse(self.release.open.is_set())
+        self.worker.active.clear()
+        self.assertEqual((await self.release.status(operation))['state'], 'ready')
+        self.assertEqual((await self.release.resume(operation))['state'], 'resumed')
+        self.assertTrue(self.release.open.is_set())
+
+    async def test_active_policy_defers_the_real_native_startup_callbacks_when_cold(self):
+        import ast
+        policy = Path(__file__).parents[1] / 'native_policy.py'
+        tree = ast.parse(policy.read_text())
+        install = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'install')
+        names = {'prepared_recovery', 'prepared_finish', 'prepared_watchers'}
+        methods = [node for node in ast.walk(install)
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
+        self.assertEqual({node.name for node in methods}, names)
+        unit = ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[]))
+        entered, pending = [], []
+        async def recovery(runner): entered.append('recovery')
+        async def finish(runner, count): entered.append('finish')
+        def watchers(runner): entered.append('watchers')
+        manager = SimpleNamespace(discover_and_load=lambda: None)
+        plugins = ModuleType('hermes_cli.plugins')
+        plugins.get_plugin_manager = lambda: manager
+        scope = {'_suspended': False, 'active_configuration': lambda: True,
+                 'recovery': recovery, 'finish': finish, 'watchers': watchers,
+                 'defer': lambda runner, callback, *args: pending.append((callback, args))}
+        exec(compile(unit, str(policy), 'exec'), scope)
+        runner = SimpleNamespace(_brai_release_cold=True, _startup_restore_in_progress=True)
+        with patch.dict(sys.modules, {'hermes_cli.plugins': plugins}):
+            await scope['prepared_recovery'](runner)
+            await scope['prepared_finish'](runner, 1)
+            scope['prepared_watchers'](runner)
+        self.assertEqual(entered, [])
+        self.assertEqual([callback for callback, _ in pending], [recovery, finish, watchers])
+        self.assertFalse(runner._startup_restore_in_progress)
+
+    async def test_cold_start_rejects_partial_or_forged_binding(self):
+        source = Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py')
+        with patch.dict(os.environ, {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': str(uuid.uuid4())}, clear=True):
+            with self.assertRaises(RuntimeError):
+                self.release.bootstrap(source)
+        self.assertTrue(self.retirement.acquire())
+        self.retirement.release()
 
     async def test_active_turn_keeps_native_child_admission_until_it_finishes(self):
         self.worker.active['turn'] = object()
