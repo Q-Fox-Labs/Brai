@@ -1,6 +1,6 @@
 # Описания и поставки Brai
 
-`component.json` находится рядом с компонентом. Владелец формата — Codeworks,
+`component.json` находится рядом с компонентом. Владелец формата — инструменты компонентов,
 машинный источник — [`component.schema.json`](component.schema.json),
 JSON Schema Draft-07. Node проверяет используемые keywords без npm preparation;
 новый keyword требует явной поддержки и не игнорируется молча.

@@ -1,6 +1,6 @@
 # Общий CI и состав поставки
 
-Владелец — Codeworks. Единственный workflow: [codeworks.yml](../../../.github/workflows/codeworks.yml).
+**Retired:** описание исторического CI Codeworks. Текущая проверка компонентов использует [components.yml](../../../.github/workflows/components.yml) и не публикует доказательства Codeworks.
 Один стандартный `ubuntu-24.04` job использует Node 24.22.1 / npm 11.19.1;
 внутри исполняются не более двух независимых компонентов. Новых платформ,
 npm-пакетов, серверных runtime или daemon нет.

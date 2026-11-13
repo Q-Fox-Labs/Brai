@@ -126,6 +126,7 @@ test('retired package metadata admits development scripts but rejects runtime sc
  save(root,'probe',retired);
  const metadata={name:'@fixture/probe',private:true,scripts:{test:'node --test',lint:'node tools/lint.mjs'}};
  put(root,'services/probe/package.json',JSON.stringify(metadata));
+ put(root,'services/probe/src/main.mjs','export {};');
  assert.deepEqual(discover(root).order,[]);
  for(const runtime of [
   {bin:'worker.mjs'},{bin:{worker:'worker.mjs'}},

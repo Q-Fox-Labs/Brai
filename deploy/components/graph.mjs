@@ -59,13 +59,15 @@ export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
     }
   }
   const active = [...components.values()].filter(c=>c.status==='active');
-  const owner = path => active.filter(c => path===c.directory || path.startsWith(c.directory+'/')).sort((a,b)=>b.directory.length-a.directory.length)[0];
+  const owner = path => [...components.values()].filter(c => path===c.directory || path.startsWith(c.directory+'/')).sort((a,b)=>b.directory.length-a.directory.length)[0];
   for (const file of files) {
     if ((file==='package.json' || file.endsWith('/package.json')) && !active.some(c=>c.directory===dirname(file))) {
       const manifest=json(join(root,file));
       if(manifest.bin || Object.keys(manifest.scripts??{}).some(name=>/^(start($|:)|mcp$|migrate$|health$|trusted$)/.test(name))) throw Error(`MISSING_COMPONENT: ${file}`);
     }
     if (/^(apps|services)\/[^/]+\/package\.json$/.test(file) && ![...components.values()].some(c=>c.directory===dirname(file))) throw Error(`MISSING_COMPONENT: ${file}`);
+    // Retired source can remain for history; its package cannot expose runtime scripts or bins.
+    if (owner(file)?.status==='retired') continue;
     // New executable entrypoints must be explicitly admitted by their owner, including nested Python programs.
     const executable = (lstatSync(join(root,file)).mode & 0o111) && readFileSync(join(root,file),'utf8').startsWith('#!');
     if ((executable || /(^|\/)(main\.(ts|mjs|js|py)|runner\.py)$/.test(file)) && !file.includes('/tests/') && !file.includes('/test/')) {

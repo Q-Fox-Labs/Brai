@@ -1,0 +1,34 @@
+# ABOUTME: Проверяет и собирает активные компоненты из исходников.
+# ABOUTME: Результаты сборки не развёртывают службы и не требуют Codeworks.
+name: Components
+on:
+  push:
+    branches: [dev, main, 'feature/**', 'hotfix/**', 'codex/**']
+
+permissions:
+  contents: read
+
+jobs:
+  components:
+    name: Components
+    runs-on: ubuntu-24.04
+    env:
+      CI: '1'
+      NEXT_TELEMETRY_DISABLED: '1'
+      BRAI_WEB_STANDALONE_OUTPUT: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - name: Verify npm toolchain
+        run: test "$(npm --version)" = '11.19.1'
+      - name: Verify component tooling
+        run: node --test --test-isolation=none deploy/components/*.test.mjs
+      - name: Prepare dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build, check and package active components
+        run: node deploy/components/cli.mjs run

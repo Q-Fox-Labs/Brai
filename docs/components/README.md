@@ -23,10 +23,10 @@
 | [agent](agent.md) | Интеграция с Codex и публикация результатов |
 | [hermes](hermes.md) | Адаптеры пользовательского агента |
 | [supabase-mcp](supabase-mcp.md) | Ограниченный доступ к данным через MCP |
-| [codeworks](codeworks.md) | Рабочие области и выпуск компонентов |
 
 ## Выведенные и отдельные материалы
 
+- [codeworks](codeworks.md) — retired; прежний сервис сохранён для истории.
 - [codeworks-agent](codeworks-agent.md) — retired; прежний контроллер не поставляется.
 - [Instaloader](../environment/instaloader.md) — внешний рецепт, относится к окружению.
 

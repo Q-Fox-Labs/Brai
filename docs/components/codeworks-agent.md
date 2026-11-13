@@ -2,6 +2,6 @@
 
 ID: `codeworks-agent`. Статус: **retired**. Прежний контроллер не поставляется; нативный агент использует собственные инструменты.
 
-Дескриптор [компонента](../../services/codeworks-agent/component.json) сохраняет историю идентичности. Текущий сервис — [Codeworks](codeworks.md).
+Дескриптор [компонента](../../services/codeworks-agent/component.json) сохраняет историю идентичности. Прежний сервис [Codeworks](codeworks.md) также выведен из состава DEV.
 
 [Индекс компонентов](README.md).
