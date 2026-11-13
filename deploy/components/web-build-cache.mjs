@@ -1,4 +1,4 @@
-// ABOUTME: Проверяет фактические зависимости и переносит webpack cache отдельными inode.
+// ABOUTME: Проверяет зависимости и переносит закрытый Turbopack cache отдельными inode.
 // ABOUTME: Shared cache остаётся подсказкой компилятора; публикация следует успешной проверке.
 import {createHash,randomUUID} from 'node:crypto';
 import {chmodSync,closeSync,constants,cpSync,existsSync,fstatSync,lstatSync,mkdirSync,openSync,readFileSync,readSync,readdirSync,realpathSync,renameSync,rmSync,statSync,writeFileSync} from 'node:fs';
@@ -6,8 +6,12 @@ import {dirname,join,resolve,sep} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {verifySources} from './source-snapshot.mjs';
+import {lockInputs} from './lock-inputs.mjs';
+import {sealedInventory} from './sealed-dependencies.mjs';
 
 const shared='/srv/projects/brai-dev/apps/web/.next/cache/.brai-release';
+export const webCompiler='turbopack';
+const cacheEntries=['turbopack','.tsbuildinfo'];
 const self=fileURLToPath(import.meta.url),inside=(root,path)=>path===root||path.startsWith(root+sep);
 const json=path=>JSON.parse(readFileSync(path,'utf8'));
 const hashFile=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -22,6 +26,7 @@ function cacheMetadata(cache) {
 }
 
 function tree(hash,path,logical,allowed,ancestors=new Set(),protectedFiles=false) {
+  if(lstatSync(path).isSymbolicLink())throw Error('WEB_CACHE_PATH_INVALID');
   const real=realpathSync(path),info=statSync(real);
   if(!allowed.some(root=>inside(root,real)) || (protectedFiles && (info.uid!==0 || info.mode&0o022)))throw Error('UNQUALIFIED_CACHE_INPUT');
   hash.update(JSON.stringify([logical,info.mode&0o777,info.isDirectory()?'d':'f'])).update('\0');
@@ -29,7 +34,6 @@ function tree(hash,path,logical,allowed,ancestors=new Set(),protectedFiles=false
     if(ancestors.has(real))throw Error('CACHE_INPUT_CYCLE');
     const next=new Set(ancestors).add(real);
     for(const name of readdirSync(real).sort()) {
-      if(name==='node_modules' && !protectedFiles)continue;
       if(/^\.env(?:\.|$)/i.test(name)||name==='.git'||name==='usercustom'||name==='tmp')throw Error('UNQUALIFIED_CACHE_INPUT');
       tree(hash,join(real,name),logical+'/'+name,allowed,next,protectedFiles);
     }
@@ -79,7 +83,7 @@ function hostProof() {
 export function trustedHostGeneration(path) {
   try {return hostProof()?.root===path;} catch {return false;}
 }
-function verifiedProof(root,roots) {
+export function verifiedProof(root,roots) {
   if(process.env.BRAI_PUBLISHER_PROOF_FD==='3') {
     const info=fstatSync(3),fixed=statSync('/publisher-proof/receipt.json');
     const flags=readFileSync('/proc/self/fdinfo/3','utf8').match(/^flags:\s+([0-7]+)$/m);
@@ -102,22 +106,38 @@ export function cacheIdentity(root,component,dependencyRoots) {
   try {
     if(process.env.NODE_PATH||process.env.NODE_OPTIONS||Object.entries(process.env).some(([key,value])=>key.startsWith('LD_')&&value))return null;
     const proof=verifiedProof(root,dependencyRoots);if(!proof)return null;
+    const generation=json(join(root,'node_modules/.brai-worktree.json')).dependencyRoot;
+    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?join(dirname(root),'repo/.git/codeworks-dependencies/prepared'):proof.root;
+    if(generation!==expected)return null;
+    const inventory=sealedInventory(root,lockInputs(root,component.npm?.workspaces??[],{development:true}),proof,generation);
+    if(!inventory)return null;
     const toolchainFile=join(proof.root,'.brai-toolchain.json'),toolchain=json(toolchainFile);
     if(hashFile(toolchainFile)!==proof.toolchainSha256 || toolchain.nodeAbi!==process.versions.modules ||
        toolchain.glibc!==`glibc ${process.report.getReport().header.glibcVersionRuntime}` || process.versions.node!==proof.node)return null;
     const hash=createHash('sha256');
     for(const path of [self,join(dirname(self),'source-snapshot.mjs'),join(dirname(self),'build-web-standalone.mjs'),join(dirname(self),'lock-inputs.mjs'),join(dirname(self),'graph.mjs')])hash.update(readFileSync(path));
     for(const path of ['package.json','apps/web/package.json','apps/web/next.config.ts','apps/web/tsconfig.json','apps/web/postcss.config.mjs'])hash.update(path).update('\0').update(readFileSync(join(root,path))).update('\0');
-    hash.update(JSON.stringify({content:proof.contentSha256,toolchain:proof.toolchainSha256,build:component.commands?.build,workspaces:component.npm?.workspaces,variant:process.env.BRAI_WEB_VARIANT??'production',node:process.version,umask:process.umask()}));
+    hash.update(JSON.stringify({compiler:webCompiler,inventory,content:proof.contentSha256,toolchain:proof.toolchainSha256,build:component.commands?.build,workspaces:component.npm?.workspaces,variant:process.env.BRAI_WEB_VARIANT??'production',node:process.version,umask:process.umask()}));
     return hash.digest('hex');
   } catch {return null;}
 }
 
 function cacheDigest(cache) {
-  const hash=createHash('sha256'),webpack=join(cache,'webpack');
-  if(!existsSync(webpack))throw Error('WEB_CACHE_MISSING');
-  if(lstatSync(webpack).isSymbolicLink() || !lstatSync(webpack).isDirectory() || !inside(realpathSync(cache),realpathSync(webpack)))throw Error('WEB_CACHE_PATH_INVALID');
-  tree(hash,webpack,'webpack',[realpathSync(webpack)]);return hash.digest('hex');
+  const hash=createHash('sha256'),compiler=join(cache,webCompiler),types=join(cache,'.tsbuildinfo');
+  if(!existsSync(compiler) || !existsSync(types))throw Error('WEB_CACHE_MISSING');
+  if(lstatSync(compiler).isSymbolicLink() || !lstatSync(compiler).isDirectory() || lstatSync(types).isSymbolicLink() || !lstatSync(types).isFile())throw Error('WEB_CACHE_PATH_INVALID');
+  const versions=readdirSync(compiler);
+  if(!versions.length)throw Error('WEB_CACHE_MISSING');
+  for(const version of versions) {
+    const folder=join(compiler,version);
+    if(lstatSync(folder).isSymbolicLink() || !lstatSync(folder).isDirectory())throw Error('WEB_CACHE_PATH_INVALID');
+    const current=join(folder,'CURRENT');
+    if(lstatSync(current).isSymbolicLink() || !lstatSync(current).isFile())throw Error('WEB_CACHE_PATH_INVALID');
+    const sequence=json(current).max_sequence_number;
+    if(!Number.isSafeInteger(sequence) || sequence<0 || !existsSync(join(folder,String(sequence).padStart(8,'0')+'.meta')))throw Error('WEB_CACHE_UNCOMMITTED');
+  }
+  for(const entry of cacheEntries)tree(hash,join(cache,entry),entry,[realpathSync(cache)]);
+  return hash.digest('hex');
 }
 function copyTree(source,target) {cpSync(source,target,{recursive:true,mode:constants.COPYFILE_FICLONE});}
 export function cacheOperation(kind,local,identity,store=shared) {
@@ -129,7 +149,7 @@ export function cacheOperation(kind,local,identity,store=shared) {
     if(!existsSync(join(snapshot,'.brai-source-snapshot.json')))return;
     const data=cacheMetadata(snapshot);
     if(data.identity!==identity || data.cacheDigest!==cacheDigest(snapshot))return;
-    rmSync(join(local,'webpack'),{recursive:true,force:true});copyTree(join(snapshot,'webpack'),join(local,'webpack'));
+    for(const entry of cacheEntries) {rmSync(join(local,entry),{recursive:true,force:true});copyTree(join(snapshot,entry),join(local,entry));}
     if(cacheDigest(local)!==data.cacheDigest)throw Error('WEB_CACHE_COPY_CHANGED');
     writeFileSync(metadata(local),JSON.stringify(data)+'\n',{flag:'wx',mode:0o600});chmodSync(metadata(local),0o600);
   } else if(kind==='publish') {
@@ -138,7 +158,7 @@ export function cacheOperation(kind,local,identity,store=shared) {
     const temporary=join(namespace,'.snapshot-'+randomUUID()),old=join(namespace,'.previous-'+randomUUID());
     mkdirSync(temporary,{recursive:true});
     try {
-      copyTree(join(local,'webpack'),join(temporary,'webpack'));
+      for(const entry of cacheEntries)copyTree(join(local,entry),join(temporary,entry));
       if(cacheDigest(temporary)!==data.cacheDigest)throw Error('WEB_CACHE_COPY_CHANGED');
       writeFileSync(metadata(temporary),JSON.stringify(data)+'\n',{flag:'wx',mode:0o600});chmodSync(metadata(temporary),0o600);
       if(existsSync(snapshot))renameSync(snapshot,old);

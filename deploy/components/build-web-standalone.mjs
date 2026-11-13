@@ -6,7 +6,7 @@ import {dirname,join,relative,resolve,sep} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {lockInputs} from './lock-inputs.mjs';
 import {snapshotSources,snapshotDirectories,verifySources} from './source-snapshot.mjs';
-import {cacheIdentity,restoreWebCache,saveWebCacheMetadata,trustedHostGeneration} from './web-build-cache.mjs';
+import {cacheIdentity,restoreWebCache,saveWebCacheMetadata,trustedHostGeneration,webCompiler} from './web-build-cache.mjs';
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 const inside=(parent,path)=>path===parent||path.startsWith(parent+sep);
@@ -77,7 +77,7 @@ function build() {
     if(!inside(root,realpathSync(cache)))fail('WEB_CACHE_ESCAPE');
     const identity=cacheIdentity(root,component,allowedRoots),previous=restoreWebCache(cache,identity);
     rmSync(join(cache,'.brai-source-snapshot.json'),{force:true});
-    if(!previous)rmSync(join(cache,'webpack'),{recursive:true,force:true});
+    if(!previous)for(const name of [webCompiler,'.tsbuildinfo'])rmSync(join(cache,name),{recursive:true,force:true});
     const files=snapshotSources(root,stage,previous??{});
     const entries=lockInputs(root,component.npm.workspaces,{development:true});
     const mounts=[];
@@ -96,7 +96,7 @@ function build() {
     const node='/usr/local/libexec/brai-dev-release/check-tools/bin/node';
     const toolRoot=dirname(dirname(realpathSync(process.execPath)));
     const toolOverlay=toolRoot.startsWith('/opt/brai-shared/immutable-files-v1/npm-')?['--ro-bind',toolRoot,'/usr/local/libexec/brai-dev-release/check-tools']:[];
-    const wrapper=join(bin,'next');writeFileSync(wrapper,`#!/bin/sh\nexec '${node}' /workspace/node_modules/next/dist/bin/next "$1" --webpack\n`,{mode:0o755});chmodSync(wrapper,0o755);
+    const wrapper=join(bin,'next');writeFileSync(wrapper,`#!/bin/sh\nexec '${node}' /workspace/node_modules/next/dist/bin/next "$1" --turbopack\n`,{mode:0o755});chmodSync(wrapper,0o755);
     mkdirSync(stageCache,{recursive:true});
     const dirs=snapshotDirectories(stage,previous??{});
     const args=['--tmpfs','/','--dir','/workspace','--ro-bind','/usr','/usr',...toolOverlay,'--symlink','usr/bin','/bin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--bind',stage,'/workspace',...mounts,'--bind',cache,'/workspace/apps/web/.next/cache','--unshare-net','--chdir','/workspace','--clearenv','--setenv','PATH','/usr/local/libexec/brai-dev-release/check-tools/bin:/usr/local/bin:/usr/bin:/bin','--setenv','HOME','/tmp','--setenv','CI','1','--setenv','NEXT_TELEMETRY_DISABLED','1','--setenv','BRAI_WEB_STANDALONE_OUTPUT','1','--setenv','LANG','C.UTF-8'];

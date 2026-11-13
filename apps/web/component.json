@@ -13,6 +13,7 @@
       "apps/web/tsconfig.json",
       "deploy/components/build-web-standalone.mjs",
       "deploy/components/graph.mjs",
+      "deploy/components/sealed-dependencies.mjs",
       "deploy/components/source-snapshot.mjs",
       "deploy/components/web-build-cache.mjs"
     ],
