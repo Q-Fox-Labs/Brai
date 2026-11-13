@@ -7,8 +7,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { discover, fingerprints, json, validateDocumentation } from './graph.mjs';
-import {buildOutputDigest, verifyBuildReceipt, command} from './build-engine.mjs';
+import {buildOutputDigest, verifyBuildReceipt as verifyPreparedBuild, command} from './build-engine.mjs';
+export {buildOutputInventory, buildOutputDigest} from './build-engine.mjs';
 const defaultRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
+export function verifyBuildReceipt(root,c,state,build) {
+  if(!c.commands.build)return;
+  verifyPreparedBuild(root,c,state??json(join(root,'tmp/component-state',c.id+'.json')),build??fingerprints(root,c).build);
+}
 function saveState(path,state) {
   const temporary=path+'.'+randomUUID();
   writeFileSync(temporary,JSON.stringify(state)+'\n');

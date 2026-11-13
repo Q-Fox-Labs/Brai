@@ -13,7 +13,7 @@ export function buildKey(root,paths,metadata) {
   for(const path of [...new Set(paths)].sort())hash.update(path).update('\0').update(readFileSync(join(root,path))).update('\0');
   return hash.digest('hex');
 }
-export function buildOutputDigest(root,c) {
+export function buildOutputInventory(root,c) {
   const files=new Map();
   function visit(path) {
     if(!existsSync(join(root,path)))throw Error(`BUILD_OUTPUT_MISSING: ${c.id}: ${path}`);
@@ -26,7 +26,10 @@ export function buildOutputDigest(root,c) {
     } else throw Error(`BUILD_OUTPUT_UNSUPPORTED: ${c.id}: ${path}`);
   }
   c.delivery.files.forEach(visit);
-  return createHash('sha256').update(JSON.stringify([...files.values()].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0))).digest('hex');
+  return [...files.values()].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+}
+export function buildOutputDigest(root,c) {
+  return createHash('sha256').update(JSON.stringify(buildOutputInventory(root,c))).digest('hex');
 }
 export function verifyBuildReceipt(root,c,state,build) {
   if(!c.commands.build)return;
