@@ -52,6 +52,8 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         async def call(method,params,**kwargs):
             if method in ('release.try','release.try_status'):
                 return {**params,'state':'ready'}
+            if method == 'health':
+                return {'userId':P1['userId'],'ready':True,'operational':True,'policyReady':True}
             return {'operationId':params['operationId'],'state':'resumed'}
         peer=NS(call=call)
         with patch.object(self.owner,'_peer',AsyncMock(return_value=peer)):
@@ -65,6 +67,25 @@ class Tests(unittest.IsolatedAsyncioTestCase):
             status=await self.owner.status(**self.request,replacementPid=124,replacementStartTime='789')
             self.assertEqual(status['state'],'resumed')
             self.assertEqual((await self.owner.status(**self.request,replacementPid=125,replacementStartTime='789'))['state'],'unknown')
+
+    async def test_resume_waits_for_primary_health_and_policy_before_release(self):
+        policy = asyncio.Event(); seen=[]
+        async def call(method,params,**kwargs):
+            seen.append(method)
+            if method in ('release.try','release.try_status'):
+                return {**params,'state':'ready'}
+            if method == 'health':
+                return {'userId':P1['userId'],'ready':True,'operational':True,'policyReady':policy.is_set()}
+            return {'operationId':params['operationId'],'state':'resumed'}
+        with patch.object(self.owner,'_peer',AsyncMock(return_value=NS(call=call))):
+            self.assertEqual((await self.owner.try_profile(**self.request))['state'],'ready')
+            task=asyncio.create_task(self.owner.resume(**self.request,replacementPid=124,replacementStartTime='789'))
+            while 'health' not in seen: await asyncio.sleep(0)
+            self.assertNotIn('release.resume',seen)
+            self.assertEqual(self.mirror.tracker.gates[1001],self.request['operationId'])
+            policy.set()
+            self.assertEqual((await task)['state'],'resumed')
+            self.assertLess(seen.index('health'),seen.index('release.resume'))
 
     async def test_ready_survives_ingress_owner_loss_and_rehydrates_closed(self):
         async def call(method, params, **kwargs):

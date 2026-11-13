@@ -232,6 +232,18 @@ class ProfileRelease:
             await asyncio.to_thread(self.store.transition,profile,request,self.boot,'ready','resuming')
         try:
             peer = await self._peer(profile,replacement_pid,replacement_start)
+            # A new worker exposes the socket before it claims the ingress peer or
+            # finishes policy activation.  Resume is a primary-channel RPC, so
+            # establish that exact channel and wait for policy readiness first.
+            while True:
+                health = await peer.call('health', {'require_tools':True}, timeout=None)
+                if (not isinstance(health,dict) or health.get('userId') != profile['userId']
+                        or health.get('ready') is not True or health.get('operational') is not True):
+                    raise ValueError('WORKER_ACTIVATION_UNCONFIRMED')
+                if health.get('policyReady') is True:
+                    break
+                await asyncio.sleep(.05)
+            peer = await self._peer(profile,replacement_pid,replacement_start)
             result = await peer.call('release.resume', {'operationId':request['operationId']}, timeout=None)
             if not isinstance(result,dict) or result.get('state') != 'resumed' or result.get('operationId') != request['operationId']:
                 raise ValueError('WORKER_RESUME_UNCONFIRMED')

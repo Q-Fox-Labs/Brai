@@ -371,6 +371,7 @@
       "services/hermes/identity/tests/ordinary_uds_proof.py",
       "services/hermes/identity/tests/test_ordinary_uds_proof.py",
       "services/hermes/identity/tests/test_profile_release.py",
+      "services/hermes/identity/tests/test_profile_resume_health.py",
       "services/hermes/identity/tests/test_dev_release_broker.py",
       "services/hermes/identity/tests/test_release_contract.py",
       "services/hermes/identity/tests/test_transport_inbox.py",

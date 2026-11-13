@@ -27,6 +27,8 @@ def synthetic_worker(path, control):
             return {**params,'state':'ready'}
         async def release_status(**params):
             return {**params,'state':'ready'}
+        async def health(require_tools=False):
+            return {'userId':'synthetic','ready':True,'operational':True,'policyReady':True}
         async def release_resume(operationId):
             state['effect']+=1
             control.send(('effect',state['effect']))
@@ -36,7 +38,7 @@ def synthetic_worker(path, control):
         async def serve(reader,writer):
             try:
                 await Peer(reader,writer,{'release.try':release_try,'release.try_status':release_status,
-                                         'release.resume':release_resume}).run()
+                                         'release.resume':release_resume, 'health':health}).run()
             finally:
                 writer.close();await writer.wait_closed()
         server=await asyncio.start_unix_server(serve,path=path)
