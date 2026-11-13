@@ -23,6 +23,7 @@ class NativeRelease:
         self.completions_open = asyncio.Event()
         self.completions_open.set()
         self.recovery_open = asyncio.Event()
+        self.recovery_done = asyncio.Event()
         self.sources = 0
         self.tasks = set()
         self.fence = None
@@ -222,7 +223,13 @@ class NativeRelease:
                 raise RuntimeError('Cold policy is not ready')
             self.recovery_open.set()
             if self.worker.cold_recovery_task is None:
-                self.finish_cold_recovery()
+                try:
+                    self.finish_cold_recovery()
+                finally:
+                    self.recovery_done.set()
+            await self.recovery_done.wait()
+            if self.worker.policy_error is not None or self.last_resumed != operationId:
+                raise RuntimeError('Cold recovery failed')
             return {'operationId': operationId, 'state': 'resumed', 'reason': None}
         if self.fence is not None:
             self.fence.brai_resume(operationId)

@@ -296,22 +296,24 @@ class Worker:
                 self.cold_recovery_task = await activate_deferred_startup(
                     runner, adapter, check, release_open=self.release.recovery_open)
                 def recovery_done(task):
-                    if task.cancelled():
-                        return
-                    error = task.exception()
-                    if error is not None:
-                        self.policy_error = self.lifecycle_error = error
-                        self.exit_code = 1
-                        runner._exit_code = 1
-                        runner._request_clean_exit('role-activation-failed')
-                    else:
-                        try:
-                            self.release.finish_cold_recovery()
-                        except Exception as failure:
-                            self.policy_error = self.lifecycle_error = failure
+                    try:
+                        if task.cancelled():
+                            if self.release.recovery_open.is_set():
+                                self.policy_error = RuntimeError('Cold recovery cancelled')
+                            return
+                        error = task.exception()
+                        if error is None:
+                            try:
+                                self.release.finish_cold_recovery()
+                            except Exception as failure:
+                                error = failure
+                        if error is not None:
+                            self.policy_error = self.lifecycle_error = error
                             self.exit_code = 1
                             runner._exit_code = 1
                             runner._request_clean_exit('role-activation-failed')
+                    finally:
+                        self.release.recovery_done.set()
                 if self.cold_recovery_task is not None:
                     self.cold_recovery_task.add_done_callback(recovery_done)
             else:

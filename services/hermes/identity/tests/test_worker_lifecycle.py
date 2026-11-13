@@ -231,6 +231,33 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 server.close()
                 await server.wait_closed()
 
+    async def test_failed_owned_recovery_notifies_waiter_and_keeps_gate_closed(self):
+        import identity.native_policy as policy
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        runner = NS(_exit_code=None, _request_clean_exit=lambda reason: None)
+        adapter = NS()
+        worker.runner, worker.adapter = runner, adapter
+        worker.operational.set()
+        worker.policy_ready.clear()
+        worker.release.operation = 'operation'
+        worker.release.cold_start = True
+        worker.release.open.clear()
+        expected = {'role': 'user', 'generation': 1}
+        async def activate(_runner, _adapter, _check, *, release_open):
+            async def recover():
+                await release_open.wait()
+                raise RuntimeError('synthetic recovery failure')
+            return asyncio.create_task(recover())
+        with patch.object(policy, 'principal', return_value=expected), \
+                patch.object(policy, 'activate_deferred_startup', side_effect=activate):
+            await worker._activate_user_startup(runner, adapter, expected)
+            with self.assertRaisesRegex(RuntimeError, 'Cold recovery failed'):
+                await worker.release.resume('operation')
+        self.assertTrue(worker.release.recovery_done.is_set())
+        self.assertFalse(worker.release.open.is_set())
+        self.assertIsNotNone(worker.policy_error)
+        self.assertEqual((await worker.release.status('operation'))['state'], 'blocked')
+
     async def test_stopping_waits_for_already_admitted_recovery(self):
         worker = await self.worker()
         started, finish = asyncio.Event(), asyncio.Event()

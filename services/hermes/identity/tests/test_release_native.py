@@ -123,21 +123,46 @@ class NativeReleaseTest(unittest.IsolatedAsyncioTestCase):
             self.runner._recover_unclean_sessions.assert_not_awaited()
             with self.assertRaises(ValueError):
                 await self.release.resume(str(uuid.uuid4()))
-            await self.release.resume(operation)
+            first_wait = asyncio.create_task(self.release.resume(operation))
             await recovery_started.wait()
             self.assertEqual((await self.release.status(operation))['reason'], 'native_recovery')
             self.assertFalse(self.retirement.acquire())
             self.assertFalse(self.release.open.is_set())
             self.assertEqual(durable_queue, ['preserved'])
+            first_wait.cancel()
+            await asyncio.gather(first_wait, return_exceptions=True)
+            self.assertFalse(task.cancelled())
+            retry = asyncio.create_task(self.release.resume(operation))
             recovery_finish.set()
             await task
             self.runner._recover_unclean_sessions.assert_awaited_once()
             self.release.finish_cold_recovery()
+            self.release.recovery_done.set()
+            self.assertEqual((await retry)['state'], 'resumed')
             self.assertEqual((await self.release.status(operation))['state'], 'resumed')
             self.assertEqual((await self.release.resume(operation))['state'], 'resumed')
         self.assertTrue(self.release.open.is_set())
         self.assertTrue(self.retirement.acquire())
         self.retirement.release()
+
+    async def test_failed_cold_recovery_wakes_waiter_without_opening_sources(self):
+        operation = 'failure'
+        self.release.operation = operation
+        self.release.cold_start = True
+        self.release.open.clear()
+        self.release.completions_open.clear()
+        self.worker.policy_stopping = False
+        self.worker.cold_recovery_task = asyncio.create_task(asyncio.Event().wait())
+        waiting = asyncio.create_task(self.release.resume(operation))
+        await self.release.recovery_open.wait()
+        self.worker.policy_error = RuntimeError('synthetic failure')
+        self.release.recovery_done.set()
+        with self.assertRaisesRegex(RuntimeError, 'Cold recovery failed'):
+            await waiting
+        self.assertFalse(self.release.open.is_set())
+        self.assertEqual((await self.release.status(operation))['state'], 'blocked')
+        self.worker.cold_recovery_task.cancel()
+        await asyncio.gather(self.worker.cold_recovery_task, return_exceptions=True)
 
     async def test_lost_resume_response_reholds_without_replaying_recovery(self):
         operation = 'lost-response'

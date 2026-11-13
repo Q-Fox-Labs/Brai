@@ -111,7 +111,7 @@ class ReleaseWorkersTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, state):
                 self.state = state
                 self.calls = []
-            async def call(self, method, params):
+            async def call(self, method, params, timeout=None):
                 self.calls.append(method)
                 if method == 'release.resume':
                     self.state = 'resumed'
@@ -148,32 +148,29 @@ class ReleaseWorkersTest(unittest.IsolatedAsyncioTestCase):
         from identity.telegram_runtime import Resolver
         recovering, complete = asyncio.Event(), asyncio.Event()
         class Peer:
-            async def call(self, method, params):
-                if method == 'release.resume':
-                    return {'operationId': params['operationId'], 'state': 'resumed', 'reason': None}
+            async def call(self, method, params, timeout=None):
+                if method != 'release.resume' or timeout is not None:
+                    raise AssertionError('Recovery must use unbounded operation wait')
                 recovering.set()
-                if not complete.is_set():
-                    return {'operationId': params['operationId'], 'state': 'draining', 'reason': 'native_recovery'}
+                await complete.wait()
                 return {'operationId': params['operationId'], 'state': 'resumed', 'reason': None}
         class Bridge:
             async def connect(self): return Peer()
         resolver = Resolver.__new__(Resolver)
         resolver.release_workers = {1: Bridge()}
-        async def wait_tick(_): await complete.wait()
-        with patch('identity.telegram_runtime.asyncio.sleep', wait_tick):
-            task = asyncio.create_task(resolver.release_resume('one'))
-            await recovering.wait()
-            self.assertFalse(task.done())
-            self.assertTrue(resolver.release_workers)
-            complete.set()
-            self.assertTrue(await task)
-            self.assertFalse(resolver.release_workers)
+        task = asyncio.create_task(resolver.release_resume('one'))
+        await recovering.wait()
+        self.assertFalse(task.done())
+        self.assertTrue(resolver.release_workers)
+        complete.set()
+        self.assertTrue(await task)
+        self.assertFalse(resolver.release_workers)
 
     async def test_resume_failure_keeps_workers_recorded(self):
         from identity.telegram_runtime import Resolver
         class Peer:
-            async def call(self, method, params):
-                state = 'resumed' if method == 'release.resume' else 'blocked'
+            async def call(self, method, params, timeout=None):
+                state = 'blocked'
                 return {'operationId': params['operationId'], 'state': state, 'reason': None}
         class Bridge:
             async def connect(self): return Peer()
