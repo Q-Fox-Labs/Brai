@@ -106,7 +106,7 @@ async function prepareComponent(root, id, graph, status, ports, timed) {
 }
 
 /** Выполняет выпуск через явные порты; ошибка никогда не превращается в accepted/успешный пустой выпуск. */
-export async function release({root, source}, ports) {
+export async function release({root, source, prepareOnly = false}, ports) {
   const timings = [], started = ports.now();
   const timed = phaseTimer(timings, ports);
   let candidatePath, operationId;
@@ -160,6 +160,7 @@ export async function release({root, source}, ports) {
     const candidate = {version: 1, target: 'dev', releaseId: ports.uuid(), sourceSha: source, expectedBase, components};
     operationId = candidate.releaseId;
     candidatePath = await timed('candidate', () => ports.saveCandidate(root, candidate));
+    if (prepareOnly) return {state:'prepared',releaseId:candidate.releaseId,sourceSha:source,expectedBase,components:selected,candidatePath,timings,durationMs:ports.now()-started};
     const queued = await timed('apply', () => ports.operator('apply', candidatePath));
     if (queued.releaseId !== candidate.releaseId) fail('APPLY_RELEASE_MISMATCH');
     const accepted = await timed('wait', () => waitForOperation(candidate.releaseId, ports));

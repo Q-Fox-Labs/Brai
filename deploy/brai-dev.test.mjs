@@ -98,6 +98,16 @@ test('release executes exact changed closure, manifests, CAS and accepted wait',
   assert.deepEqual(result.operatorTimings, [{phase: 'smoke', durationMs: 4}]); assert.equal(state.report.state, 'accepted');
 });
 
+test('prepare-only returns the actual candidate without applying or waiting', async () => {
+  const {ports,state}=fixture();
+  const result=await release({root:'/repository',source,prepareOnly:true},ports);
+  assert.equal(result.state,'prepared');assert.equal(result.releaseId,releaseId);
+  assert.equal(result.expectedBase,base);assert.equal(result.candidatePath,'/candidate.json');
+  assert.deepEqual(result.components,['auth','web']);
+  assert.ok(!state.calls.some(call=>call[0]==='operator'&&call[1]!=='status'));
+  assert.equal(state.current.releaseId,base);
+});
+
 test('candidate uses accepted migration ref before and packaged migration ref after', async () => {
   const {ports,state}=fixture();
   ports.manifestInfo=async (_path,id)=>({sha256:'e'.repeat(64),schemaRef:id==='auth'?'sha256:new':'schema-v1'});
