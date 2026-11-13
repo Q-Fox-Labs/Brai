@@ -13,7 +13,7 @@ import {canonical} from '../../src/ci-verifier.mjs';
 import {repairPostprocess} from '../../src/postprocess-repair.mjs';
 import {createGit} from '../../src/git.mjs';
 import {createFlowGit} from '../../src/git-flow.mjs';
-import {verifyPackage} from '../../components/package-runtime.mjs';
+import {verifyPackage} from '../../../../deploy/components/package-runtime.mjs';
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 test('old immutable worker under016 resumes the same failed parent after new owner repair',{skip:!configured||process.env.CODEWORKS_TEMPORAL_TEST!=='1'||!process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT,timeout:240000},async t=>{
   const configuration=await readConfig(),f=await setup({strictVerifier:!!configuration.verifier_url,git:createGit({flowGit:createFlowGit({localRemote:true,requireLock:()=>{}})})});let child,connection,client,verifierPool,workflowId;

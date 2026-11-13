@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {signCatalog} from '../ci/catalog.mjs';
 import {verifyCI,recipeFiles,downloadProof,loadRunProof} from '../src/ci-verifier.mjs';
-import {digestFiles} from '../components/graph.mjs';
+import {digestFiles} from '../../../deploy/components/graph.mjs';
 import {createGitHub} from '../src/github.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../../..'),workflow='.github/workflows/codeworks.yml';
 const hash=value=>createHash('sha256').update(value).digest('hex');

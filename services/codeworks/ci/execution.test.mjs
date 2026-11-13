@@ -9,8 +9,8 @@ import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {executePlan, recipeFiles, selectWork} from './pipeline.mjs';
-import {execute} from '../components/cli.mjs';
-import {discover, digestFiles, fingerprints} from '../components/graph.mjs';
+import {execute} from '../../../deploy/components/cli.mjs';
+import {discover, digestFiles, fingerprints} from '../../../deploy/components/graph.mjs';
 
 const repoRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../../..');
 const sha256=value=>createHash('sha256').update(value).digest('hex');

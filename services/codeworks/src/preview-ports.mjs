@@ -13,7 +13,7 @@ const stable=value=>JSON.stringify(canonical(value));
 /** Сопоставляет diff с web build/runtime и явными контрактами зависимостей. */
 export function classifyWebChanges(before,after,diff,{lockChanged=false}={}) {
   const patterns=[before,after].flatMap(c=>[...c.inputs.build,...c.inputs.runtime,...c.dependencies.flatMap(d=>d.inputs)]);
-  const runtime=diff.some(file=>patterns.some(pattern=>matchesGlob(file,pattern)) || ['package.json','services/codeworks/ci/toolchain.json'].includes(file));
+  const runtime=diff.some(file=>patterns.some(pattern=>matchesGlob(file,pattern)) || ['package.json','deploy/components/toolchain.json'].includes(file));
   const backend=diff.some(file=>(file.startsWith('services/')&&!file.startsWith('services/codeworks/')) || (file.startsWith('apps/')&&!file.startsWith('apps/web/')));
   return {web:runtime||lockChanged||stable(keys(before))!==stable(keys(after)),backend};
 }

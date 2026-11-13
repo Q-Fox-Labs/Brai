@@ -167,7 +167,7 @@ export async function packageComponent(root, component, outputRoot) {
       if (existsSync(join(stage, 'Dockerfile'))) fail('DOCKERFILE_ALREADY_SELECTED');
       const command = component.delivery.command ?? ['node', posix.relative(component.directory, repositoryPath(entrypoint))];
       if (!Array.isArray(command) || !command.length || command.some(value => typeof value !== 'string' || !value || value.includes('\0'))) fail('INVALID_DELIVERY_COMMAND');
-      const toolchainPath=join(root,'services/codeworks/ci/toolchain.json');
+      const toolchainPath=join(root,'deploy/components/toolchain.json');
       const base=existsSync(toolchainPath)?json(toolchainPath).nodeBase:'node:24.22.1-bookworm-slim';
       writeFileSync(join(stage, 'Dockerfile'), `FROM ${base}\nWORKDIR ${JSON.stringify(`/app/${component.directory}`)}\nCOPY . /app\nCMD ${JSON.stringify(command)}\n`);
       chmodSync(join(stage, 'Dockerfile'), 0o644);

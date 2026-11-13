@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {validate,methods,outputNames,expanded} from '../src/contracts.mjs';
-import {lockInputs} from '../components/lock-inputs.mjs';
+import {lockInputs} from '../../../deploy/components/lock-inputs.mjs';
 const id='0997203d-1266-4cf7-9668-d985b3eec801';
 test('close/cancel are admitted mutations with exact attempt, reason and request key',()=>{
   const scope={project_id:'p',workspace_id:id,request_key:'close-1',reason:'Исправить задачу'};

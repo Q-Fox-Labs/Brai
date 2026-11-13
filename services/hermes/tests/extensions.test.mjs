@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
-import { buildOutputInventory } from '../../codeworks/components/cli.mjs';
+import { buildOutputInventory } from '../../../deploy/components/cli.mjs';
 
 test('delivery includes every extension file and keeps skill documentation separate', () => {
   const root = fileURLToPath(new URL('../../../', import.meta.url));

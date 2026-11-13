@@ -1,7 +1,7 @@
 # Описания и поставки Brai
 
 `component.json` находится рядом с компонентом. Владелец формата — Codeworks,
-машинный источник — [`component.schema.json`](../schemas/component.schema.json),
+машинный источник — [`component.schema.json`](component.schema.json),
 JSON Schema Draft-07. Node проверяет используемые keywords без npm preparation;
 новый keyword требует явной поддержки и не игнорируется молча.
 Новых библиотек, движка задач и фоновых процессов нет.
@@ -27,9 +27,9 @@ fixtures создают собственный Git repository перед доб�
 Из корня репозитория:
 
 ```sh
-node services/codeworks/components/cli.mjs validate --base refs/remotes/origin/dev
-node services/codeworks/components/cli.mjs plan history alerts
-node services/codeworks/components/cli.mjs run history alerts
+node deploy/components/cli.mjs validate --base refs/remotes/origin/dev
+node deploy/components/cli.mjs plan history alerts
+node deploy/components/cli.mjs run history alerts
 ```
 
 `validate` проверяет схему, полноту описаний, импорты, граф и lifecycle.
@@ -62,7 +62,7 @@ manifest с SHA-256/размерами каждого файла и точным
 нужно. Smoke выполняется из отдельного временного каталога вне репозитория с
 пустыми NODE_PATH/NODE_OPTIONS. OCI Dockerfile только копирует готовые файлы,
 не устанавливает зависимости. Registry/Actions использует этот же упаковщик
-через [общий CI](../ci/README.md); rollout остаётся отдельным этапом.
+через [общий CI](../../services/codeworks/ci/README.md); rollout остаётся отдельным этапом.
 
 Скрипты History/Alerts `scripts/package-runtime.mjs` используют тот же упаковщик,
 принимают только prebuilt outputs с проверенным build receipt и печатают точный immutable каталог. Их `--output`
@@ -98,7 +98,7 @@ runtime остаётся по `services/local-ai/release.json`; полная OCI
 Проверки формата и автономной упаковки:
 
 ```sh
-node --test --test-isolation=none services/codeworks/components/*.test.mjs
+node --test --test-isolation=none deploy/components/*.test.mjs
 ```
 
 Конкретные unit IDs, включённость компонентов и сведения установки принадлежат оператору. Дескрипторы содержат поддерживаемые цели, но не подтверждают их состояние.
@@ -119,6 +119,6 @@ conventional main/runner и файлы с shebang и executable mode незав�
 
 ## Документация в проверках компонентов
 
-Тот же graph/CLI проверяет обязательные индексы, карточки по существующим ID, технические README, ссылки и локальные якоря. Активные документы должны быть достижимы от [главного README](../../../docs/README.md). Архивы, vendor и тестовые fixtures не требуют переписывания; принятые правила GameCore сверяются по baseline.
+Тот же graph/CLI проверяет обязательные индексы, карточки по существующим ID, технические README, ссылки и локальные якоря. Активные документы должны быть достижимы от [главного README](../../docs/README.md). Архивы, vendor и тестовые fixtures не требуют переписывания; принятые правила GameCore сверяются по baseline.
 
 Проверка выполняется также при планировании и исполнении CI, даже при полном попадании в кеш. Личные файлы docs/user-agent/usercustom не читаются из исходников и запрещены в составе поставки. Самостоятельного сервиса или второго реестра компонентов нет.

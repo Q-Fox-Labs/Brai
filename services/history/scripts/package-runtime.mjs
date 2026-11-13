@@ -1,9 +1,9 @@
 // ABOUTME: Packages the prebuilt history runtime through the Codeworks owner descriptor.
 // ABOUTME: Copies only locked runtime dependencies; never compiles or installs packages.
 import {resolve} from 'node:path';
-import {discover} from '../../codeworks/components/graph.mjs';
-import {verifyBuildReceipt} from '../../codeworks/components/cli.mjs';
-import {packageComponent} from '../../codeworks/components/package-runtime.mjs';
+import {discover} from '../../../deploy/components/graph.mjs';
+import {verifyBuildReceipt} from '../../../deploy/components/cli.mjs';
+import {packageComponent} from '../../../deploy/components/package-runtime.mjs';
 const root=resolve(import.meta.dirname,'../../..');
 try {
  const args=process.argv.slice(2);

@@ -6,7 +6,7 @@ import {mkdirSync,mkdtempSync,writeFileSync,rmSync} from 'node:fs';
 import {join,dirname,resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {sourceFiles,validateDocumentation} from './graph.mjs';
-const repository=resolve(import.meta.dirname,'../../..');
+const repository=resolve(import.meta.dirname,'../..');
 function fixture(t) {
   mkdirSync(join(repository,'tmp'),{recursive:true});
   const root=mkdtempSync(join(repository,'tmp','documentation-fixture-'));

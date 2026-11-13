@@ -80,10 +80,10 @@ test('only completed ordinary Git shell calls finish writer accounting',async()=
 test('unreadable target fails closed before contacting Codeworks',async()=>{const f=fixture();f.options.resolveTarget=()=>{throw Object.assign(new Error('private path'),{code:'EACCES'});};const result=await runHook(patch(valid),f.options);assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);assert.doesNotMatch(JSON.stringify(result),/private path/);});
 
 test('foreground checks and read-only pipelines finish but background and opaque commands stay protected',async()=>{
- for(const command of ['node --test services/codeworks/tests/hook.test.mjs','node services/codeworks/components/cli.mjs build codeworks','node services/codeworks/components/cli.mjs check codeworks','node services/codeworks/components/cli.mjs package codeworks','node services/codeworks/components/cli.mjs run codeworks','rg -n pattern src | head -n 10','sed -n 1,20p src/file && git status --short']) {
+ for(const command of ['node --test services/codeworks/tests/hook.test.mjs','node deploy/components/cli.mjs build codeworks','node deploy/components/cli.mjs check codeworks','node deploy/components/cli.mjs package codeworks','node deploy/components/cli.mjs run codeworks','rg -n pattern src | head -n 10','sed -n 1,20p src/file && git status --short']) {
   const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'Chunk ID: test\nWall time: 1\nProcess exited with code 0\nOutput:\n'},f.options);assert.equal(f.calls[0]?.method,'write.finish',command);
  }
- for(const command of ['node --test tests/a &','nohup node --test tests/a','node script.mjs','node -e evil','node services/codeworks/components/cli.mjs run codeworks &','rg word src | sh','sed -n 1w/tmp/out src/file']) {
+ for(const command of ['node --test tests/a &','nohup node --test tests/a','node script.mjs','node -e evil','node deploy/components/cli.mjs run codeworks &','rg word src | sh','sed -n 1w/tmp/out src/file']) {
   const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:{exit_code:0}},f.options);assert.equal(f.calls.length,0,command);
  }
 });
@@ -112,7 +112,7 @@ test('native end-of-file marker survives rewrite byte for byte',async()=>{
 });
 
 test('literal foreground redirects accept terminal Post without accepting background or opaque shell',async()=>{
- for(const command of ['node --test tests/a > /tmp/tests.log 2>&1','node --test tests/a 2> /tmp/error.log','node services/codeworks/components/cli.mjs package codeworks >> /tmp/package.log 2>&1','node --test tests/a > /tmp/test.log && node services/codeworks/components/cli.mjs check codeworks 2>> /tmp/check.log']) {
+ for(const command of ['node --test tests/a > /tmp/tests.log 2>&1','node --test tests/a 2> /tmp/error.log','node deploy/components/cli.mjs package codeworks >> /tmp/package.log 2>&1','node --test tests/a > /tmp/test.log && node deploy/components/cli.mjs check codeworks 2>> /tmp/check.log']) {
   const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'completed'},f.options);assert.equal(f.calls[0]?.method,'write.finish',command);
  }
  for(const command of ['node --test tests/a > /tmp/a &','node --test tests/a > $(evil)','node --test tests/a > /tmp/a 2>&1 &','node script.mjs > /tmp/a','node --test tests/a &> /tmp/a','node --test tests/a 2>&3','node --test tests/a > /tmp/a; nohup node other.mjs','node --test tests/a > /tmp/a 2>&1; disown']) {
@@ -126,7 +126,7 @@ test('actual component publication commands admit and complete with literal redi
  const cfg={completion_spool:spool,projects:[{id:'demo',repo_path:'/srv/projects/brai-dev',workspace_root:'/var/lib/brai-dev/codeworks/workspaces'}]};
  for(const suffix of ['','-eb77']) {
   const calls=[];const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};if(method==='write.finish')return {state:'finished'};return {};},close(){}});
-  const command='node services/codeworks/components/cli.mjs run codeworks > '+root+'/tmp/codeworks-temporal/final-publication-check'+suffix+'.log 2>&1';
+  const command='node deploy/components/cli.mjs run codeworks > '+root+'/tmp/codeworks-temporal/final-publication-check'+suffix+'.log 2>&1';
   const event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command}};
   assert.equal((await runHook(event,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');
   await runHook({...event,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).method,'write.finish');
@@ -134,7 +134,7 @@ test('actual component publication commands admit and complete with literal redi
 });
 
 test('owner verifier uses the same conservative foreground classifier',()=>{
- assert.equal(foregroundCommand('node services/codeworks/components/cli.mjs run codeworks > tmp/out.log 2>&1'),true);
+ assert.equal(foregroundCommand('node deploy/components/cli.mjs run codeworks > tmp/out.log 2>&1'),true);
  for(const command of ['node --test tests/a &','node script.mjs > tmp/out','node --test tests/a > $(evil)','nohup node --test tests/a']) assert.equal(foregroundCommand(command),false,command);
 });
 
@@ -324,6 +324,6 @@ test('only RTK_DISABLED=1 prefix preserves safe admission and terminal identity'
  const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};if(method==='write.finish')return {state:'finished'};return {};},close(){}});
  const event=command=>({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command,cwd:root,cwd_unavailable:false}});
  assert.deepEqual(await runHook(event('RTK_DISABLED=1 git diff --check'),{config:cfg,env,connect}),{});assert.equal(calls.length,0);
- for(const command of ['RTK_DISABLED=1 node --test --test-isolation=none tests/a','RTK_DISABLED=1 node services/codeworks/components/cli.mjs run codeworks','RTK_DISABLED=1 git add -A']){calls.length=0;const e=event(command);assert.equal((await runHook(e,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');assert.equal(calls.find(c=>c.method==='write.begin').args.original_input_sha256,canonicalHash(e.tool_input));assert.equal(calls.find(c=>c.method==='write.admit').args.completion_input_sha256,canonicalHash(e.tool_input));await runHook({...e,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).args.canonical_input_sha256,canonicalHash(e.tool_input));}
+ for(const command of ['RTK_DISABLED=1 node --test --test-isolation=none tests/a','RTK_DISABLED=1 node deploy/components/cli.mjs run codeworks','RTK_DISABLED=1 git add -A']){calls.length=0;const e=event(command);assert.equal((await runHook(e,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');assert.equal(calls.find(c=>c.method==='write.begin').args.original_input_sha256,canonicalHash(e.tool_input));assert.equal(calls.find(c=>c.method==='write.admit').args.completion_input_sha256,canonicalHash(e.tool_input));await runHook({...e,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).args.canonical_input_sha256,canonicalHash(e.tool_input));}
  for(const command of ['PATH=/tmp git status','LD_PRELOAD=/tmp/evil git status','GIT_CONFIG=/tmp/c git status','NODE_OPTIONS=--inspect node --test tests/a','RTK_DISABLED=0 git diff --check','RTK_DISABLED=1 NODE_OPTIONS=--inspect node --test tests/a']){calls.length=0;assert.equal((await runHook(event(command),{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'deny',command);assert.equal(calls.length,0);}
 });

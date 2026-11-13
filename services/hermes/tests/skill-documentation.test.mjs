@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, cpSync, existsSync, readdirSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {expand, fingerprints, discover, validateDocumentation} from '../../codeworks/components/graph.mjs';
+import {expand, fingerprints, discover, validateDocumentation} from '../../../deploy/components/graph.mjs';
 
 const root=fileURLToPath(new URL('../../../',import.meta.url));
 test('skill text updates leave build and payload unchanged; script updates change them',t=>{
@@ -21,8 +21,8 @@ test('skill text updates leave build and payload unchanged; script updates chang
   for(const key of Object.keys(lock.packages))
     if(!key.includes('node_modules') && existsSync(join(root,key,'package.json')))
       files.add(join(key,'package.json'));
-  if(existsSync(join(root,'services/codeworks/ci/toolchain.json')))
-    files.add('services/codeworks/ci/toolchain.json');
+  if(existsSync(join(root,'deploy/components/toolchain.json')))
+    files.add('deploy/components/toolchain.json');
   for(const path of new Set([...files,...component.delivery.files,...component.dependencies.flatMap(d=>d.delivery)])){
     if(!existsSync(join(root,path)))continue;
     mkdirSync(dirname(join(fixture,path)),{recursive:true});

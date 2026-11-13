@@ -3,14 +3,14 @@
 import {createHash} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {readFileSync} from 'node:fs';
-import {descriptorValidator} from '../components/descriptor-validation.mjs';
+import {descriptorValidator} from '../../../deploy/components/descriptor-validation.mjs';
 import {verifyCatalog,catalogContains,catalogPackage} from '../ci/catalog.mjs';
 const validateComposition=descriptorValidator(JSON.parse(readFileSync(new URL('../schemas/ci-composition.schema.json',import.meta.url),'utf8')));
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const workflow='.github/workflows/codeworks.yml';
 export const recipeFiles=[
-  '.github/workflows/codeworks.yml','services/codeworks/ci/pipeline.mjs','services/codeworks/ci/registry.mjs','services/codeworks/ci/catalog.mjs','services/codeworks/ci/toolchain.json',
-  'services/codeworks/components/graph.mjs','services/codeworks/components/cli.mjs','services/codeworks/components/lock-inputs.mjs','services/codeworks/components/descriptor-validation.mjs','services/codeworks/components/package-runtime.mjs','services/codeworks/schemas/component.schema.json','services/codeworks/schemas/ci-composition.schema.json','services/codeworks/src/ci-verifier.mjs',
+  '.github/workflows/codeworks.yml','services/codeworks/ci/pipeline.mjs','services/codeworks/ci/registry.mjs','services/codeworks/ci/catalog.mjs','deploy/components/toolchain.json',
+  'deploy/components/graph.mjs','deploy/components/cli.mjs','deploy/components/lock-inputs.mjs','deploy/components/descriptor-validation.mjs','deploy/components/package-runtime.mjs','deploy/components/component.schema.json','services/codeworks/schemas/ci-composition.schema.json','services/codeworks/src/ci-verifier.mjs',
 ];
 const match=(value,expected)=>Object.entries(expected).every(([key,item])=>value?.[key]===item);
 const no=state=>({verified:false,state});

@@ -7,7 +7,7 @@ import { join, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { discover, fingerprints, sourceFiles } from './graph.mjs';
 import { execute } from './cli.mjs';
-const repository=resolve(import.meta.dirname,'../../..');
+const repository=resolve(import.meta.dirname,'../..');
 function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
 function descriptor(id) {
  const dir='services/'+id;
@@ -18,7 +18,7 @@ function fixture(t) {
  const root=mkdtempSync(join(repository,'tmp','component-fixture-'));
  t.after(()=>rmSync(root,{recursive:true,force:true}));
  execFileSync('git',['init','-q',root],{stdio:'pipe'});
- put(root,'services/codeworks/schemas/component.schema.json',readFileSync(join(repository,'services/codeworks/schemas/component.schema.json')));
+ put(root,'deploy/components/component.schema.json',readFileSync(join(repository,'deploy/components/component.schema.json')));
  return root;
 }
 function add(root,id,edit=()=>{}) {

@@ -39,7 +39,7 @@ export function digestFiles(root, paths, metadata = {}) {
 function git(root, args) { return execFileSync('git', ['-C',root,...args], {encoding:'utf8',maxBuffer:32*1024*1024}); }
 export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
   const files = sourceFiles(root);
-  const validator = descriptorValidator(json(join(root,'services/codeworks/schemas/component.schema.json')));
+  const validator = descriptorValidator(json(join(root,'deploy/components/component.schema.json')));
   const components = new Map();
   for (const file of files.filter(path => path.endsWith('/component.json') || path === 'component.json')) {
     const value = json(join(root,file));
@@ -162,7 +162,7 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   const runtimeLock=lockInputs(root,c.npm.workspaces,target);
   const buildLock=c.commands.build?lockInputs(root,c.npm.workspaces,{...target,development:true}):runtimeLock;
   const checkLock=lockInputs(root,c.npm.workspaces,{...target,development:true});
-  const toolchainPath=join(root,'services/codeworks/ci/toolchain.json');
+  const toolchainPath=join(root,'deploy/components/toolchain.json');
   const toolchain=existsSync(toolchainPath)?json(toolchainPath):{node:process.versions.node,npm:'11.19.1',nodeBase:'node:24.22.1-bookworm-slim'};
   const compatibility={platform,libc:target.platform==='linux'?(process.report.getReport().header.glibcVersionRuntime?'glibc':'musl'):null,node:toolchain.node,npm:toolchain.npm,...(c.id==='web'?{variant,standalone:false}:{})};
   const buildEngine=digestFiles(dirname(fileURLToPath(import.meta.url)),['graph.mjs','cli.mjs','lock-inputs.mjs']);

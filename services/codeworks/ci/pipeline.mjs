@@ -3,9 +3,9 @@
 import {existsSync,mkdirSync,readFileSync,writeFileSync,cpSync,rmSync,mkdtempSync} from 'node:fs';
 import {join,resolve,dirname,posix} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {discover,fingerprints,json,digestFiles,validateDocumentation} from '../components/graph.mjs';
-import {buildOutputDigest,verifyBuildReceipt} from '../components/cli.mjs';
-import {verifyPackage,packageComponent} from '../components/package-runtime.mjs';
+import {discover,fingerprints,json,digestFiles,validateDocumentation} from '../../../deploy/components/graph.mjs';
+import {buildOutputDigest,verifyBuildReceipt} from '../../../deploy/components/cli.mjs';
+import {verifyPackage,packageComponent} from '../../../deploy/components/package-runtime.mjs';
 import {createRegistry,run,sha256} from './registry.mjs';
 import {recipeFiles,verifyRecipeAt,loadRunProof,downloadProof} from '../src/ci-verifier.mjs';
 import {verifyCatalog,catalogContains,catalogPackage} from './catalog.mjs';
@@ -61,7 +61,7 @@ function config(env=process.env) {
 async function plan(cfg,registry) {
   const started=Date.now(),recipe=digestFiles(root,recipeFiles),target=process.env.CODEWORKS_TARGET??'dev';
   if(!['dev','prod'].includes(target))throw Error('INVALID_TARGET');
-  const toolchain=json(join(root,'services/codeworks/ci/toolchain.json'));
+  const toolchain=json(join(root,'deploy/components/toolchain.json'));
   if(process.versions.node!==toolchain.node||`${process.platform}/${process.arch==='x64'?'amd64':process.arch}`!==toolchain.platform)throw Error('TOOLCHAIN_MISMATCH');
   const graph=discover(root,{base:process.env.CODEWORKS_BASE_REF??'refs/remotes/origin/dev',allowMissingBuildOutputs:true});
   validateDocumentation(root,graph);
@@ -107,7 +107,7 @@ async function restoreOutputs(item,c,root,commands) {
 }
 function runtimeContext(root,c,payload) {
   const context=mkdtempSync(join(root,'tmp/ci-context-'));mkdirSync(join(context,'payload'));cpSync(payload.path,join(context,'payload'),{recursive:true,verbatimSymlinks:true});
-  const toolchain=json(join(root,'services/codeworks/ci/toolchain.json'));
+  const toolchain=json(join(root,'deploy/components/toolchain.json'));
   const base=c.delivery.kind==='oci-context'?toolchain.nodeBase:'scratch';
   const command=c.delivery.command??(c.delivery.entrypoints.length?['node',posix.relative(c.directory,c.delivery.entrypoints[0])]:[]);
   const workdir=c.delivery.kind==='oci-context'?`/payload/${c.directory}`:'/payload';
@@ -139,13 +139,13 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
       const cli=async action=>{
         // CI check/package не вправе использовать convenience CLI и скрыто пересобирать компонент.
         if(action==='check'||action==='package')verifyBuildReceipt(root,c,undefined,item.keys.build);
-        return commands(process.execPath,['services/codeworks/components/cli.mjs',action,item.id,'--only','--base',cfg.source],{cwd:root,env});
+        return commands(process.execPath,['deploy/components/cli.mjs',action,item.id,'--only','--base',cfg.source],{cwd:root,env});
       };
       if(!item.artifactHit&&!item.buildHit&&c.commands.build){const t=Date.now();await cli('build');entry.buildMs=Date.now()-t;}
       if(!item.checkHit&&c.commands.check){const t=Date.now();await cli('check');entry.checkMs=Date.now()-t;}
       if(!item.artifactHit&&item.id==='instaloader') {
         const context=mkdtempSync(join(root,'tmp/ci-instaloader-'));cpSync(join(root,c.directory),context,{recursive:true});
-        const docker=readFileSync(join(context,'Dockerfile'),'utf8').replace(/^FROM .+$/m,'FROM '+json(join(root,'services/codeworks/ci/toolchain.json')).pythonBase);
+        const docker=readFileSync(join(context,'Dockerfile'),'utf8').replace(/^FROM .+$/m,'FROM '+json(join(root,'deploy/components/toolchain.json')).pythonBase);
         writeFileSync(join(context,'Dockerfile'),docker);
         entry.externalImage=registry.reference(item.id,'smoke-'+cfg.runId+'-'+cfg.attempt);entry.context=context;
         const metadata={...provenance('runtime',item.keys.artifact),payloadHash:null,componentType:c.type,deliveryKind:'external-cli'};
@@ -206,7 +206,7 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
     records.push({id:item.id,type:c.type,keys:item.keys,artifact,check,build,reused:item.artifactHit,reusedBuild:item.buildHit,checkedNow:!item.checkHit,buildMs:entry.buildMs,checkMs:entry.checkMs,packageMs:entry.packageMs,layerCacheHits:entry.layerCacheHits??artifact.layerCacheHits??0,systemRequirements:c.delivery.systemRequirements,deploy:c.deploy});
   }
   const dependencyPath=join(root,'tmp/ci-dependency-ms');
-  const composition={format:'brai-release-composition-v1',repository:cfg.repository,source:cfg.source,runId:cfg.runId,attempt:cfg.attempt,workflow:'.github/workflows/codeworks.yml',recipe:plan.recipe,target:plan.target,reuseCatalog:plan.reuseCatalog?{reference:plan.reuseCatalog.reference,digest:plan.reuseCatalog.digest}:null,toolchain:{...json(join(root,'services/codeworks/ci/toolchain.json')),docker:plan.dockerToolchain??null},createdAt:stamp(),billing:{state:'hard-stop-confirmed',basis:'operator-confirmed account-wide Actions USD 0 with Stop usage',confirmedAt:process.env.CODEWORKS_BILLING_CONFIRMED_AT,quota:'unavailable-to-workflow-token'},components:records,retired:[...graph.components.values()].filter(c=>c.status==='retired').map(c=>({id:c.id,reason:c.reason,renamedTo:c.renamedTo})),measurements:{planningMs:plan.planningMs,dependencyMs:existsSync(dependencyPath)?Number(readFileSync(dependencyPath,'utf8')):0,executionMs:Date.now()-started,builds:plan.sets.build.length+(plan.items.some(x=>x.id==='instaloader'&&!x.artifactHit)?1:0),packages:plan.sets.package.length,reuse:plan.sets.reuse.length,checks:plan.sets.check.length,artifactBytes:records.reduce((n,c)=>n+c.artifact.bytes,0),dependencyDownloadCacheHit:process.env.CODEWORKS_DEPENDENCY_CACHE_HIT==='true',layerCacheHits:records.reduce((n,c)=>n+c.layerCacheHits,0),optionalCacheDisabled:process.env.CODEWORKS_DISABLE_CACHE==='1'}};
+  const composition={format:'brai-release-composition-v1',repository:cfg.repository,source:cfg.source,runId:cfg.runId,attempt:cfg.attempt,workflow:'.github/workflows/codeworks.yml',recipe:plan.recipe,target:plan.target,reuseCatalog:plan.reuseCatalog?{reference:plan.reuseCatalog.reference,digest:plan.reuseCatalog.digest}:null,toolchain:{...json(join(root,'deploy/components/toolchain.json')),docker:plan.dockerToolchain??null},createdAt:stamp(),billing:{state:'hard-stop-confirmed',basis:'operator-confirmed account-wide Actions USD 0 with Stop usage',confirmedAt:process.env.CODEWORKS_BILLING_CONFIRMED_AT,quota:'unavailable-to-workflow-token'},components:records,retired:[...graph.components.values()].filter(c=>c.status==='retired').map(c=>({id:c.id,reason:c.reason,renamedTo:c.renamedTo})),measurements:{planningMs:plan.planningMs,dependencyMs:existsSync(dependencyPath)?Number(readFileSync(dependencyPath,'utf8')):0,executionMs:Date.now()-started,builds:plan.sets.build.length+(plan.items.some(x=>x.id==='instaloader'&&!x.artifactHit)?1:0),packages:plan.sets.package.length,reuse:plan.sets.reuse.length,checks:plan.sets.check.length,artifactBytes:records.reduce((n,c)=>n+c.artifact.bytes,0),dependencyDownloadCacheHit:process.env.CODEWORKS_DEPENDENCY_CACHE_HIT==='true',layerCacheHits:records.reduce((n,c)=>n+c.layerCacheHits,0),optionalCacheDisabled:process.env.CODEWORKS_DISABLE_CACHE==='1'}};
   const context=mkdtempSync(join(root,'tmp/ci-release-'));save(join(context,'release.json'),composition);writeFileSync(join(context,'Dockerfile'),'FROM scratch\nCOPY release.json /release.json\n');
   const published=await registry.publish('release','run-'+cfg.runId+'-'+cfg.attempt,context,provenance('composition',sha256(readFileSync(join(context,'release.json')))));
   save(join(root,'tmp/ci-result.json'),{composition,published});

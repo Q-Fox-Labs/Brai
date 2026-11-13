@@ -6,8 +6,8 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {bounded, reusable, selectWork, buildSnapshotTag} from './pipeline.mjs';
-import {fingerprints} from '../components/graph.mjs';
-import {lockInputs} from '../components/lock-inputs.mjs';
+import {fingerprints} from '../../../deploy/components/graph.mjs';
+import {lockInputs} from '../../../deploy/components/lock-inputs.mjs';
 
 const repoRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../../..');
 test('build discovery separates accepted CI recipes without changing the sealed receipt key',()=>{
@@ -25,7 +25,7 @@ function fixture(t) {
   put('services/probe/package.json',JSON.stringify(pkg));
   put('services/probe/main.mjs','export const value=1;\n');
   put('services/probe/check.mjs','export const check=1;\n');
-  put('services/codeworks/ci/toolchain.json',JSON.stringify({node:'24.22.1',npm:'11.19.1',nodeBase:'node:24.22.1-bookworm-slim'}));
+  put('deploy/components/toolchain.json',JSON.stringify({node:'24.22.1',npm:'11.19.1',nodeBase:'node:24.22.1-bookworm-slim'}));
   put('package-lock.json',JSON.stringify({lockfileVersion:3,packages:{
     'services/probe':{name:pkg.name,version:pkg.version,dependencies:pkg.dependencies},
     'node_modules/parent-pkg':{version:'1.0.0',dependencies:{'child-pkg':'1.0.0'}},

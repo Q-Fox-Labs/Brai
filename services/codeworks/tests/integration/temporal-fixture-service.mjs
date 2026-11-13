@@ -6,7 +6,7 @@ import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {Pool} from 'pg';
-import {verifyPackage} from '../../components/package-runtime.mjs';
+import {verifyPackage} from '../../../../deploy/components/package-runtime.mjs';
 import {copyFixtureTree} from './temporal-fixture-payload.mjs';
 const [action,input,id]=process.argv.slice(2),c=JSON.parse(fs.readFileSync(input));
 const ensure=(v,code)=>{if(!v)throw Error(code);};

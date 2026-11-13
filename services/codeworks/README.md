@@ -4,7 +4,7 @@ Codeworks хранит рабочие области и координирует
 
 При включённой оператором политике `web_preview` сервис автоматически публикует веб отправленных рабочих веток до слияния. Два слота используют общие сервисы и данные DEV. `status.preview` показывает очередь, точный опубликованный коммит и срок аренды отдельно от результата `sync`. Устройство и гарантии описаны в [контракте превью](PREVIEW.md).
 
-[Контракт](CONTRACT.md) описывает lifecycle и API; [дескрипторы компонентов](components/README.md) — discovery, проверки, сборку и поставки; [CI](ci/README.md) — доказательства происхождения артефактов; [Temporal](TEMPORAL.md) — исполнение, восстановление и обновление.
+[Контракт](CONTRACT.md) описывает lifecycle и API; [дескрипторы компонентов](../../deploy/components/README.md) — discovery, проверки, сборку и поставки; [CI](ci/README.md) — доказательства происхождения артефактов; [Temporal](TEMPORAL.md) — исполнение, восстановление и обновление.
 
 Привязки PR хранятся в PostgreSQL Codeworks и общие для `sync` и `release`.
 Редактирование заголовка или описания PR не нарушает связь. Перед продолжением
@@ -84,7 +84,7 @@ root CLI и его DB-адаптеры сохраняют root. Обычный w
 
 - [CONTRACT.md](CONTRACT.md).
 - [ci/README.md](ci/README.md).
-- [components/README.md](components/README.md).
+- [components/README.md](../../deploy/components/README.md).
 
 ### Обновление основной копии
 

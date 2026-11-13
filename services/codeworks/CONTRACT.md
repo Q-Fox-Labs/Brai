@@ -486,7 +486,7 @@ legacy_writer и legacy_attachments — только исторические д
 Оставшиеся Hermes-исходники отложены, codeworks-agent retired и не поставляется.
 
 Обычные проверки:
-`node --test --test-isolation=none services/codeworks/tests/*.test.mjs services/codeworks/components/*.test.mjs services/codeworks/ci/*.test.mjs`.
+`node --test --test-isolation=none services/codeworks/tests/*.test.mjs deploy/components/*.test.mjs services/codeworks/ci/*.test.mjs`.
 
 Интеграционная проверка публикации должна использовать отдельные роли приложения, владельца и verifier: приложению доступно чтение доверенных записей и вызов функции блокировки, но не их изменение. Сценарий конкурентного UPDATE от verifier проверяет фактическую блокировку; unit fixture с расширенными правами этого не подтверждает.
 

@@ -148,7 +148,7 @@ ID, проектом, контуром, SHA и composition digest. После п
 ## Проверки
 
 Локальные проверки: `node --test --test-isolation=none --test-concurrency=1
-services/codeworks/tests/*.test.mjs services/codeworks/components/*.test.mjs
+services/codeworks/tests/*.test.mjs deploy/components/*.test.mjs
 services/codeworks/ci/*.test.mjs`.
 
 Интеграционные сценарии запускает Ansible из Admin: test_brai_codeworks_temporal.yml

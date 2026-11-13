@@ -105,7 +105,7 @@ Local AI сохраняет runtime/models/catalog/installer lifecycle; веса
 ## Проверки
 
 ```sh
-node --test --test-isolation=none services/codeworks/components/*.test.mjs services/codeworks/ci/*.test.mjs services/codeworks/tests/ci-verifier.test.mjs
+node --test --test-isolation=none deploy/components/*.test.mjs services/codeworks/ci/*.test.mjs services/codeworks/tests/ci-verifier.test.mjs
 ```
 
 Fixtures не доказывают реальные Actions/GHCR/установку. Обязательны настоящие
