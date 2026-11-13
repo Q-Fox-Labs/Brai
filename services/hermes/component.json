@@ -368,6 +368,8 @@
       "services/hermes/identity/tests/test_ordinary_batches.py",
       "services/hermes/identity/tests/test_ordinary_boundaries.py",
       "services/hermes/identity/tests/test_ordinary_uds_root.py",
+      "services/hermes/identity/tests/ordinary_uds_proof.py",
+      "services/hermes/identity/tests/test_ordinary_uds_proof.py",
       "services/hermes/identity/tests/test_profile_release.py",
       "services/hermes/identity/tests/test_release_contract.py",
       "services/hermes/identity/tests/test_transport_inbox.py",

@@ -17,7 +17,7 @@ REQUIRED = {PREFIX + name for name in ('ordinary_admission.py','profile_release.
 CHECKS = {PREFIX + 'tests/' + name for name in ('test_ordinary_admission.py','test_ordinary_batches.py',
           'test_ordinary_boundaries.py','test_ordinary_uds_root.py','test_profile_release.py',
           'test_release_contract.py','test_transport_inbox.py','test_update_inbox.py',
-          'test_component_release_package.py')}
+          'test_component_release_package.py','ordinary_uds_proof.py','test_ordinary_uds_proof.py')}
 FIXTURES = {PREFIX + 'tests/fixtures/ordinary_release/plugins/platforms/telegram/' + name for name in
             ('adapter.py','telegram_held_inbound.py','update_admission.py')}
 
