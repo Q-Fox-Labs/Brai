@@ -32,8 +32,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends bubblewrap
+          sudo mkdir -p /usr/local/libexec/brai-dev-release/check-tools/bin
+          sudo ln "$(command -v node)" /usr/local/libexec/brai-dev-release/check-tools/bin/node
+          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify component tooling
-        run: node --test --test-isolation=none deploy/components/*.test.mjs
+        # Smoke-проверки используют Root namespaces и закреплённый путь check-tools.
+        run: sudo --preserve-env=PATH,CI "$(command -v node)" --test --test-isolation=none deploy/components/*.test.mjs
       - name: Validate component graph and documentation
         run: node deploy/components/cli.mjs plan
       - name: Prepare dependencies
