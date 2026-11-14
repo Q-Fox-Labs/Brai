@@ -1,3 +1,16 @@
+## Brai DEV workflow
+
+For Brai DEV, follow the repository `AGENTS.md` and use the accepted DEV manifest as the candidate baseline; the Git branch tip alone does not prove what is installed. The agent performs these steps without asking the user to prepare the workspace:
+
+1. Create an isolated Git worktree and a task branch using Codex when available, or Git. Keep existing worktrees and other people's changes intact.
+2. Prepare a new worktree with `brai-worktree-prepare <absolute-worktree-path>`. Preserve personal data and existing worktree dependencies.
+3. Make the task changes, run the relevant code and contract checks, and create a clean commit. An ordinary release checks affected code and contracts; it does not scan personal profiles or rebuild the platform when dependencies are unchanged.
+4. Release the exact clean commit with `brai-dev release --source <full-commit-sha>`. Use `brai-dev status [<operation-id>]` to inspect the same operation, especially if its response is lost; do not repeat side effects blindly.
+5. Push the task changes as required by the repository. A pull request and remote CI are not prerequisites for a DEV release. GitHub unavailability does not block the local release; report any unsent commit as pending.
+6. After the release is accepted and changes are pushed, safely clean up only your own completed clean worktree. Preserve uncommitted, untracked, ignored, personal and other people's data; if ownership or safety is unclear, keep the worktree and report why. Do not delete remote branches without separate authorization.
+
+PROD changes require a separate explicit request. The full release time has not yet been established; do not promise a 120-second result without measurement on a real task.
+
 ## Parallel Issue Fixing with Worktrees
 
 Follow the repository instructions for preparing a worktree and its dependencies before using the commands below.
