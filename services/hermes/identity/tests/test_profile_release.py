@@ -35,6 +35,15 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         self.request={'operationId':str(uuid.uuid4()),'attemptId':str(uuid.uuid4()),'profileId':P1['profileId'],
             'targetPayloadHash':'a'*64,'workerPid':123,'workerStartTime':'456'}
 
+    async def asyncTearDown(self):
+        # Reapers may still inspect the SQLite receipt in a worker thread.
+        # Await both stages before TemporaryDirectory cleanup removes the database.
+        tasks = [task for _, task in self.owner.tasks.values()]
+        if tasks:
+            await asyncio.gather(*tasks)
+        if self.owner.reapers:
+            await asyncio.gather(*self.owner.reapers)
+
     async def test_busy_profile_remains_open_and_other_profile_independent(self):
         self.mirror.tracker.counts[1001]=1
         async def call(method, params, **kwargs):
