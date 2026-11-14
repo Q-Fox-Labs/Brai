@@ -70,6 +70,22 @@ test('new described component enters pipeline without workflow editing; build on
  const second=await execute(root,'package',['probe']);assert.equal(second[0].artifact.payloadHash,result[0].artifact.payloadHash);assert.equal(second[0].compiled,false);assert.equal(second[0].packaged,false);
  put(result[0].artifact.path,'services/probe/main.mjs','export const value=9;');await assert.rejects(execute(root,'package',['probe']),/IMMUTABLE_OUTPUT_MISMATCH/);
 });
+test('fresh consumer builds unchanged dependency output without packaging it',async t=>{
+ const root=fixture(t);
+ const provider=add(root,'provider');provider.delivery.files.push('services/provider/dist/publisher.mjs');save(root,'provider',provider);
+ put(root,'services/provider/build.mjs',"import{mkdirSync,writeFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/publisher.mjs','export const ready=true;');appendFileSync('build-count','1');\n");
+ const consumer=add(root,'consumer');consumer.dependencies=[{id:'provider',inputs:[],delivery:['services/provider/dist/publisher.mjs']}];save(root,'consumer',consumer);
+ put(root,'.gitignore','/docs/user-agent/usercustom/\nservices/provider/dist/\n');
+ await assert.rejects(execute(root,'run',['consumer'],{includeDependencies:false}),/MISSING_DELIVERY_FILE/);
+ const built=await execute(root,'build',['consumer'],{includeDependencies:true});
+ assert.deepEqual(built.map(row=>row.id),['provider','consumer']);
+ assert.ok(built.every(row=>!row.artifact && !row.packaged));
+ const result=await execute(root,'run',['consumer'],{includeDependencies:false});
+ assert.deepEqual(result.map(row=>row.id),['consumer']);
+ assert.equal(readFileSync(join(result[0].artifact.path,'services/provider/dist/publisher.mjs'),'utf8'),'export const ready=true;');
+ await execute(root,'build',['consumer'],{includeDependencies:true});
+ assert.equal(readFileSync(join(root,'services/provider/build-count'),'utf8'),'1');
+});
 test('check receipt is reused only for unchanged successful inputs',async t=>{
  const root=fixture(t);const d=add(root,'probe');d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];save(root,'probe',d);
  const script="printf 1 >> ../../tmp/check-count\n";

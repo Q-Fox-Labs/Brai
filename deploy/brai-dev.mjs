@@ -90,6 +90,10 @@ function assertSupported(status, ids) {
 }
 
 async function prepareComponent(root, id, graph, status, ports, timed) {
+  // Изолированное дерево может не иметь dist неизменившегося поставщика.
+  // Build готовит closure без проверки, упаковки и публикации его компонентов.
+  await timed('build-dependencies', () => ports.execute(root, 'build', [id],
+    {base: status.current?.sourceSha, includeDependencies: true}), id);
   const rows = await timed('prepare', () => ports.execute(root, 'run', [id], {base: status.current?.sourceSha, includeDependencies: false}), id);
   if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== id) fail(`COMPONENT_RESULT_INVALID: ${id}: run`);
   const result = rows[0];

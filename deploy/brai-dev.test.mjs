@@ -134,6 +134,14 @@ test('release executes exact changed closure, manifests, CAS and accepted wait',
     ['run', ['auth']], ['run', ['web']],
   ]);
   for (const call of state.calls.filter(c => c[0] === 'run')) assert.deepEqual(call[2], {base: oldSource, includeDependencies: false});
+  assert.deepEqual(state.calls.filter(c => c[0] === 'build').map(c => c.slice(0, 2)), [
+    ['build', ['auth']], ['build', ['web']],
+  ]);
+  for (const call of state.calls.filter(c => c[0] === 'build')) assert.deepEqual(call[2], {base: oldSource, includeDependencies: true});
+  for (const id of ['auth', 'web']) {
+    assert.ok(state.calls.findIndex(c => c[0] === 'build' && c[1][0] === id) <
+              state.calls.findIndex(c => c[0] === 'run' && c[1][0] === id));
+  }
   assert.equal(state.candidate.components[0].artifact.digest, `sha256:${digest}`);
   assert.deepEqual(state.candidate.components[0].checks, [{kind: 'artifact-manifest', sha256: 'e'.repeat(64)}]);
   assert.deepEqual(state.candidate.components[0].schema, {before: 'schema-v1', after: 'schema-v1', rollbackCompatible: true});
