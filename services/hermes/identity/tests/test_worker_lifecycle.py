@@ -102,13 +102,6 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RpcError, 'Worker not ready'):
             await worker.health()
 
-    async def test_stopping_worker_cannot_report_ready(self):
-        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
-        worker.runner, worker.adapter = NS(), NS()
-        worker.policy_stopping = True
-        with self.assertRaisesRegex(RpcError, 'Worker not ready'):
-            await worker.health()
-
     def test_native_exit_funnel_preserves_stop_failure_and_restart_codes(self):
         for outcome, expected in [(None, 0), (SystemExit(None), 0),
                                   (SystemExit(1), 1), (SystemExit(75), 75)]:
@@ -533,7 +526,8 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((await worker.health())['policyReady'])
             worker.policy_error = None
             worker.policy_stopping = True
-            self.assertFalse((await worker.health())['policyReady'])
+            with self.assertRaisesRegex(RpcError, 'Worker not ready'):
+                await worker.health()
         finally:
             await worker.stop_runtime()
 
