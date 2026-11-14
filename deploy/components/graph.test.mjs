@@ -288,7 +288,6 @@ test('build config and effective dependency delivery cannot reuse stale payload'
  assert.notEqual(first.artifact.payloadHash,second.artifact.payloadHash);
  assert.equal(readFileSync(join(second.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=2;');
  add(root,'neighbor');put(root,'services/neighbor/extra.json','{"revision":1}');
- // AIDEV-NOTE: Явный исходный mode сохраняет проверку смены прав при umask 0077.
  chmodSync(join(root,'services/neighbor/extra.json'),0o644);
  d.dependencies=[{id:'neighbor',inputs:[],delivery:[]}];save(root,'probe',d);
  const before=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
@@ -302,7 +301,9 @@ test('build config and effective dependency delivery cannot reuse stale payload'
  assert.equal(readFileSync(join(changed.artifact.path,'services/neighbor/extra.json'),'utf8'),'{"revision":2}');
  const repeat=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(repeat.packaged,false);
  chmodSync(join(root,'services/neighbor/extra.json'),0o600);
- const modeChanged=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(modeChanged.packaged,true);assert.equal(modeChanged.artifact.payloadHash,repeat.artifact.payloadHash);
+ const modeChanged=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(modeChanged.packaged,false);assert.equal(modeChanged.artifact.payloadHash,repeat.artifact.payloadHash);
+ chmodSync(join(root,'services/neighbor/extra.json'),0o755);
+ const executable=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(executable.packaged,true);assert.notEqual(executable.artifact.payloadHash,repeat.artifact.payloadHash);
 });
 test('executable admission covers package bins, runtime flags and executable shebang files',t=>{
  const root=fixture(t),d=add(root,'probe');put(root,'services/probe/extra.mjs','export {};');
@@ -383,11 +384,17 @@ test('cold source plan excludes generated bundle; built delivery admits its exac
 });
 
 
-test('artifact fingerprint reflects canonical delivery mode and executable bits', t => {
+test('source fingerprints ignore checkout permissions but retain executable bits', t => {
  const root=fixture(t), c=add(root,'probe'), path=join(root,'services/probe/main.mjs');
- chmodSync(path,0o644); const original=fingerprints(root,c);
+ c.commands.build=null;
+ const group={id:'probe',excludedInputs:[],extraInputs:[]};
+ chmodSync(join(root,'services/probe'),0o700);chmodSync(path,0o600);
+ const original=fingerprints(root,c),originalGroup=checkGroupFingerprint(root,c,group);
+ chmodSync(join(root,'services/probe'),0o775);
  chmodSync(path,0o664); const groupWritable=fingerprints(root,c);
- assert.equal(groupWritable.artifact,original.artifact);
+ for(const key of ['build','artifact','checks','runtime'])assert.equal(groupWritable[key],original[key],key);
+ assert.equal(checkGroupFingerprint(root,c,group),originalGroup);
  chmodSync(path,0o755); const executable=fingerprints(root,c);
  assert.notEqual(executable.artifact,original.artifact);
+ assert.notEqual(executable.runtime,original.runtime);
 });

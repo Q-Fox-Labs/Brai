@@ -182,8 +182,10 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   deliveryFiles.forEach(collect);
   const delivery={...c.delivery,files:deliveryFiles};
   const sourcePayload=payloadInputs.filter(path=>!/\/(?:dist|\.next)(?:\/|$)/.test(path));
-  const artifact=digestFiles(root,[...expand(root,c.inputs.runtime),...deps,...sourcePayload],{build,delivery,npm:runtimeLock,packagingEngine,compatibility,sourceModes:sourcePayload.map(path=>[path,lstatSync(join(root,path)).mode & 0o755]),base:c.delivery.kind==='oci-context'?toolchain.nodeBase:null,recipe:c.id==='instaloader'?toolchain.pythonBase:null});
-  const runtime=digestFiles(root,payloadInputs,{artifact,modes:payloadInputs.map(path=>[path,lstatSync(join(root,path)).mode & 0o777])});
+  const sourceSet=new Set(sourcePayload);
+  const sourceMode=path=>lstatSync(join(root,path)).mode & 0o111 ? 0o755 : 0o644;
+  const artifact=digestFiles(root,[...expand(root,c.inputs.runtime),...deps,...sourcePayload],{build,delivery,npm:runtimeLock,packagingEngine,compatibility,sourceModes:sourcePayload.map(path=>[path,sourceMode(path)]),base:c.delivery.kind==='oci-context'?toolchain.nodeBase:null,recipe:c.id==='instaloader'?toolchain.pythonBase:null});
+  const runtime=digestFiles(root,payloadInputs,{artifact,modes:payloadInputs.map(path=>[path,sourceSet.has(path)?sourceMode(path):lstatSync(join(root,path)).mode & 0o777])});
   const checkEngine=digestFiles(dirname(fileURLToPath(import.meta.url)),['graph.mjs','cli.mjs','lock-inputs.mjs']);
   const checks=digestFiles(root,[...buildFiles,...deps,...expand(root,c.inputs.checks)],{build,check:c.commands.check,checkTools:c.commands.checkTools,checkEngine,lock:checkLock,delivery});
   return {build,runtime,checks,artifact,compatibility};
