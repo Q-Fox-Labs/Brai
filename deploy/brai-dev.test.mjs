@@ -81,6 +81,49 @@ test('generated runtime fingerprint alone does not trigger source rebuild', () =
   assert.deepEqual(selectComponents(state.graph, state.current, state.next, Object.fromEntries(state.graph.order.map(id => [id, keys(id)]))), []);
 });
 
+test('global checker-only changes leave every installed service unchanged without package or apply', async () => {
+  const {ports, state} = fixture();
+  for (const id of state.graph.order) state.next[id] = {...keys(id), checks: 'global-check-engine-v2'};
+  const result = await release({root: '/repository', source}, ports);
+  assert.equal(result.state, 'unchanged'); assert.equal(result.acceptedSourceSha, oldSource);
+  assert.deepEqual(result.components, []); assert.equal(state.candidate, null);
+  assert.ok(!state.calls.some(call => call[0] === 'run' || call[0] === 'candidate' ||
+    call[0] === 'operator' && ['seal', 'apply'].includes(call[1])));
+});
+
+test('Hermes artifact change selects only Hermes and declared consumers despite global checker changes', async () => {
+  const {ports, state} = fixture();
+  const components = [component('auth'), component('web', ['auth']), component('hermes'),
+    component('hermes-client', ['hermes']), component('hermes-client-consumer', ['hermes-client']), component('timer')];
+  state.graph.components = new Map(components.map(value => [value.id, value]));
+  state.graph.order = components.map(value => value.id);
+  state.current.components = Object.fromEntries(components.map(({id}) => [id, {fingerprints: keys(id), schema: {after: 'schema-v1'}}]));
+  for (const {id} of components) {
+    state.next[id] = {...keys(id), checks: 'global-check-engine-v2'};
+    state.supportedComponents[id] = {supported: true, handler: 'compose-payload', schemaRef: 'schema-v1'};
+  }
+  state.next.hermes.artifact = 'changed-hermes-artifact';
+  const result = await release({root: '/repository', source}, ports);
+  const selected = ['hermes', 'hermes-client', 'hermes-client-consumer'];
+  assert.deepEqual(result.components, selected);
+  assert.deepEqual(state.calls.filter(call => call[0] === 'run').flatMap(call => call[1]), selected);
+  assert.deepEqual(state.candidate.components.map(value => value.id), selected);
+  for (const value of state.candidate.components) assert.equal(value.fingerprints.checks, 'global-check-engine-v2');
+});
+
+test('selected artifact changes still require successful checks with the current checker', async () => {
+  for (const proof of [{checked: false, checkProof: 'executed'}, {checked: true, checkProof: undefined}]) {
+    const {ports, state} = fixture(), execute = ports.execute;
+    for (const id of state.graph.order) state.next[id] = {...keys(id), checks: 'global-check-engine-v2'};
+    state.next.auth.artifact = 'changed-auth-artifact';
+    ports.execute = async (...args) => (await execute(...args)).map(row => ({...row, ...proof}));
+    await assert.rejects(release({root: '/repository', source}, ports), /CHECK_NOT_EXECUTED: auth/);
+    assert.deepEqual(state.calls.filter(call => call[0] === 'run').map(call => call[1]), [['auth']]);
+    assert.equal(state.candidate, null);
+    assert.ok(!state.calls.some(call => call[0] === 'operator' && call[1] === 'apply'));
+  }
+});
+
 test('release executes exact changed closure, manifests, CAS and accepted wait', async () => {
   const {ports, state} = fixture();
   const result = await release({root: '/repository', source}, ports);

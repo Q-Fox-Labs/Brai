@@ -54,7 +54,8 @@ export function selectComponents(graph, current, next, before) {
   const selected = new Set();
   for (const id of active) {
     const old = before[id];
-    if (!current || !old || ['build', 'artifact', 'checks'].some(key => next[id][key] !== old[key])) selected.add(id);
+    // AIDEV-NOTE: Ключ checker инвалидирует check receipts, но не меняет поставляемую программу.
+    if (!current || !old || ['build', 'artifact'].some(key => next[id][key] !== old[key])) selected.add(id);
   }
   // AIDEV-NOTE: Потребитель повторно проверяется даже при совпавшем локальном ключе: изменился его поставщик.
   for (const id of graph.order) if (active.includes(id) && graph.components.get(id).dependencies.some(dep => selected.has(dep.id))) selected.add(id);
