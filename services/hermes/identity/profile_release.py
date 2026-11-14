@@ -149,6 +149,25 @@ class ProfileRelease:
                 pass
             return self._receipt(request,'blocked','attempt_unconfirmed')
 
+    async def _verify_ingress(self, profile, request):
+        """Recheck the exact gated owner and all unresolved durable inputs."""
+        uid, operation = profile['uid'], request['operationId']
+        if not self.mirror.hydrated or self.mirror.tracker.gates.get(uid) != operation:
+            raise ValueError('PROFILE_GATE_UNCONFIRMED')
+        if uid in self.mirror.transport_blocked:
+            raise ValueError('PROFILE_TRANSPORT_UNCONFIRMED')
+        outstanding = await asyncio.to_thread(self.mirror.inbox.unsettled, profile)
+        if any(not row['bound'] or row['state'] in ('unknown', 'blocked', 'handing_off', 'captured', 'native_duplicate')
+               or row['operationId'] != operation for row in outstanding):
+            raise ValueError('PROFILE_INBOX_UNCONFIRMED')
+        if self.mirror.transport is not None and await asyncio.to_thread(self.mirror.transport.blocked_for, uid):
+            raise ValueError('PROFILE_TRANSPORT_UNCONFIRMED')
+        if (not self.mirror.hydrated or self.mirror.tracker.gates.get(uid) != operation
+                or uid in self.mirror.transport_blocked or self.mirror.pending
+                or self.mirror.tracker.counts.get(uid,0)
+                or any(value is None for value in self.mirror.tracker.tickets.values())):
+            raise ValueError('PROFILE_GATE_UNCONFIRMED')
+
     async def status(self, operationId, attemptId, profileId, targetPayloadHash, workerPid, workerStartTime,
                      replacementPid=None, replacementStartTime=None):
         request = self._request(operationId,attemptId,profileId,targetPayloadHash,workerPid,workerStartTime)
@@ -164,18 +183,24 @@ class ProfileRelease:
             if not self.mirror.hydrated or self.mirror.tracker.gates.get(profile['uid']) != operationId:
                 return self._receipt(request,'unknown','ingress_gate_unconfirmed')
             try:
-                outstanding = await asyncio.to_thread(self.mirror.inbox.unsettled, profile)
-                if any(not row['bound'] or row['state'] in ('unknown', 'blocked', 'handing_off', 'captured')
-                       or row['operationId'] != operationId for row in outstanding):
-                    raise ValueError('PROFILE_INBOX_UNCONFIRMED')
-                if self.mirror.transport is not None and await asyncio.to_thread(
-                        self.mirror.transport.blocked_for,profile['uid']):
-                    raise ValueError('PROFILE_TRANSPORT_UNCONFIRMED')
-                peer = await self._peer(profile,workerPid,workerStartTime)
-                result = await peer.call('release.try_status',request,timeout=None)
-                if (not isinstance(result,dict) or result.get('state') != 'ready'
-                        or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId'))):
-                    raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
+                await self._verify_ingress(profile, request)
+                if replacementPid is None and replacementStartTime is None:
+                    peer = await self._peer(profile,workerPid,workerStartTime)
+                    result = await peer.call('release.try_status',request,timeout=None)
+                    if (not isinstance(result,dict) or result.get('state') != 'ready'
+                            or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId'))):
+                        raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
+                else:
+                    if (type(replacementPid) is not int or replacementPid <= 0
+                            or not isinstance(replacementStartTime,str)
+                            or not replacementStartTime.isascii() or not replacementStartTime.isdecimal()):
+                        raise ValueError('REPLACEMENT_BINDING_INVALID')
+                    peer = await self._peer(profile,replacementPid,replacementStartTime)
+                    result = await peer.call('release.status',{'operationId':operationId},timeout=None)
+                    if (not isinstance(result,dict) or result.get('state') != 'ready'
+                            or result.get('operationId') != operationId):
+                        raise ValueError('REPLACEMENT_NOT_HELD')
+                    await self._verify_ingress(profile, request)
             except Exception:
                 return self._receipt(request,'unknown','worker_unconfirmed')
             return self._receipt(request,'ready')
@@ -228,9 +253,10 @@ class ProfileRelease:
             return self._receipt(request,'blocked','attempt_unconfirmed')
         if row['state'] == 'resumed':
             return await self.status(**request,replacementPid=replacement_pid,replacementStartTime=replacement_start)
-        if row['state'] == 'ready':
-            await asyncio.to_thread(self.store.transition,profile,request,self.boot,'ready','resuming')
         try:
+            await self._verify_ingress(profile, request)
+            if row['state'] == 'ready':
+                await asyncio.to_thread(self.store.transition,profile,request,self.boot,'ready','resuming')
             peer = await self._peer(profile,replacement_pid,replacement_start)
             # A new worker exposes the socket before it claims the ingress peer or
             # finishes policy activation.  Resume is a primary-channel RPC, so
@@ -245,6 +271,7 @@ class ProfileRelease:
                     break
                 await asyncio.sleep(.05)
             peer = await self._peer(profile,replacement_pid,replacement_start)
+            await self._verify_ingress(profile, request)
             result = await peer.call('release.resume', {'operationId':request['operationId']}, timeout=None)
             if not isinstance(result,dict) or result.get('state') != 'resumed' or result.get('operationId') != request['operationId']:
                 raise ValueError('WORKER_RESUME_UNCONFIRMED')
@@ -311,9 +338,19 @@ class ProfileRelease:
                 if (fresh or self.mirror.pending or tracker.counts.get(uid,0)
                         or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
                     continue
+                if target == 'resumed':
+                    await self._verify_ingress(profile, request)
+                    if (self.mirror.pending or tracker.counts.get(uid,0)
+                            or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
+                        continue
                 if expected is not None:
                     await asyncio.to_thread(self.store.transition,profile,request,self.boot,expected,target,
                                             replacement_pid=replacement_pid,replacement_start=replacement_start)
+                if target == 'resumed':
+                    await self._verify_ingress(profile, request)
+                    if (self.mirror.pending or tracker.counts.get(uid,0)
+                            or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
+                        raise ValueError('PROFILE_GATE_CHANGED_DURING_RESUME')
                 tracker.resume(uid,op)
                 return
 
