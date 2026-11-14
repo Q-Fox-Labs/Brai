@@ -9,6 +9,10 @@ For Brai DEV, follow the repository `AGENTS.md` and use the accepted DEV manifes
 5. Push the task changes as required by the repository. A pull request and remote CI are not prerequisites for a DEV release. GitHub unavailability does not block the local release; report any unsent commit as pending.
 6. After the release is accepted and changes are pushed, safely clean up only your own completed clean worktree. Preserve uncommitted, untracked, ignored, personal and other people's data; if ownership or safety is unclear, keep the worktree and report why. Do not delete remote branches without separate authorization.
 
+An accepted release records the desired composition. Loaded profiles may finish their current turns before switching; inspect `nativeProgress` in status, preserve pending turns, and never pause a profile to speed up a release. If status reports an operation blocked, inspect that same operation and use `brai-dev reconcile <original-program-operation-id>` only for that reported blockage. A later instructions release can have a different operation ID; do not reconcile it in place of the original program operation or launch another release blindly.
+
+Keep protected system instructions separate from personal settings. Do not edit a user's personal settings to fix system instructions.
+
 PROD changes require a separate explicit request. The full release time has not yet been established; do not promise a 120-second result without measurement on a real task.
 
 ## Parallel Issue Fixing with Worktrees
