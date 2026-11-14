@@ -31,10 +31,15 @@ export function runComponentCommand(root,c,text) {
   if(result.error)throw result.error;
   if(result.status!==0)throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
 }
-function runCheckCommand(root,c,text) {
-  if(!text)return Promise.resolve();
+function checkEnvironment() {
   const environment={...process.env,NEXT_TELEMETRY_DISABLED:'1'};
   delete environment.CODEX_TOOL_CALL_ID;
+  delete environment.SUDO_COMMAND;
+  return environment;
+}
+function runCheckCommand(root,c,text) {
+  if(!text)return Promise.resolve();
+  const environment=checkEnvironment();
   const stdio=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?['inherit','inherit','inherit',3]:'inherit';
   return new Promise((resolve,reject)=>{
     const child=spawn(text,{cwd:join(root,c.directory),shell:true,stdio,env:environment});
@@ -186,7 +191,7 @@ function checkKey(c,item,toolCache) {
       }
     } catch {return null;}
   }
-  const environment=Object.entries(process.env).filter(([key])=>key!=='CODEX_TOOL_CALL_ID').sort(([a],[b])=>a.localeCompare(b));
+  const environment=Object.entries(checkEnvironment()).sort(([a],[b])=>a.localeCompare(b));
   return createHash('sha256').update(JSON.stringify({checks:item.checks,tools,environment,node:process.execPath,nodeVersion:process.version,uid:process.getuid?.(),gid:process.getgid?.(),groups:process.getgroups?.()})).digest('hex');
 }
 export async function execute(root, action, ids=[], {base,includeDependencies=true}={}) {
@@ -259,7 +264,7 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
       } else {
         const key=dependencies && checkKey(c,{checks:item.checks+dependencies},toolCache);
         if(key && state.checkReceipt?.key===key) checkProof='cached';
-        else {runComponentCommand(root,c,c.commands.check);checkProof='executed';}
+        else {await runCheckCommand(root,c,c.commands.check);checkProof='executed';}
         if(fingerprints(root,c).checks!==item.checks || (key && checkKey(c,{checks:item.checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
         if(dependencies && dependencyInventory(root,c,true,new Map())!==dependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
         state.checkReceipt=key?{key}:null;

@@ -90,6 +90,23 @@ test('unqualified check is always executed',async t=>{
  assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
  assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
 });
+for(const grouped of [false,true]) test(`check ${grouped?'group':'command'} ignores launcher metadata in its key and child`,async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];
+ if(grouped)d.commands.checkGroups=[{id:'checked',command:'sh tests.mjs',tools:['sh'],excludedInputs:[],extraInputs:[]}];
+ save(root,'probe',d);
+ put(root,'services/probe/tests.mjs','test -z "${SUDO_COMMAND+x}" || exit 11\ntest "$NEXT_TELEMETRY_DISABLED" = 1 || exit 12\nprintf 1 >> ../../tmp/check-count\n');
+ const names=['SUDO_COMMAND','NEXT_TELEMETRY_DISABLED','BRAI_COMPONENT_TEST_INPUT'];
+ const original=Object.fromEntries(names.map(name=>[name,process.env[name]]));
+ t.after(()=>{for(const name of names)if(original[name]===undefined)delete process.env[name];else process.env[name]=original[name];});
+ process.env.SUDO_COMMAND='/launcher/first';process.env.NEXT_TELEMETRY_DISABLED='0';process.env.BRAI_COMPONENT_TEST_INPUT='first';
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ process.env.SUDO_COMMAND='/launcher/second';process.env.NEXT_TELEMETRY_DISABLED='different';
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'cached');
+ process.env.BRAI_COMPONENT_TEST_INPUT='second';
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'11');
+});
 test('check groups reuse only proofs whose declared inputs are unchanged',async t=>{
  const root=fixture(t),d=add(root,'probe');d.commands.build=null;
  d.inputs.checks.push('services/probe/other.mjs');
