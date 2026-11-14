@@ -39,6 +39,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.cached = self.cache / self.aid / 'report.txt'
         self.cached.parent.mkdir(mode=0o700)
         self.cached.write_bytes(b'report')
+        self.cached.chmod(0o600)
         self.result = {'artifactId': self.aid, 'filename': self.cached.name,
             'localPath': str(self.cached), 'mimeType': 'text/plain',
             'sizeBytes': 6, 'sha256': sha256(b'report').hexdigest()}
@@ -145,6 +146,15 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.control, 'call', side_effect=PermissionError('Foreign artifact')):
             with self.assertRaises(PermissionError):
                 await self.port.open_ingress(self.uid, self.profile, self.aid)
+
+    async def test_ingress_rejects_group_or_other_writable_cache(self):
+        original = identity.open_file
+        for mode in (0o620, 0o602):
+            with self.subTest(mode=oct(mode)):
+                self.cached.chmod(mode)
+                with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)):
+                    with self.assertRaisesRegex(PermissionError, 'Writable artifact cache'):
+                        await self.port.open_ingress(self.uid, self.profile, self.aid)
 
     async def test_ingress_receives_readable_copy_without_exposing_root_cache(self):
         (self.root / 'delivery').mkdir(mode=0o700)
