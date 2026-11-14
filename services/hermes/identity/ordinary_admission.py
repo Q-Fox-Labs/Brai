@@ -176,6 +176,7 @@ class Mirror:
                         or '00000000-0000-0000-0000-000000000000' in all_ids):
                     raise ValueError('TRANSPORT_PROFILE_COLLISION')
             outsiders = []
+            unbound_transport = False
             if self.transport is not None:
                 import json
                 from telegram import Update
@@ -195,6 +196,8 @@ class Mirror:
                         self.transport_unavailable.append(row)
                         if type(original_uid) is int:
                             self.transport_blocked.add(original_uid)
+                        else:
+                            unbound_transport = True
                         continue
                     if str(self.app.bot.id) != row['bot_id']:
                         raise ValueError('TRANSPORT_BOT_CHANGED')
@@ -212,6 +215,8 @@ class Mirror:
                             self.transport_unavailable.append(row)
                             if type(original_uid) is int:
                                 self.transport_blocked.add(original_uid)
+                            else:
+                                unbound_transport = True
                             continue
                         fresh = await self.resolve(original.get('telegramId'))
                         current = fresh.get('profile') if isinstance(fresh,dict) and fresh.get('state') == 'known' else None
@@ -233,6 +238,7 @@ class Mirror:
                 uid = profile['uid']
                 await asyncio.to_thread(self.inbox.install_v2, profile)
                 record = await asyncio.to_thread(self.gate_store.current, profile, boot)
+                outstanding = await asyncio.to_thread(self.inbox.unsettled, profile)
                 if record is not None:
                     state = record['state']
                     if state in ('busy', 'resumed'):
@@ -243,15 +249,17 @@ class Mirror:
                             expected = ((record['worker_pid'], record['worker_start']) if state == 'busy'
                                         else (record['replacement_pid'], record['replacement_start']))
                             if actual != expected:
-                                state = 'unknown'
+                                completed = (state == 'resumed' and not outstanding
+                                             and uid not in self.transport_blocked and not unbound_transport)
+                                if not completed:
+                                    state = 'unknown'
                         except Exception:
                             state = 'unknown'
                     if state not in ('busy', 'resumed'):
                         self.tracker.gates[uid] = record['operation_id']
                     record = {**record, 'state': state}
-                outstanding = await asyncio.to_thread(self.inbox.unsettled, profile)
                 if record is not None and record['state'] == 'resumed':
-                    transport_unknown = (uid in self.transport_blocked or
+                    transport_unknown = (unbound_transport or uid in self.transport_blocked or
                         (self.transport is not None and await asyncio.to_thread(self.transport.blocked_for, uid)))
                     if transport_unknown or any(not item['bound'] or item['state'] in
                                                 ('unknown','blocked','handing_off','native_duplicate')

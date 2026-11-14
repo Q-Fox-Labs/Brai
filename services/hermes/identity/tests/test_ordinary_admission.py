@@ -230,9 +230,57 @@ class MirrorTest(unittest.IsolatedAsyncioTestCase):
         async def observe(profile): return (20,'different')
         mirror=Mirror(SimpleNamespace(unsettled=lambda profile:[], install_v2=lambda profile:None),lambda actor:None,inventory=inventory,observe=observe,gate_store=Store(),boot_id='synthetic')
         await mirror.hydrate()
-        self.assertEqual(mirror.tracker.gates,{1001:'op1',1002:'op2'})
-        self.assertEqual(mirror.rehydrated[1002]['record']['state'],'unknown')
+        self.assertEqual(mirror.tracker.gates,{1001:'op1'})
+        self.assertEqual(mirror.rehydrated[1002]['record']['state'],'resumed')
         self.assertTrue(mirror.hydrated)
+
+    async def test_changed_resumed_worker_keeps_unsettled_inputs_held(self):
+        profile={'uid':1001,'profileId':'11111111-1111-4111-8111-111111111111'}
+        record={'state':'resumed','operation_id':'op','replacement_pid':20,'replacement_start':'21'}
+        async def inventory(): return {'profiles':[profile]}
+        async def observe(profile): return (30,'31')
+        for state, bound in [('unknown',True),('blocked',True),('handing_off',True),
+                             ('held',True),('captured',True),('held',False)]:
+            with self.subTest(state=state,bound=bound):
+                item={'state':state,'bound':bound,'operationId':'op','botId':'1','updateId':'2'}
+                inbox=SimpleNamespace(install_v2=lambda p:None,unsettled=lambda p:[item],
+                    markunknown=lambda *args:None,disposition=lambda *args,**kwargs:None)
+                mirror=Mirror(inbox,lambda actor:None,inventory=inventory,observe=observe,
+                    gate_store=SimpleNamespace(current=lambda *args:record),boot_id='synthetic')
+                mirror.recover=AsyncMock()
+                await mirror.hydrate()
+                self.assertEqual(mirror.tracker.gates,{1001:'op'})
+                self.assertEqual(mirror.rehydrated[1001]['record']['state'],'unknown')
+                mirror.recover.assert_not_awaited()
+
+    async def test_changed_resumed_worker_keeps_unresolved_transport_held(self):
+        import json
+        profile={'uid':1001,'profileId':'11111111-1111-4111-8111-111111111111'}
+        record={'state':'resumed','operation_id':'op','replacement_pid':20,'replacement_start':'21'}
+        async def inventory(): return {'profiles':[profile],'allProfileIds':[profile['profileId']]}
+        async def observe(profile): return (30,'31')
+        for binding in ({'state':'known','profile':profile},{'state':'unknown'}):
+            with self.subTest(binding=binding):
+                transport=SimpleNamespace(pending=lambda:[{'state':'unknown','binding':json.dumps(binding)}],
+                                          blocked_for=lambda uid:False)
+                inbox=SimpleNamespace(install_v2=lambda p:None,unsettled=lambda p:[])
+                mirror=Mirror(inbox,lambda actor:None,inventory=inventory,observe=observe,
+                    gate_store=SimpleNamespace(current=lambda *args:record),boot_id='synthetic',transport=transport)
+                mirror.app=SimpleNamespace(bot=SimpleNamespace(id=123))
+                await mirror.hydrate()
+                self.assertEqual(mirror.tracker.gates,{1001:'op'})
+                self.assertEqual(mirror.rehydrated[1001]['record']['state'],'unknown')
+
+    async def test_resumed_without_verified_worker_remains_held(self):
+        profile={'uid':1001,'profileId':'p1'}
+        record={'state':'resumed','operation_id':'op','replacement_pid':20,'replacement_start':'21'}
+        async def inventory(): return {'profiles':[profile]}
+        async def observe(profile): raise PermissionError('worker unavailable')
+        mirror=Mirror(SimpleNamespace(install_v2=lambda p:None,unsettled=lambda p:[]),lambda actor:None,
+            inventory=inventory,observe=observe,gate_store=SimpleNamespace(current=lambda *args:record),boot_id='synthetic')
+        await mirror.hydrate()
+        self.assertEqual(mirror.tracker.gates,{1001:'op'})
+        self.assertEqual(mirror.rehydrated[1001]['record']['state'],'unknown')
 
     async def test_hydration_failure_does_not_confirm_gate_inventory(self):
         async def inventory(): raise PermissionError('synthetic Auth failure')
