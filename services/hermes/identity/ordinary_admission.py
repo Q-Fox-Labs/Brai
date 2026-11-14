@@ -357,8 +357,6 @@ class Mirror:
         # Только captured: неизвестные эффекты никогда не попадают в повтор.
         for update in replay:
             await self.app.update_queue.put(update)
-        import logging
-        logging.getLogger(__name__).info('DEV input queue ready: queued=%d', len(replay))
 
     def _start_recovery(self):
         """Запустить отложенный replay один раз после снятия общего gate."""
