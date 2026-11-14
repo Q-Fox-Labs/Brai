@@ -310,7 +310,7 @@ export async function main(args = process.argv.slice(2), ports, root = process.c
     return {...status, previews};
   }
   if (options.command === 'reconcile') {
-    const current = await ports.operator('status');
+    const current = await ports.operator('status', options.operation);
     if (current.operation?.releaseId !== options.operation) fail('RECONCILE_RELEASE_MISMATCH');
     return ports.operator('reconcile', options.operation);
   }

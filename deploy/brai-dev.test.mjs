@@ -338,6 +338,37 @@ test('reconcile requires matching operation and passes its ID to the locked help
   assert.equal(result.releaseId, releaseId); assert.ok(state.calls.some(c => c[0] === 'operator' && c[1] === 'reconcile' && c[2] === releaseId));
 });
 
+test('reconcile addresses accepted program history after a newer instruction release', async () => {
+  const {ports, state} = fixture();
+  const calls = [];
+  state.operation = {releaseId, state: 'accepted'};
+  ports.operator = async (action, id) => {
+    calls.push([action, id]);
+    if (action === 'status') {
+      assert.equal(id, base);
+      return {current: {releaseId}, operation: {releaseId: base, state: 'accepted'}};
+    }
+    assert.equal(action, 'reconcile'); assert.equal(id, base);
+    return {releaseId: base, pendingReconcile: 'queued'};
+  };
+  assert.deepEqual(await main(['reconcile', base], ports), {releaseId: base, pendingReconcile: 'queued'});
+  assert.deepEqual(calls, [['status', base], ['reconcile', base]]);
+});
+
+test('reconcile rejects absent or incorrectly scoped history without a privileged effect', async () => {
+  for (const operation of [null, {releaseId, state: 'accepted'}]) {
+    const {ports} = fixture();
+    const calls = [];
+    ports.operator = async (action, id) => {
+      calls.push([action, id]);
+      assert.equal(action, 'status'); assert.equal(id, base);
+      return {operation};
+    };
+    await assert.rejects(main(['reconcile', base], ports), /RECONCILE_RELEASE_MISMATCH/);
+    assert.deepEqual(calls, [['status', base]]);
+  }
+});
+
 test('preview builds only web then seals, prepares and updates requested empty slot', async () => {
   const {ports, state} = fixture();
   const result = await preview({root: '/repository', source, slot: '02'}, ports);
