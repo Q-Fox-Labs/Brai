@@ -1,4 +1,4 @@
-// ABOUTME: Packages the prebuilt history runtime through the Codeworks owner descriptor.
+// ABOUTME: Packages the prebuilt history runtime through the component owner descriptor.
 // ABOUTME: Copies only locked runtime dependencies; never compiles or installs packages.
 import {resolve} from 'node:path';
 import {discover} from '../../../deploy/components/graph.mjs';

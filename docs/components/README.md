@@ -26,7 +26,7 @@
 
 ## Выведенные и отдельные материалы
 
-- [codeworks](codeworks.md) — retired; прежний сервис сохранён для истории.
+- [codeworks](codeworks.md) — retired; история прежнего сервиса сохранена в Git.
 - [codeworks-agent](codeworks-agent.md) — retired; прежний контроллер не поставляется.
 - [Instaloader](../environment/instaloader.md) — внешний рецепт, относится к окружению.
 

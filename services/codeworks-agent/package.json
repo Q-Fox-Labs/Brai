@@ -1,8 +1,0 @@
-{
-  "name": "@brai/codeworks-agent",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "engines": {"node": "24.22.1"},
-  "dependencies": {"ws": "8.22.0"}
-}

@@ -86,8 +86,7 @@ manifest с SHA-256/размерами каждого файла и точным
 относительные пути опубликованных owner contracts; полное дерево исходников не
 нужно. Smoke выполняется из отдельного временного каталога вне репозитория с
 пустыми NODE_PATH/NODE_OPTIONS. OCI Dockerfile только копирует готовые файлы,
-не устанавливает зависимости. Registry/Actions использует этот же упаковщик
-через [общий CI](../../services/codeworks/ci/README.md); rollout остаётся отдельным этапом.
+не устанавливает зависимости. [CI компонентов](../../.github/workflows/components.yml) проверяет описания и инструменты; полный прогон запускается вручную. Выпуск остаётся отдельным этапом.
 
 Скрипты History/Alerts `scripts/package-runtime.mjs` используют тот же упаковщик,
 принимают только prebuilt outputs с проверенным build receipt и печатают точный immutable каталог. Их `--output`
@@ -101,14 +100,14 @@ CLI по умолчанию сравнивает с `refs/remotes/origin/dev`; �
 службу: фактическое отключение — отдельный reviewed rollout оператора.
 
 Описаны web, auth, timer, history, alerts, artifacts (включая MCP), game-core,
-transcription, local-ai, agent, providers, supabase-mcp, hermes, codeworks и
-codeworks-agent (retired; прежний контроллер не поставляется). Transcription сохраняет coordinator/helper/local/external как
+transcription, local-ai, agent, providers, supabase-mcp и hermes. Codeworks и
+codeworks-agent имеют статус retired; прежние контроллеры не поставляются. Transcription сохраняет coordinator/helper/local/external как
 четыре executable одного владельца. Caddy, NATS, Temporal и Supabase — внешние
 зависимости оператора. Instaloader — рецепт внешней on-demand программы (type `library`): готовые файлы
 задают pinned OCI runtime requirement. First-party executable здесь отсутствует;
 активные Brai службы его не импортируют. Runtime executable принадлежит внешнему
 образу `brai-instaloader:4.15.3` из его Dockerfile/requirements.txt; build/deploy
-этого образа выполняет общий CI по pinned/hash-locked recipe. Exact GHCR digest
+этого образа выполняется отдельно по pinned/hash-locked recipe. Exact GHCR digest
 и offline CLI acceptance фиксирует composition; установка остаётся rollout.
 Проверяемый offline запуск: `docker run --rm --pull never --network none
 --read-only brai-instaloader:4.15.3 --help`. Отсутствующий образ — явная ошибка,

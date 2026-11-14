@@ -1,6 +1,6 @@
 ## Parallel Issue Fixing with Worktrees
 
-For a repository governed by Codeworks, follow its project instructions instead of the manual worktree commands below. A new area is prepared by the supported native file-write hook; public prepare resumes an existing area. Check status after an uncertain outcome.
+Follow the repository instructions for preparing a worktree and its dependencies before using the commands below.
 
 ```
 # Create worktrees
