@@ -1,8 +1,10 @@
 # ABOUTME: Проверяет owner-bound перенос файлов и transport без общего владельца.
 # ABOUTME: Не использует модель, сеть, live-профили или привилегированную установку.
 import asyncio
+import base64
 from hashlib import sha256
 import importlib.util
+import json
 import os
 from pathlib import Path
 import runpy
@@ -221,7 +223,9 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             return value
 
         self.control.call = configuration
-        self.assertEqual(await self.port.configuration(self.uid, self.profile), value)
+        configured = await self.port.configuration(self.uid, self.profile)
+        self.assertEqual(configured, {**value, 'readRoots': [str(self.home / 'cache/generated/images')]})
+        self.assertNotIn('readRoots', value)
         for field, path in [('serviceRoots', '/etc'),
                             ('serviceRoots', str(self.root / 'another-user')),
                             ('serviceRoots', '/opt/brai-profile/instructions-extra'),
@@ -241,6 +245,75 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
                 await self.port.configuration(self.uid, self.profile)
             value.clear()
             value.update(original)
+
+    async def test_native_image_cache_reaches_publication_and_ingress_descriptor(self):
+        """Проверить native результат через оба файловых guard до байтов доставки."""
+        image = self.home / 'cache/generated/images/wallpaper.png'
+        image.parent.mkdir(parents=True, mode=0o700)
+        raw = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7ioAAAAASUVORK5CYII=')
+        image.write_bytes(raw)
+        backend = Backend(self.cache)
+        config = {'ownerId': 'owner', 'account': 'test',
+                  'stateRoot': str(self.home / 'workspace/files'),
+                  'resultRoot': str(self.home / 'results'),
+                  'readRoots': [str(self.home / name) for name in ('workspace', 'media', 'results')]}
+
+        async def control(method, args, **kwargs):
+            if method == 'files.configuration':
+                return config
+            return backend.call({'artifacts.publish': 'files.publish', 'artifacts.fetch': 'files.fetch'}[method],
+                                {key: value for key, value in args.items() if key != 'uid'})
+
+        self.control.call = control
+        configured = await self.port.configuration(self.uid, self.profile)
+        loop = asyncio.get_running_loop()
+
+        def worker_call(method, args, **kwargs):
+            operation = {'files.publish': self.port.publish, 'files.fetch': self.port.fetch}[method]
+            return asyncio.run_coroutine_threadsafe(operation(self.uid, self.profile, args), loop).result()
+
+        previous = native._store
+        original, directory = identity.open_file, identity.open_directory
+        try:
+            native.configure(configured, SimpleNamespace(call=worker_call))
+            # Только Root-владение эмулируется; snapshot, SQLite, hash и descriptors настоящие.
+            with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)), \
+                    patch.object(identity, 'open_directory', side_effect=lambda path, uid: directory(path, self.uid)):
+                result = json.loads(await asyncio.to_thread(native.after_tool, 'image_generate', {},
+                    json.dumps({'success': True, 'image': str(image), 'host_image': str(image), 'prompt': 'wallpaper'}),
+                    session_id='session', tool_call_id='image-1'))
+                self.assertTrue(result['success'])
+                self.assertEqual(result['prompt'], 'wallpaper')
+                self.assertEqual(result['image'], result['host_image'])
+                self.assertTrue(Path(result['image']).is_relative_to(self.home / 'results'))
+                metadata, fd = await self.port.open_ingress(self.uid, self.profile, result['artifactId'])
+                try:
+                    self.assertEqual(os.read(fd, len(raw) + 1), raw)
+                    self.assertEqual(metadata['sha256'], sha256(raw).hexdigest())
+                finally:
+                    os.close(fd)
+                self.assertEqual(sum(method == 'files.publish' for method, _ in backend.calls), 1)
+                self.assertEqual(image.read_bytes(), raw)
+                self.assertEqual(list(self.stage.iterdir()), [])
+        finally:
+            native._store = previous
+
+    async def test_image_cache_publication_rejects_other_roots_and_links(self):
+        """Допуск native cache не открывает соседние каталоги или подменённые inode."""
+        root = self.home / 'cache/generated/images'
+        root.mkdir(parents=True, mode=0o700)
+        image = root / 'image.png'
+        image.write_bytes(b'image')
+        link = root / 'link.png'
+        link.symlink_to(image)
+        hardlink = root / 'hard.png'
+        hardlink.hardlink_to(image)
+        for path in (self.home / 'cache/spillover/file', self.home / 'cache/generated/images-other/file',
+                     root / 'nested/image.png', root / '../images/image.png', self.root / 'foreign/cache/generated/images/image.png',
+                     link, hardlink, image):
+            with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
+                await self.port.publish(self.uid, self.profile, {'path': str(path), 'requestId': 'denied'})
+        self.assertEqual(self.calls, [])
 
     async def test_transport_preserves_original_ids_without_file_access(self):
         source = SimpleNamespace(platform='telegram', chat_id='1', thread_id='', user_id='2', profile='')
