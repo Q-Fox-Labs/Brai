@@ -14,6 +14,39 @@ class Bot:
 
 
 class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_watchdogs_ignore_only_poll_actually_held_and_resume_checks(self):
+        events=[]
+        class Adapter:
+            _polling_generation_started_monotonic=1
+            _polling_last_progress_monotonic=1
+            _polling_pending_stuck_count=1
+            _polling_not_running_count=1
+            async def _check_polling_stall(self): events.append('stall')
+            async def _probe_pending_updates(self,*args): events.append('pending')
+            def _verifier_stale(self,*args): return False
+            def _escalate_stuck_consumer(self,*args): events.append('escalate')
+            def _schedule_polling_recovery(self,error,*,reason): events.append(reason)
+        adapter=Adapter();bot=Bot()
+        gate=ReleaseGate(SimpleNamespace(bot=bot,update_queue=asyncio.Queue()))
+        gate.install_watchdogs(adapter);gate.install();self.addCleanup(gate.restore)
+        await gate.begin('one')
+        # До фактической остановки get_updates проверки не отключаются.
+        await adapter._check_polling_stall();self.assertEqual(events,['stall'])
+        poll=asyncio.create_task(bot.get_updates());await gate.drain
+        await adapter._check_polling_stall();await adapter._probe_pending_updates(None,1)
+        self.assertTrue(adapter._verifier_stale(None,None))
+        adapter._escalate_stuck_consumer('message','reason')
+        adapter._schedule_polling_recovery(Exception(),reason='polling progress verifier: updater not running')
+        adapter._schedule_polling_recovery(Exception(),reason='heartbeat probe')
+        self.assertEqual(events,['stall','heartbeat probe'])
+        await gate.resume('one');self.assertEqual(await poll,['update'])
+        self.assertIsNone(adapter._polling_last_progress_monotonic)
+        self.assertGreater(adapter._polling_generation_started_monotonic,1)
+        self.assertEqual((adapter._polling_pending_stuck_count,adapter._polling_not_running_count),(0,0))
+        await adapter._check_polling_stall();await adapter._probe_pending_updates(None,1)
+        self.assertFalse(adapter._verifier_stale(None,None))
+        self.assertEqual(events[-2:],['stall','pending'])
+
     async def test_cancel_after_cleanup_rehydrates_updates_that_ptb_did_not_enqueue(self):
         class TestBot:
             id=123

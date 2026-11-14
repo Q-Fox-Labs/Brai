@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
 import uuid
 from contextvars import ContextVar
@@ -66,6 +67,42 @@ class ReleaseGate:
         self.resolver = None
         self.committed = False
         self.lock = asyncio.Lock()
+        self.watchdog_restore = None
+        self.watchdog_adapter = None
+
+    def install_watchdogs(self, adapter):
+        """Не считать намеренно удержанный poll сетевым сбоем native adapter."""
+        names = ('_check_polling_stall', '_probe_pending_updates', '_verifier_stale',
+                 '_escalate_stuck_consumer', '_schedule_polling_recovery')
+        methods = {name:getattr(adapter,name,None) for name in names}
+        if not any(callable(value) for value in methods.values()):
+            return
+        if not all(callable(value) for value in methods.values()):
+            raise RuntimeError('Native polling watchdog hooks unavailable')
+        held = lambda: self.operation is not None and self.held.is_set()
+        async def stall(*args, **kwargs):
+            if not held(): return await methods['_check_polling_stall'](*args, **kwargs)
+        async def pending(*args, **kwargs):
+            if not held(): return await methods['_probe_pending_updates'](*args, **kwargs)
+        def stale(*args, **kwargs):
+            return held() or methods['_verifier_stale'](*args, **kwargs)
+        def escalate(*args, **kwargs):
+            if not held(): return methods['_escalate_stuck_consumer'](*args, **kwargs)
+        def recovery(*args, **kwargs):
+            reason = kwargs.get('reason', '')
+            if held() and (reason == 'polling stall watchdog' or reason.startswith('polling progress verifier:')):
+                return
+            return methods['_schedule_polling_recovery'](*args, **kwargs)
+        wrappers = dict(zip(names,(stall,pending,stale,escalate,recovery)))
+        originals = {name:(name in getattr(adapter,'__dict__',{}), getattr(adapter,name,None)) for name in names}
+        for name, value in wrappers.items(): setattr(adapter,name,value)
+        def restore():
+            for name, value in wrappers.items():
+                if getattr(adapter,name,None) is value:
+                    existed, original = originals[name]
+                    if existed: setattr(adapter,name,original)
+                    else: delattr(adapter,name)
+        self.watchdog_adapter, self.watchdog_restore = adapter, restore
 
     def install(self):
         """Установить gate на Bot данного приложения до начала polling."""
@@ -103,6 +140,8 @@ class ReleaseGate:
             self.unlocked.set()
             if self.drain is not None:
                 self.drain.cancel()
+            if self.watchdog_restore is not None:
+                self.watchdog_restore()
             if cls.__dict__.get('get_updates') is gated:
                 if owned:
                     cls.get_updates = original
@@ -205,6 +244,13 @@ class ReleaseGate:
             if drain is not None:
                 drain.cancel()
                 await asyncio.gather(drain, return_exceptions=True)
+            if self.held.is_set() and self.watchdog_adapter is not None:
+                # После долгого hold возраст отсчитывается с открытия, не с прошлого poll.
+                adapter = self.watchdog_adapter
+                adapter._polling_generation_started_monotonic = time.monotonic()
+                adapter._polling_last_progress_monotonic = None
+                adapter._polling_pending_stuck_count = 0
+                adapter._polling_not_running_count = 0
             self.operation = None
             self.committed = False
             self.unlocked.set()
@@ -223,6 +269,7 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         from .telegram_runtime import admit_update
     installed = []
     closing = set()
+    closing_scheduled = set()
 
     def closed(task):
         closing.discard(task)
@@ -230,15 +277,24 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             logging.getLogger(__name__).warning('BRAI_IDENTITY_INGRESS_CLOSE_FAILED')
 
     def schedule_close(close, loop):
+        marker = object()
+        closing_scheduled.add(marker)
         def start():
             task = loop.create_task(close())
             closing.add(task)
             task.add_done_callback(closed)
+            def settled(done):
+                if not done.cancelled() and done.exception() is None:
+                    closing_scheduled.discard(marker)
+            task.add_done_callback(settled)
         if loop.is_running():
             loop.call_soon_threadsafe(start)
 
     def factory(app, adapter):
         _verify_release_contract()
+        if installed or closing or closing_scheduled:
+            # Старый primary владеет worker и его незавершёнными задачами.
+            raise RuntimeError('Previous ingress resolver still active')
         runner = getattr(adapter, 'gateway_runner', None)
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
@@ -287,6 +343,7 @@ def register(ctx, *, build_resolver=None, admit_update=None):
                     or hashlib.sha256(source.read_bytes()).hexdigest() != bootstrap_source):
                 raise RuntimeError('Root startup release binding unavailable')
             gate.hold(bootstrap_operation)
+        gate.install_watchdogs(adapter)
         gate.install()
         resolver.release_gate = gate
         journal = getattr(resolver, 'journal', None)

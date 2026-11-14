@@ -162,16 +162,31 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
         telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
         telegram.Update = type('Update', (), {})
         ext.TypeHandler, ext.ApplicationHandlerStop = Handler, type('ApplicationHandlerStop', (Exception,), {})
+        closing=asyncio.Event()
+        class Resolver:
+            def __call__(self,source): return None
+            async def close(self): await closing.wait()
         with patch.dict(sys.modules, {'telegram':telegram, 'telegram.ext':ext}):
-            native_ingress.register(ctx, build_resolver=lambda adapter, runner: lambda source: None, admit_update=admit_update)
+            native_ingress.register(ctx, build_resolver=lambda adapter, runner: Resolver(), admit_update=admit_update)
             ctx.factory(app, adapter)
             self.assertTrue(adapter._brai_identity_ingress_ready)
             self.assertFalse(adapter._drop_pending_on_cold_boot)
             self.assertTrue(callable(adapter._brai_identity_dispatch))
             self.assertIs(adapter.handle_message, original)
+            current=adapter._brai_identity_dispatch
+            with self.assertRaisesRegex(RuntimeError,'Previous ingress resolver still active'):
+                ctx.factory(app, adapter)
+            self.assertIs(adapter._brai_identity_dispatch,current)
             ctx.close()
             self.assertFalse(adapter._brai_identity_ingress_ready)
             self.assertIsNone(adapter._brai_identity_dispatch)
+            with self.assertRaisesRegex(RuntimeError,'Previous ingress resolver still active'):
+                ctx.factory(app,adapter)
+            closing.set()
+            for _ in range(4): await asyncio.sleep(0)
+            ctx.factory(app,adapter)
+            ctx.close()
+            for _ in range(4): await asyncio.sleep(0)
 
     async def test_root_bootstrap_pair_holds_first_poll_until_explicit_resume(self):
         import hashlib
