@@ -24,6 +24,38 @@ FIXTURES = {PREFIX + 'tests/fixtures/ordinary_release/plugins/platforms/telegram
 
 
 class ReleasePackageTest(unittest.TestCase):
+    def test_runtime_read_module_is_delivered_and_importable_from_package(self):
+        """Установленный адаптер получает тот же opener, что проверялся из исходников."""
+        component=json.loads(COMPONENT.read_text())
+        module='services/hermes/files/runtime_reads.py'
+        self.assertIn(module,component['inputs']['runtime'])
+        self.assertIn(module,component['delivery']['files'])
+        self.assertIn('services/hermes/files/tests/test_runtime_reads.py',component['inputs']['checks'])
+        self.assertIn('services/hermes/tests/runtime-reads.test.mjs',component['inputs']['checks'])
+        files=[path for path in component['delivery']['files']
+               if path.startswith('services/hermes/files/') and path.endswith('.py')]
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for path in files:
+                dest=root/path;dest.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copyfile(ROOT/path,dest)
+            script='''const {packageComponent}=await import(process.argv[1]);
+const component={id:'hermes-runtime-reads-proof',directory:'services/hermes',
+ delivery:{kind:'ready-files',files:JSON.parse(process.argv[3]),entrypoints:[],smokeImports:[]},npm:{workspaces:[]}};
+const result=await packageComponent(process.argv[2],component,'tmp/out');
+process.stdout.write(result.path);'''
+            built=subprocess.run(['node','--input-type=module','-e',script,
+                (ROOT/'deploy/components/package-runtime.mjs').as_uri(),str(root),json.dumps(files)],
+                check=True,text=True,capture_output=True)
+            artifact=Path(built.stdout)
+            env={**os.environ,'PYTHONPATH':str(artifact/'services/hermes'),'PYTHONDONTWRITEBYTECODE':'1'}
+            subprocess.run([sys.executable,'-B','-c',
+                'from files import native,runtime_reads; '
+                'assert callable(native.before_tool) and callable(runtime_reads.open_source); '
+                'assert "cache/spillover" in runtime_reads.READ_DIRECTORIES'],
+                cwd=root,env=env,check=True,capture_output=True,text=True)
+            self.assertEqual((artifact/module).read_bytes(),(ROOT/module).read_bytes())
+
     def test_system_instructions_and_all_public_skills_are_packaged_and_fingerprinted(self):
         component=json.loads(COMPONENT.read_text())
         skill_root='docs/user-agent/instructions/hermes/skills'
