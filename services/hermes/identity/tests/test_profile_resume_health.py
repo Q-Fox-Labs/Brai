@@ -291,4 +291,8 @@ class DurableResume(unittest.IsolatedAsyncioTestCase):
    with patch.dict(sys.modules,{'telegram':SimpleNamespace(Update=object)}):
     await mirror.hydrate()
    self.assertNotIn(123,mirror.tracker.gates)
+   following={**request,'operationId':str(uuid.uuid4()),'attemptId':str(uuid.uuid4())}
+   store.begin(profile,following,boot);store.transition(profile,following,boot,'arming','ready')
+   store.transition(profile,following,boot,'ready','resuming',replacement_pid=222,replacement_start='200')
+   self.assertEqual(store.transition(profile,following,boot,'resuming','unknown')['state'],'unknown')
 if __name__=='__main__':unittest.main()

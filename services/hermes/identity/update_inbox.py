@@ -498,7 +498,7 @@ class ProfileGateStore:
                 elif row['state'] != expected:
                     raise ValueError('PROFILE_GATE_STATE_CHANGED')
                 else:
-                    if expected == 'resuming' and row['replacement_pid'] is not None and (
+                    if expected == 'resuming' and state == 'resumed' and row['replacement_pid'] is not None and (
                             row['replacement_pid'], row['replacement_start']) != (replacement_pid, replacement_start):
                         raise ValueError('PROFILE_GATE_REPLACEMENT_CHANGED')
                     db.execute('UPDATE release_profile_gates SET state=?,replacement_pid=?,replacement_start=? WHERE seq=?',
