@@ -971,7 +971,7 @@
     },
     {
       "name": "files.publish",
-      "description": "Worker-only root snapshot publication. Exact params path/requestId, no uid/owner. Source must be a stable regular single-link inode owned by worker in home/{workspace,results,media}; at most 64 MiB. Result localPath/markdown point to a verified home/results copy. Same requestId preserves Artifacts idempotency; no transport retries.",
+      "description": "Worker-only root snapshot publication. Exact params path/requestId, no uid/owner. Source must be a stable regular single-link inode owned by worker in home/{workspace,results,media} or directly in home/cache/generated/images; at most 64 MiB. Result localPath/markdown point to a verified home/results copy. Same requestId preserves Artifacts idempotency; no transport retries.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -1018,7 +1018,7 @@
     },
     {
       "name": "artifacts.publish",
-      "description": "Worker-only root snapshot publication. Exact params path/requestId, no uid/owner. Source must be a stable regular single-link inode owned by worker in home/{workspace,results,media}; at most 64 MiB. Result localPath/markdown point to a verified home/results copy. Same requestId preserves Artifacts idempotency; no transport retries.",
+      "description": "Worker-only root snapshot publication. Exact params path/requestId, no uid/owner. Source must be a stable regular single-link inode owned by worker in home/{workspace,results,media} or directly in home/cache/generated/images; at most 64 MiB. Result localPath/markdown point to a verified home/results copy. Same requestId preserves Artifacts idempotency; no transport retries.",
       "paramStructure": "by-name",
       "params": [
         {

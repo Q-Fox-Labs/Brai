@@ -164,7 +164,10 @@ class OwnerFiles:
                         '/opt/brai-profile/skills',
                         '/opt/brai-profile/instructions', '/opt/brai-profile/system-skills'))) for p in roots):
                 raise PermissionError('Foreign file root')
-        return value
+        # AIDEV-NOTE: Native image_generate пишет сюда и в личном UID-режиме.
+        # Корень выводится из доверенного HOME, защищённый files.json не меняется.
+        return {**value, 'readRoots': list(dict.fromkeys([
+            *value.get('readRoots', []), str(home / 'cache/generated/images')]))}
 
     def open_cache(self, uid, result, profile=None):
         """Проверить точный root-owned cache path и метаданные результата."""
@@ -222,10 +225,14 @@ class OwnerFiles:
             raise ValueError('Invalid publication')
         path, home = Path(params['path']), Path(profile['home'])
         relative = path.relative_to(home)
-        if len(relative.parts) < 2 or relative.parts[0] not in ('workspace', 'results', 'media'):
+        if len(relative.parts) >= 2 and relative.parts[0] in ('workspace', 'results', 'media'):
+            root = home / relative.parts[0]
+        elif len(relative.parts) == 4 and relative.parts[:3] == ('cache', 'generated', 'images'):
+            root = home / 'cache/generated/images'
+        else:
             raise PermissionError('File root denied')
         expected = self.input_admission(uid, profile, path) if admitted else None
-        source = open_file(home / relative.parts[0], path, uid)
+        source = open_file(root, path, uid)
         folder = None
         try:
             stage = Path(self.runtime(uid, profile)['stagingRoot'])
