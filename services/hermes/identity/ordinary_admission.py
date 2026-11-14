@@ -105,6 +105,7 @@ class Mirror:
     """Сохранить зарегистрированные Update до возврата всей Telegram-пачки."""
     def __init__(self, inbox, resolve, *, inventory=None, observe=None, gate_store=None, boot_id=None, transport=None):
         self.inbox = inbox
+        self.restartable = getattr(inbox, 'restartable', False)
         self.transport = transport
         self.resolve = resolve
         self.inventory, self.observe, self.gate_store = inventory, observe, gate_store
@@ -164,6 +165,9 @@ class Mirror:
             if self.hydrated:
                 if not defer_recovery:
                     self._start_recovery()
+                return
+            if self.restartable:
+                await self._restart_inputs()
                 return
             boot = self.boot_id or Path('/proc/sys/kernel/random/boot_id').read_text().strip()
             result = await self.inventory()
@@ -302,6 +306,57 @@ class Mirror:
             self.deferred_recovery = (outsiders, found)
             if not defer_recovery:
                 self._start_recovery()
+
+    async def _restart_inputs(self):
+        """DEV: вернуть непереданные входы в обычную очередь без profile gates."""
+        import json
+        from telegram import Update
+        if self.transport is None or self.app is None:
+            raise ValueError('TRANSPORT_RECOVERY_UNAVAILABLE')
+        inventory = await self.inventory()
+        profiles = inventory.get('profiles') if isinstance(inventory, dict) else None
+        if not isinstance(profiles, list):
+            raise ValueError('INGRESS_HYDRATION_UNAVAILABLE')
+        for profile in profiles:
+            await asyncio.to_thread(self.inbox.prepare_restart, profile)
+        pending = await asyncio.to_thread(self.transport.pending)
+        replay = []
+        for row in pending:
+            if row['state'] == 'handing_off':
+                await asyncio.to_thread(self.transport.transition, row['bot_id'], row['update_id'],
+                                        'handing_off', 'unknown')
+                continue
+            if row['state'] != 'captured':
+                continue
+            if str(self.app.bot.id) != row['bot_id']:
+                raise ValueError('TRANSPORT_BOT_CHANGED')
+            snapshot = json.loads(row['binding'])
+            update = Update.de_json(json.loads(row['payload']), self.app.bot)
+            if str(getattr(getattr(update, 'effective_user', None), 'id', '')) != row['actor_id']:
+                raise ValueError('TRANSPORT_BINDING_CHANGED')
+            if snapshot.get('state') == 'known':
+                original = snapshot['profile']
+                fresh = await self.resolve(original['telegramId'])
+                current = fresh.get('profile') if isinstance(fresh, dict) and fresh.get('state') == 'known' else None
+                if (not isinstance(current, dict) or not any(all(p.get(k) == original.get(k)
+                        for k in ('uid', 'profileId', 'userId')) for p in profiles)
+                        or any(current.get(k) != original.get(k) for k in
+                               ('uid','profileId','userId','telegramId','authorTelegramId','role','generation'))):
+                    await asyncio.to_thread(self.transport.transition, row['bot_id'], row['update_id'],
+                                            'captured', 'blocked')
+                    continue
+                receipt = await asyncio.to_thread(self.inbox.capture, current, update, self.app.bot.id)
+                if receipt['state'] != 'captured':
+                    continue
+            elif snapshot.get('state') != 'unregistered':
+                raise ValueError('TRANSPORT_STATE_INVALID')
+            self.register_snapshot(f"{row['bot_id']}:{row['update_id']}", snapshot)
+            replay.append(update)
+        self.bot_id = self.app.bot.id
+        self.hydrated = True
+        # Только captured: неизвестные эффекты никогда не попадают в повтор.
+        for update in replay:
+            await self.app.update_queue.put(update)
 
     def _start_recovery(self):
         """Запустить отложенный replay один раз после снятия общего gate."""

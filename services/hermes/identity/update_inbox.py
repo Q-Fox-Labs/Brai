@@ -46,6 +46,7 @@ class UpdateInbox:
     """Проверенные profile и Telegram actor задаёт вызывающий Auth owner."""
     def __init__(self, journal):
         self.journal = journal
+        self.restartable = os.environ.get('BRAI_IDENTITY_INSTANCE') == 'dev'
 
     def install_v2(self, profile):
         """Add versioned metadata without rewriting or deleting legacy rows."""
@@ -277,7 +278,7 @@ class UpdateInbox:
                     raise PermissionError('INBOX_OPERATION_CHANGED')
                 blocked_states = ("('held','handing_off','unknown','blocked')" if row['state'] == 'held'
                                   else "('unknown','blocked')")
-                if db.execute("SELECT 1 FROM release_inbox WHERE seq<? AND state IN " + blocked_states + " LIMIT 1", (row['seq'],)).fetchone():
+                if not self.restartable and db.execute("SELECT 1 FROM release_inbox WHERE seq<? AND state IN " + blocked_states + " LIMIT 1", (row['seq'],)).fetchone():
                     raise ValueError('INBOX_ORDER_BLOCKED')
                 current = self._state(db,row['chat'],row['thread'])
                 if current and (current['paused'] or current['generation'] != row['chat_generation']):
@@ -329,6 +330,21 @@ class UpdateInbox:
                      'botId': row['bot_id'], 'updateId': row['update_id'], 'bound':bool(row['bound'])} for row in rows]
         finally:
             db.close()
+
+    def prepare_restart(self, profile):
+        """DEV: сохранить неизвестные исходы, открыть только ещё не переданные входы."""
+        if not self.restartable:
+            raise PermissionError('DEV_RESTART_ONLY')
+        self.install_v2(profile)
+        db = self._open(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute("UPDATE release_inbox SET state='unknown' WHERE state='handing_off'")
+                db.execute("UPDATE release_inbox SET state='captured',operation_id=NULL WHERE state='held'")
+        finally:
+            db.close()
+        self._sync_journal_directories(profile)
 
     def markunknown(self, profile, bot_id, update_id):
         return self._finish(profile,bot_id,update_id,'unknown',None)
