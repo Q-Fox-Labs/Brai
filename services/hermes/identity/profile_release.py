@@ -252,7 +252,21 @@ class ProfileRelease:
         if row is None or row['state'] not in ('ready','resuming','resumed'):
             return self._receipt(request,'blocked','attempt_unconfirmed')
         if row['state'] == 'resumed':
-            return await self.status(**request,replacementPid=replacement_pid,replacementStartTime=replacement_start)
+            if self.mirror.tracker.gates.get(profile['uid']) != request['operationId']:
+                return await self.status(**request,replacementPid=replacement_pid,replacementStartTime=replacement_start)
+            try:
+                if (row['replacement_pid'] != replacement_pid or row['replacement_start'] != replacement_start):
+                    raise ValueError('PROFILE_REPLACEMENT_CHANGED')
+                await self._verify_ingress(profile, request)
+                peer = await self._peer(profile,replacement_pid,replacement_start)
+                result = await peer.call('release.status', {'operationId':request['operationId']}, timeout=None)
+                if (not isinstance(result,dict) or result.get('state') != 'resumed'
+                        or result.get('operationId') != request['operationId']):
+                    raise ValueError('WORKER_RESUME_UNCONFIRMED')
+                await self._reopen(profile,request,'resumed','resumed',replacement_pid,replacement_start)
+                return self._receipt(request,'resumed',replacementPid=replacement_pid,replacementStartTime=replacement_start)
+            except Exception:
+                return self._receipt(request,'blocked','resume_unconfirmed')
         try:
             await self._verify_ingress(profile, request)
             if row['state'] == 'ready':
@@ -343,7 +357,13 @@ class ProfileRelease:
                     if (self.mirror.pending or tracker.counts.get(uid,0)
                             or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
                         continue
-                if expected is not None:
+                if expected == 'resumed' and target == 'resumed':
+                    recorded = await asyncio.to_thread(self.store.status,profile,request,self.boot)
+                    if (not isinstance(recorded,dict) or recorded.get('state') != 'resumed'
+                            or recorded.get('replacement_pid') != replacement_pid
+                            or recorded.get('replacement_start') != replacement_start):
+                        raise ValueError('PROFILE_GATE_REPLACEMENT_CHANGED')
+                elif expected is not None:
                     await asyncio.to_thread(self.store.transition,profile,request,self.boot,expected,target,
                                             replacement_pid=replacement_pid,replacement_start=replacement_start)
                 if target == 'resumed':

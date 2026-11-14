@@ -116,4 +116,42 @@ class ResumeHealth(unittest.IsolatedAsyncioTestCase):
    with self.assertRaisesRegex(ValueError,'TRANSPORT_UNCONFIRMED'):
     await self.owner._reopen(self.profile,self.request,'resuming','resumed',222,'200')
   self.assertNotIn('gate-open',self.events)
+ async def test_late_guard_recovery_does_not_repeat_native_resume(self):
+  import sys
+  self.owner._reopen=ProfileRelease._reopen.__get__(self.owner)
+  tracker=self.owner.mirror.tracker
+  tracker.changed=asyncio.Event();tracker.counts={};tracker.tickets={}
+  tracker.resume=lambda uid,op:tracker.gates.pop(uid)
+  self.owner.mirror.pending=False;self.owner.mirror.capture_lock=asyncio.Lock()
+  self.owner.mirror.inbox.held=lambda profile,op:[]
+  self.owner.resolver=SimpleNamespace(batch_ownership=SimpleNamespace(busy=lambda uid:False))
+  row={'state':'ready'};methods=[]
+  self.owner.store.status=lambda *args:dict(row)
+  def transition(profile,request,boot,expected,target,**kwargs):
+   self.assertEqual(row['state'],expected);row['state']=target
+   if target=='resumed':
+    row.update(replacement_pid=kwargs['replacement_pid'],replacement_start=kwargs['replacement_start'])
+    self.owner.mirror.transport_blocked.add(123)
+  self.owner.store.transition=transition
+  async def call(method,params,**kwargs):
+   methods.append(method)
+   if method=='health':return {'userId':'owner','ready':True,'operational':True,'policyReady':True}
+   return {'operationId':self.request['operationId'],'state':'resumed'}
+  self.owner._peer=AsyncMock(return_value=SimpleNamespace(call=call))
+  with patch.dict(sys.modules,{'telegram':SimpleNamespace(Update=object)}):
+   self.assertEqual((await self.owner._resume(self.request,222,'200'))['state'],'blocked')
+   self.assertEqual(row['state'],'resumed');self.assertIn(123,tracker.gates)
+   self.owner.mirror.transport_blocked.clear()
+   self.assertEqual((await self.owner._resume(self.request,222,'200'))['state'],'resumed')
+  self.assertNotIn(123,tracker.gates);self.assertEqual(methods.count('release.resume'),1)
+  self.assertEqual(methods.count('release.status'),1)
+ async def test_resumed_recovery_rejects_wrong_replacement_or_foreign_gate(self):
+  self.owner.store.status=lambda *args:{'state':'resumed','replacement_pid':222,'replacement_start':'200'}
+  self.owner._peer=AsyncMock()
+  self.assertEqual((await self.owner._resume(self.request,333,'300'))['state'],'blocked')
+  self.owner._peer.assert_not_awaited()
+  self.owner.mirror.tracker.gates[123]='another-operation'
+  self.assertEqual((await self.owner._resume(self.request,222,'200'))['state'],'unknown')
+  self.assertEqual(self.owner.mirror.tracker.gates[123],'another-operation')
+  self.owner._peer.assert_not_awaited()
 if __name__=='__main__':unittest.main()
