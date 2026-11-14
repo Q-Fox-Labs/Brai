@@ -224,6 +224,11 @@ test('Hermes check groups select instructions and adapter consumers independentl
  put(root,adapter,readFileSync(join(root,adapter),'utf8')+'\n# fixture change\n');
  const adapterChanged=keys();assert.deepEqual(changed(before,adapterChanged),['instructions','identity']);
  put(root,adapter,readFileSync(join(repository,adapter),'utf8'));
+ for (const path of ['services/hermes/identity/ordinary_admission.py','services/hermes/identity/update_inbox.py','services/hermes/identity/transport_inbox.py','services/hermes/identity/profile_release.py']) {
+  put(root,path,readFileSync(join(root,path),'utf8')+'\n# queue fixture change\n');
+  assert.deepEqual(changed(before,keys()),['identity']);
+  put(root,path,readFileSync(join(repository,path),'utf8'));
+ }
  const instruction='docs/user-agent/instructions/context.md';
  put(root,instruction,readFileSync(join(root,instruction),'utf8')+'\nfixture change\n');
  assert.deepEqual(changed(before,keys()),['instructions']);

@@ -493,12 +493,22 @@
           "git",
           "sh"
         ],
-        "pythonModules": ["_distutils_hack"],
+        "pythonModules": [
+          "_distutils_hack"
+        ],
         "pythonAbsent": [],
-        "allSources": true,
-        "excludedInputs": [],
+        "excludedInputs": [
+          "services/hermes/identity/ordinary_admission.py",
+          "services/hermes/identity/update_inbox.py",
+          "services/hermes/identity/transport_inbox.py",
+          "services/hermes/identity/profile_release.py"
+        ],
         "extraInputs": [
-          "docs/user-agent/instructions/**"
+          "docs/user-agent/instructions/**",
+          "deploy/components/*.mjs",
+          "deploy/components/*.json",
+          "**/component.json",
+          "docs/**"
         ]
       },
       {
@@ -547,7 +557,11 @@
           "docs/user-agent/instructions/hermes/policies/SECRETS.md",
           "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
           "docs/user-agent/instructions/hermes/prompts/telegram-reply.md",
-          "services/hermes/identity/adapter.py"
+          "services/hermes/identity/adapter.py",
+          "services/hermes/identity/ordinary_admission.py",
+          "services/hermes/identity/update_inbox.py",
+          "services/hermes/identity/transport_inbox.py",
+          "services/hermes/identity/profile_release.py"
         ],
         "extraInputs": [
           "services/hermes/tests/*.test.mjs"
@@ -606,7 +620,9 @@
       },
       {
         "id": "extensions",
-        "absentPaths": ["/opt/brai-identity/dev/software/release-fb5e7fb91bee427182e4da0f56466b3a/engine"],
+        "absentPaths": [
+          "/opt/brai-identity/dev/software/release-fb5e7fb91bee427182e4da0f56466b3a/engine"
+        ],
         "command": "node --test --test-isolation=none tests/extensions.test.mjs",
         "tools": [
           "node",
@@ -651,7 +667,11 @@
           "docs/user-agent/instructions/hermes/policies/SECRETS.md",
           "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
           "docs/user-agent/instructions/hermes/prompts/telegram-reply.md",
-          "services/hermes/identity/adapter.py"
+          "services/hermes/identity/adapter.py",
+          "services/hermes/identity/ordinary_admission.py",
+          "services/hermes/identity/update_inbox.py",
+          "services/hermes/identity/transport_inbox.py",
+          "services/hermes/identity/profile_release.py"
         ],
         "extraInputs": []
       },
@@ -701,7 +721,11 @@
           "docs/user-agent/instructions/hermes/policies/SECRETS.md",
           "docs/user-agent/instructions/hermes/policies/SYSTEM_OPERATIONS.md",
           "docs/user-agent/instructions/hermes/prompts/telegram-reply.md",
-          "services/hermes/identity/adapter.py"
+          "services/hermes/identity/adapter.py",
+          "services/hermes/identity/ordinary_admission.py",
+          "services/hermes/identity/update_inbox.py",
+          "services/hermes/identity/transport_inbox.py",
+          "services/hermes/identity/profile_release.py"
         ],
         "extraInputs": [
           "services/hermes/memos/embedding/*.test.mjs",
