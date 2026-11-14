@@ -118,6 +118,7 @@ class Mirror:
         self.transport_unavailable = []
         self.transport_blocked = set()
         self.recovery_tasks = {}
+        self.deferred_recovery = None
         self.snapshots = {}
         self.snapshot_refs = {}
         self.pending = False
@@ -143,11 +144,17 @@ class Mirror:
         else:
             self.snapshot_refs[key] = count - 1
 
-    async def hydrate(self):
+    async def hydrate_held(self):
+        """Восстановить journal и gates, отложив replay до открытия общего входа."""
+        await self.hydrate(defer_recovery=True)
+
+    async def hydrate(self, *, defer_recovery=False):
         """Восстановить все durable gates до первого Telegram poll."""
         import asyncio
         from pathlib import Path
         if self.hydrated:
+            if not defer_recovery:
+                self._start_recovery()
             return
         if self.inventory is None or self.gate_store is None:
             raise ValueError('INGRESS_HYDRATION_UNAVAILABLE')
@@ -155,6 +162,8 @@ class Mirror:
             self.hydration_lock = asyncio.Lock()
         async with self.hydration_lock:
             if self.hydrated:
+                if not defer_recovery:
+                    self._start_recovery()
                 return
             boot = self.boot_id or Path('/proc/sys/kernel/random/boot_id').read_text().strip()
             result = await self.inventory()
@@ -282,24 +291,35 @@ class Mirror:
                 raise ValueError('TRANSPORT_RECOVERY_UNAVAILABLE')
             self.rehydrated = found
             self.hydrated = True
-            for update,snapshot in outsiders:
-                key = f'{self.app.bot.id}:{update.update_id}'
-                self.bot_id = self.app.bot.id
-                self.register_snapshot(key,snapshot)
-                task = asyncio.create_task(self.recover_external(update))
-                self.recovery_tasks[key] = task
-                def external_done(done):
+            self.deferred_recovery = (outsiders, found)
+            if not defer_recovery:
+                self._start_recovery()
+
+    def _start_recovery(self):
+        """Запустить отложенный replay один раз после снятия общего gate."""
+        import asyncio
+        if self.deferred_recovery is None:
+            return
+        outsiders, found = self.deferred_recovery
+        self.deferred_recovery = None
+        for update,snapshot in outsiders:
+            key = f'{self.app.bot.id}:{update.update_id}'
+            self.bot_id = self.app.bot.id
+            self.register_snapshot(key,snapshot)
+            task = asyncio.create_task(self.recover_external(update))
+            self.recovery_tasks[key] = task
+            def external_done(done):
+                if not done.cancelled() and done.exception() is not None:
+                    self.tracker.changed.set()
+            task.add_done_callback(external_done)
+        for uid, value in found.items():
+            if 'recovery' in value:
+                task = asyncio.create_task(self.recover(value['profile'], value['recovery']))
+                self.recovery_tasks[uid] = task
+                def completed(done, uid=uid):
                     if not done.cancelled() and done.exception() is not None:
                         self.tracker.changed.set()
-                task.add_done_callback(external_done)
-            for uid, value in found.items():
-                if 'recovery' in value:
-                    task = asyncio.create_task(self.recover(value['profile'], value['recovery']))
-                    self.recovery_tasks[uid] = task
-                    def completed(done, uid=uid):
-                        if not done.cancelled() and done.exception() is not None:
-                            self.tracker.changed.set()
-                    task.add_done_callback(completed)
+                task.add_done_callback(completed)
 
     async def capture(self, updates, bot_id):
         import asyncio

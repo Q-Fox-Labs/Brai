@@ -60,6 +60,8 @@ class ReleaseGate:
         self.app = app
         self.operation = None
         self.held = asyncio.Event()
+        self.poll_held = False
+        self.hydration_failed = False
         self.unlocked = asyncio.Event()
         self.unlocked.set()
         self.drain = None
@@ -79,7 +81,7 @@ class ReleaseGate:
             return
         if not all(callable(value) for value in methods.values()):
             raise RuntimeError('Native polling watchdog hooks unavailable')
-        held = lambda: self.operation is not None and self.held.is_set()
+        held = lambda: self.operation is not None and self.poll_held
         async def stall(*args, **kwargs):
             if not held(): return await methods['_check_polling_stall'](*args, **kwargs)
         async def pending(*args, **kwargs):
@@ -119,8 +121,26 @@ class ReleaseGate:
                 # PTB stop отменяет удержанный action и отдельно подтверждает обработанный offset.
                 cleanup = self.committed and updater is not None and updater.running is False and seconds == 0
                 if not cleanup:
+                    self.poll_held = True
+                    mirror = getattr(self.resolver, 'mirror', None)
+                    hydrate_held = getattr(mirror, 'hydrate_held', None)
+                    try:
+                        if callable(hydrate_held):
+                            await hydrate_held()
+                    except BaseException:
+                        self.poll_held = False
+                        self.hydration_failed = True
+                        self.held.set()
+                        raise
+                    self.hydration_failed = False
                     self.held.set()
-                    await self.unlocked.wait()
+                    try:
+                        await self.unlocked.wait()
+                    except BaseException:
+                        self.poll_held = False
+                        if self.operation is not None and not self.committed:
+                            self.hydration_failed = True
+                        raise
             mirror = getattr(self.resolver, 'mirror', None)
             hydrate = getattr(mirror, 'hydrate', None)
             if instance is bot and callable(hydrate) and not cleanup:
@@ -137,6 +157,7 @@ class ReleaseGate:
         cls.get_updates = gated
         def restore():
             self.operation = None
+            self.poll_held = False
             self.unlocked.set()
             if self.drain is not None:
                 self.drain.cancel()
@@ -185,6 +206,8 @@ class ReleaseGate:
             return {'operationId': operationId, 'state': 'resumed', 'reason': None}
         if self.operation != operationId:
             raise RpcError(-32602, 'Release operation does not own ingress')
+        if self.hydration_failed:
+            return {'operationId': operationId, 'state': 'blocked', 'reason': 'ingress_hydration_failed'}
         if self.drain is None or not self.drain.done():
             return {'operationId': operationId, 'state': 'draining', 'reason': 'telegram_polling'}
         if self.drain.cancelled() or self.drain.exception() is not None:
@@ -252,6 +275,7 @@ class ReleaseGate:
                 adapter._polling_pending_stuck_count = 0
                 adapter._polling_not_running_count = 0
             self.operation = None
+            self.poll_held = False
             self.committed = False
             self.unlocked.set()
         return {'operationId': operationId, 'state': 'resumed', 'reason': None}

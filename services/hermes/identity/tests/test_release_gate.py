@@ -14,6 +14,59 @@ class Bot:
 
 
 class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_held_hydration_never_proves_ready(self):
+        class Mirror:
+            async def hydrate_held(self): raise ValueError('journal unavailable')
+        class Resolver:
+            mirror=Mirror()
+            async def release_status(self,operationId):raise AssertionError('must remain blocked')
+        bot=Bot();gate=ReleaseGate(SimpleNamespace(bot=bot,update_queue=asyncio.Queue()))
+        gate.resolver=Resolver();gate.install();self.addCleanup(gate.restore)
+        await gate.begin('release')
+        with self.assertRaisesRegex(ValueError,'journal unavailable'):
+            await bot.get_updates()
+        self.assertEqual((await gate.status('release'))['reason'],'ingress_hydration_failed')
+        self.assertFalse(gate.poll_held)
+
+    async def test_held_poll_hydrates_before_ready_and_defers_automatic_replay(self):
+        import uuid
+        from identity.ordinary_admission import Mirror
+        profile={'profileId':str(uuid.uuid4()),'userId':'owner','uid':123}
+        row={'state':'captured','operationId':None,'botId':'123','updateId':'1','bound':True}
+        class Inbox:
+            def install_v2(self,profile): pass
+            def unsettled(self,profile): return [dict(row)]
+            def disposition(self,profile,bot,update,state,*,operation_id):
+                row.update(state=state,operationId=operation_id)
+        class GateStore:
+            def current(self,profile,boot): return None
+        class EmptyBot:
+            id=123
+            async def get_updates(self,**kwargs): return []
+        async def inventory(): return {'profiles':[profile]}
+        async def resolve(actor): return {'state':'known','profile':profile}
+        mirror=Mirror(Inbox(),resolve,inventory=inventory,gate_store=GateStore())
+        mirror.app=SimpleNamespace(bot=EmptyBot())
+        called=[]
+        async def recover(profile,operation): called.append((profile['uid'],operation))
+        mirror.recover=recover
+        class Resolver:
+            async def release_status(self,operationId):return {'operationId':operationId,'state':'ready'}
+            async def release_resume(self,operationId):return True
+        resolver=Resolver();resolver.mirror=mirror
+        bot=mirror.app.bot;gate=ReleaseGate(SimpleNamespace(bot=bot,update_queue=asyncio.Queue()))
+        gate.resolver=resolver;gate.install();self.addCleanup(gate.restore)
+        await gate.begin('release');poll=asyncio.create_task(bot.get_updates())
+        await gate.drain
+        self.assertTrue(mirror.hydrated)
+        self.assertEqual((await gate.status('release'))['state'],'ready')
+        self.assertEqual(row['state'],'held');self.assertEqual(called,[])
+        self.assertFalse(poll.done())
+        await gate.resume('release');self.assertEqual(await poll,[])
+        await asyncio.gather(*mirror.recovery_tasks.values())
+        self.assertEqual(called,[(123,str(uuid.uuid5(uuid.UUID(profile['profileId']),'brai-ingress-recovery')))])
+        await mirror.hydrate();self.assertEqual(len(called),1)
+
     async def test_watchdogs_ignore_only_poll_actually_held_and_resume_checks(self):
         events=[]
         class Adapter:
