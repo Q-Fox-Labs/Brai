@@ -42,6 +42,9 @@ def number(value, name):
     return value
 
 
+DEV_RESTART_ADMISSION = 1
+
+
 class UpdateInbox:
     """Проверенные profile и Telegram actor задаёт вызывающий Auth owner."""
     def __init__(self, journal):
