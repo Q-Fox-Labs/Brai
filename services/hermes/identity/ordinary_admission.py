@@ -241,6 +241,13 @@ class Mirror:
                         self.tracker.gates[uid] = record['operation_id']
                     record = {**record, 'state': state}
                 outstanding = await asyncio.to_thread(self.inbox.unsettled, profile)
+                if record is not None and record['state'] == 'resumed':
+                    transport_unknown = (uid in self.transport_blocked or
+                        (self.transport is not None and await asyncio.to_thread(self.transport.blocked_for, uid)))
+                    if transport_unknown or any(not item['bound'] or item['state'] in
+                                                ('unknown','blocked','handing_off','native_duplicate')
+                                                for item in outstanding):
+                        self.tracker.gates[uid] = record['operation_id']
                 for item in outstanding:
                     if item['state'] == 'handing_off':
                         await asyncio.to_thread(self.inbox.markunknown, profile, item['botId'], item['updateId'])

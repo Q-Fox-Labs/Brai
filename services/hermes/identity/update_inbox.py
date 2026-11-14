@@ -473,11 +473,13 @@ class ProfileGateStore:
                    'reopening': {'busy','unknown'}, 'resuming': {'resumed','unknown'}}
         if state not in allowed.get(expected, set()):
             raise ValueError('PROFILE_GATE_TRANSITION_INVALID')
-        if state == 'resumed' and (type(replacement_pid) is not int or replacement_pid <= 0
+        if state in ('resuming', 'resumed') and (replacement_pid is not None or replacement_start is not None) and (type(replacement_pid) is not int or replacement_pid <= 0
                 or not isinstance(replacement_start,str) or not replacement_start.isascii()
                 or not replacement_start.isdecimal()):
             raise ValueError('PROFILE_GATE_REPLACEMENT_INVALID')
-        if state != 'resumed' and (replacement_pid is not None or replacement_start is not None):
+        if state == 'resumed' and replacement_pid is None:
+            raise ValueError('PROFILE_GATE_REPLACEMENT_INVALID')
+        if state not in ('resuming', 'resumed') and (replacement_pid is not None or replacement_start is not None):
             raise ValueError('PROFILE_GATE_REPLACEMENT_INVALID')
         db = self._open(profile)
         try:
@@ -496,6 +498,9 @@ class ProfileGateStore:
                 elif row['state'] != expected:
                     raise ValueError('PROFILE_GATE_STATE_CHANGED')
                 else:
+                    if expected == 'resuming' and row['replacement_pid'] is not None and (
+                            row['replacement_pid'], row['replacement_start']) != (replacement_pid, replacement_start):
+                        raise ValueError('PROFILE_GATE_REPLACEMENT_CHANGED')
                     db.execute('UPDATE release_profile_gates SET state=?,replacement_pid=?,replacement_start=? WHERE seq=?',
                                (state,replacement_pid,replacement_start,row['seq']))
                 result = dict(db.execute('SELECT * FROM release_profile_gates WHERE seq=?',(row['seq'],)).fetchone())

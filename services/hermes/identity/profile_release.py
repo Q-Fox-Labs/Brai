@@ -28,7 +28,7 @@ class ProfileRelease:
                 try:
                     profile = await self._profile(request['profileId'])
                     row = await asyncio.to_thread(self.store.status,profile,request,self.boot)
-                    if row is None or row['state'] not in ('ready','busy','resumed','unknown'):
+                    if row is None or row['state'] not in ('ready','busy','resuming','resumed','unknown'):
                         return
                 except Exception:
                     return
@@ -179,11 +179,14 @@ class ProfileRelease:
         if row is None:
             return self._receipt(request,'unknown','attempt_unavailable')
         state = row['state']
-        if state == 'ready':
+        if state in ('ready', 'resuming'):
             if not self.mirror.hydrated or self.mirror.tracker.gates.get(profile['uid']) != operationId:
                 return self._receipt(request,'unknown','ingress_gate_unconfirmed')
             try:
                 await self._verify_ingress(profile, request)
+                if state == 'resuming' and (replacementPid != row['replacement_pid'] or
+                        replacementStartTime != row['replacement_start'] or replacementPid is None):
+                    raise ValueError('REPLACEMENT_BINDING_INVALID')
                 if replacementPid is None and replacementStartTime is None:
                     peer = await self._peer(profile,workerPid,workerStartTime)
                     result = await peer.call('release.try_status',request,timeout=None)
@@ -197,10 +200,14 @@ class ProfileRelease:
                         raise ValueError('REPLACEMENT_BINDING_INVALID')
                     peer = await self._peer(profile,replacementPid,replacementStartTime)
                     result = await peer.call('release.status',{'operationId':operationId},timeout=None)
-                    if (not isinstance(result,dict) or result.get('state') != 'ready'
+                    if (not isinstance(result,dict) or result.get('state') not in
+                            (('ready', 'resumed') if state == 'resuming' else ('ready',))
                             or result.get('operationId') != operationId):
                         raise ValueError('REPLACEMENT_NOT_HELD')
                     await self._verify_ingress(profile, request)
+                    if state == 'resuming' and result['state'] == 'resumed':
+                        return self._receipt(request,'pending','ingress_completion',
+                                             replacementPid=replacementPid,replacementStartTime=replacementStartTime)
             except Exception:
                 return self._receipt(request,'unknown','worker_unconfirmed')
             return self._receipt(request,'ready')
@@ -280,7 +287,10 @@ class ProfileRelease:
         try:
             await self._verify_ingress(profile, request)
             if row['state'] == 'ready':
-                await asyncio.to_thread(self.store.transition,profile,request,self.boot,'ready','resuming')
+                await asyncio.to_thread(self.store.transition,profile,request,self.boot,'ready','resuming',
+                                        replacement_pid=replacement_pid,replacement_start=replacement_start)
+            elif (row['replacement_pid'], row['replacement_start']) != (replacement_pid, replacement_start) or replacement_pid is None:
+                raise ValueError('PROFILE_REPLACEMENT_CHANGED')
             peer = await self._peer(profile,replacement_pid,replacement_start)
             # A new worker exposes the socket before it claims the ingress peer or
             # finishes policy activation.  Resume is a primary-channel RPC, so
@@ -373,7 +383,7 @@ class ProfileRelease:
                             or recorded.get('replacement_pid') != replacement_pid
                             or recorded.get('replacement_start') != replacement_start):
                         raise ValueError('PROFILE_GATE_REPLACEMENT_CHANGED')
-                elif expected is not None:
+                elif expected is not None and target != 'resumed':
                     await asyncio.to_thread(self.store.transition,profile,request,self.boot,expected,target,
                                             replacement_pid=replacement_pid,replacement_start=replacement_start)
                 if target == 'resumed':
@@ -382,6 +392,23 @@ class ProfileRelease:
                             or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
                         raise ValueError('PROFILE_GATE_CHANGED_DURING_RESUME')
                 tracker.resume(uid,op)
+                if expected == 'resuming' and target == 'resumed':
+                    # Нет await: новый вход не увидит открытый gate до durable receipt.
+                    try:
+                        self.store.transition(profile,request,self.boot,expected,target,
+                                              replacement_pid=replacement_pid,replacement_start=replacement_start)
+                        outstanding = self.mirror.inbox.unsettled(profile)
+                        if (not self.mirror.hydrated or uid in self.mirror.transport_blocked
+                                or (self.mirror.transport is not None and self.mirror.transport.blocked_for(uid))
+                                or any(not row['bound'] or row['state'] != 'held' or row['operationId'] != op
+                                       for row in outstanding)
+                                or self.mirror.pending or tracker.counts.get(uid,0)
+                                or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
+                            raise ValueError('PROFILE_GATE_CHANGED_DURING_RESUME')
+                    except BaseException:
+                        tracker.gates[uid] = op
+                        tracker.changed.set()
+                        raise
                 return
 
     async def recover_inbox(self, profile, operationId):
