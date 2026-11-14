@@ -53,6 +53,9 @@ class Worker:
         self.chat_interactive = {}
         self.chat_locks = {}
         self.peer_lock = asyncio.Lock()
+        self.runtime_stop_lock = asyncio.Lock()
+        self.runtime_stopped = False
+        self.peer_draining = False
         self.peer_released = asyncio.Event()
         self.peer_released.set()
         from .release_native import NativeRelease
@@ -121,9 +124,20 @@ class Worker:
             claimed_wait.cancel()
             await asyncio.gather(claimed_wait, return_exceptions=True)
             if self.peer is peer:
+                # Only a peer EOF that precedes native exit is a clean handoff.
+                # A native lifecycle that already ended must keep its exit verdict.
+                self.peer_draining = (reading.done() and not reading.cancelled()
+                                      and self.lifecycle_task is not None
+                                      and not self.lifecycle_task.done())
                 try:
                     await self.stop_runtime()
+                except Exception as error:
+                    self.lifecycle_error = error
+                    self.exit_code = 1
+                    self.exited.set()
+                    raise
                 finally:
+                    self.peer_draining = False
                     if not reading.done():
                         reading.cancel()
                     await asyncio.gather(reading, return_exceptions=True)
@@ -142,6 +156,11 @@ class Worker:
 
     async def start(self, peer):
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
+        if self.exited.is_set():
+            raise RuntimeError('Worker lifecycle already exited')
+        self.exit_code = None
+        self.lifecycle_error = None
+        self.runtime_stopped = False
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             self._install_telegram_profile()
@@ -341,6 +360,7 @@ class Worker:
         # Bootstrap health EOF не завершает ещё не активированный native daemon.
         # Отмена до try оставляет listener для будущего постоянного ingress.
         await self.activation.wait()
+        explicit_exit = False
         try:
             from gateway.run import start_gateway
             result = await start_gateway(
@@ -351,6 +371,7 @@ class Worker:
             if self.exit_code is None:
                 self.exit_code = 0 if result else 1
         except SystemExit as error:
+            explicit_exit = True
             self.exit_code = error.code if type(error.code) is int else 1
         except asyncio.CancelledError:
             raise
@@ -361,10 +382,18 @@ class Worker:
             if self.policy_error is not None:
                 self.exit_code = 1
             self.operational.clear()
-            self.exited.set()
+            if explicit_exit or not self.peer_draining or self.exit_code not in (None, 0) or self.lifecycle_error is not None:
+                self.exited.set()
 
     async def stop_runtime(self):
         """Дождаться native drain и внешней обвязки до освобождения peer."""
+        async with self.runtime_stop_lock:
+            if self.runtime_stopped:
+                return
+            await self._stop_runtime_once()
+            self.runtime_stopped = True
+
+    async def _stop_runtime_once(self):
         recovery = self.cold_recovery_task
         if recovery is not None and not recovery.done() and not self.release.recovery_open.is_set():
             # Nothing was admitted while the cold source remained held.

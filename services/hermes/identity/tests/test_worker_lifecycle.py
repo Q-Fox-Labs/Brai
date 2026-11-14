@@ -194,6 +194,102 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop_runtime()
 
+    async def test_provision_health_eof_preserves_listener_for_next_primary(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            path = directory + '/worker.sock'
+            server = await asyncio.start_unix_server(worker.serve_connection, path=path)
+            async def connect():
+                reader, writer = await asyncio.open_unix_connection(path)
+                peer = Peer(reader, writer, {})
+                return writer, peer, asyncio.create_task(peer.run())
+            writer, probe, reading = await connect()
+            try:
+                health = await probe.call('health', {'require_tools': True}, timeout=2)
+                self.assertTrue(health['operational'])
+                first_runner = worker.runner
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                self.assertFalse(worker.exited.is_set())
+                self.assertIsNone(worker.peer)
+                self.assertTrue(Path(path).is_socket())
+                self.shutdown.clear()
+                writer, ingress, reading = await connect()
+                health = await ingress.call('health', {'require_tools': True}, timeout=2)
+                self.assertTrue(health['operational'])
+                self.assertIsNot(worker.runner, first_runner)
+                self.assertFalse(worker.exited.is_set())
+                self.assertEqual(self.calls.count('native_start'), 2)
+            finally:
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                server.close()
+                await server.wait_closed()
+
+    async def test_failure_during_peer_drain_still_exits(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            peer = Peer(reader, writer, {})
+            reading = asyncio.create_task(peer.run())
+            try:
+                await peer.call('health', {'require_tools': True}, timeout=2)
+                self.exit_code = 75
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                self.assertTrue(worker.exited.is_set())
+                self.assertEqual(worker.exit_code, 75)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    async def test_explicit_clean_exit_during_peer_drain_still_exits(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            peer = Peer(reader, writer, {})
+            reading = asyncio.create_task(peer.run())
+            try:
+                await peer.call('health', {'require_tools': True}, timeout=2)
+                self.exit_code = 0
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                self.assertTrue(worker.exited.is_set())
+                self.assertEqual(worker.exit_code, 0)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    async def test_concurrent_runtime_stop_is_serialized(self):
+        worker = await self.worker()
+        await worker.health(require_tools=True)
+        self.allow_finalize.clear()
+        first = asyncio.create_task(worker.stop_runtime())
+        await self.shutdown.wait()
+        second = asyncio.create_task(worker.stop_runtime())
+        await asyncio.sleep(0)
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        self.allow_finalize.set()
+        await asyncio.gather(first, second)
+        # start_gateway's own finally also calls runner.stop; only one call
+        # comes from the worker owner even with concurrent stop requests.
+        self.assertEqual(self.calls.count('stop'), 2)
+
     async def test_reconnect_waits_for_closed_bootstrap_peer_drain(self):
         worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
         worker._startup_gate = self.gate(worker)
