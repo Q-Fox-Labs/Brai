@@ -1,3 +1,5 @@
+# ABOUTME: Проверяет учёт и восстановление входов Telegram на native fixture.
+# ABOUTME: Не подключается к настоящим профилям и службам Telegram.
 import asyncio
 import importlib.util
 import sys
@@ -27,7 +29,7 @@ def patched_module(directory):
     marker = '--- a/plugins/platforms/telegram/update_admission.py\n'
     if source.count(marker) != 1:
         raise ValueError('Pinned admission patch missing or duplicated')
-    section = marker + source.split(marker, 1)[1].split('\n--- a/', 1)[0] + '\n'
+    section = marker + source.split(marker, 1)[1].split('\ndiff --git ', 1)[0] + '\n'
     subprocess.run(['patch', '-p1', '--batch'], cwd=directory, input=section,
                    text=True, check=True, stdout=subprocess.DEVNULL)
     spec = importlib.util.spec_from_file_location('_brai_postflight_test',path)

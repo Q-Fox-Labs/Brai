@@ -397,6 +397,115 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         await stopping
         self.assertTrue(worker.policy_stopping)
 
+    async def test_cold_reconnect_waits_for_new_recovery_not_cancelled_old_task(self):
+        import identity.native_policy as policy
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        runner = NS(_exit_code=None, _request_clean_exit=lambda reason: None, stop=AsyncMock())
+        adapter = NS();worker.runner, worker.adapter = runner, adapter
+        worker.operational.set();worker.release.operation='operation';worker.release.cold_start=True
+        worker.release.open.clear();worker.release.completions_open.clear()
+        finish=asyncio.Event();started=asyncio.Event();expected={'role':'user','generation':1}
+        async def activate(_runner,_adapter,_check,*,release_open):
+            async def recover():
+                await release_open.wait();started.set();await finish.wait()
+            return asyncio.create_task(recover())
+        with patch.object(policy,'principal',return_value=expected), \
+             patch.object(policy,'activate_deferred_startup',side_effect=activate):
+            await worker._activate_user_startup(runner,adapter,expected)
+            old=worker.cold_recovery_task
+            await worker.stop_runtime()
+            self.assertTrue(old.cancelled());self.assertTrue(worker.release.recovery_done.is_set())
+            worker.runtime_stopped=False;worker.policy_stopping=False;worker.policy_error=None
+            worker.operational.set();worker.policy_ready.clear()
+            await worker._activate_user_startup(runner,adapter,expected)
+            self.assertFalse(worker.release.recovery_done.is_set())
+            resumed=asyncio.create_task(worker.release.resume('operation'))
+            await started.wait();self.assertFalse(resumed.done())
+            self.assertFalse(worker.release.open.is_set())
+            finish.set()
+            self.assertEqual((await resumed)['state'],'resumed')
+            self.assertTrue(worker.release.open.is_set())
+
+    async def test_admitted_cold_recovery_outcome_is_not_reset_on_reconnect(self):
+        import identity.native_policy as policy
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        runner = NS(_exit_code=None, _request_clean_exit=lambda reason: None)
+        adapter = NS();worker.runner, worker.adapter = runner, adapter
+        worker.release.operation='operation';worker.release.cold_start=True
+        worker.release.recovery_open.set();worker.release.recovery_done.set()
+        expected={'role':'user','generation':1}
+        with patch.object(policy,'principal',return_value=expected), \
+             patch.object(policy,'activate_deferred_startup',new_callable=AsyncMock) as activate:
+            await worker._activate_user_startup(runner,adapter,expected)
+        activate.assert_not_awaited()
+        self.assertTrue(worker.release.recovery_done.is_set())
+        self.assertRegex(str(worker.policy_error),'outcome is unresolved')
+
+    async def test_stop_also_settles_recovery_created_during_prior_cleanup(self):
+        worker=Worker(os.getuid()+1,'owner','123',AsyncMock())
+        worker.runner=NS(stop=AsyncMock())
+        cancelled=asyncio.Event();finish=asyncio.Event()
+        async def old_recovery():
+            try: await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set();await finish.wait()
+        old=asyncio.create_task(old_recovery());await asyncio.sleep(0)
+        worker.cold_recovery_task=old
+        stopping=asyncio.create_task(worker.stop_runtime())
+        await cancelled.wait()
+        late=asyncio.create_task(asyncio.Event().wait())
+        worker.cold_recovery_task=late
+        finish.set();await stopping
+        self.assertTrue(late.cancelled())
+        self.assertIsNone(worker.cold_recovery_task)
+
+    async def test_cold_primary_eof_reconnect_waits_for_replacement_recovery(self):
+        import identity.native_policy as policy
+        worker=Worker(os.getuid()+1,'owner','123',AsyncMock())
+        worker._startup_gate=self.gate(worker)
+        worker.release.operation='operation';worker.release.cold_start=True
+        worker.release.open.clear();worker.release.completions_open.clear()
+        expected={'role':'user','generation':1};started=asyncio.Event();finish=asyncio.Event();policy_settled=asyncio.Event()
+        async def activate(runner,adapter,check,*,release_open):
+            async def recovery():
+                await release_open.wait();started.set();await finish.wait()
+            return asyncio.create_task(recovery())
+        async def ready(runner):
+            worker.operational.set();worker.policy_ready.clear()
+            await worker._activate_user_startup(runner,worker.adapter,expected)
+            policy_settled.set()
+        worker._operational_ready=ready
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('identity.worker.peer_uid',return_value=worker.ingress_uid), \
+             patch.object(policy,'principal',return_value=expected), \
+             patch.object(policy,'activate_deferred_startup',side_effect=activate):
+            path=directory+'/worker.sock'
+            server=await asyncio.start_unix_server(worker.serve_connection,path=path)
+            async def connect():
+                reader,writer=await asyncio.open_unix_connection(path)
+                peer=Peer(reader,writer,{})
+                return writer,peer,asyncio.create_task(peer.run())
+            writer,peer,reading=await connect()
+            try:
+                self.assertTrue((await peer.call('health',{'require_tools':True},timeout=2))['operational'])
+                await policy_settled.wait()
+                old=worker.cold_recovery_task
+                writer.close();await reading;await worker.peer_released.wait()
+                self.assertTrue(old.cancelled());self.assertTrue(worker.release.recovery_done.is_set())
+                self.shutdown.clear();policy_settled.clear()
+                writer,peer,reading=await connect()
+                await peer.call('health',{'require_tools':True},timeout=2)
+                await policy_settled.wait()
+                self.assertTrue((await peer.call('health',{'require_tools':True},timeout=2))['policyReady'])
+                self.assertFalse(worker.release.recovery_done.is_set())
+                pending=asyncio.create_task(peer.call('release.resume',{'operationId':'operation'},timeout=None))
+                await started.wait();self.assertFalse(pending.done())
+                finish.set();self.assertEqual((await pending)['state'],'resumed')
+            finally:
+                writer.close();await reading
+                if worker.peer is not None:await worker.peer_released.wait()
+                server.close();await server.wait_closed()
+
     async def test_health_policy_ready_requires_settled_live_policy(self):
         worker = await self.worker()
         try:

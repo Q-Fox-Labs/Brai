@@ -313,6 +313,12 @@ class Worker:
                     raise PermissionError('Runtime preparation changed')
                 break
             if self.release.cold_start:
+                if self.cold_recovery_task is not None:
+                    raise RuntimeError('Previous cold recovery is still owned')
+                if self.release.recovery_done.is_set():
+                    if self.release.recovery_open.is_set():
+                        raise RuntimeError('Previous cold recovery outcome is unresolved')
+                    self.release.recovery_done.clear()
                 self.cold_recovery_task = await activate_deferred_startup(
                     runner, adapter, check, release_open=self.release.recovery_open)
                 def recovery_done(task):
@@ -400,7 +406,8 @@ class Worker:
             recovery.cancel()
         if recovery is not None:
             await asyncio.gather(recovery, return_exceptions=True)
-        self.cold_recovery_task = None
+        if self.cold_recovery_task is recovery:
+            self.cold_recovery_task = None
         self.policy_stopping = True
         policy = self.policy_task
         if policy is not None and not policy.done():
@@ -408,6 +415,13 @@ class Worker:
         if policy is not None:
             await asyncio.gather(policy, return_exceptions=True)
         self.policy_task = None
+        # Policy могла создать recovery пока ожидалось завершение предыдущей.
+        recovery = self.cold_recovery_task
+        if recovery is not None:
+            if not recovery.done() and not self.release.recovery_open.is_set():
+                recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
+            self.cold_recovery_task = None
         self.policy_ready.set()
         task = self.lifecycle_task
         if task is not None and not self.activation.is_set() and not task.done():
