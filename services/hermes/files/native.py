@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import uuid
 import time
+import tempfile
 from urllib.parse import unquote, urlparse
 from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
 
@@ -832,12 +833,56 @@ def before_tool(name, args, **ids):
     return args
 
 
+def _publish_tool_output(name, path, identity, operation):
+    """Перенести точный native выход в workspace, сохранив прежний RPC публикации."""
+    source_path = Path(path)
+    roots = {
+        'image_generate': ('cache/generated/images',),
+        'video_generate': ('cache/generated/videos',),
+        'text_to_speech': ('cache/audio', 'audio_cache'),
+        'browser_screenshot': ('cache/screenshots', 'browser_screenshots'),
+        'browser_vision': ('cache/screenshots', 'browser_screenshots'),
+    }
+    # Старые экземпляры уже разрешают эти каталоги; их маршрут сохраняется.
+    if any(source_path.resolve().is_relative_to(root) for root in store().read_roots):
+        return resolve(path, identity)
+    from hermes_constants import get_hermes_home
+    home = Path(get_hermes_home())
+    root = next((home / part for part in roots.get(name, ()) if source_path.parent == home / part), None)
+    if root is None:
+        return resolve(path, identity)  # Обычный guard отклонит неизвестный источник.
+    from .identity import open_file, copy_fd
+    source = open_file(root, source_path, os.getuid())
+    folder = None
+    try:
+        folder = Path(tempfile.mkdtemp(prefix='generated-', dir=store().workspace(operation)))
+        staged = folder / source_path.name
+        target = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            copy_fd(source, target)
+        finally:
+            os.close(target)
+    except BaseException:
+        if folder is not None:
+            shutil.rmtree(folder)
+        raise
+    finally:
+        os.close(source)
+    # AIDEV-NOTE: При неизвестном исходе публикации snapshot нужен штатному recovery.
+    published = resolve(str(staged), identity)
+    try:
+        shutil.rmtree(folder)
+    except OSError:
+        logging.getLogger(__name__).warning('BRAI_GENERATED_OUTPUT_CLEANUP_FAILED')
+    return published
+
+
 def after_tool(name, args, result, **ids):
     """Публиковать явные выходы генераторов, не сканируя промежуточные каталоги."""
-    if not isinstance(result, str) or name not in {'image_generate', 'text_to_speech', 'video_generate', 'browser_screenshot', 'terminal', 'process'}:
+    if not isinstance(result, (str, dict)) or name not in {'image_generate', 'text_to_speech', 'video_generate', 'browser_screenshot', 'browser_vision', 'terminal', 'process'}:
         return result
     try:
-        data = json.loads(result)
+        data = json.loads(result) if isinstance(result, str) else result
     except (ValueError, TypeError):
         return result
     if name == 'terminal':
@@ -855,18 +900,44 @@ def after_tool(name, args, result, **ids):
                     db.execute('INSERT OR IGNORE INTO cleanup_scopes VALUES (?,?)', (operation_for(ids), row[0]))
         return result
     operation = [operation_for(ids), ids.get('tool_call_id') or key([name, args])]
+    outputs = {}
+
+    def publish(path, field):
+        if path not in outputs:
+            outputs[path] = _publish_tool_output(name, path, ['output', operation, field, path], operation[0])
+        return outputs[path]
+
     def visit(value):
         if isinstance(value, dict):
             changed = {k: visit(v) for k, v in value.items()}
-            for field in ('path', 'file_path', 'image_path', 'audio_path', 'video_path', 'output_path', 'image', 'host_image', 'agent_visible_image'):
+            for field in ('path', 'file_path', 'image_path', 'audio_path', 'video_path', 'output_path', 'image', 'host_image', 'agent_visible_image', 'video', 'screenshot_path', 'image_url'):
                 path = value.get(field)
-                if isinstance(path, str) and Path(path).is_file():
-                    published = resolve(path, ['output', operation, field, path])
+                if isinstance(path, str) and (path in outputs or Path(path).is_file()):
+                    published = publish(path, field)
                     changed[field] = published['localPath']
                     changed['artifactId'] = published['artifactId']
+            paths = value.get('file_paths')
+            if isinstance(paths, list):
+                changed['file_paths'] = [publish(path, 'file_paths')['localPath']
+                    if isinstance(path, str) and (path in outputs or Path(path).is_file()) else path for path in paths]
             return changed
         return [visit(item) for item in value] if isinstance(value, list) else value
-    return canonical(visit(data)).replace("MEDIA:", r"MEDIA\u003a")
+    changed = visit(data)
+
+    def references(value):
+        if isinstance(value, dict):
+            for field in ('media_tag', 'text_summary'):
+                if isinstance(value.get(field), str):
+                    for path, published in sorted(outputs.items(), key=lambda item: len(item[0]), reverse=True):
+                        value[field] = value[field].replace(path, published['localPath'])
+            for item in value.values():
+                references(item)
+        elif isinstance(value, list):
+            for item in value:
+                references(item)
+
+    references(changed)
+    return canonical(changed).replace("MEDIA:", r"MEDIA\u003a") if isinstance(result, str) else changed
 
 
 def presentation(file):

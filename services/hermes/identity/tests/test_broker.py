@@ -1180,8 +1180,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             return expected
         self.broker.files.control = SimpleNamespace(call=configuration)
         result = await self.broker.call(WORKER_UID, 'files.configuration', {})
-        self.assertEqual(result, {**expected,
-            'readRoots': [*expected['readRoots'], home + '/cache/generated/images']})
+        self.assertEqual(result, expected)
         for method, params in [
                 ('files.get', {'artifactId': 'a'}), ('files.list', {}),
                 ('files.prepare', {'mode': 'files', 'items': []}),

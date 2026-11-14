@@ -1,7 +1,9 @@
 # ABOUTME: Проверяет owner-bound перенос файлов и transport без общего владельца.
 # ABOUTME: Не использует модель, сеть, live-профили или привилегированную установку.
 import asyncio
+import ast
 import base64
+import datetime
 from hashlib import sha256
 import importlib.util
 import json
@@ -10,6 +12,8 @@ from pathlib import Path
 import runpy
 import sys
 import tempfile
+import stat
+import types
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -223,9 +227,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             return value
 
         self.control.call = configuration
-        configured = await self.port.configuration(self.uid, self.profile)
-        self.assertEqual(configured, {**value, 'readRoots': [str(self.home / 'cache/generated/images')]})
-        self.assertNotIn('readRoots', value)
+        self.assertEqual(await self.port.configuration(self.uid, self.profile), value)
         for field, path in [('serviceRoots', '/etc'),
                             ('serviceRoots', str(self.root / 'another-user')),
                             ('serviceRoots', '/opt/brai-profile/instructions-extra'),
@@ -246,12 +248,8 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             value.clear()
             value.update(original)
 
-    async def test_native_image_cache_reaches_publication_and_ingress_descriptor(self):
-        """Проверить native результат через оба файловых guard до байтов доставки."""
-        image = self.home / 'cache/generated/images/wallpaper.png'
-        image.parent.mkdir(parents=True, mode=0o700)
-        raw = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7ioAAAAASUVORK5CYII=')
-        image.write_bytes(raw)
+    async def check_generator_outputs(self, cases):
+        """Пропустить результаты генераторов через прежние guards и чтение доставки."""
         backend = Backend(self.cache)
         config = {'ownerId': 'owner', 'account': 'test',
                   'stateRoot': str(self.home / 'workspace/files'),
@@ -267,8 +265,11 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.control.call = control
         configured = await self.port.configuration(self.uid, self.profile)
         loop = asyncio.get_running_loop()
+        worker_paths = []
 
         def worker_call(method, args, **kwargs):
+            if method == 'files.publish':
+                worker_paths.append(Path(args['path']))
             operation = {'files.publish': self.port.publish, 'files.fetch': self.port.fetch}[method]
             return asyncio.run_coroutine_threadsafe(operation(self.uid, self.profile, args), loop).result()
 
@@ -278,28 +279,226 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             native.configure(configured, SimpleNamespace(call=worker_call))
             # Только Root-владение эмулируется; snapshot, SQLite, hash и descriptors настоящие.
             with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)), \
-                    patch.object(identity, 'open_directory', side_effect=lambda path, uid: directory(path, self.uid)):
-                result = json.loads(await asyncio.to_thread(native.after_tool, 'image_generate', {},
-                    json.dumps({'success': True, 'image': str(image), 'host_image': str(image), 'prompt': 'wallpaper'}),
-                    session_id='session', tool_call_id='image-1'))
-                self.assertTrue(result['success'])
-                self.assertEqual(result['prompt'], 'wallpaper')
-                self.assertEqual(result['image'], result['host_image'])
-                self.assertTrue(Path(result['image']).is_relative_to(self.home / 'results'))
-                metadata, fd = await self.port.open_ingress(self.uid, self.profile, result['artifactId'])
-                try:
-                    self.assertEqual(os.read(fd, len(raw) + 1), raw)
-                    self.assertEqual(metadata['sha256'], sha256(raw).hexdigest())
-                finally:
-                    os.close(fd)
-                self.assertEqual(sum(method == 'files.publish' for method, _ in backend.calls), 1)
-                self.assertEqual(image.read_bytes(), raw)
-                self.assertEqual(list(self.stage.iterdir()), [])
+                    patch.object(identity, 'open_directory', side_effect=lambda path, uid: directory(path, self.uid)), \
+                    patch.dict(sys.modules, {'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}):
+                for number, (name, payload, sources) in enumerate(cases):
+                    with self.subTest(tool=name, case=number):
+                        before = set(backend.remote)
+                        result = await asyncio.to_thread(native.after_tool, name, {}, payload,
+                            session_id='session', tool_call_id=str(number))
+                        self.assertEqual(type(result), type(payload))
+                        value = json.loads(result) if isinstance(result, str) else result
+                        if 'success' in value:
+                            self.assertTrue(value['success'])
+                        added = set(backend.remote) - before
+                        self.assertEqual(len(added), len(sources))
+                        for aid in added:
+                            raw, filename = backend.remote[aid]
+                            self.assertEqual(raw, sources[filename])
+                            metadata, fd = await self.port.open_ingress(self.uid, self.profile, aid)
+                            try:
+                                self.assertEqual(os.read(fd, len(raw) + 1), raw)
+                                self.assertEqual(metadata['sha256'], sha256(raw).hexdigest())
+                            finally:
+                                os.close(fd)
+                        for method, params in backend.calls:
+                            if method == 'files.publish':
+                                self.assertTrue(Path(params['path']).is_relative_to(self.stage))
+                        self.assertTrue(all(p.is_relative_to(self.home / 'workspace') for p in worker_paths))
+                        for field in ('image', 'host_image', 'agent_visible_image', 'video', 'file_path', 'screenshot_path'):
+                            if field in value:
+                                self.assertTrue(Path(value[field]).is_relative_to(self.home / 'results'))
+                        if 'file_paths' in value:
+                            self.assertTrue(all(Path(p).is_relative_to(self.home / 'results') for p in value['file_paths']))
+                            for path in value['file_paths']:
+                                self.assertIn(path, value['media_tag'])
+                            self.assertNotIn('/cache/', value['media_tag'])
+                        if 'meta' in value:
+                            self.assertTrue(Path(value['meta']['screenshot_path']).is_relative_to(self.home / 'results'))
+                            self.assertNotIn('/cache/', value['text_summary'])
+                            self.assertEqual(value['content'], payload['content'])
+                        self.assertEqual(list(self.stage.iterdir()), [])
+        finally:
+            native._store = previous
+
+    async def test_native_generators_reach_publication_and_ingress_descriptor(self):
+        """Изображения, голос, видео и оба вида browser vision сохраняют точные байты."""
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7ioAAAAASUVORK5CYII=')
+        def output(directory, filename, raw):
+            path = self.home / directory / filename
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_bytes(raw)
+            return str(path)
+        image = output('cache/generated/images', 'wallpaper.png', png)
+        video = output('cache/generated/videos', 'movie.mp4', b'\x00\x00\x00\x18ftypmp42video-fixture')
+        audio = output('cache/audio', 'speech.ogg', b'OggS-audio')
+        second = output('cache/audio', 'speech-2.ogg', b'OggS-second')
+        shot = output('cache/screenshots', 'browser.png', png)
+        native_shot = output('cache/screenshots', 'native.png', png)
+        legacy_audio = output('audio_cache', 'legacy.ogg', b'OggS-legacy')
+        legacy_shot = output('browser_screenshots', 'legacy.png', png)
+        cases = [
+            ('image_generate', json.dumps({'success': True, 'image': image, 'host_image': image,
+                'agent_visible_image': image, 'prompt': 'wallpaper'}), {'wallpaper.png': png}),
+            ('video_generate', json.dumps({'success': True, 'video': video}), {'movie.mp4': Path(video).read_bytes()}),
+            ('text_to_speech', json.dumps({'success': True, 'file_path': audio, 'file_paths': [audio, second],
+                'media_tag': '[[audio_as_voice]]\nMEDIA:' + audio + '\nMEDIA:' + second}),
+                {'speech.ogg': b'OggS-audio', 'speech-2.ogg': b'OggS-second'}),
+            ('browser_vision', json.dumps({'success': True, 'screenshot_path': shot}), {'browser.png': png}),
+            ('browser_vision', {'_multimodal': True,
+                'meta': {'screenshot_path': native_shot, 'image_url': native_shot},
+                'text_summary': 'Screenshot path: ' + native_shot,
+                'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AA=='}}]}, {'native.png': png}),
+            ('text_to_speech', json.dumps({'success': True, 'file_path': legacy_audio}), {'legacy.ogg': b'OggS-legacy'}),
+            ('browser_screenshot', json.dumps({'success': True, 'screenshot_path': legacy_shot}), {'legacy.png': png}),
+        ]
+        await self.check_generator_outputs(cases)
+        for path in (image, video, audio, second, shot, native_shot, legacy_audio, legacy_shot):
+            self.assertTrue(Path(path).is_file())
+
+    @unittest.skipUnless(os.environ.get('BRAI_ENGINE_TEST_ROOT'), 'Pinned native source not configured')
+    async def test_pinned_producers_reach_publication_and_ingress_descriptor(self):
+        """Исполнить исходные native writers и форматы до snapshot и FD доставки."""
+        engine = Path(os.environ['BRAI_ENGINE_TEST_ROOT'])
+        def functions(file, names, **values):
+            tree = ast.parse((engine / file).read_text())
+            selected = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+            self.assertEqual({n.name for n in selected}, set(names))
+            namespace = types.ModuleType(file)
+            namespace.__dict__.update(values)
+            module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0),
+                *selected], type_ignores=[])
+            exec(compile(ast.fix_missing_locations(module), str(engine / file), 'exec'), namespace.__dict__)
+            return namespace
+
+        constants = functions('hermes_constants.py', ['get_hermes_dir', '_legacy_path_has_content'],
+            Path=Path, stat=stat, get_hermes_home=lambda: self.home)
+        media = functions('agent/provider_media.py', ['cache_dir', 'cache_path', 'save_bytes', 'save_b64'],
+            Path=Path, uuid=uuid, datetime=datetime, base64=base64)
+        video = functions('agent/video_gen_provider.py', ['save_bytes_video', 'success_response'],
+            provider_media=media, _GENERATED_VIDEO_KIND='generated/videos')
+        tts = functions('tools/tts_tool.py', ['_get_default_output_dir', '_resolve_output_base', '_media_tag', '_text_to_speech_single'],
+            Path=Path, datetime=datetime, os=os, json=json, logger=SimpleNamespace(info=lambda *a: None),
+            _get_command_tts_output_format=lambda config: config['output_format'],
+            _repair_ogg_container=lambda path: path,
+            _finalize_voice_delivery=lambda path, *a: (path, True),
+            _generate_command_tts=lambda text, path, *a: (Path(path).write_bytes(b'OggS-native-command'), path)[1])
+        tts._default_output_dir = tts._get_default_output_dir
+        vision = functions('tools/vision_tools.py', ['_build_native_vision_tool_result'])
+        vision._EMBED_MAX_DIMENSION = 1024
+        vision._resize_image_for_vision = lambda *a, **k: 'data:image/png;base64,AA=='
+        browser_vision = functions('tools/browser_tool_vision.py', ['_native_vision_result'])
+        browser = functions('tools/browser_tool.py', ['_capture_vision_screenshot'], Path=Path,
+            _session=SimpleNamespace(sandbox_screenshot_path=lambda path: None,
+                _run_browser_command=lambda task, command, args, **kwargs: (Path(args[-1]).write_bytes(b'png-native-capture'),
+                    {'success': True, 'data': {'path': args[-1]}})[1]))
+        with patch.dict(sys.modules, {'hermes_constants': constants, 'tools.vision_tools': vision,
+                'tools.vision_tools_history_budget': SimpleNamespace(resolve_embed_target_bytes=lambda: 1024)}):
+            image = media.save_bytes('generated/images', b'png-native-image', prefix='image', extension='png')
+            movie = video.save_bytes_video(b'mp4-native-video')
+            audio, error = tts._resolve_output_base(None, 'silero', {'output_format': 'ogg'}, True)
+            self.assertIsNone(error)
+            audio_result = tts._text_to_speech_single('voice', str(audio), provider='silero', tts_config={},
+                command_provider_config={'output_format': 'ogg'}, want_opus=True, instructions=None)
+            shot = constants.get_hermes_dir('cache/screenshots', 'browser_screenshots') / 'native-capture.png'
+            shot.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            result, actual, error = browser._capture_vision_screenshot('task', False, shot, False)
+            self.assertIsNone(error)
+            screenshot = browser_vision._native_vision_result(actual, 'page', False, result, None)
+        await self.check_generator_outputs([
+            ('image_generate', json.dumps({'success': True, 'image': str(image)}), {image.name: b'png-native-image'}),
+            ('video_generate', json.dumps(video.success_response(video=str(movie), model='fixture', prompt='movie',
+                provider='fixture')), {movie.name: b'mp4-native-video'}),
+            ('text_to_speech', audio_result, {audio.name: b'OggS-native-command'}),
+            ('browser_vision', screenshot, {shot.name: b'png-native-capture'}),
+        ])
+
+    def test_native_handoff_rejects_links_and_wrong_generator_roots(self):
+        """Перенос в workspace не позволяет читать чужие источники и подмены inode."""
+        previous = native._store
+        backend = Backend(self.home / 'results')
+        native.configure({'ownerId': 'owner', 'account': 'test', 'stateRoot': str(self.home / 'workspace/files'),
+            'resultRoot': str(self.home / 'results'), 'readRoots': [str(self.home / 'workspace')]}, backend)
+        root = self.home / 'cache/generated/images'
+        root.mkdir(parents=True, mode=0o700)
+        image = root / 'image.png'
+        image.write_bytes(b'image')
+        link = root / 'link.png'
+        link.symlink_to(image)
+        hard = root / 'hard.png'
+        hard.hardlink_to(image)
+        try:
+            with patch.dict(sys.modules, {'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}):
+                for name, path in [('image_generate', link), ('image_generate', hard), ('image_generate', image),
+                        ('text_to_speech', image)]:
+                    with self.subTest(tool=name, path=path), self.assertRaises((ValueError, OSError, native.FileError)):
+                        native.after_tool(name, {}, json.dumps({'success': True, 'path': str(path)}), session_id='test')
+                hard.unlink()
+                with patch.object(identity, 'copy_fd', side_effect=PermissionError('File changed during copy')):
+                    with self.assertRaisesRegex(PermissionError, 'File changed'):
+                        native.after_tool('image_generate', {}, json.dumps({'image': str(image)}), session_id='test')
+            self.assertEqual(backend.calls, [])
+            self.assertEqual(image.read_bytes(), b'image')
+        finally:
+            native._store = previous
+
+    def test_unknown_publication_keeps_snapshot_for_recovery_without_generation(self):
+        """Неизвестный исход сохраняет bytes и requestId для существующего recovery."""
+        previous = native._store
+        backend = Backend(self.home / 'results')
+        backend.fail_publish = True
+        store = native.configure({'ownerId': 'owner', 'account': 'test', 'stateRoot': str(self.home / 'workspace/files'),
+            'resultRoot': str(self.home / 'results'), 'readRoots': [str(self.home / 'workspace')]}, backend)
+        image = self.home / 'cache/generated/images/image.png'
+        image.parent.mkdir(parents=True, mode=0o700)
+        image.write_bytes(b'generated once')
+        try:
+            with patch.dict(sys.modules, {'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}):
+                with self.assertRaisesRegex(native.FileError, 'ARTIFACTS_UNAVAILABLE'):
+                    native.after_tool('image_generate', {}, json.dumps({'image': str(image)}),
+                        session_id='session', tool_call_id='image')
+            first = backend.calls[-1][1]
+            self.assertEqual(Path(first['path']).read_bytes(), b'generated once')
+            self.assertEqual(image.read_bytes(), b'generated once')
+            backend.fail_publish = False
+            store.resume_publications()
+            self.assertEqual(backend.calls[-1][1], first)
+            self.assertEqual(len(backend.remote), 1)
+        finally:
+            native._store = previous
+
+    def test_cache_cleanup_and_snapshot_cleanup_do_not_hide_confirmed_result(self):
+        """После подтверждения все aliases сохраняются даже при удалении кеша и ошибке уборки."""
+        previous = native._store
+        backend = Backend(self.home / 'results')
+        image = self.home / 'cache/generated/images/image.png'
+        image.parent.mkdir(parents=True, mode=0o700)
+        image.write_bytes(b'generated once')
+        def call(method, params, **kwargs):
+            result = backend.call(method, params, **kwargs)
+            if method == 'files.publish':
+                image.unlink()  # Имитирует независимую уборку native cache после snapshot.
+            return result
+        native.configure({'ownerId': 'owner', 'account': 'test', 'stateRoot': str(self.home / 'workspace/files'),
+            'resultRoot': str(self.home / 'results'), 'readRoots': [str(self.home / 'workspace')]}, SimpleNamespace(call=call))
+        try:
+            with patch.dict(sys.modules, {'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}), \
+                    patch.object(native.shutil, 'rmtree', side_effect=OSError('Cleanup failed')), \
+                    self.assertLogs('files.native', level='WARNING') as logs:
+                result = json.loads(native.after_tool('image_generate', {}, json.dumps({'success': True,
+                    'image': str(image), 'host_image': str(image), 'agent_visible_image': str(image)})))
+            self.assertTrue(result['success'])
+            self.assertEqual(result['image'], result['host_image'])
+            self.assertEqual(result['image'], result['agent_visible_image'])
+            self.assertEqual(Path(result['image']).read_bytes(), b'generated once')
+            self.assertIn(result['artifactId'], backend.remote)
+            self.assertEqual(sum(method == 'files.publish' for method, _ in backend.calls), 1)
+            self.assertIn('BRAI_GENERATED_OUTPUT_CLEANUP_FAILED', logs.output[0])
         finally:
             native._store = previous
 
     async def test_image_cache_publication_rejects_other_roots_and_links(self):
-        """Допуск native cache не открывает соседние каталоги или подменённые inode."""
+        """Broker по-прежнему отклоняет native cache и любые соседние каталоги."""
         root = self.home / 'cache/generated/images'
         root.mkdir(parents=True, mode=0o700)
         image = root / 'image.png'
