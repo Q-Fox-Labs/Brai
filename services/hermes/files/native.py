@@ -794,6 +794,10 @@ def before_tool(name, args, **ids):
     args = dict(args)
     operation = operation_for(ids)
     workspace = store().workspace(operation)
+    # Native skill resolvers own their package-relative paths and their write policy.
+    # Anchoring file_path to the conversation workspace breaks linked references and edits.
+    if name in {'skill_view', 'skill_manage'}:
+        return args
     if name == 'terminal':
         requested = Path(args.get('workdir') or workspace).absolute()
         if not requested.resolve().is_relative_to(workspace) and not any(requested.resolve().is_relative_to(p) for p in store().service_roots):
@@ -811,6 +815,14 @@ def before_tool(name, args, **ids):
         path = Path(local_path(value)).expanduser()
         path = path if path.is_absolute() else workspace / path
         resolved = path.resolve()
+        from .runtime_reads import source, snapshot
+        selected = source(path)
+        if selected is not None:
+            if name in {'write_file', 'patch'}:
+                raise FileError('TEMPORARY_OUTPUT_REQUIRED')
+            if not path.is_dir():
+                args[field] = snapshot(selected, workspace)
+                continue
         if any(resolved.is_relative_to(root) for root in store().service_roots):
             continue
         if name in {'write_file', 'patch'}:
@@ -842,6 +854,7 @@ def _publish_tool_output(name, path, identity, operation):
         'text_to_speech': ('cache/audio', 'audio_cache'),
         'browser_screenshot': ('cache/screenshots', 'browser_screenshots'),
         'browser_vision': ('cache/screenshots', 'browser_screenshots'),
+        'computer_use': ('cache/images', 'image_cache'),
     }
     # Старые экземпляры уже разрешают эти каталоги; их маршрут сохраняется.
     if any(source_path.resolve().is_relative_to(root) for root in store().read_roots):
@@ -851,8 +864,9 @@ def _publish_tool_output(name, path, identity, operation):
     root = next((home / part for part in roots.get(name, ()) if source_path.parent == home / part), None)
     if root is None:
         return resolve(path, identity)  # Обычный guard отклонит неизвестный источник.
-    from .identity import open_file, copy_fd
-    source = open_file(root, source_path, os.getuid())
+    from .identity import copy_fd
+    from .runtime_reads import open_source
+    source = open_source(root, source_path, os.getuid())
     folder = None
     try:
         folder = Path(tempfile.mkdtemp(prefix='generated-', dir=store().workspace(operation)))
@@ -879,7 +893,7 @@ def _publish_tool_output(name, path, identity, operation):
 
 def after_tool(name, args, result, **ids):
     """Публиковать явные выходы генераторов, не сканируя промежуточные каталоги."""
-    if not isinstance(result, (str, dict)) or name not in {'image_generate', 'text_to_speech', 'video_generate', 'browser_screenshot', 'browser_vision', 'terminal', 'process'}:
+    if not isinstance(result, (str, dict)) or name not in {'image_generate', 'text_to_speech', 'video_generate', 'browser_screenshot', 'browser_vision', 'computer_use', 'terminal', 'process'}:
         return result
     try:
         data = json.loads(result) if isinstance(result, str) else result
@@ -926,7 +940,7 @@ def after_tool(name, args, result, **ids):
 
     def references(value):
         if isinstance(value, dict):
-            for field in ('media_tag', 'text_summary'):
+            for field in (('media_tag', 'text_summary', 'summary', 'text') if name == 'computer_use' else ('media_tag', 'text_summary')):
                 if isinstance(value.get(field), str):
                     for path, published in sorted(outputs.items(), key=lambda item: len(item[0]), reverse=True):
                         value[field] = value[field].replace(path, published['localPath'])
@@ -1025,6 +1039,10 @@ def final_text(text, operation):
         path = match.group('angle') or match.group('plain')
         if not path.startswith('artifact:') and (not path.startswith('/') or any(Path(path).resolve().is_relative_to(root) for root in files.service_roots)):
             return match.group(0)
+        if path.startswith('/'):
+            from .runtime_reads import source
+            if source(Path(path)) is not None:
+                return match.group(0)
         label = re.sub(r'\\(.)', r'\1', match.group('label'))
         return add(match, path, label)
     active_sub(_DESCRIPTOR, descriptor, masked)
@@ -1515,6 +1533,9 @@ def guard_write(path, task_id):
     base = Path(workspace_for(task_id))
     value = Path(path).expanduser()
     value = value if value.is_absolute() else base / value
+    from .runtime_reads import source
+    if source(value) is not None:
+        raise FileError('TEMPORARY_OUTPUT_REQUIRED')
     resolved = value.resolve()
     if not resolved.is_relative_to(store().work) and not any(resolved.is_relative_to(p) for p in store().service_roots):
         raise FileError('TEMPORARY_OUTPUT_REQUIRED')

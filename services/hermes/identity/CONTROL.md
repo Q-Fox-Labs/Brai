@@ -108,7 +108,7 @@ brai_telegram_unlink_account принимает только target=current|othe
 
 `ingress.profiles {}` возвращает `{profiles:[{uid,...profile}]}` только доверенному ingress UID для сопровождения активных личных процессов. Каждый профиль проходит свежую проверку Auth. Ответ не содержит переписку или credentials; worker не может вызывать этот метод.
 
-Внешние `serviceRoots` ограничены тремя read-only путями worker: `/opt/brai-profile/engine`, `/opt/brai-profile/runtime`, `/opt/brai-profile/instructions`. Они разрешают внутреннее чтение, не публикацию или временные файлы. Личные инструкции остаются внутри собственного HOME.
+Внешние `serviceRoots` допускают только точные read-only пути worker: `/opt/brai-profile/engine`, `/opt/brai-profile/runtime`, `/opt/brai-profile/instructions`, `/opt/brai-profile/skills`, `/opt/brai-profile/system-skills`. Они разрешают внутреннее чтение, не публикацию или временные файлы. Личные инструкции остаются внутри собственного HOME. Актуальные поколения `/opt/brai-profile/system-instructions` читаются доверенным reader через readonly копию хода; это не расширяет защищённую конфигурацию или RPC владельца. [Служебные ответы и справочники](../files/CONTRACT.md#служебные-ответы-и-справочники).
 
 Во время provisioning `health` подтверждает native runner и файловый адаптер до активации Auth. После активации `health` с `require_tools: true` также проверяет реальное обнаружение MCP и инструмента входа. Worker всегда выполняет эту проверку до обработки первого сообщения: модель не запускается без инструмента входа.
 

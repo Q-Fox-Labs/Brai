@@ -3,6 +3,7 @@
 import asyncio
 import ast
 import base64
+import contextlib
 import datetime
 from hashlib import sha256
 import importlib.util
@@ -316,7 +317,13 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
                         if 'meta' in value:
                             self.assertTrue(Path(value['meta']['screenshot_path']).is_relative_to(self.home / 'results'))
                             self.assertNotIn('/cache/', value['text_summary'])
-                            self.assertEqual(value['content'], payload['content'])
+                            if name == 'computer_use':
+                                self.assertIn(value['meta']['screenshot_path'], value['content'][0]['text'])
+                                self.assertEqual(value['content'][1:], payload['content'][1:])
+                            else:
+                                self.assertEqual(value['content'], payload['content'])
+                        if name == 'computer_use' and 'summary' in value:
+                            self.assertIn(value['screenshot_path'], value['summary'])
                         self.assertEqual(list(self.stage.iterdir()), [])
         finally:
             native._store = previous
@@ -337,6 +344,8 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         native_shot = output('cache/screenshots', 'native.png', png)
         legacy_audio = output('audio_cache', 'legacy.ogg', b'OggS-legacy')
         legacy_shot = output('browser_screenshots', 'legacy.png', png)
+        computer_shot = output('cache/images', 'computer_use_capture.png', png)
+        legacy_computer = output('image_cache', 'computer_use_legacy.png', png)
         cases = [
             ('image_generate', json.dumps({'success': True, 'image': image, 'host_image': image,
                 'agent_visible_image': image, 'prompt': 'wallpaper'}), {'wallpaper.png': png}),
@@ -351,6 +360,12 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
                 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AA=='}}]}, {'native.png': png}),
             ('text_to_speech', json.dumps({'success': True, 'file_path': legacy_audio}), {'legacy.ogg': b'OggS-legacy'}),
             ('browser_screenshot', json.dumps({'success': True, 'screenshot_path': legacy_shot}), {'legacy.png': png}),
+            ('computer_use', {'_multimodal': True, 'meta': {'screenshot_path': computer_shot},
+                'content': [{'type': 'text', 'text': 'shareable screenshot saved to ' + computer_shot},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AA=='}}],
+                'text_summary': 'shareable screenshot saved to ' + computer_shot}, {'computer_use_capture.png': png}),
+            ('computer_use', json.dumps({'screenshot_path': legacy_computer,
+                'summary': 'shareable screenshot saved to ' + legacy_computer}), {'computer_use_legacy.png': png}),
         ]
         await self.check_generator_outputs(cases)
         for path in (image, video, audio, second, shot, native_shot, legacy_audio, legacy_shot):
@@ -392,6 +407,11 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             _session=SimpleNamespace(sandbox_screenshot_path=lambda path: None,
                 _run_browser_command=lambda task, command, args, **kwargs: (Path(args[-1]).write_bytes(b'png-native-capture'),
                     {'success': True, 'data': {'path': args[-1]}})[1]))
+        computer = functions('tools/computer_use/tool.py', ['_secure_dir_policy', '_write_private_bytes',
+            '_cache_file', '_write_cache_file', '_persist_capture_image'],
+            contextlib=contextlib, uuid=uuid, base64=base64, _MAX_CAPTURE_FILES=20,
+            _capture_image_format=lambda cap: ('image/png', '.png'),
+            logger=SimpleNamespace(debug=lambda *a, **k: None))
         with patch.dict(sys.modules, {'hermes_constants': constants, 'tools.vision_tools': vision,
                 'tools.vision_tools_history_budget': SimpleNamespace(resolve_embed_target_bytes=lambda: 1024)}):
             image = media.save_bytes('generated/images', b'png-native-image', prefix='image', extension='png')
@@ -405,12 +425,17 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             result, actual, error = browser._capture_vision_screenshot('task', False, shot, False)
             self.assertIsNone(error)
             screenshot = browser_vision._native_vision_result(actual, 'page', False, result, None)
+            computer_shot = computer._persist_capture_image(SimpleNamespace(png_b64=base64.b64encode(b'png-native-computer').decode()))
+            self.assertIsNotNone(computer_shot)
         await self.check_generator_outputs([
             ('image_generate', json.dumps({'success': True, 'image': str(image)}), {image.name: b'png-native-image'}),
             ('video_generate', json.dumps(video.success_response(video=str(movie), model='fixture', prompt='movie',
                 provider='fixture')), {movie.name: b'mp4-native-video'}),
             ('text_to_speech', audio_result, {audio.name: b'OggS-native-command'}),
             ('browser_vision', screenshot, {shot.name: b'png-native-capture'}),
+            ('computer_use', json.dumps({'screenshot_path': computer_shot,
+                'summary': 'shareable screenshot saved to ' + computer_shot}),
+                {Path(computer_shot).name: b'png-native-computer'}),
         ])
 
     def test_native_handoff_rejects_links_and_wrong_generator_roots(self):

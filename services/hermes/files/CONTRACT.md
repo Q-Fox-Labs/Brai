@@ -88,8 +88,31 @@ Telegram публикует каждый готовый элемент в Artifa
 
 Диагностический footer проверки записи файлов фильтруется также на последней границе результата: движок добавляет его после раннего output transform. Пользователь получает последствия отказа по-русски; пути и коды остаются в сохранённых результатах инструментов.
 
+## Служебные ответы и справочники
+
+`read_file` и файловые входы инструментов не публикуют служебные ответы. Адаптер читает точный файл через проверенный descriptor и передаёт readonly копию в рабочую область текущего хода. Проверяются владелец, обычный тип файла, единственная жёсткая ссылка, отсутствие symlink во всём пути и неизменность inode/байтов во время копирования. Проход через защищённые родительские каталоги использует `O_PATH`: право просмотра этих каталогов не требуется. Тот же безопасный opener используется при переносе готовых медиа, а лимит публикации остаётся прежним. Повторное чтение тех же байтов получает прежний путь для native pagination/dedup; другой ход получает отдельную копию. Очистка рабочей области удаляет копию, сохраняя исходник. Новый лимит размера для чтения не вводится; ограничения публикации к этим копиям не применяются.
+
+Проверенные источники закреплённого native движка:
+
+| Источник | Каталог внутри активного Hermes HOME |
+| --- | --- |
+| Большие ответы инструментов, включая MCP | `cache/spillover` |
+| Полный вывод терминала | `cache/terminal-output` |
+| Веб-страницы и полные снимки дерева браузера | `cache/web`, прежний `web_cache` |
+| Вывод code execution | `cache/exec`, прежний `exec_spill` |
+| Итоги и live transcripts делегирования | `cache/delegation`, прежний `delegation_cache` |
+| Вывод hooks | `hook_outputs` с каталогами сессий |
+| Полное дерево элементов computer use | `cache/computer_use`, прежний `computer_use_cache` |
+| Штатные media-входы и временные vision/video файлы | Точные media/vision каталоги и прежние имена из `runtime_reads.READ_DIRECTORIES` |
+
+Весь HOME или `cache` не становится разрешённым корнем. Произвольный override каталога hook-spill должен находиться в уже разрешённой рабочей области; настройка пользователя не расширяет доступ. Запись и публикация исходников служебного кэша запрещены прежними границами. Готовые пользовательские результаты проходят отдельную цепочку публикации; снимки `computer_use` из `cache/images`/`image_cache` входят в неё, а `elements_file` остаётся служебным материалом.
+
+`skill_view` и `skill_manage` сохраняют package-relative `file_path`; разрешение и проверка пути принадлежат native resolver и политике личных/общих навыков. Общие инструкции и справочники из защищённых поколений `/opt/brai-profile/system-instructions/.generations/<digest>` доступны через тот же readonly snapshot; alias `current` выбирается доверенным reader. Это не меняет `files.configuration`, `serviceRoots`, `readRoots`, publisher или RPC владельца. Markdown-ссылка на служебный источник не вызывает автоматической публикации.
+
+Проверка `tests/runtime-reads.test.mjs` запускает автономные fixtures. При `BRAI_ENGINE_TEST_ROOT` дополнительно исполняются точные writers spillover, web, browser snapshot, code execution, delegation, hooks и resolver связанных файлов навыков из закреплённого native source. Отдельно сохраняются отрицательные проверки чужих HOME/рабочих областей, секретов, похожих имён каталогов, symlink, hardlink, FIFO, чужого UID и подмены snapshot. Интеграционная приёмка установленной версии требует отдельного разрешённого выпуска.
+
 ## Гостевой текстовый артефакт
 
 Private files.create-text принимает filename, content и requestId; без пути и ownerId. До 1 МиБ точных UTF-8 байтов. Публикация использует штатные staging/Artifacts и проверяет имя, размер и SHA-256; код в содержимом не исполняется. Ответ — bounded artifact descriptor с канонической artifact-ссылкой. files.read-text принимает только artifactId и возвращает filename/content после owner/size/hash проверки. Guest-публикация входного файла требует root-owned admission receipt для точного профиля, пути и байтов; общий files.publish модели не выдаётся. [Политика](../identity/ROLES.md), [OpenRPC](../identity/broker.openrpc.json).
 
-Служебный bootstrap допускает только точные readonly `serviceRoots` за пределами HOME: `/opt/brai-profile/engine`, `/opt/brai-profile/runtime`, `/opt/brai-profile/instructions`, `/opt/brai-profile/skills`. Последний соответствует настоящему namespace mount общих навыков. Это не добавляет эти каталоги в пользовательские `readRoots`, `temporaryRoots` или `legacyRoots`; похожие имена и путь `/opt/brai-profile/system-skills` отклоняются.
+Служебный bootstrap допускает только точные readonly `serviceRoots` за пределами HOME: `/opt/brai-profile/engine`, `/opt/brai-profile/runtime`, `/opt/brai-profile/instructions`, `/opt/brai-profile/skills`, `/opt/brai-profile/system-skills`. Последние два имени поддерживаются валидатором конфигурации для соответствующих namespace mounts. Это не добавляет эти каталоги в пользовательские `readRoots`, `temporaryRoots` или `legacyRoots`; похожие имена отклоняются. Защищённый reader актуальных поколений общих документов описан выше и не требует изменения конфигурации.
