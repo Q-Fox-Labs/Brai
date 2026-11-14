@@ -454,7 +454,7 @@ class Worker:
         """Различить доступный bootstrap и полный operational lifecycle."""
         if type(require_tools) is not bool:
             raise RpcError(-32602, 'Invalid health check')
-        if self.runner is None or self.adapter is None:
+        if self.runner is None or self.adapter is None or self.exited.is_set():
             raise RpcError(-32603, 'Worker not ready')
         if require_tools:
             await self.ensure_tools()

@@ -95,6 +95,13 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.calls.append('active_auth')
         return active
 
+    async def test_exited_worker_cannot_report_ready(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker.runner, worker.adapter = NS(), NS()
+        worker.exited.set()
+        with self.assertRaisesRegex(RpcError, 'Worker not ready'):
+            await worker.health()
+
     def test_native_exit_funnel_preserves_stop_failure_and_restart_codes(self):
         for outcome, expected in [(None, 0), (SystemExit(None), 0),
                                   (SystemExit(1), 1), (SystemExit(75), 75)]:
