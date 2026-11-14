@@ -3,6 +3,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from identity.ipc import RpcError
 from identity.native_ingress import ReleaseGate
@@ -75,6 +76,7 @@ class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
             _polling_pending_stuck_count=1
             _polling_not_running_count=1
             async def _check_polling_stall(self): events.append('stall')
+            async def _await_cold_start_readiness(self,*args): events.append('readiness')
             async def _probe_pending_updates(self,*args): events.append('pending')
             def _verifier_stale(self,*args): return False
             def _escalate_stuck_consumer(self,*args): events.append('escalate')
@@ -99,6 +101,50 @@ class ReleaseGateTest(unittest.IsolatedAsyncioTestCase):
         await adapter._check_polling_stall();await adapter._probe_pending_updates(None,1)
         self.assertFalse(adapter._verifier_stale(None,None))
         self.assertEqual(events[-2:],['stall','pending'])
+
+    async def test_startup_hold_skips_progress_wait_without_claiming_success(self):
+        class Mirror:
+            async def hydrate_held(self): pass
+            async def hydrate(self): pass
+        class Resolver:
+            mirror=Mirror()
+            async def release_status(self,operationId): return {'operationId':operationId,'state':'ready'}
+            async def release_resume(self,operationId): return True
+        adapter=SimpleNamespace(_check_polling_stall=AsyncMock(),_probe_pending_updates=AsyncMock(),
+            _verifier_stale=lambda *args:False,_escalate_stuck_consumer=lambda *args:None,
+            _schedule_polling_recovery=lambda *args,**kwargs:None,
+            _await_cold_start_readiness=AsyncMock())
+        original=adapter._await_cold_start_readiness
+        class EmptyBot:
+            async def get_updates(self, **kwargs): return []
+        bot=EmptyBot();gate=ReleaseGate(SimpleNamespace(bot=bot,update_queue=asyncio.Queue()))
+        gate.resolver=Resolver();gate.install_watchdogs(adapter);gate.install();self.addCleanup(gate.restore)
+        await gate.begin('op')
+        progress=asyncio.Event();error_event=asyncio.Event();errors=[]
+        # Startup must complete even before get_updates reaches held hydration.
+        await adapter._await_cold_start_readiness(progress,error_event,errors)
+        self.assertFalse(progress.is_set());original.assert_not_awaited()
+        self.assertNotEqual((await gate.status('op'))['state'],'ready')
+        poll=asyncio.create_task(bot.get_updates());await gate.drain
+        self.assertFalse(poll.done());self.assertFalse(progress.is_set())
+        self.assertEqual((await gate.status('op'))['state'],'ready')
+        await gate.resume('op');self.assertEqual(await poll,[])
+        await adapter._await_cold_start_readiness(progress,error_event,errors)
+        original.assert_awaited_once_with(progress,error_event,errors)
+        gate.restore();self.assertIs(adapter._await_cold_start_readiness,original)
+
+    async def test_startup_hold_does_not_mask_strict_poll_error(self):
+        async def readiness(progress,error_event,errors):
+            raise OSError('polling failed')
+        adapter=SimpleNamespace(_check_polling_stall=AsyncMock(),_probe_pending_updates=AsyncMock(),
+            _verifier_stale=lambda *args:False,_escalate_stuck_consumer=lambda *args:None,
+            _schedule_polling_recovery=lambda *args,**kwargs:None,
+            _await_cold_start_readiness=readiness)
+        gate=ReleaseGate(SimpleNamespace(bot=Bot(),update_queue=asyncio.Queue()))
+        gate.install_watchdogs(adapter);gate.install();self.addCleanup(gate.restore)
+        await gate.begin('op')
+        with self.assertRaisesRegex(OSError,'polling failed'):
+            await adapter._await_cold_start_readiness(asyncio.Event(),asyncio.Event(),[OSError('failed')])
 
     async def test_cancel_after_cleanup_rehydrates_updates_that_ptb_did_not_enqueue(self):
         class TestBot:

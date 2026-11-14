@@ -75,7 +75,8 @@ class ReleaseGate:
     def install_watchdogs(self, adapter):
         """Не считать намеренно удержанный poll сетевым сбоем native adapter."""
         names = ('_check_polling_stall', '_probe_pending_updates', '_verifier_stale',
-                 '_escalate_stuck_consumer', '_schedule_polling_recovery')
+                 '_escalate_stuck_consumer', '_schedule_polling_recovery',
+                 '_await_cold_start_readiness')
         methods = {name:getattr(adapter,name,None) for name in names}
         if not any(callable(value) for value in methods.values()):
             return
@@ -95,7 +96,13 @@ class ReleaseGate:
             if held() and (reason == 'polling stall watchdog' or reason.startswith('polling progress verifier:')):
                 return
             return methods['_schedule_polling_recovery'](*args, **kwargs)
-        wrappers = dict(zip(names,(stall,pending,stale,escalate,recovery)))
+        async def readiness(progress, strict_error_event, strict_error):
+            # Startup hold is intentional; the poll and hydration remain fenced.
+            # Delegate any existing progress or strict error to the native verifier.
+            if self.operation is not None and not progress.is_set() and not strict_error and not strict_error_event.is_set():
+                return
+            return await methods['_await_cold_start_readiness'](progress, strict_error_event, strict_error)
+        wrappers = dict(zip(names,(stall,pending,stale,escalate,recovery,readiness)))
         originals = {name:(name in getattr(adapter,'__dict__',{}), getattr(adapter,name,None)) for name in names}
         for name, value in wrappers.items(): setattr(adapter,name,value)
         def restore():
