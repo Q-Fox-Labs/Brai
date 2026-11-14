@@ -205,12 +205,22 @@ class ProfileRelease:
                 return self._receipt(request,'unknown','worker_unconfirmed')
             return self._receipt(request,'ready')
         if state == 'resumed':
-            if profile['uid'] in self.mirror.tracker.gates:
+            gate = self.mirror.tracker.gates.get(profile['uid'])
+            if gate is not None and gate != operationId:
                 return self._receipt(request,'unknown','ingress_gate_unconfirmed')
             if replacementPid != row['replacement_pid'] or replacementStartTime != row['replacement_start']:
                 return self._receipt(request,'unknown','replacement_changed')
             try:
-                await self._peer(profile,replacementPid,replacementStartTime)
+                peer = await self._peer(profile,replacementPid,replacementStartTime)
+                if gate is not None:
+                    await self._verify_ingress(profile, request)
+                    result = await peer.call('release.status', {'operationId':operationId}, timeout=None)
+                    if (not isinstance(result,dict) or result.get('state') != 'resumed'
+                            or result.get('operationId') != operationId):
+                        raise ValueError('WORKER_RESUME_UNCONFIRMED')
+                    await self._verify_ingress(profile, request)
+                    return self._receipt(request,'pending','ingress_completion',
+                                         replacementPid=replacementPid,replacementStartTime=replacementStartTime)
             except Exception:
                 return self._receipt(request,'unknown','replacement_unconfirmed')
             return self._receipt(request,'resumed',replacementPid=replacementPid,replacementStartTime=replacementStartTime)

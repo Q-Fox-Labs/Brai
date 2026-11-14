@@ -145,6 +145,19 @@ class ResumeHealth(unittest.IsolatedAsyncioTestCase):
    self.assertEqual((await self.owner._resume(self.request,222,'200'))['state'],'resumed')
   self.assertNotIn(123,tracker.gates);self.assertEqual(methods.count('release.resume'),1)
   self.assertEqual(methods.count('release.status'),1)
+ async def test_status_exposes_only_exact_resumed_ingress_completion(self):
+  self.owner.store.status=lambda *args:{'state':'resumed','replacement_pid':222,'replacement_start':'200'}
+  calls=[]
+  async def call(method,params,**kwargs):
+   calls.append(method);return {'state':'resumed','operationId':self.request['operationId']}
+  self.owner._peer=AsyncMock(return_value=SimpleNamespace(call=call))
+  result=await self.owner.status(**self.request,replacementPid=222,replacementStartTime='200')
+  self.assertEqual((result['state'],result['reason'],result['replacementPid'],result['replacementStartTime']),
+                   ('pending','ingress_completion',222,'200'))
+  self.assertEqual(calls,['release.status'])
+  self.assertEqual((await self.owner.status(**self.request,replacementPid=333,replacementStartTime='300'))['reason'],'replacement_changed')
+  self.owner.mirror.transport_blocked.add(123)
+  self.assertEqual((await self.owner.status(**self.request,replacementPid=222,replacementStartTime='200'))['state'],'unknown')
  async def test_resumed_recovery_rejects_wrong_replacement_or_foreign_gate(self):
   self.owner.store.status=lambda *args:{'state':'resumed','replacement_pid':222,'replacement_start':'200'}
   self.owner._peer=AsyncMock()
