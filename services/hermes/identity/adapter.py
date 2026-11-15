@@ -153,6 +153,12 @@ def make_adapter(config, platform, peer, publish_file):
                                       error_kind='delivery_pending')
                 return SendResult(success=False, error='Ingress delivery unavailable or outcome unknown')
 
+        def _send_retry_is_final(self, result):
+            """Сохранённый ответ повторяет outbox; native fallback не создаёт второй ответ."""
+            if getattr(result, 'error_kind', None) == 'delivery_pending':
+                return True
+            return super()._send_retry_is_final(result)
+
         async def create_handoff_thread(self, parent_chat_id, name):
             """Оставить создание фоновой темы ingress, без отдельной темы на каждое cron-задание."""
             return None

@@ -53,6 +53,8 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         class TelegramAdapter(Base):
             def __init__(self, config):
                 super().__init__(config, 'telegram')
+            def _send_retry_is_final(self, result):
+                return getattr(result, 'error_kind', None) == 'forbidden'
             def _mark_connected(self):
                 self._running = True
             def _mark_disconnected(self):
@@ -124,6 +126,13 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(peer.call.await_count, 1)
         finally:
             input_delivery.reset(token)
+
+    async def test_saved_reply_stops_native_retry_and_plain_text_fallback(self):
+        from identity.adapter import make_adapter
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)
+        self.assertTrue(adapter._send_retry_is_final(NS(error_kind='delivery_pending')))
+        self.assertTrue(adapter._send_retry_is_final(NS(error_kind='forbidden')))
+        self.assertFalse(adapter._send_retry_is_final(NS(error_kind='formatting')))
 
     async def test_failed_persistence_does_not_claim_saved_reply_or_call_network(self):
         from identity.delivery_journal import delivery_id

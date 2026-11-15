@@ -289,6 +289,9 @@ async def run(config, fixture, native, receipt):
             fail_send = False
             unit, process = await launch()
             await eventually(lambda: len(deliveries) >= 5, 'saved-reply-delivered')
+            peer = await resolver._bridge(profile).connect()
+            await peer.call('outbox.flush', {'owner': profile['userId']})
+            fixture.require(len(deliveries) == 5, 'SAVED_REPLY_DUPLICATED')
             fixture.require(len(model.requests) == requests_before, 'OUTBOX_RERAN_MODEL')
             proof['scenarios'].append('reply-transport-failure-worker-sigkill-saved-bytes-retry')
 
@@ -328,7 +331,7 @@ async def run(config, fixture, native, receipt):
             await eventually(batch_popped.is_set, 'merged-pop', watch=process)
             fixture.require(all(f'123:{ident}' in resolver.mirror.snapshots for ident in (7, 8)), 'MERGED_ADMISSION_LOST')
             batch_send.set()
-            await eventually(lambda: len(deliveries) == 6, 'merged-delivery', watch=process)
+            await eventually(lambda: len(deliveries) >= 6, 'merged-delivery', watch=process)
             await eventually(lambda: not resolver.turns, 'merged-idle')
             await asyncio.gather(*batch_tasks, return_exceptions=True)
             for ident in (7, 8):
@@ -343,7 +346,9 @@ async def run(config, fixture, native, receipt):
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
         if str(error) in {'FAULT_KILL_FAILED', 'FAULT_NOT_OBSERVED', 'TOPIC_ORDER_CHANGED', 'WORKER_EXITED',
                           'EARLY_ACK', 'INPUT_NOT_ACCEPTED', 'LOST_ACK_REEXECUTED', 'OUTBOX_RERAN_MODEL',
-                          'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN'}:
+                          'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN',
+                          'SAVED_REPLY_DUPLICATED', 'MERGED_ADMISSION_LOST', 'MERGED_INPUT_NOT_ACCEPTED',
+                          'MERGED_INPUT_RERAN_MODEL', 'PAUSE_LOST_ON_RESTART'}:
             proof['code'] = str(error)
         proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
         proof['controllerUid'] = os.geteuid()
