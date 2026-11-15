@@ -42,6 +42,29 @@ class TimeoutPolicyTests(unittest.TestCase):
                     network._timeout_policy()
 
 
+class RelayShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_closes_keep_alive_clients_before_waiting_for_server(self):
+        """Поведение Python 3.13+: ожидание сервера не должно удерживать завершённый worker."""
+        events = []
+        class Server:
+            def close(self): events.append('close')
+            def abort_clients(self): events.append('abort_clients')
+            async def wait_closed(self):
+                self_test.assertEqual(events, ['close', 'abort_clients'])
+                events.append('closed')
+        self_test = self
+        await network.close_relay(Server())
+        self.assertEqual(events, ['close', 'abort_clients', 'closed'])
+
+    async def test_shutdown_supports_earlier_python_server_without_client_api(self):
+        """Старый Python не требует нового метода Server для закрытия listener."""
+        class Server:
+            def close(self): self.closed = True
+            async def wait_closed(self): self_test.assertTrue(self.closed)
+        self_test = self
+        await network.close_relay(Server())
+
+
 class NetworkTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()

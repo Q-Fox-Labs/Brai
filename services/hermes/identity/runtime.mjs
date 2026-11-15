@@ -11,7 +11,7 @@ import dialoguesTools from './dialogues-tools.json' with { type: 'json' };
 import { createHistoryCatalog } from './history.mjs';
 import { createBugHuntCatalog } from './bug-hunt.mjs';
 import { createOwnerTranscription } from './transcription.mjs';
-import { fileConfiguration } from '../files/configuration.mjs';
+import { identityFileConfiguration } from '../files/configuration.mjs';
 import { readProtectedJSON, runStdio as runControl } from './control.mjs';
 
 const invalid=()=>{throw new Error('IDENTITY_RUNTIME_CONFIG_NOT_READY');};
@@ -33,7 +33,7 @@ function checkSnapshot(path,root) {
  if(!stat.isFile()||stat.uid!==0||(stat.mode&0o022)||stat.nlink!==1||stat.size>67108864)invalid();
 }
 /** Собирает порты только из root-owned конфигураций, закреплённых за профилем. */
-export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,start,openPorts=connectPorts,transcriptionFactory=createOwnerTranscription,verifyDirectory=rootDirectory,verifySnapshot=checkSnapshot,readFiles=fileConfiguration}={}) {
+export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,start,openPorts=connectPorts,transcriptionFactory=createOwnerTranscription,verifyDirectory=rootDirectory,verifySnapshot=checkSnapshot,readFiles=identityFileConfiguration}={}) {
  const cache=new Map();
  let booting=0,stopped=false;const waiting=[];
  // AIDEV-NOTE: Холодная сборка MCP компилирует схемы; массовый старт не должен задерживать обратный Auth.

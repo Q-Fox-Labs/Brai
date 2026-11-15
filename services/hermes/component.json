@@ -259,6 +259,7 @@
       "services/hermes/identity/release-contract.json"
     ],
     "checks": [
+      "services/hermes/files/tests/configuration.test.mjs",
       "services/hermes/extensions/config/network-timeouts.json",
       "services/hermes/memos/embedding/adapter.test.mjs",
       "services/hermes/memos/tests/**",

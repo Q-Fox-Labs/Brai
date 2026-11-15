@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import errno
 import json
+import logging
 import os
 import re
 import signal
@@ -87,6 +88,14 @@ class Worker:
                         self.lifecycle_error = error
                         self.exit_code = 1
                         self.exited.set()
+                        diagnostic = getattr(error, 'diagnostic', None)
+                        diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
+                        reason, stage = diagnostic.get('reason', ''), diagnostic.get('stage', '')
+                        logging.getLogger(__name__).error(
+                            'HERMES_WORKER_STARTUP_FAILED type=%s reason=%s stage=%s',
+                            type(error).__name__,
+                            reason if isinstance(reason, str) and re.fullmatch('[A-Z_]+', reason) else 'UNKNOWN',
+                            stage if isinstance(stage, str) and re.fullmatch('[a-z_]+', stage) else 'bootstrap')
                     claimed.set()
                     raise
                 claimed.set()
@@ -870,7 +879,7 @@ async def publish_delivery_file(file_path, *, broker=None):
 
 async def run(config_path):
     """Запустить relay и worker; остановить оба при штатном SIGTERM."""
-    from .network import start_relay
+    from .network import start_relay, close_relay
     from .tool_client import broker_call
     # У файлового bootstrap только привязанный по UID broker; старый fixed-owner порт запрещён.
     os.environ['BRAI_IDENTITY_MODE'] = 'worker'
@@ -890,8 +899,7 @@ async def run(config_path):
                 raise ValueError('Invalid browser egress socket')
             browser_relay = await start_relay(browser_egress, port=18081)
     except BaseException:
-        relay.close()
-        await relay.wait_closed()
+        await close_relay(relay)
         raise
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -908,10 +916,8 @@ async def run(config_path):
         exited.cancel()
         await asyncio.gather(exited, return_exceptions=True)
         if browser_relay is not None:
-            browser_relay.close()
-            await browser_relay.wait_closed()
-        relay.close()
-        await relay.wait_closed()
+            await close_relay(browser_relay)
+        await close_relay(relay)
     if worker.exit_code:
         raise SystemExit(worker.exit_code)
 

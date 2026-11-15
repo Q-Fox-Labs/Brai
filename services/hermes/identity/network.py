@@ -129,6 +129,19 @@ async def start_relay(socket_path, port=18080):
     return await asyncio.start_server(handle, "127.0.0.1", port, limit=BUFFER_SIZE)
 
 
+async def close_relay(server):
+    """Закрыть relay вместе с оставшимися клиентами после остановки native runtime.
+
+    Python 3.13+ ждёт клиентов в Server.wait_closed; незакрытый keep-alive
+    иначе удерживает уже завершившийся worker и скрывает его код ошибки.
+    """
+    server.close()
+    abort_clients = getattr(server, 'abort_clients', None)
+    if abort_clients is not None:
+        abort_clients()
+    await server.wait_closed()
+
+
 async def _main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", required=True)
