@@ -245,7 +245,7 @@ NativeRelease(None).bootstrap(Path('/unused'))
 for key in ('INVOCATION_ID', 'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE'):
     assert key not in os.environ
     assert (key + '=fixture-' + key + '\\0').encode() in Path('/proc/self/environ').read_bytes()
-subprocess.check_call([sys.executable, '-c', 'import os; assert all(k not in os.environ for k in (\"INVOCATION_ID\", \"MEMORY_PRESSURE_WATCH\", \"MEMORY_PRESSURE_WRITE\"))'])
+subprocess.check_call([sys.executable, '-B', '-c', 'import os; assert all(k not in os.environ for k in (\"INVOCATION_ID\", \"MEMORY_PRESSURE_WATCH\", \"MEMORY_PRESSURE_WRITE\"))'])
 """
         env={'PATH':'/usr/bin:/bin', 'PYTHONPATH':str(Path(__file__).resolve().parents[2]),
              'INVOCATION_ID':'fixture-INVOCATION_ID',
