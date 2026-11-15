@@ -61,6 +61,9 @@ async def run(config, fixture, native, receipt):
         settings['display']['platforms']['telegram']['streaming'] = False
         (home / 'config.yaml').write_text(json.dumps(settings))
         lock = root / 'pm.lock'; lock.touch(mode=0o600); os.chown(lock, uid, uid)
+        launcher = home.parent / 'worker_launcher.py'
+        launcher.write_text(fixture.WORKER_LAUNCHER)
+        launcher.chmod(0o444)
         broker = fixture.FixtureBroker(uid, configuration)
         model = fixture.FixtureModel(None, uid)
         for name, handler in (('broker.sock', broker.handle), ('model.sock', model.handle)):
@@ -131,7 +134,7 @@ async def run(config, fixture, native, receipt):
         async def launch():
             unit = 'brai-native-fixture-' + uuid.uuid4().hex
             args = fixture.worker_unit_args(unit, uid, 0, home, software, runtime, root / 'broker.sock',
-                root / 'model.sock', receipt['paths']['python'], lock,
+                root / 'model.sock', receipt['paths']['python'], lock, launcher,
                 dependency_paths={'venv': receipt['paths']['venv'], 'site-packages': receipt['paths']['sitePackages']})
             args.insert(args.index('/usr/bin/env'), '--setenv=BRAI_IDENTITY_INSTANCE=dev')
             process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
@@ -160,7 +163,9 @@ async def run(config, fixture, native, receipt):
             await resolver.mirror.app.update_queue.put(raw)
             await eventually(lambda: not resolver.mirror.snapshots, 'deferred')
             fixture.require(resolver.mirror.inbox.observe(profile, 123, 1)['state'] == 'captured', 'EARLY_ACK')
+            stage = 'first-worker-start'
             unit, process = await launch()
+            stage = 'first-automatic-reply'
             await eventually(lambda: len(deliveries) >= 1, 'first-delivery')
             await eventually(lambda: not resolver.turns, 'first-idle')
             fixture.require(resolver.mirror.inbox.observe(profile, 123, 1)['state'] == 'accepted', 'INPUT_NOT_ACCEPTED')
@@ -231,6 +236,7 @@ async def run(config, fixture, native, receipt):
                          processKills=2, modelRequests=len(model.requests), manualQueueResets=0)
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
+        proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
         if consumer is not None and consumer.done() and not consumer.cancelled():
             proof['consumerError'] = type(consumer.exception()).__name__ if consumer.exception() else None
     finally:
