@@ -266,6 +266,48 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mirror.snapshots, {})
         self.assertEqual(self.mirror.pending_snapshots, set())
 
+    async def test_rearmed_text_batch_retains_every_merged_update_after_pop(self):
+        batch = self.batch()
+        batch.adapter._text_batch_key = lambda event: 'route'
+        tasks = batch.adapter._pending_text_batch_tasks = {}
+        pending = batch.adapter._pending_text_batches
+        events = []
+        for ident in (1, 2):
+            item = self.capture(ident)
+            self.mirror.register_snapshot(f'123:{ident}', {'state': 'known', 'profile': PROFILE})
+            self.mirror.enter(f'123:{ident}', item)
+            await self.mirror.classify(f'123:{ident}', item)
+            event = NS(_brai_release_updates=[ident])
+            batch.tag(event, ident)
+            events.append(event)
+        first = asyncio.create_task(asyncio.Event().wait())
+        pending['route'] = events[0]
+        tasks['route'] = first
+        batch.track(first, events[0])
+        self.mirror.finish('123:1', {'completed': True})
+        popped, proceed = asyncio.Event(), asyncio.Event()
+        async def flush():
+            combined = pending.pop('route')
+            popped.set()
+            await proceed.wait()
+            await self.mirror.before_delivery(combined)
+            await self.mirror.accepted(combined, RECEIPT)
+        second = asyncio.create_task(flush())
+        tasks['route'] = second
+        batch.text(events[1], {'route': first}, 'after')
+        self.mirror.finish('123:2', {'completed': True})
+        await popped.wait()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        self.assertIn('123:1', self.mirror.snapshots)
+        self.assertIn('123:2', self.mirror.snapshots)
+        proceed.set()
+        await second
+        await asyncio.sleep(0)
+        self.assertEqual(self.mirror.snapshots, {})
+        for ident in (1, 2):
+            self.assertEqual(self.transport.observe(123, ident)['state'], 'accepted')
+
     async def test_cancelled_batch_without_receipt_requeues_automatically(self):
         item = self.capture()
         self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})

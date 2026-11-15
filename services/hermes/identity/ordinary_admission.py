@@ -666,7 +666,7 @@ class BatchOwnership:
         self.poisoned = False
 
     def has_input(self, key):
-        if any(not task.done() and key in keys for task, keys in self.task_inputs.items()):
+        if any(not task.done() and key in self.input_keys(event) for task, event in self.task_inputs.items()):
             return True
         events = [event for event, _ in self.detached.values()]
         for name in ('_pending_text_batches', '_pending_photo_batches', '_media_group_events'):
@@ -718,7 +718,7 @@ class BatchOwnership:
             if task in self.tasks:
                 raise ValueError('INGRESS_BATCH_TASK_DUPLICATE')
             self.tasks[task] = value
-            self.task_inputs[task] = self.input_keys(event)
+            self.task_inputs[task] = event
             def finished(done):
                 self.tasks.pop(done, None)
                 self.task_inputs.pop(done, None)
@@ -745,7 +745,7 @@ class BatchOwnership:
                 task = self.adapter._pending_text_batch_tasks.get(key)
                 if task is None or previous.get(key) is task:
                     raise ValueError('INGRESS_BATCH_TASK_UNAVAILABLE')
-                self.track(task, event)
+                self.track(task, existing)
             else:
                 raise ValueError('INGRESS_BATCH_STAGE_INVALID')
         except Exception:
