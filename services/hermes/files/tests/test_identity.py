@@ -27,6 +27,8 @@ from files.tests.test_files import Backend
 
 class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        # Личные файлы fixture должны оставаться закрытыми и при host umask 0002.
+        self.addCleanup(os.umask, os.umask(0o077))
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.uid = os.getuid()

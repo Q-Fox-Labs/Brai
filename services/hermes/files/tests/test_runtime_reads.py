@@ -24,6 +24,8 @@ from files.tests.test_files import Backend
 
 class RuntimeReadsTest(unittest.TestCase):
     def setUp(self):
+        # Fixture моделирует личный HOME, независимо от umask запускающего установщика.
+        self.addCleanup(os.umask, os.umask(0o077))
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
