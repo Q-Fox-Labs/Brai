@@ -46,6 +46,10 @@ async def run(config, fixture, native, receipt):
         stage = 'candidate-archive'
         fixture.stage_archive(fixture.candidate_archive(source, config['sourceSha']), runtime)
         stage = 'software-compose'
+        # Current accepted FileStore includes its private runtime reader.
+        # Extend the fixture catalog explicitly; admission still verifies every manifest byte.
+        if 'runtime_reads.py' not in fixture.FILES_PAYLOAD:
+            fixture.FILES_PAYLOAD = (*fixture.FILES_PAYLOAD, 'runtime_reads.py')
         software, _instructions, _files = fixture.prepare_software(root, runtime, native, receipt)
         stage = 'profile-prepare'
         uid = fixture.unused_uid()
