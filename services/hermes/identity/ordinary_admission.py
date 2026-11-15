@@ -666,6 +666,7 @@ class BatchOwnership:
         self.poisoned = False
 
     def has_input(self, key):
+        """Удерживать вход и после снятия batch с timer, пока его native dispatch не завершён."""
         if any(not task.done() and key in self.input_keys(event) for task, event in self.task_inputs.items()):
             return True
         events = [event for event, _ in self.detached.values()]
