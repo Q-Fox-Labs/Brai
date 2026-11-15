@@ -524,6 +524,7 @@ class Resolver:
 
     async def durable_reply(self, profile, owner, action, payload, ident, source_id):
         """Сохранить ответ только к реально допущенному исходному input этого worker."""
+        profile = {**profile, 'authorTelegramId': profile.get('authorTelegramId', profile['telegramId'])}
         if owner != profile['userId'] or self.reply_outbox is None:
             raise PermissionError('Reply owner mismatch')
         source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id)
@@ -555,7 +556,9 @@ class Resolver:
         metadata = payload['metadata']
         route = (str(payload['chat_id']), str(metadata.get('thread_id') or metadata.get('message_thread_id') or metadata.get('direct_messages_topic_id') or ''))
         active = await self._account(profile, route[0])
-        if any(active.get(key) != profile.get(key) for key in ('uid', 'profileId', 'userId', 'authorTelegramId', 'role', 'generation')):
+        # _account уже сверил UID, профиль, владельца и канонического автора
+        # через RouteLedger.owner; supervisor profile может не дублировать автора.
+        if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
             raise PermissionError('Reply owner binding changed')
         self._chat_generation(profile, route, body['generation'])
         self.authorize_delivery(profile, body['action'], payload)
