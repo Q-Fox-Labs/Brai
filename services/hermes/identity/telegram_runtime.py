@@ -287,9 +287,6 @@ class Resolver:
         if self.mirror is not None and self.mirror.restartable:
             from .reply_outbox import ReplyOutbox
             self.reply_outbox = ReplyOutbox(self.ledger.db, self._deliver_saved_reply)
-            recovered = self.reply_outbox.recover_legacy_binding_blocks()
-            if recovered:
-                _logger.warning('DURABLE_REPLY_BINDING_RECOVERED count=%s', recovered)
         self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None

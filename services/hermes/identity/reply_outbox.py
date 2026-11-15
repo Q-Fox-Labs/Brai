@@ -28,26 +28,21 @@ class ReplyOutbox:
         row = self.db.execute('SELECT state,receipt FROM reply_outbox WHERE id=?', (ident,)).fetchone()
         return json.loads(row[1]) if row and row[1] else None
 
-    def recover_legacy_binding_blocks(self):
-        """Вернуть только ответы, отвергнутые старым сравнением отсутствующего автора.
+    def retry_blocked(self, ident, owner, body, receipt):
+        """Адресно вернуть ошибочно запрещённую отправку после операторской проверки.
 
-        Прежний _deliver_saved_reply всегда отвергал такой profile до Bot API:
-        identity.resolve возвращает непустого автора, а profile.get — None.
-        Тело, адресат и ID сохраняются; обычная доставка заново проверяет права.
-        Новые отказы помечены error_kind и повторно сюда не попадают.
+        Сверяет неизменные ID, owner, тело и прежнюю квитанцию. Pending/sent
+        повторно не открывает; актуальные права проверяет обычный deliver.
         """
-        legacy = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
-        recovered = 0
-        for ident, raw, receipt in self.db.execute(
-                "SELECT id,body,receipt FROM reply_outbox WHERE state='blocked'").fetchall():
-            profile = json.loads(raw).get('profile', {})
-            author = profile.get('telegramId')
-            if ('authorTelegramId' not in profile and isinstance(author, str)
-                    and author.isascii() and author.isdecimal() and int(author) > 0
-                    and json.loads(receipt or 'null') == legacy):
-                recovered += self.db.execute(
-                    "UPDATE reply_outbox SET state='pending' WHERE id=? AND state='blocked'", (ident,)).rowcount
-        return recovered
+        row = self.db.execute('SELECT owner,body,state,receipt FROM reply_outbox WHERE id=?', (ident,)).fetchone()
+        if row is None or row[:2] != (owner, canonical(body)):
+            raise ValueError('OUTBOX_RETRY_CONFLICT')
+        if row[2] in ('pending', 'sending', 'sent'):
+            return False
+        if row[2] != 'blocked' or json.loads(row[3]) != receipt:
+            raise ValueError('OUTBOX_RETRY_CONFLICT')
+        return self.db.execute("UPDATE reply_outbox SET state='pending' WHERE id=? AND state='blocked' AND receipt=?",
+                               (ident, row[3])).rowcount == 1
 
     async def flush_owner(self, owner):
         """Отправить сохранённые ответы по порядку; один отказ не блокирует других владельцев."""
@@ -65,8 +60,6 @@ class ReplyOutbox:
                     result = {'success': False, 'retryable': True, 'error': 'Delivery pending'}
                 sent = result.get('success') is True and bool(result.get('message_id'))
                 blocked = result.get('retryable') is False
-                if blocked and not sent:
-                    result.setdefault('error_kind', 'blocked')
                 state = 'sent' if sent else 'blocked' if blocked else 'pending'
                 self.db.execute('UPDATE reply_outbox SET state=?,receipt=? WHERE id=?', (state, canonical(result), ident))
                 if state == 'pending':

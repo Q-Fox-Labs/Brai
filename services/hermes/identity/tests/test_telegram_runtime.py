@@ -98,68 +98,8 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body['profile']['authorTelegramId'], '123')
         self.assertNotIn('authorTelegramId', restored)
 
-    async def test_recovery_ignores_explicit_owner_and_nonlegacy_or_unknown_failure(self):
-        resolver = runtime.Resolver(NS())
-        self.addCleanup(resolver.ledger.close)
-        outbox = ReplyOutbox(resolver.ledger.db, AsyncMock())
-        forbidden = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
-        for label, saved, state, receipt in [
-                ('explicit', {**profile(), 'authorTelegramId': '123'}, 'blocked', forbidden),
-                ('different', profile(), 'blocked', {**forbidden, 'error': 'Revoked'}),
-                ('new', profile(), 'blocked', {**forbidden, 'error_kind': 'forbidden'}),
-                ('unknown', profile(), 'sending', forbidden)]:
-            ident = delivery_id(label)
-            outbox.enqueue(ident, RouteLedger.owner(saved), {'profile': saved})
-            resolver.ledger.db.execute('UPDATE reply_outbox SET state=?,receipt=? WHERE id=?',
-                                      (state, json.dumps(receipt), ident))
-        before = resolver.ledger.db.execute('SELECT * FROM reply_outbox ORDER BY seq').fetchall()
-        self.assertEqual(outbox.recover_legacy_binding_blocks(), 0)
-        self.assertEqual(resolver.ledger.db.execute('SELECT * FROM reply_outbox ORDER BY seq').fetchall(), before)
 
-    async def test_legacy_blocked_reply_recovers_saved_bytes_once_without_native_dispatch(self):
-        resolver = runtime.Resolver(NS())
-        self.addCleanup(resolver.ledger.close)
-        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
-        active = {**restored, 'authorTelegramId': '123'}
-        resolver.ledger.admit(restored, ('123', '77'), {'thread_id': '77'}, '55')
-        resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
-        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
-        ident = delivery_id('legacy-reply')
-        body = {'profile': restored, 'action': 'send', 'generation': 0,
-                'payload': {'chat_id': '123', 'content': 'Точный сохранённый ответ', 'metadata': {'thread_id': '77'}}}
-        outbox.enqueue(ident, RouteLedger.owner(restored), body)
-        before = resolver.ledger.db.execute('SELECT body FROM reply_outbox WHERE id=?', (ident,)).fetchone()[0]
-        forbidden = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
-        resolver.ledger.db.execute("UPDATE reply_outbox SET state='blocked',receipt=? WHERE id=?", (json.dumps(forbidden), ident))
-        self.assertEqual(outbox.recover_legacy_binding_blocks(), 1)
-        with patch.object(runtime, 'broker_call', AsyncMock(return_value=active)):
-            await outbox.flush()
-            await outbox.flush()
-        self.assertEqual(outbox.recover_legacy_binding_blocks(), 0)
-        self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
-        after = resolver.ledger.db.execute('SELECT body FROM reply_outbox WHERE id=?', (ident,)).fetchone()[0]
-        self.assertEqual(before, after)
-        resolver._deliver_route.assert_awaited_once()
-        self.assertEqual(resolver._deliver_route.call_args.args[2]['content'], 'Точный сохранённый ответ')
 
-    async def test_legacy_recovery_rechecks_revocation_and_never_rearms_new_denial(self):
-        resolver = runtime.Resolver(NS())
-        self.addCleanup(resolver.ledger.close)
-        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
-        resolver._deliver_route = AsyncMock()
-        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
-        ident = delivery_id('revoked-legacy-reply')
-        outbox.enqueue(ident, RouteLedger.owner(restored), {
-            'profile': restored, 'action': 'send', 'generation': 0,
-            'payload': {'chat_id': '123', 'metadata': {}}})
-        forbidden = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
-        resolver.ledger.db.execute("UPDATE reply_outbox SET state='blocked',receipt=?", (json.dumps(forbidden),))
-        self.assertEqual(outbox.recover_legacy_binding_blocks(), 1)
-        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=PermissionError('revoked'))):
-            await outbox.flush()
-        self.assertEqual(outbox.result(ident)['error_kind'], 'forbidden')
-        self.assertEqual(outbox.recover_legacy_binding_blocks(), 0)
-        resolver._deliver_route.assert_not_awaited()
 
     async def test_saved_reply_pause_blocks_transport(self):
         resolver = runtime.Resolver(NS())
@@ -173,6 +113,27 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(PermissionError):
                 await resolver._deliver_saved_reply(body)
         resolver._deliver_route.assert_not_awaited()
+
+    async def test_operator_retry_preserves_bytes_checks_receipt_and_never_reopens_sent(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        deliver = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        outbox = ReplyOutbox(resolver.ledger.db, deliver)
+        ident, owner = delivery_id('operator-retry'), RouteLedger.owner(profile())
+        body = {'action': 'send', 'payload': {'content': 'Сохранённый ответ'}}
+        outbox.enqueue(ident, owner, body)
+        receipt = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
+        resolver.ledger.db.execute("UPDATE reply_outbox SET state='blocked',receipt=?", (json.dumps(receipt),))
+        for wrong_owner, wrong_body, wrong_receipt in [
+                ('foreign', body, receipt), (owner, {'changed': True}, receipt), (owner, body, {})]:
+            with self.assertRaises(ValueError):
+                outbox.retry_blocked(ident, wrong_owner, wrong_body, wrong_receipt)
+        self.assertTrue(outbox.retry_blocked(ident, owner, body, receipt))
+        self.assertFalse(outbox.retry_blocked(ident, owner, body, receipt))
+        await outbox.flush()
+        self.assertFalse(outbox.retry_blocked(ident, owner, body, receipt))
+        self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
+        deliver.assert_awaited_once_with(body)
 
     async def test_delayed_batch_cannot_cross_auth_generation_change(self):
         resolver=runtime.Resolver.__new__(runtime.Resolver)
