@@ -12,10 +12,12 @@ import uuid
 from unittest.mock import patch
 
 
-async def eventually(check, label):
+async def eventually(check, label, watch=None):
     """Дождаться наблюдаемого исхода; срок относится только к исполнению fixture."""
     async with asyncio.timeout(180):
         while not check():
+            if watch is not None and watch.returncode is not None:
+                raise ValueError('WORKER_EXITED')
             await asyncio.sleep(.05)
 
 
@@ -51,6 +53,9 @@ async def run(config, fixture, native, receipt):
         if 'runtime_reads.py' not in fixture.FILES_PAYLOAD:
             fixture.FILES_PAYLOAD = (*fixture.FILES_PAYLOAD, 'runtime_reads.py')
         software, _instructions, _files = fixture.prepare_software(root, runtime, native, receipt)
+        import system_instructions
+        stable_instructions = root / 'system-instructions'
+        system_instructions.publish(software / 'instructions', stable_instructions)
         stage = 'profile-prepare'
         uid = fixture.unused_uid()
         home = root / 'profiles/personal'
@@ -137,6 +142,7 @@ async def run(config, fixture, native, receipt):
                 root / 'model.sock', receipt['paths']['python'], lock, launcher,
                 dependency_paths={'venv': receipt['paths']['venv'], 'site-packages': receipt['paths']['sitePackages']})
             args.insert(args.index('/usr/bin/env'), '--setenv=BRAI_IDENTITY_INSTANCE=dev')
+            args.insert(args.index('/usr/bin/env'), '--property=BindReadOnlyPaths=' + str(stable_instructions) + ':/opt/brai-profile/system-instructions')
             process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, env={'PATH': '/usr/bin:/bin'}, start_new_session=True)
             workers.append((unit, process))
@@ -166,7 +172,7 @@ async def run(config, fixture, native, receipt):
             stage = 'first-worker-start'
             unit, process = await launch()
             stage = 'first-automatic-reply'
-            await eventually(lambda: len(deliveries) >= 1, 'first-delivery')
+            await eventually(lambda: len(deliveries) >= 1, 'first-delivery', watch=process)
             await eventually(lambda: not resolver.turns, 'first-idle')
             fixture.require(resolver.mirror.inbox.observe(profile, 123, 1)['state'] == 'accepted', 'INPUT_NOT_ACCEPTED')
             proof['scenarios'].append('worker-absent-automatic-admission')
