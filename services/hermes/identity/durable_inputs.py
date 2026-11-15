@@ -44,6 +44,10 @@ async def pump(mirror):
                     profile = current
                     await asyncio.to_thread(mirror.inbox.capture, profile, update, mirror.app.bot.id)
                     observed = await asyncio.to_thread(mirror.inbox.observe, profile, row['bot_id'], row['update_id'])
+                    if observed['state'] == 'blocked':
+                        # AIDEV-NOTE: Запрет профиля сохраняет неопределённый вход и после перезапуска транспорта.
+                        await asyncio.to_thread(mirror.transport.transition, row['bot_id'], row['update_id'], row['state'], 'blocked')
+                        return
                     binding = await asyncio.to_thread(mirror.inbox.delivery_for, profile, row['bot_id'], row['update_id'])
                     if row['state'] == 'handing_off' or observed['state'] == 'handing_off' or binding is not None:
                         if binding is None or mirror.reconcile_delivery is None:

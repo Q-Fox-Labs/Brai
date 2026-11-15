@@ -426,6 +426,37 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.mirror.app.update_queue.empty())
         self.assertEqual(self.transport.observe(123, 1)['state'], 'handing_off')
 
+    async def test_blocked_profile_input_stays_blocked_after_restart_and_does_not_replay(self):
+        self.handing_off()
+        self.inbox.markblocked(PROFILE, 123, 1)
+        self.capture(2)
+        self.mirror = self.new_mirror()
+        self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'not_received'})
+        await self.mirror.pump()
+        self.mirror.reconcile_delivery.assert_not_awaited()
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'blocked')
+        self.assertEqual(self.transport.observe(123, 1)['state'], 'blocked')
+        self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 2)
+        self.mirror = self.new_mirror()
+        self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'not_received'})
+        await self.mirror.pump()
+        self.mirror.reconcile_delivery.assert_not_awaited()
+        self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 2)
+        self.assertTrue(self.mirror.app.update_queue.empty())
+
+    async def test_blocked_profile_input_with_captured_transport_is_not_replayed(self):
+        binding = self.handing_off()
+        row = self.transport.observe(123, 1)
+        self.transport.not_received(123, 1, row['digest'])
+        self.inbox.markblocked(PROFILE, 123, 1)
+        self.mirror = self.new_mirror()
+        self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'not_received'})
+        await self.mirror.pump()
+        self.mirror.reconcile_delivery.assert_not_awaited()
+        self.assertEqual(self.transport.observe(123, 1)['state'], 'blocked')
+        self.assertEqual(self.inbox.delivery_for(PROFILE, 123, 1), binding)
+        self.assertTrue(self.mirror.app.update_queue.empty())
+
     async def test_pause_and_changed_identity_never_replay(self):
         self.capture()
         self.inbox.journal.set_chat_pause(PROFILE, ('42', ''), True)
