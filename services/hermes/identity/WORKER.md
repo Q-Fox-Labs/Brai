@@ -237,3 +237,9 @@ worker/ingress outbox. IpcAdapter не создаёт для того же от�
 delivery obligation; `delivery_pending` не запускает plain-text fallback.
 Legacy input без durable ID сохраняет native поведение. Старые журналы и
 неоднозначные входы не удаляются и не переисполняются этим изменением.
+
+Resolver принадлежит сроку жизни native Telegram adapter. При неудачном connect
+native вызывает `adapter.disconnect`, сохраняя загруженный plugin. После штатного
+disconnect закрываются ingress hooks и resolver; новый primary допускается
+только после завершения этой очистки. Unload plugin использует ту же очистку.
+Повторные подключения и сроки ожидания остаются у native SDK.
