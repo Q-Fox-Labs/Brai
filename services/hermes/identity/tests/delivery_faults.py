@@ -86,6 +86,12 @@ async def run(config, fixture, native, receipt):
         bot = Bot('123:fixture'); bot._bot_user = User(123, 'fixture', True)
         deliveries, consumed, dispatches = [], [], []
         fail_send = False
+        reply_attempts = []
+        original_reply = telegram_runtime.Resolver.durable_reply
+        async def traced_reply(instance, owner_profile, owner, action, payload, ident, source_id):
+            reply_attempts.append({'id': ident, 'input': source_id, 'action': action,
+                                   'content': payload.get('content'), 'stage': stage})
+            return await original_reply(instance, owner_profile, owner, action, payload, ident, source_id)
         batch_mode = False
         batch_owner = None
         batch_popped, batch_send = asyncio.Event(), asyncio.Event()
@@ -221,7 +227,7 @@ async def run(config, fixture, native, receipt):
                 fixture.require(not fixture.cgroup_pids(state['ControlGroup'], unit), 'CLEANUP_CGROUP_SURVIVED')
                 await process.wait()
 
-        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth):
+        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth), patch.object(telegram_runtime.Resolver, 'durable_reply', traced_reply):
             resolver = create()
             await resolver.mirror.hydrate()
             supervisor = asyncio.create_task(resolver._supervise())
@@ -344,6 +350,7 @@ async def run(config, fixture, native, receipt):
                          processKills=3, mergedInputs=2, mergedModelRequests=1, modelRequests=len(model.requests), manualQueueResets=0)
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
+        proof['syntheticReplyAttempts'] = locals().get('reply_attempts', [])
         if str(error) in {'FAULT_KILL_FAILED', 'FAULT_NOT_OBSERVED', 'TOPIC_ORDER_CHANGED', 'WORKER_EXITED',
                           'EARLY_ACK', 'INPUT_NOT_ACCEPTED', 'LOST_ACK_REEXECUTED', 'OUTBOX_RERAN_MODEL',
                           'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN',
