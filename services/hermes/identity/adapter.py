@@ -31,6 +31,12 @@ def make_adapter(config, platform, peer, publish_file):
             return (getattr(result, 'error_kind', None) in {'delivery_pending', 'forbidden'}
                     or super()._send_retry_is_final(result))
 
+        async def _record_delivery_obligation(self, *args, **kwargs):
+            """Один владелец ответа: современный IPC input сохраняет worker/ingress outbox."""
+            if getattr(self, '_brai_delivery_journal', None) is not None and input_delivery.get() is not None:
+                return None
+            return await super()._record_delivery_obligation(*args, **kwargs)
+
         def is_interactive_actor(self, user_id):
             """Допустить actual actor только внутри подтверждённого Root callback."""
             return self._interactive_actor.get() == str(user_id)
@@ -157,12 +163,6 @@ def make_adapter(config, platform, peer, publish_file):
                     return SendResult(success=False, error='Reply saved for delivery', retryable=False,
                                       error_kind='delivery_pending')
                 return SendResult(success=False, error='Ingress delivery unavailable or outcome unknown')
-
-        def _send_retry_is_final(self, result):
-            """Сохранённый ответ повторяет outbox; native fallback не создаёт второй ответ."""
-            if getattr(result, 'error_kind', None) == 'delivery_pending':
-                return True
-            return super()._send_retry_is_final(result)
 
         async def create_handoff_thread(self, parent_chat_id, name):
             """Оставить создание фоновой темы ingress, без отдельной темы на каждое cron-задание."""

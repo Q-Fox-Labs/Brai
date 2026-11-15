@@ -57,6 +57,8 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                 super().__init__(config, 'telegram')
             def _send_retry_is_final(self, result):
                 return getattr(result, 'error_kind', None) == 'forbidden'
+            async def _record_delivery_obligation(self, *args, **kwargs):
+                return 'native-obligation'
             def _mark_connected(self):
                 self._running = True
             def _mark_disconnected(self):
@@ -137,6 +139,19 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(adapter._send_retry_is_final(NS(error_kind='delivery_pending')))
         self.assertTrue(adapter._send_retry_is_final(NS(error_kind='forbidden')))
         self.assertFalse(adapter._send_retry_is_final(NS(error_kind='formatting')))
+
+    async def test_durable_input_has_one_delivery_owner_without_disabling_legacy(self):
+        from identity.scope import input_delivery
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)
+        self.assertEqual(await adapter._record_delivery_obligation(), 'native-obligation')
+        adapter._brai_delivery_journal = NS()
+        self.assertEqual(await adapter._record_delivery_obligation(), 'native-obligation')
+        token = input_delivery.set('root-admitted-input')
+        try:
+            self.assertIsNone(await adapter._record_delivery_obligation())
+        finally:
+            input_delivery.reset(token)
+        self.assertEqual(await adapter._record_delivery_obligation(), 'native-obligation')
 
     async def test_failed_persistence_does_not_claim_saved_reply_or_call_network(self):
         from identity.delivery_journal import delivery_id
