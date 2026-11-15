@@ -92,6 +92,15 @@ class DeliveryJournal:
             if changed != 1:
                 raise ValueError('DELIVERY_INPUT_STATE_CHANGED')
 
+    def decline_input(self, ident, digest):
+        """Native явно не принял input: разрешить последующую передачу, не заявляя обработку."""
+        self.identity(ident, digest)
+        with self.open() as db:
+            changed = db.execute("DELETE FROM input_deliveries WHERE id=? AND digest=? AND phase='dispatching'",
+                                 (ident, digest)).rowcount
+            if changed != 1:
+                raise ValueError('DELIVERY_INPUT_STATE_CHANGED')
+
     def complete_turn(self, turn_id):
         """Закрепить окончание native task для сверки после потери уведомления."""
         with self.open() as db:

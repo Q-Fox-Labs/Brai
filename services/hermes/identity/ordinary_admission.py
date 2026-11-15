@@ -494,6 +494,9 @@ class Mirror:
                 row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update.update_id)
                 if row['state'] != 'captured':
                     return True
+                consent = await asyncio.to_thread(self.inbox.journal.chat_state, profile, (row['chat'], row['thread']))
+                if consent['paused'] or consent['generation'] != row['chat_generation']:
+                    return True
                 if self.input_routes.get(uid, route) != route or self.input_ready is not None and not await self.input_ready(profile, route):
                     return True
                 self.input_routes[uid] = route
@@ -566,6 +569,10 @@ class Mirror:
 
     async def accepted(self, event, receipt):
         import asyncio
+        if self.restartable and receipt.get('delivery_state') == 'not_received':
+            # Временный native busy/refusal не является обработкой сообщения.
+            # Сверяемый handing_off остаётся в очереди до следующего supervisor.
+            return
         receipt = {key: value for key, value in receipt.items() if key != 'delivery_state'}
         ids = getattr(event, '_brai_release_updates', None)
         if not isinstance(ids, list) or not ids:

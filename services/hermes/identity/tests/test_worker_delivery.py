@@ -9,7 +9,7 @@ import sys
 import tempfile
 from types import ModuleType, SimpleNamespace as NS
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.adapter import make_adapter
@@ -106,6 +106,39 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_kind, 'forbidden')
         self.assertFalse(result.retryable)
         self.assertEqual(calls, ['send'])
+
+    async def test_saved_reply_owns_retry_without_claiming_delivery_or_blocking_outbox(self):
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+        peer = NS(call=AsyncMock(return_value={'success': False, 'retryable': True, 'error': 'offline'}))
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, AsyncMock())
+        store = DeliveryJournal(self.root / 'delivery.sqlite3', 'owner')
+        adapter._brai_delivery_journal = store
+        token = input_delivery.set(delivery_id('input'))
+        try:
+            result = await adapter.send('123', 'Saved reply', metadata={'thread_id': '77'})
+            self.assertFalse(result.success)
+            self.assertFalse(result.retryable)
+            self.assertEqual(result.error_kind, 'delivery_pending')
+            self.assertEqual(store.pending_outputs()[0]['state'], 'pending')
+            self.assertEqual(peer.call.await_count, 1)
+        finally:
+            input_delivery.reset(token)
+
+    async def test_failed_persistence_does_not_claim_saved_reply_or_call_network(self):
+        from identity.delivery_journal import delivery_id
+        from identity.scope import input_delivery
+        peer = NS(call=AsyncMock())
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, AsyncMock())
+        adapter._brai_delivery_journal = NS(queue_output=Mock(side_effect=ValueError('Cannot persist')))
+        token = input_delivery.set(delivery_id('input'))
+        try:
+            result = await adapter.send('123', 'Reply', metadata={'thread_id': '77'})
+            self.assertFalse(result.success)
+            self.assertIsNot(getattr(result, 'retryable', None), False)
+            peer.call.assert_not_awaited()
+        finally:
+            input_delivery.reset(token)
 
     async def test_final_edit_uses_current_dispatch_topic_without_duplicate_send(self):
         calls = []

@@ -182,7 +182,8 @@
               "enum": [
                 "accepted",
                 "completed",
-                "interrupted"
+                "interrupted",
+                "not_received"
               ]
             }
           },
@@ -1197,7 +1198,8 @@
                       "enum": [
                         "accepted",
                         "completed",
-                        "interrupted"
+                        "interrupted",
+                        "not_received"
                       ]
                     }
                   },

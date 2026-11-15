@@ -582,6 +582,9 @@ class Worker:
             context = input_delivery.set(delivery_id)
             try:
                 value = await self._dispatch_native(event, owner)
+                if value.get('accepted') is False:
+                    self.delivery_journal.decline_input(delivery_id, input_digest)
+                    return {**value, 'delivery_state': 'not_received'}
                 self.delivery_journal.accept_input(delivery_id, input_digest, value)
                 if value.get('turn_id') and value['turn_id'] not in self.active:
                     self.delivery_journal.complete_turn(value['turn_id'])
@@ -643,6 +646,9 @@ class Worker:
         try:
             key = self.adapter._event_session_key(message)
             before = self.adapter._session_tasks.get(key)
+            if (self.delivery_journal is not None and not str(getattr(message, 'text', '')).lstrip().startswith('/')
+                    and any(other != key and not task.done() for other, task in self.adapter._session_tasks.items())):
+                return {'accepted': False, 'turn_id': None}
             typing = self.adapter.start_turn_typing(message)
             await self.ensure_tools()
             await self.ensure_user_policy()

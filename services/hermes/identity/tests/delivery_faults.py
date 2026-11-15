@@ -37,6 +37,7 @@ async def run(config, fixture, native, receipt):
     root.mkdir(mode=0o711)
     identity = root.stat().st_dev, root.stat().st_ino
     workers, servers, log_tasks = [], [], []
+    deliveries = []
     consumer = supervisor = None
     resolver = None
     proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': config['sourceSha'],
@@ -70,8 +71,11 @@ async def run(config, fixture, native, receipt):
         launcher.write_text(fixture.WORKER_LAUNCHER)
         launcher.chmod(0o444)
         broker = fixture.FixtureBroker(uid, configuration)
+        broker_runs = [broker]
+        async def broker_port(reader, writer):
+            await broker.handle(reader, writer)
         model = fixture.FixtureModel(None, uid)
-        for name, handler in (('broker.sock', broker.handle), ('model.sock', model.handle)):
+        for name, handler in (('broker.sock', broker_port), ('model.sock', model.handle)):
             path = root / name
             servers.append(await asyncio.start_unix_server(handler, path=path, limit=65537))
             path.chmod(0o666)
@@ -137,6 +141,12 @@ async def run(config, fixture, native, receipt):
                 resolver.mirror.finish(key, {'completed': True, 'deferred': deferred})
 
         async def launch():
+            nonlocal broker
+            # Each process gets the unchanged fixture backend contract and its
+            # own bounded diagnostic transcript. Product queues stay untouched.
+            if workers:
+                broker = fixture.FixtureBroker(uid, configuration)
+                broker_runs.append(broker)
             unit = 'brai-native-fixture-' + uuid.uuid4().hex
             args = fixture.worker_unit_args(unit, uid, 0, home, software, runtime, root / 'broker.sock',
                 root / 'model.sock', receipt['paths']['python'], lock, launcher,
@@ -268,6 +278,8 @@ async def run(config, fixture, native, receipt):
             proof['code'] = str(error)
         proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
         proof['controllerUid'] = os.geteuid()
+        proof['deliverySummary'] = [{'syntheticMarker': 'SYNTHETIC_OK' in p.get('content', ''),
+                                     'thread': p.get('metadata', {}).get('thread_id')} for p in deliveries]
         if consumer is not None and consumer.done() and not consumer.cancelled():
             proof['consumerError'] = type(consumer.exception()).__name__ if consumer.exception() else None
     finally:

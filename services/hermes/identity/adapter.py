@@ -113,17 +113,19 @@ def make_adapter(config, platform, peer, publish_file):
                     and (name == 'send' or (name == 'edit_message' and payload.get('finalize')))):
                 from tools.approval_conversation import pending_delivery
                 pending = pending_delivery(getattr(self, 'gateway_runner', None), source[2], payload.get('content'))
+            ident = None
+            saved = False
             try:
                 wire = {'payload': payload, 'scope_id': delivery_scope.get()}
                 journal = getattr(self, '_brai_delivery_journal', None)
                 persistent = (journal is not None and input_delivery.get() is not None
                     and name in {'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation'})
-                ident = None
                 if persistent:
                     from .delivery_journal import delivery_id
                     ident = delivery_id(['output', uuid.uuid4().hex])
                     wire['input_delivery_id'] = input_delivery.get()
                     journal.queue_output(ident, name, wire)
+                    saved = True
                 value = await peer.call('send', {'action': name, **wire, **({'delivery_id': ident} if ident else {})})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
                     raise ValueError('invalid send result')
@@ -131,6 +133,10 @@ def make_adapter(config, platform, peer, publish_file):
                     journal.output_state(ident, 'sent', value)
                 elif ident and value.get('retryable') is False:
                     journal.output_state(ident, 'blocked', value)
+                if ident and not value.get('success') and value.get('retryable') is not False:
+                    # Durable outbox owns the retry. Native must not create a second
+                    # logical output for the same failed transport attempt.
+                    value = {**value, 'retryable': False, 'error_kind': 'delivery_pending'}
                 fields = ('success', 'message_id', 'error', 'raw_response', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind')
                 result = SendResult(**{key: value[key] for key in fields if key in value})
                 if pending and result.success and result.message_id:
@@ -142,6 +148,9 @@ def make_adapter(config, platform, peer, publish_file):
                     name, type(error).__name__, getattr(error, 'code', None))
                 if isinstance(error, RpcError) and error.code == -32003:
                     return SendResult(success=False, error='Delivery forbidden', retryable=False, error_kind='forbidden')
+                if saved:
+                    return SendResult(success=False, error='Reply saved for delivery', retryable=False,
+                                      error_kind='delivery_pending')
                 return SendResult(success=False, error='Ingress delivery unavailable or outcome unknown')
 
         async def create_handoff_thread(self, parent_chat_id, name):

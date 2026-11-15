@@ -9,7 +9,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from telegram import Bot, User
+from telegram import Bot, Update, User
 from identity.chat_journal import IdentityJournal
 from identity.delivery_journal import DeliveryJournal, delivery_id
 from identity.ordinary_admission import Mirror
@@ -116,6 +116,16 @@ class WorkerReceiptsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again['delivery_state'], 'interrupted')
         self.worker._dispatch_native.assert_awaited_once()
 
+    async def test_native_refusal_keeps_input_retryable_instead_of_fake_handled(self):
+        self.worker._dispatch_native.side_effect = [
+            {'accepted': False, 'turn_id': None}, RECEIPT]
+        first = await self.worker.dispatch({}, 'owner', IDENT, DIGEST)
+        self.assertEqual(first['delivery_state'], 'not_received')
+        self.assertEqual(await self.worker.dispatch_status('owner', IDENT, DIGEST), {'state': 'not_received'})
+        second = await self.worker.dispatch({}, 'owner', IDENT, DIGEST)
+        self.assertTrue(second['accepted'])
+        self.assertEqual(self.worker._dispatch_native.await_count, 2)
+
 
 class PumpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -168,6 +178,42 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         await self.mirror.pump()
         self.assertEqual([self.mirror.app.update_queue.get_nowait().update_id for _ in range(3)], [3, 1, 2])
 
+    async def test_voice_and_media_keep_original_file_ids_while_agent_is_offline(self):
+        media = [('voice', {'file_id': 'voice-file', 'file_unique_id': 'voice-unique', 'duration': 1}),
+                 ('document', {'file_id': 'document-file', 'file_unique_id': 'document-unique', 'file_name': 'fixture.txt'})]
+        for ident, (kind, value) in enumerate(media, 10):
+            raw = update(ident).to_dict()
+            raw['message'].pop('text')
+            raw['message'][kind] = value
+            item = Update.de_json(raw, self.bot)
+            self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+            self.inbox.capture(PROFILE, item, 123)
+        self.mirror.input_ready.return_value = False
+        await self.mirror.pump()
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        self.mirror.input_ready.return_value = True
+        await self.mirror.pump()
+        for kind, value in media:
+            queued = self.mirror.app.update_queue.get_nowait()
+            self.assertEqual(getattr(queued.message, kind).file_id, value['file_id'])
+            self.assertEqual(getattr(queued.message, kind).file_unique_id, value['file_unique_id'])
+
+    async def test_service_topic_creation_is_handled_without_worker_dispatch(self):
+        raw = update(7).to_dict()
+        raw['message'].pop('text')
+        raw['message']['forum_topic_created'] = {'name': 'Fixture', 'icon_color': 7322096}
+        item = Update.de_json(raw, self.bot)
+        self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+        self.inbox.capture(PROFILE, item, 123)
+        self.mirror.register_snapshot('123:7', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:7', item)
+        self.assertFalse(await self.mirror.classify('123:7', item))
+        self.assertFalse(self.mirror.finish('123:7', {'completed': True}))
+        await self.mirror.recovery_tasks['123:7']
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 7)['state'], 'handled')
+        self.assertEqual(self.transport.observe(123, 7)['state'], 'handled')
+        self.assertEqual(self.mirror.snapshots, {})
+
     async def test_frontend_completion_before_rpc_does_not_ack_input(self):
         item = self.capture()
         self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
@@ -189,6 +235,29 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         await self.mirror.accepted(event, RECEIPT)
         self.assertTrue(self.mirror.finish('123:1', {'completed': True}))
         self.assertEqual(self.mirror.input_routes, {})
+
+    async def test_native_refusal_leaves_claim_deferred_and_automatically_requeued(self):
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        await self.mirror.classify('123:1', item)
+        event = NS(_brai_release_updates=[1])
+        await self.mirror.before_delivery(event)
+        await self.mirror.accepted(event, {'accepted': False, 'turn_id': None, 'delivery_state': 'not_received'})
+        self.assertFalse(self.mirror.finish('123:1', {'completed': True}))
+        self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'not_received'})
+        await self.mirror.pump()
+        self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
+
+    async def test_pause_preflight_defers_before_media_or_dispatch(self):
+        self.inbox.journal.set_chat_pause(PROFILE, ('42', ''), True)
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        self.assertTrue(await self.mirror.classify('123:1', item))
+        self.assertFalse(self.mirror.finish('123:1', {'completed': True, 'deferred': True}))
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
 
     async def test_lost_rpc_ack_reconciles_instead_of_reexecuting(self):
         binding = self.handing_off()
