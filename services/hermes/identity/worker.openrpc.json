@@ -181,7 +181,8 @@
               "type": "string",
               "enum": [
                 "accepted",
-                "completed"
+                "completed",
+                "interrupted"
               ]
             }
           },
@@ -1169,7 +1170,8 @@
                 "not_received",
                 "dispatching",
                 "accepted",
-                "completed"
+                "completed",
+                "interrupted"
               ]
             },
             "receipt": {
@@ -1194,7 +1196,8 @@
                       "type": "string",
                       "enum": [
                         "accepted",
-                        "completed"
+                        "completed",
+                        "interrupted"
                       ]
                     }
                   },

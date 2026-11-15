@@ -514,10 +514,10 @@ class Resolver:
         turn = self.turns.get(profile['uid'])
         if turn is not None and receipt.get('turn_id'):
             turn['workerTurnId'] = receipt['turn_id']
-            if result.get('state') == 'completed':
-                await self.end(profile, receipt['turn_id'])
-            else:
-                self._bridge(profile).known_turns.add(receipt['turn_id'])
+            bridge = self._bridge(profile)
+            bridge.known_turns.add(receipt['turn_id'])
+            if result.get('state') in ('completed', 'interrupted'):
+                await bridge._close_turn(receipt['turn_id'])
         elif turn is not None and result.get('state') == 'not_received' and turn.get('workerTurnId') is None:
             await self.end(profile, None)
         return result
@@ -554,7 +554,9 @@ class Resolver:
         profile, payload = body['profile'], body['payload']
         metadata = payload['metadata']
         route = (str(payload['chat_id']), str(metadata.get('thread_id') or metadata.get('message_thread_id') or metadata.get('direct_messages_topic_id') or ''))
-        await self._account(profile, route[0])
+        active = await self._account(profile, route[0])
+        if any(active.get(key) != profile.get(key) for key in ('uid', 'profileId', 'userId', 'authorTelegramId', 'role', 'generation')):
+            raise PermissionError('Reply owner binding changed')
         self._chat_generation(profile, route, body['generation'])
         self.authorize_delivery(profile, body['action'], payload)
         def current():

@@ -536,7 +536,17 @@ class Worker:
         if owner != self.user_id or self.delivery_journal is None:
             raise RpcError(-32602, 'Durable delivery unavailable')
         async with self.delivery_lock:
-            return self.delivery_journal.input_status(delivery_id, input_digest)
+            return self._delivery_status(delivery_id, input_digest)
+
+    def _delivery_status(self, ident, digest):
+        """Не держать ingress навечно за ходом прежнего процесса; неизвестное действие не повторять."""
+        status = self.delivery_journal.input_status(ident, digest)
+        receipt = status.get('receipt') or {}
+        if (status['state'] == 'accepted' and receipt.get('turn_id')
+                and receipt['turn_id'] not in self.active and self.operational.is_set()
+                and not any(not task.done() for task in getattr(self.adapter, '_session_tasks', {}).values())):
+            return {**status, 'state': 'interrupted'}
+        return status
 
     async def flush_outputs(self, owner):
         """Повторить только доставку готовых ответов; native задание не запускается."""
@@ -563,8 +573,8 @@ class Worker:
             raise RpcError(-32602, 'Durable delivery unavailable')
         from .scope import input_delivery
         async with self.delivery_lock:
-            previous = self.delivery_journal.input_status(delivery_id, input_digest)
-            if previous['state'] in ('accepted', 'completed'):
+            previous = self._delivery_status(delivery_id, input_digest)
+            if previous['state'] in ('accepted', 'completed', 'interrupted'):
                 return {**previous['receipt'], 'delivery_state': previous['state']}
             if previous['state'] != 'not_received':
                 raise RpcError(-32004, 'Input dispatch outcome requires reconciliation')
@@ -677,6 +687,8 @@ class Worker:
                 # Resume не исполняет старые resume_pending или native queue.
                 state['recoveryBlocked'] = False
             token = None
+            if self.delivery_journal is not None and message._gateway_accepted and task is not None and task is before:
+                token = next((value for value, record in self.active.items() if record[0] == key), None)
             if message._gateway_accepted and task is not None and task is not before:
                 # Native переносит pending follow-up в новую drain task того же session key.
                 # Один живой допуск ingress покрывает всю цепочку до освобождения сессии.

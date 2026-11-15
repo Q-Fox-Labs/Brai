@@ -104,6 +104,18 @@ class WorkerReceiptsTests(unittest.IsolatedAsyncioTestCase):
         await dispatch
         self.assertEqual((await status)['state'], 'accepted')
 
+    async def test_old_process_turn_does_not_hold_future_inputs_forever(self):
+        await self.worker.dispatch({}, 'owner', IDENT, DIGEST)
+        self.worker.active.clear()
+        self.worker.adapter = NS(_session_tasks={})
+        self.worker.operational.set()
+        status = await self.worker.dispatch_status('owner', IDENT, DIGEST)
+        self.assertEqual(status['state'], 'interrupted')
+        self.assertEqual(status['receipt'], RECEIPT)
+        again = await self.worker.dispatch({}, 'owner', IDENT, DIGEST)
+        self.assertEqual(again['delivery_state'], 'interrupted')
+        self.worker._dispatch_native.assert_awaited_once()
+
 
 class PumpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

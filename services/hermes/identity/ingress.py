@@ -149,7 +149,7 @@ class Bridge:
                 asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(self._close_turn(turn_id)))
         if callable(self.input_receipt):
             await self.input_receipt(event, result)
-        if result.get('delivery_state') == 'completed' and turn_id in self.known_turns:
+        if result.get('delivery_state') in ('completed', 'interrupted') and turn_id in self.known_turns:
             await self._close_turn(turn_id)
         return result
 

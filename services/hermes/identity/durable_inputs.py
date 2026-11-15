@@ -49,7 +49,7 @@ async def pump(mirror):
                         if binding is None or mirror.reconcile_delivery is None:
                             return
                         result = await mirror.reconcile_delivery(profile, binding)
-                        if result.get('state') in ('accepted', 'completed'):
+                        if result.get('state') in ('accepted', 'completed', 'interrupted'):
                             receipt = result['receipt']
                             accepted = receipt.get('accepted') is True
                             method = mirror.inbox.markaccepted if accepted else mirror.inbox.markhandled
