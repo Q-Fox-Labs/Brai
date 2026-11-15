@@ -153,6 +153,8 @@ async def run(config, fixture, native, receipt):
             killed = await asyncio.to_thread(subprocess.run,
                 ['/usr/bin/systemctl', 'kill', '--kill-whom=all', '--signal=SIGKILL', unit],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
+            if killed.returncode:
+                proof['killFailure'] = {'rc': killed.returncode, 'diagnostic': killed.stderr.decode('utf-8', 'replace')}
             fixture.require(killed.returncode == 0, 'FAULT_KILL_FAILED')
             await process.wait()
             fixture.require(process.returncode != 0, 'FAULT_NOT_OBSERVED')
@@ -242,6 +244,10 @@ async def run(config, fixture, native, receipt):
                          processKills=2, modelRequests=len(model.requests), manualQueueResets=0)
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
+        if str(error) in {'FAULT_KILL_FAILED', 'FAULT_NOT_OBSERVED', 'TOPIC_ORDER_CHANGED', 'WORKER_EXITED',
+                          'EARLY_ACK', 'INPUT_NOT_ACCEPTED', 'LOST_ACK_REEXECUTED', 'OUTBOX_RERAN_MODEL',
+                          'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN'}:
+            proof['code'] = str(error)
         proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
         if consumer is not None and consumer.done() and not consumer.cancelled():
             proof['consumerError'] = type(consumer.exception()).__name__ if consumer.exception() else None
