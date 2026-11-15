@@ -22,7 +22,7 @@ export async function issueCode(pool:Pool,secret:string,telegramId:string) {
  const client=await pool.connect();
  try {
   await client.query("BEGIN");
-  const user=await client.query("SELECT i.user_id FROM brai_identity i JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' FOR UPDATE OF i",[telegramId]);
+  const user=await client.query("SELECT i.user_id FROM brai_identity i JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' AND i.role IN ('creator','admin','user') FOR UPDATE OF i",[telegramId]);
   if(!user.rowCount){await client.query("COMMIT");return null;}
   const id:string=user.rows[0].user_id;
   // AIDEV-NOTE: FOR UPDATE OF i мог ждать отвязку; её DELETE аккаунта не обновляет строку i.
@@ -43,7 +43,7 @@ export async function consumeCodeGrant(pool:Pool,secret:string,input:string,clie
   const global=await authLimit(client,secret,"redeem:global",300);
   const local=await authLimit(client,secret,`redeem:client:${clientKey}`,10);
   const code=normalizeCode(input);let grant:{userId:string;generation:number}|null=null;
-  if(global&&local&&code){const row=await client.query(`DELETE FROM brai_login_code c USING brai_identity i WHERE c.user_id=i.user_id AND i.status='active' AND c.digest=$1 AND c.expires_at>now() RETURNING c.user_id,i.lifecycle_generation`,[digest(secret,`code:${code}`)]);grant=row.rows[0]?{userId:row.rows[0].user_id,generation:row.rows[0].lifecycle_generation}:null;}
+  if(global&&local&&code){const row=await client.query(`DELETE FROM brai_login_code c USING brai_identity i WHERE c.user_id=i.user_id AND i.status='active' AND i.role IN ('creator','admin','user') AND c.digest=$1 AND c.expires_at>now() RETURNING c.user_id,i.lifecycle_generation`,[digest(secret,`code:${code}`)]);grant=row.rows[0]?{userId:row.rows[0].user_id,generation:row.rows[0].lifecycle_generation}:null;}
   await client.query("COMMIT");return grant;
  } catch(error){await client.query("ROLLBACK");throw error;} finally{client.release();}
 }

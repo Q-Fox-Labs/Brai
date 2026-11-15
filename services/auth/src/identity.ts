@@ -7,7 +7,7 @@ import { insertIdentity } from "./identity-record.js";
 import { lifecycleLock, requestLifecycle } from "./lifecycle.js";
 import type { IdentityUser, ProvisionRequest } from "./identity-types.js";
 
-const selectUser=`SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId"
+const selectUser=`SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId",i.lifecycle_generation AS generation,i.applied_generation AS "appliedGeneration"
  FROM brai_identity i JOIN "user" u ON u.id=i.user_id`;
 /** Ищет идентичность по Telegram без раскрытия внутреннего email. */
 export async function resolveTelegram(pool:Pool,telegramId:string):Promise<IdentityUser|null> {
@@ -30,7 +30,8 @@ export async function provision(pool:Pool,secret:string,input:ProvisionRequest):
   await lifecycleLock(client);
   const previous=await client.query(`SELECT r.fingerprint,${selectUser.slice(7)} JOIN brai_identity_request r ON r.user_id=i.user_id WHERE r.request_id=$1`,[input.requestId]);
   if(previous.rowCount){if(previous.rows[0].fingerprint!==fingerprint)throw new Error("Request conflict");const {fingerprint:_,...user}=previous.rows[0];await client.query("COMMIT");return user;}
-  if(input.role==='admin') {const admins=await client.query("SELECT 1 FROM brai_identity WHERE role='admin' AND status='active' LIMIT 1");if(!admins.rowCount)throw new Error("Owner bootstrap required");}
+  if(input.role==='creator'||input.role==='guest')throw new Error('Role assignment requires lifecycle operation');
+  if(input.role==='admin'&&!(await client.query("SELECT 1 FROM brai_identity WHERE role IN ('creator','admin') AND status='active' LIMIT 1")).rowCount)throw new Error('Owner bootstrap required');
   const found=await client.query(`${selectUser} JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1`,[input.telegramId]);
   let user:IdentityUser=found.rows[0];
   if(user){if((input.userId&&input.userId!==user.id)||input.role!==user.role||input.status!==user.status||(input.profileId&&input.profileId!==user.profileId))throw new Error("Identity conflict");}
@@ -65,10 +66,11 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
  try{
   await client.query("BEGIN");
   await lifecycleLock(client);
-  const invite=await client.query("SELECT id,consumed_by,revoked_at,expires_at FROM brai_invite WHERE digest=$1 FOR UPDATE",[digest]);
+  const invite=await client.query("SELECT id,role,consumed_by,revoked_at,expires_at FROM brai_invite WHERE digest=$1 FOR UPDATE",[digest]);
   if(!invite.rowCount||invite.rows[0].revoked_at){await client.query("COMMIT");return null;}
   const existing=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1",[telegramId]);
   const previous:IdentityUser|undefined=existing.rows[0];
+  if(previous&&!invite.rows[0].consumed_by&&previous.role!==invite.rows[0].role){await client.query('COMMIT');return null;}
   if(previous?.status==='blocked'){await client.query("COMMIT");return null;}
   const ensureProfile=async(user:IdentityUser):Promise<IdentityUser|null>=>{
    if(user.profileId)return user;
@@ -101,7 +103,7 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
   if(!user){
    const id=randomUUID(),profileId=randomUUID(),userName=name??"Пользователь";
    await client.query('INSERT INTO "user"(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,false,now(),now())',[id,userName,asSyntheticEmail(id)]);
-   user=await insertIdentity(client,{id,name:userName,role:"user",status:"provisioning",telegramId,profileId});
+   user=await insertIdentity(client,{id,name:userName,role:invite.rows[0].role,status:"provisioning",telegramId,profileId});
   }
   await client.query("UPDATE brai_invite SET consumed_at=now(),consumed_by=$2 WHERE id=$1",[invite.rows[0].id,user.id]);
   const queued=await queueProfile(user);
@@ -114,7 +116,7 @@ export async function issueTelegramLink(pool:Pool,secret:string,telegramId:strin
  const client=await pool.connect();
  try {
   await client.query("BEGIN");
-  const found=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' FOR UPDATE OF i",[telegramId]);
+  const found=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' AND i.role IN ('creator','admin','user') FOR UPDATE OF i",[telegramId]);
   const user:IdentityUser|undefined=found.rows[0];
   // AIDEV-NOTE: Отвязка могла закончиться за время ожидания i-lock; нужен новый statement snapshot аккаунта.
   const account=user?await client.query("SELECT 1 FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[telegramId,user.id]):null;
@@ -136,10 +138,10 @@ export async function redeemTelegramLink(pool:Pool,secret:string,telegramId:stri
   const global=await authLimit(client,secret,"telegram-link-redeem:global",300);
   const local=await authLimit(client,secret,`telegram-link-redeem:${telegramId}`,10);
   if(!global||!local){await client.query("COMMIT");return null;}
-  const found=await client.query(`SELECT l.*,i.status,i.profile_id FROM sys_telegram_link l
+  const found=await client.query(`SELECT l.*,i.status,i.role,i.profile_id FROM sys_telegram_link l
    JOIN brai_identity i ON i.user_id=l.user_id WHERE l.digest=$1 FOR UPDATE OF l,i`,[digest]);
   const link=found.rows[0];
-  if(!link||link.status!=="active"||!link.profile_id){await client.query("COMMIT");return null;}
+  if(!link||link.status!=="active"||!link.profile_id||!["creator","admin","user"].includes(link.role)){await client.query("COMMIT");return null;}
   const account=await client.query("SELECT user_id FROM sys_telegram_account WHERE telegram_id=$1",[telegramId]);
   if(link.consumed_by){
    const valid=link.consumed_by===telegramId&&account.rows[0]?.user_id===link.user_id;
@@ -165,12 +167,12 @@ export async function unlinkTelegram(pool:Pool,telegramId:string,targetTelegramI
  try {
   await client.query("BEGIN");
   await lifecycleLock(client);
-  const found=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' FOR UPDATE OF i",[telegramId]);
+  const found=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' AND i.role IN ('creator','admin','user') FOR UPDATE OF i",[telegramId]);
   const user:IdentityUser|undefined=found.rows[0];
   if(!user){await client.query("COMMIT");return false;}
   const accounts=await client.query("SELECT telegram_id FROM sys_telegram_account WHERE user_id=$1",[user.id]);
   // AIDEV-NOTE: Здесь учитываются все реализованные каналы связи; сейчас подключён только Telegram.
-  if(!accounts.rows.some(row=>row.telegram_id===targetTelegramId)||(user.role==="admin"&&accounts.rows.length<=1)){await client.query("COMMIT");return false;}
+  if(!accounts.rows.some(row=>row.telegram_id===targetTelegramId)||(["creator","admin"].includes(user.role)&&accounts.rows.length<=1)){await client.query("COMMIT");return false;}
   await client.query("DELETE FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[targetTelegramId,user.id]);
   // AIDEV-NOTE: Уже погашенный код не должен создать новую действующую сессию после отвязки.
   await client.query("UPDATE brai_identity SET lifecycle_generation=lifecycle_generation+1 WHERE user_id=$1",[user.id]);

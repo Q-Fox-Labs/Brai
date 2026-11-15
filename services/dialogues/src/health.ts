@@ -12,8 +12,8 @@ try {
     await createPersonalAuthorizer(process.env.DIALOGUES_IDENTITY_SOCKET??'',{userId:process.env.DIALOGUES_MCP_USER_ID,profileId:process.env.DIALOGUES_MCP_PROFILE_ID??''})();
   }
   const host=process.env.DIALOGUES_MCP_HOST==="::1"?"[::1]":"127.0.0.1";
-  const response=await fetch("http://"+host+":"+process.env.DIALOGUES_MCP_PORT+"/health",{signal:AbortSignal.timeout(3000)});
-  if(!response.ok)throw new Error("LISTENER_UNAVAILABLE");
+  const response=await fetch("http://"+host+":"+process.env.DIALOGUES_MCP_PORT+"/health",{signal:AbortSignal.timeout(3000),redirect:"error"});
+  if(response.status!==200)throw new Error("LISTENER_UNAVAILABLE");
   const health=await response.json() as {ready?:boolean;tools?:string[]};
   if(health.ready!==true||health.tools?.slice().sort().join(',')!=='dialogues_context_ack,dialogues_exchange')throw new Error("TOOLS_UNAVAILABLE");
   console.log("dialogues ready");

@@ -25,12 +25,56 @@ def event():
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_batch_cannot_cross_auth_generation_change(self):
+        resolver=runtime.Resolver.__new__(runtime.Resolver)
+        resolver.mirror=NS(block_event=AsyncMock())
+        binding=(101,'profile','owner','123','123','user',1)
+        incoming=NS(_brai_release_binding=binding)
+        changed={'uid':101,'profileId':'profile','userId':'owner','telegramId':'123',
+                 'authorTelegramId':'123','role':'user','generation':2}
+        with patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':changed})):
+            with self.assertRaises(PermissionError):
+                await resolver.validate_event_binding(incoming)
+        resolver.mirror.block_event.assert_awaited_once_with(incoming)
+
     async def test_registered_private_user_is_admitted(self):
         update = NS(effective_message=NS(sender_chat=None, business_connection_id=None),
                     effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
         with patch.object(runtime, 'broker_call', AsyncMock(return_value=profile())) as broker:
             self.assertTrue(await runtime.admit_update(update, NS()))
         broker.assert_awaited_once_with('identity.resolve', {'telegramId': '123'})
+
+    async def test_preack_binding_change_is_blocked_before_any_command(self):
+        from unittest.mock import Mock
+        before={'uid':101,'userId':'owner','profileId':'p1','telegramId':'123','authorTelegramId':'123'}
+        after={**before,'uid':202,'profileId':'p2'}
+        snapshot={'state':'known','profile':before}
+        blocked=Mock()
+        mirror=NS(snapshot=lambda key:snapshot,inbox=NS(markblocked=blocked))
+        adapter=NS(_bot=NS(id=123))
+        resolver=NS(mirror=mirror)
+        update=NS(update_id=7,effective_message=NS(sender_chat=None,business_connection_id=None,text='/unlink'),
+                  effective_user=NS(id=123,is_bot=False),effective_chat=NS(id=123,type='private'))
+        with patch.dict(runtime._resolvers,{id(adapter):resolver}), \
+                patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':after})) as broker, \
+                patch.object(runtime,'_notice',AsyncMock()):
+            self.assertFalse(await runtime.admit_update(update,adapter))
+        broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'},timeout=None)
+        blocked.assert_called_once_with(before,123,7)
+        self.assertEqual(snapshot['state'],'binding_changed')
+
+    async def test_unregistered_snapshot_cannot_turn_into_registered_dispatch(self):
+        snapshot={'state':'unregistered'}
+        mirror=NS(snapshot=lambda key:snapshot)
+        adapter=NS(_bot=NS(id=123));resolver=NS(mirror=mirror)
+        update=NS(update_id=8,effective_message=NS(sender_chat=None,business_connection_id=None,text='hello'),
+                  effective_user=NS(id=123,is_bot=False),effective_chat=NS(id=123,type='private'))
+        with patch.dict(runtime._resolvers,{id(adapter):resolver}), \
+                patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':profile()})) as broker, \
+                patch.object(runtime,'_notice',AsyncMock()):
+            self.assertFalse(await runtime.admit_update(update,adapter))
+        broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'},timeout=None)
+        self.assertEqual(snapshot['state'],'binding_changed')
 
     async def test_non_private_updates_are_ignored_before_broker_or_notice(self):
         for chat_type, chat_id in [('group', -10), ('supergroup', -100), ('channel', -100),

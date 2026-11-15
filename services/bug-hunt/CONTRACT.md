@@ -4,7 +4,7 @@
 закрытые DTO, [AsyncAPI](asyncapi.json) — NATS Services. Одно ядро обслуживает
 оба транспорта. PostgreSQL — отдельная БД, не общий каталог чужих таблиц.
 Операции v1 не ждут моделей. Добавочная [систематизация v2](SYSTEMATIZATION.md)
-не меняет их DTO или смысл. Сервис не расследует, не подтверждает и не исправляет баги.
+не меняет их DTO или смысл. Опциональное расширение v3 расследует наблюдения и публикует отдельные доказательные выводы; см. [VERIFICATION.md](VERIFICATION.md). Программу оно не исправляет.
 
 ## Идентичность и границы
 
@@ -185,3 +185,12 @@ processing.activate-generation проверяет CAS и полный корпу
 квитанцию и инвалидирует signed cursor. Подготовка build не активирует его.
 Точные DTO и ошибки — schemas/processing-v2.schema.json; правила — раздел
 «Подготовка и активация поколения» в SYSTEMATIZATION.md.
+
+## Проверка наблюдений v3
+
+Capability verification=3 и миграция 005 добавляют requests, snapshots, effects,
+evidence, results, ручной audit и расписание. Старые DTO v1/v2 и поле
+verification_status=unverified сохраняют прежний смысл. Контракт, доказательные
+критерии и ограничения: [VERIFICATION.md](VERIFICATION.md). Машинные входы:
+schemas/verification-v3.schema.json; NATS: asyncapi-v3.json; локальный runner:
+runner.openrpc.json. Capability не означает, что verification worker включён.

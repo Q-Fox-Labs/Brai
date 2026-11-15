@@ -6,12 +6,27 @@ import type { Observation } from "./contracts.js";
 export const EMBEDDING_MODEL = { modelId: "embeddinggemma-2-q8", revision: "bfcd298762cc34d0357ece5ebdd31791a3a374d8", profileId: "embeddinggemma2_llama_cpp" } as const;
 export const PROJECTION_VERSION = "1";
 export const GENERATION = "gemma2-symmetric-v1";
+export const EXTERNAL_PROJECTION_POLICY = "technical-fields-v1";
 
 const digest = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 const normalize = (text: string) => text.replace(/\r\n/g, "\n");
 const searchFields = ["title", "operation", "expected", "observed", "steps", "diagnostic_text", "component_id", "component_version", "commit_sha", "deployment_revision", "error_code"] as const;
 const exactFields = ["component_id", "component_version", "commit_sha", "deployment_revision", "operation", "error_code", "expected", "observed", "steps", "diagnostic_text"] as const;
 const modelFields = ["title", "component_id", "operation", "component_version", "commit_sha", "deployment_revision", "expected", "observed", "error_code"] as const;
+
+// AIDEV-NOTE: Общий guard известных форм применяется и к ручному state, и к автоматическим полям.
+const sensitiveModelText = /(?:\b[a-z][a-z\d+.-]*:\/\/|\bwww\.|\b(?:bearer|basic)\s+\S+|-----BEGIN [^-]*PRIVATE KEY-----|\bsk[-_][a-z\d_-]{16,}|\b(?:AKIA|ASIA)[a-z\d]{16}\b|\bgh[pousr]_[a-z\d_]{20,}|\beyJ[a-z\d_-]+\.[a-z\d_-]+\.[a-z\d_-]+|\b[\w.+-]{1,254}@[\w.-]{1,253}\.[a-z]{2,63}\b|(?:^|[^\p{L}\p{N}_])@[a-z\d_]{3,}|\+\d[\d ()-]{7,}\d|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b)/iu;
+const sensitiveAssignmentKey = /(?:password|passwd|passphrase|token|secret|api[_-]?key|authorization|cookie|private[_-]?key|telegram[_-]?id|owner[_-]?id|user[_-]?id|principal[_-]?id|actor[_-]?id|installation[_-]?id|user[_-]?name|full[_-]?name|пароль|токен|секрет|фамилия|телефон|^имя$|^name$)/iu;
+
+/** Находит известные чувствительные формы, включая env/JSON ключи с префиксами. */
+function hasSensitiveModelText(text: string): boolean {
+ if (sensitiveModelText.test(text)) return true;
+ // AIDEV-NOTE: Ключ сначала выделяется целиком; вложенные wildcard вокруг secret дают избыточный backtracking.
+ for (const match of text.matchAll(/(?<![\p{L}\p{N}_-])["']?([\p{L}\p{N}_-]+)["']?\s*[:=](?=\s*\S)/gu)) {
+  if (sensitiveAssignmentKey.test(match[1])) return true;
+ }
+ return false;
+}
 
 /** Формирует полный текст локального поиска без удаления чисел и отрицаний. */
 export function searchProjection(observation: Observation): string {
@@ -43,9 +58,28 @@ export function modelProjection(observation: Observation): { text: string; hash:
   return typeof value === "string" ? [field + ": " + normalize(value)] : [];
  }).join("\n");
  // AIDEV-NOTE: Проверка блокирует обнаруженные признаки, но не гарантирует отсутствие личных данных.
- const blocked = /(?:\b(?:https?|ftp):\/\/|\bwww\.|\b(?:bearer|basic)\s+\S+|\b(?:password|passwd|token|secret|api[_-]?key|authorization|cookie)\s*[:=]\s*\S+|-----BEGIN [^-]*PRIVATE KEY-----)/iu.test(text);
+ const blocked = hasSensitiveModelText(text);
  const safeText = blocked ? "" : text;
  return { text: safeText, hash: digest(safeText), excluded_fields, policy_version: PROJECTION_VERSION, blocked };
+}
+
+/** Готовит технические поля по принятой политике, не изменяя исходное наблюдение. */
+export function prepareExternalProjection(observation: Observation, excludedIdentifiers: readonly string[] = []) {
+ const fields = [...modelFields, "steps"] as const;
+ const excluded = new Set(Object.keys(observation).filter(field => !(fields as readonly string[]).includes(field)));
+ const parts: string[] = [];
+ let hasDescription = false;
+ // AIDEV-NOTE: Это ограниченная техническая проекция, а не доказательство анонимности свободного текста.
+ // Известный чувствительный фрагмент исключает всё поле, чтобы не сохранять часть credential.
+ for (const field of fields) {
+  const value = observation[field];
+  if (typeof value !== "string" || !value.trim()) continue;
+  if (hasSensitiveModelText(value) || excludedIdentifiers.some(id => id.length > 0 && value.includes(id))) { excluded.add(field); continue; }
+  parts.push(field + ": " + normalize(value));
+  if (["title", "operation", "expected", "observed", "steps"].includes(field)) hasDescription = true;
+ }
+ if (!hasDescription) return null;
+ return { text: parts.join("\n"), excluded_fields: [...excluded].sort(), policy_version: EXTERNAL_PROJECTION_POLICY };
 }
 
 /** Делит текст по UTF-16 offsets, не разрезая пары surrogate; покрытие явно учитывает пределы. */

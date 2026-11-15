@@ -1,6 +1,8 @@
 # ABOUTME: Проверяет разговорное согласование, привязку ответа и однократное исполнение.
 # ABOUTME: Использует временную SQLite и подмену модели; не читает рабочий профиль и не отправляет сообщения.
 import importlib.util
+import hashlib
+import os
 import json
 from pathlib import Path
 import sqlite3
@@ -42,12 +44,28 @@ def source(owner="alice",thread="trip"):
     return types.SimpleNamespace(platform=types.SimpleNamespace(value="telegram"),profile="dev",
         chat_id="chat",thread_id=thread,user_id=owner,is_bot=False)
 
+def branding_module():
+    """Загрузить настоящий чистый formatter из i18n overlay без native зависимостей."""
+    lines=(ROOT/"services/hermes/extensions/patches/conversational-approvals.patch").read_text().splitlines()
+    start=lines.index("+def brand_text(text):")
+    body=[]
+    for line in lines[start:]:
+        if not line.startswith("+"):
+            break
+        body.append(line[1:])
+    module=types.ModuleType("agent.i18n")
+    exec(compile("\n".join(body),"native/agent/i18n.py","exec"),module.__dict__)
+    return module
+
+
 REVIEW={"decision":"needs_consent","effects_known":True,"target":"Папка Поездка","consequences":"Фотографии будут удалены без возможности восстановления.","reason":"Удаление не было поручено."}
 
 class ConsentTests(unittest.TestCase):
     def setUp(self):
         self.configuration=patch.object(consent,"configuration",return_value={"interaction":"conversation"})
         self.configuration.start()
+        self.branding=patch.dict(sys.modules,{'agent.i18n':branding_module()})
+        self.branding.start()
         (ROOT/"tmp").mkdir(exist_ok=True)
         self.temp=tempfile.TemporaryDirectory(dir=ROOT/"tmp")
         self.db=Database(Path(self.temp.name)/"state.db")
@@ -55,6 +73,7 @@ class ConsentTests(unittest.TestCase):
         self.store=consent.Store(self.db)
         self.descriptor={"command":"delete trip","arguments":{},"cwd":self.temp.name}
     def tearDown(self):
+        self.branding.stop()
         self.configuration.stop()
         self.db.close()
         self.temp.cleanup()
@@ -105,20 +124,20 @@ class ConsentTests(unittest.TestCase):
         self.store.record_request("other","alice","3","Отправляй деньги")
         with consent.turn_scope(self.db,source(),"session","model paraphrase","1") as scope:
             self.assertEqual(scope.instruction,"Публикуй готовый отчёт")
-            self.assertEqual(scope.authorizations,[{"message_id":"1","text":"Публикуй готовый отчёт"}])
+            self.assertEqual(self.store.requests(scope.key,scope.owner,scope.generation),[{"message_id":"1","text":"Публикуй готовый отчёт"}])
 
     def test_unknown_history_does_not_hide_newer_completed_operation(self):
         first=self.prepare()
         self.authorize(first)
-        self.store.claim(first["id"],consent._hash(self.descriptor),"first")
+        self.store.claim(first["id"],consent.operation_fingerprint(self.descriptor),"first")
         self.store.finish(first["id"],"first",False)
         second_descriptor={**self.descriptor,"command":"another operation"}
         second=self.store.prepare(self.scope,second_descriptor,REVIEW,"Другое действие?")
         self.authorize(second)
-        self.store.claim(second["id"],consent._hash(second_descriptor),"second")
+        self.store.claim(second["id"],consent.operation_fingerprint(second_descriptor),"second")
         self.store.finish(second["id"],"second",True)
         self.assertEqual(self.store.query(self.scope.key)["id"],second["id"])
-        self.assertEqual(self.store.operation(self.scope.key,consent._hash(self.descriptor))["status"],"unknown")
+        self.assertEqual(self.store.operation(self.scope.key,consent.operation_fingerprint(self.descriptor))["status"],"unknown")
         self.assertEqual({row["status"] for row in self.store.review_history(self.scope.key,"alice")},{"unknown","completed"})
 
     def test_stop_clears_prior_request_authority(self):
@@ -136,6 +155,20 @@ class ConsentTests(unittest.TestCase):
         self.store.delivered(row["id"],"10")
         timestamp=int(self.store.query(self.scope.key)["delivered_at"])
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",timestamp,"10"),"authorized")
+
+    def test_explicit_confirmation_of_this_action_is_consumed_once(self):
+        row=self.prepare()
+        self.store.delivered(row["id"],"10")
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        event=types.SimpleNamespace(source=source(),internal=False,message_id="11",
+            text="Разрешаю это действие",timestamp=time.time()+1,reply_to_message_id="10")
+        self.assertIsNone(consent.gateway_input(runner,event,event))
+        stored=self.store.query(self.scope.key)
+        self.assertEqual(stored["status"],"authorized")
+        self.assertEqual(stored["answer_id"],"11")
+        self.assertTrue(self.store.claim(row["id"],stored["fingerprint"],"once"))
+        self.assertFalse(self.store.claim(row["id"],stored["fingerprint"],"twice"))
 
     def test_no_answer_before_delivery(self):
         row=self.prepare()
@@ -158,6 +191,54 @@ class ConsentTests(unittest.TestCase):
         self.db=Database(Path(self.temp.name)/"state.db")
         self.store=consent.Store(self.db)
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",time.time()+3600),"authorized")
+
+    def test_pending_survives_cold_worker_metadata_but_not_execution_inputs(self):
+        sys.path.insert(0, str(ROOT / 'services/hermes'))
+        try:
+            from identity.release_native import NativeRelease
+            command='remove trip'; args={'command':command}
+            base={'PATH':'/usr/bin:/bin','HOME':self.temp.name,'EXECUTION_SECRET':'same'}
+            metadata={'INVOCATION_ID':'old','JOURNAL_STREAM':'old','SYSTEMD_EXEC_PID':'10',
+                      'MEMORY_PRESSURE_WATCH':'old-watch','MEMORY_PRESSURE_WRITE':'old-write'}
+            with patch.dict(os.environ,{**base,**metadata},clear=True):
+                NativeRelease(None).bootstrap(Path('/unused'))
+                with consent.turn_scope(self.db,source(),'session','Поручение','1'), consent.tool_scope('terminal',args,'first'), patch.object(consent,'review_action',return_value=REVIEW):
+                    self.assertEqual(consent.gate(command,cwd=self.temp.name,backend='local')['status'],'needs_consent')
+                original=consent.descriptor_for(command,cwd=self.temp.name,backend='local')
+            row=self.store.query(self.scope.key);self.assertEqual(self.authorize(row),'authorized')
+            payload=b'pinned worker'; operation='6115e95f-dd1d-4501-a9f2-31bc4c747818'
+            cold={**base,'INVOCATION_ID':'new','JOURNAL_STREAM':'new','SYSTEMD_EXEC_PID':'20',
+                  'MEMORY_PRESSURE_WATCH':'new-watch','MEMORY_PRESSURE_WRITE':'new-write',
+                  'BRAI_IDENTITY_RELEASE_HOLD_OPERATION':operation,
+                  'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256':hashlib.sha256(payload).hexdigest()}
+            retirement=types.SimpleNamespace(brai_hold=lambda value:value==operation)
+            with patch.dict(os.environ,cold,clear=True), patch.dict(sys.modules,{'hermes_cli.backend_retirement':types.SimpleNamespace(retirement=retirement)}), patch.object(Path,'read_bytes',return_value=payload):
+                release=NativeRelease(None)
+                release.bootstrap(Path('/opt/brai-profile/runtime/services/hermes/identity/worker.py'))
+                self.assertTrue(release.cold_start);self.assertEqual(release.operation,operation)
+                self.assertEqual(dict(os.environ),base)
+                self.assertEqual(consent.descriptor_for(command,cwd=self.temp.name,backend='local'),original)
+                with patch.dict(os.environ,{'EXECUTION_SECRET':'changed'}):
+                    self.assertNotEqual(consent.descriptor_for(command,cwd=self.temp.name,backend='local'),original)
+                self.assertNotEqual(consent.descriptor_for(command,cwd='/',backend='local'),original)
+                self.assertNotEqual(consent.descriptor_for(command,cwd=self.temp.name,backend='docker'),original)
+                with consent.turn_scope(self.db,source(),'session','да','11'), consent.tool_scope('terminal',args,'second'):
+                    self.assertTrue(consent.gate(command,cwd=self.temp.name,backend='local')['approved'])
+        finally:
+            sys.path.pop(0)
+
+    def test_changed_environment_cwd_or_backend_invalidates_real_consent(self):
+        command='remove trip'; args={'command':command}
+        for field in ('environment','cwd','backend'):
+            with self.subTest(field=field), patch.dict(os.environ,{'PATH':'/usr/bin:/bin','HOME':self.temp.name},clear=True):
+                with consent.turn_scope(self.db,source(),'session','Поручение','1'), consent.tool_scope('terminal',args,'first'), patch.object(consent,'review_action',return_value=REVIEW):
+                    self.assertEqual(consent.gate(command,cwd=self.temp.name,backend='local')['status'],'needs_consent')
+                self.assertEqual(self.authorize(self.store.query(self.scope.key)),'authorized')
+                if field=='environment':os.environ['PATH']='/other/bin'
+                cwd='/' if field=='cwd' else self.temp.name
+                backend='docker' if field=='backend' else 'local'
+                with consent.turn_scope(self.db,source(),'session','да','11'), consent.tool_scope('terminal',args,'second'):
+                    self.assertEqual(consent.gate(command,cwd=cwd,backend=backend)['status'],'consent_changed')
     def test_concurrent_preparations_keep_one_operation(self):
         with ThreadPoolExecutor(max_workers=8) as pool:
             rows=list(pool.map(lambda _:self.prepare(),range(16)))
@@ -166,7 +247,7 @@ class ConsentTests(unittest.TestCase):
         row=self.prepare()
         self.authorize(row)
         with ThreadPoolExecutor(max_workers=8) as pool:
-            results=list(pool.map(lambda n:self.store.claim(row["id"],consent._hash(self.descriptor),str(n)),range(16)))
+            results=list(pool.map(lambda n:self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),str(n)),range(16)))
         self.assertEqual(sum(results),1)
     def test_changed_descriptor_does_not_consume_grant(self):
         row=self.prepare()
@@ -178,15 +259,15 @@ class ConsentTests(unittest.TestCase):
         self.authorize(row)
         self.store.cancel(self.scope.key,"bob")
         self.assertEqual(self.store.query(self.scope.key)["status"],"authorized")
-        self.store.claim(row["id"],consent._hash(self.descriptor),"execution")
+        self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),"execution")
         self.store.cancel(self.scope.key,"alice")
         self.assertEqual(self.store.query(self.scope.key)["status"],"unknown")
-        self.assertFalse(self.store.claim(row["id"],consent._hash(self.descriptor),"retry"))
+        self.assertFalse(self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),"retry"))
     def test_decline_is_not_a_grant(self):
         row=self.prepare()
         self.store.delivered(row["id"],"10")
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","нет",time.time()+1),"denied")
-        self.assertFalse(self.store.claim(row["id"],consent._hash(self.descriptor),"execution"))
+        self.assertFalse(self.store.claim(row["id"],consent.operation_fingerprint(self.descriptor),"execution"))
     def test_script_and_directory_are_bound(self):
         script=Path(self.temp.name)/"calculate.py"
         script.write_text("print(1)")
@@ -244,33 +325,56 @@ class ConsentTests(unittest.TestCase):
         self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
         consent.record_delivery(event,row["question"],True,"10")
         self.assertIsNotNone(self.store.query(self.scope.key)["delivered_at"])
-    def test_confirmed_stream_delivery_arms_exact_question_for_normal_reply(self):
+    def test_worker_normal_completion_cannot_rearm_replaced_question(self):
         row=self.prepare()
-        runner=types.SimpleNamespace(session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
-        turn=types.SimpleNamespace(source=source(),session_key="native-key",session_id="session",inbound_message_id="1")
-        consent.record_stream_delivery(runner,turn,row["question"],"10")
-        stored=self.store.query(self.scope.key)
-        self.assertIsNotNone(stored["delivered_at"])
-        self.assertEqual(stored["question_message_id"],"10")
-        self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",time.time()+1,"10"),"authorized")
-        self.assertTrue(self.store.claim(row["id"],stored["fingerprint"],"execute-once"))
-        self.assertFalse(self.store.claim(row["id"],stored["fingerprint"],"execute-again"))
-
-    def test_stream_receipt_never_arms_other_owner_session_topic_or_preview(self):
-        row=self.prepare()
-        runner=types.SimpleNamespace(session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
-        for actor,session,text,mid in ((source("bob"),"session",row["question"],"10"),
-            (source(thread="other"),"session",row["question"],"10"),
-            (source(),"new-session",row["question"],"10"),
-            (source(),"session","Предварительный ответ","10"),
-            (source(),"session",row["question"],None),
-            (source(),"session",row["question"],"__no_edit__")):
-            turn=types.SimpleNamespace(source=actor,session_key="native-key",session_id=session,inbound_message_id="1")
-            consent.record_stream_delivery(runner,turn,text,mid)
-            self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
-        turn.inbound_message_id="other-input"
-        consent.record_stream_delivery(runner,turn,row["question"],"10")
+        event=types.SimpleNamespace(_brai_consent_delivery=(self.db,self.scope.key,"alice"))
+        self.store.invalidate(row["id"])
+        replacement=self.prepare()
+        with patch.dict(consent.os.environ,BRAI_IDENTITY_MODE="worker"):
+            consent.record_delivery(event,replacement["question"],True,"10")
         self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+
+    def test_transport_receipt_is_bound_before_question_replacement(self):
+        row=self.prepare()
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        pending=consent.pending_delivery(runner,source(),row["question"])
+        self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+        self.store.invalidate(row["id"])
+        replacement=self.prepare()
+        pending[0].delivered(pending[1],"10")
+        self.assertIsNone(self.store.query(self.scope.key)["delivered_at"])
+        self.assertNotEqual(replacement["id"],row["id"])
+
+    def test_transport_receipt_rejects_other_owner_topic_generation_and_content(self):
+        row=self.prepare()
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        for actor,text in ((source("bob"),row["question"]),
+                (source(thread="other"),row["question"]),(source(),"Предварительный ответ")):
+            self.assertIsNone(consent.pending_delivery(runner,actor,text))
+        runner._brai_consent_generation=lambda _:1
+        self.assertIsNone(consent.pending_delivery(runner,source(),row["question"]))
+
+    def test_prepared_input_is_not_reinterpreted_on_idle_dispatch(self):
+        import asyncio
+        row=self.prepare()
+        self.store.delivered(row["id"],"10")
+        runner=types.SimpleNamespace(_session_key_for_source=lambda _:"native-key",
+            session_store=types.SimpleNamespace(_db_for_key=lambda _:self.db))
+        event=types.SimpleNamespace(source=source(),internal=False,message_id="11",
+            text="Разрешаю это действие",timestamp=time.time()+1,reply_to_message_id="10")
+        self.assertIsNone(asyncio.run(consent.gateway_input_prepared(runner,event,event)))
+        # Повторный idle hook не читает даже новое обогащённое представление.
+        event._gateway_pending_stt_text="Разрешаю это действие"
+        event._gateway_pending_stt_transcripts=["Разрешаю это действие"]
+        event._gateway_pending_stt_echoed=1
+        replacement=types.SimpleNamespace(source=event.source,text="Служебное представление")
+        self.assertIsNone(asyncio.run(consent.gateway_input_prepared(runner,replacement,event)))
+        self.assertEqual(replacement._gateway_pending_stt_transcripts,event._gateway_pending_stt_transcripts)
+        self.assertEqual(replacement._gateway_pending_stt_echoed,1)
+        self.assertEqual(self.store.query(self.scope.key)["status"],"authorized")
+        self.assertEqual(self.store.requests(self.scope.key,"alice")[-1]["text"],"Разрешаю это действие")
 
     def test_reviewer_has_budget_context_and_bounded_retry(self):
         auxiliary=types.ModuleType("agent.auxiliary_client")

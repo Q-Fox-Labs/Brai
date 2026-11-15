@@ -14,7 +14,7 @@ class Control:
     async def call(self, method, params, timeout=3):
         assert method=='authorize' and params=={'uid':20001}
         if not self.enabled: raise ConnectionError('synthetic Auth unavailable')
-        return {'userId':'a','profileId':'p'}
+        return {'userId':'a','profileId':'p','role':'user','generation':0}
 async def check():
     c=Control()
     b=module.Broker({'registryPath':'unused','ingressUid':999,'dialoguesServicesPath':'protected'},c)

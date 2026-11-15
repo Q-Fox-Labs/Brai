@@ -52,7 +52,8 @@
       "services/auth/contracts/service-data-scope.mjs",
       "services/auth/contracts/service-data-scope.d.mts",
       "services/auth/contracts/PERSONAL_DATA.md",
-      "services/auth/src/lifecycle.ts"
+      "services/auth/src/lifecycle.ts",
+      "services/auth/src/web-access.ts"
     ],
     "checks": [
       "services/auth/tests/bridge.test.mjs",
@@ -70,7 +71,11 @@
       "services/auth/tests/lifecycle.test.mjs",
       "services/auth/tests/integration/lifecycle.test.mjs",
       "services/auth/tests/integration/invite-lifecycle.test.mjs",
-      "services/auth/tests/integration/telegram-lifecycle.test.mjs"
+      "services/auth/tests/integration/telegram-lifecycle.test.mjs",
+      "services/auth/tests/email.roles.sol.test.mjs",
+      "services/auth/tests/integration/00-roles-regression.test.mjs",
+      "services/auth/tests/integration/roles-revocation.test.mjs",
+      "services/auth/tests/integration/email-role-generation.test.mjs"
     ]
   },
   "dependencies": [],

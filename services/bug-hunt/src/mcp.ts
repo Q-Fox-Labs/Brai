@@ -10,6 +10,8 @@ import {systemSchemas,systemFailure,type SystemOperation} from "./system-contrac
 import type {Config} from "./config.js";
 import type {WorkContext,createGate} from "./load.js";
 
+import {verificationTools,verificationFailure,type VerificationOperation} from "./verification-api.js";
+
 const agentGuide=JSON.parse(readFileSync(new URL("../contracts/agent-guide.json",import.meta.url),"utf8"));
 export const agentInstructions:string=agentGuide.reminder;
 export const toolDefinitions=[
@@ -26,10 +28,11 @@ export const systemToolDefinitions=[
  {name:"bug_hunt_groups_get",description:"Прочитать ограниченную страницу участников своей группы.",inputSchema:systemSchemas["groups-get"]},
 ].map(tool=>({...tool,annotations:{readOnlyHint:true,idempotentHint:true}}));
 type SystemExecute=(op:SystemOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
+type VerificationExecute=(op:VerificationOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 type Execute=(op:Operation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 /** Запускает stateless listener с закрытой проверкой credential и ограниченными ресурсами. */
-export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute){
- const definitions=executeSystem?[...toolDefinitions,...systemToolDefinitions]:toolDefinitions;
+export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute,executeVerification?:VerificationExecute){
+ const definitions=[...toolDefinitions,...(executeSystem?systemToolDefinitions:[]),...(executeVerification?verificationTools.map(({operation,...tool})=>tool):[])];
  let connections=0;
  const http=createServer(async(req,res)=>{
   if(req.url!=="/mcp"||req.method!=="POST"){res.writeHead(req.url==="/mcp"?405:404).end();return;}
@@ -62,13 +65,14 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
      const op=found.name.slice("bug_hunt_".length) as Operation;
      try {
       const systemOp=found.name.slice("bug_hunt_".length).replaceAll("_","-") as SystemOperation;
-      const value=systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
+      const verification=verificationTools.find(tool=>tool.name===found.name);
+      const value=verification&&executeVerification?await executeVerification(verification.operation,p,request.params.arguments??{},ctx):systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
        ?await executeSystem(systemOp,p,request.params.arguments??{},ctx)
        :await execute(op,p,request.params.arguments??{},ctx);
       const result={content:[],structuredContent:value as Record<string,unknown>};
       if(Buffer.byteLength(JSON.stringify({jsonrpc:"2.0",id:body.id,result}))>limits.responseBytes)throw new Fault("RESULT_TOO_LARGE");
       return result;
-     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"))}]};}
+     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(verificationTools.some(tool=>tool.name===found.name)?verificationFailure(error,found.name==="bug_hunt_verification_run"):systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"))}]};}
     });
     await server.connect(transport);
     await transport.handleRequest(req,res,body);

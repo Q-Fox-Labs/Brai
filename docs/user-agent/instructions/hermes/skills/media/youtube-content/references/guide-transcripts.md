@@ -30,16 +30,16 @@ below with the interpreter whose import check succeeded.
 
 ```bash
 # JSON output with metadata
-python SKILL_DIR/scripts/fetch_transcript.py "https://youtube.com/watch?v=VIDEO_ID"
+python ${HERMESCUSTOM_ROOT}/skill-scripts/media/youtube-content/scripts/fetch_transcript.py "https://youtube.com/watch?v=VIDEO_ID"
 
 # Plain text (good for piping into further processing)
-python SKILL_DIR/scripts/fetch_transcript.py "URL" --text-only
+python ${HERMESCUSTOM_ROOT}/skill-scripts/media/youtube-content/scripts/fetch_transcript.py "URL" --text-only
 
 # With timestamps
-python SKILL_DIR/scripts/fetch_transcript.py "URL" --timestamps
+python ${HERMESCUSTOM_ROOT}/skill-scripts/media/youtube-content/scripts/fetch_transcript.py "URL" --timestamps
 
 # Specific language with fallback chain
-python SKILL_DIR/scripts/fetch_transcript.py "URL" --language tr,en
+python ${HERMESCUSTOM_ROOT}/skill-scripts/media/youtube-content/scripts/fetch_transcript.py "URL" --language tr,en
 ```
 
 ## Output Formats

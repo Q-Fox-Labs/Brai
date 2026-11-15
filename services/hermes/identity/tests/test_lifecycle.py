@@ -19,7 +19,7 @@ class Control:
         self.calls = []
         self.accept_renewal = renew
         self.operation = {'id': 'op', 'requestId': 'request', 'kind': 'prepare',
-                          'leaseToken': 'token', 'user': {'id': 'user'}}
+                          'leaseToken': 'token', 'generation': 1, 'user': {'id': 'user', 'role': 'user'}}
 
     async def call(self, method, params, timeout=12):
         self.calls.append((method, params))
@@ -34,7 +34,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_completes_only_after_renewal(self):
         control = Control()
-        script = "import sys,json; assert json.load(sys.stdin)['user']['id']=='user'"
+        script = "import sys,json; user=json.load(sys.stdin)['user']; assert user['id']=='user'; print(json.dumps({'rolePolicyVersion':1,'role':user['role']}))"
         runner = LifecycleRunner(control, [sys.executable, '-c', script])
         self.assertTrue(await runner.once())
         self.assertEqual([name for name, _ in control.calls],

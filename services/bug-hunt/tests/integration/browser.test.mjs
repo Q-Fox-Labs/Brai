@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {existsSync} from 'node:fs';
+import {existsSync,readFileSync} from 'node:fs';
 import {writeFile,rm,chmod} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {join} from 'node:path';
@@ -13,8 +13,12 @@ const enabled=existsSync(new URL('../../../../tmp/bug-hunt-browser.enable',impor
 test('explicit isolated browser acceptance',{skip:!enabled,timeout:46*60*1000},async()=>{
  const qualityRun=process.env.BRAI_BUG_HUNT_BROWSER_QUALITY_RUN??fixture.browserQualityRun;
  if(qualityRun&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(qualityRun))throw new Error('Invalid synthetic quality run');
- const options=qualityRun?{installationId:'bug-hunt-quality-'+qualityRun,userId:'synthetic-quality-'+qualityRun,profileId:'quality-profile-'+qualityRun,telegramId:String(120030000+parseInt(qualityRun.slice(0,7),16)),role:'admin',browserAsReporter:true}:{};
+ const flowPath=new URL('../../../../tmp/bug-hunt-verification-live.json',import.meta.url);
+ const verificationFlow=existsSync(new URL('../../../../tmp/bug-hunt-stage3-browser.enable',import.meta.url))?JSON.parse(readFileSync(flowPath,'utf8')):null;
+ if(verificationFlow){assert.match(verificationFlow.userId,/^synthetic-[a-f0-9-]{36}$/);assert.equal(verificationFlow.installationId,'flow-'+verificationFlow.run);}
+ const options=verificationFlow?{installationId:verificationFlow.installationId,userId:verificationFlow.userId,telegramId:fixture.verificationTelegramId,profileId:'verification-'+verificationFlow.run,role:'admin',browserAsReporter:true}:qualityRun?{installationId:'bug-hunt-quality-'+qualityRun,userId:'synthetic-quality-'+qualityRun,profileId:'quality-profile-'+qualityRun,telegramId:String(120030000+parseInt(qualityRun.slice(0,7),16)),role:'admin',browserAsReporter:true}:{};
  const f=await startFixture(options),root=fileURLToPath(new URL('../../../../',import.meta.url));
+ if(verificationFlow)f.cfg.verification={enabled:false,revision:'browser-v3',externalAllowedOwners:[f.user.id]};
  const stop=join(root,'tmp','bug-hunt-browser-'+f.fixture.run+'.stop'),live=join(root,'tmp','bug-hunt-live.json');
  let tail='',child;
  const keep=chunk=>{tail=(tail+String(chunk)).slice(-4000);};
@@ -31,7 +35,7 @@ test('explicit isolated browser acceptance',{skip:!enabled,timeout:46*60*1000},a
   }
   assert.equal(ready,true,'Web listener must be ready');
   let checkedCaseIds=[],seedCaseIds=[];
-  const context={kind:'web',headers:{cookie:qualityRun?f.cookie:f.adminCookie,origin:f.fixture.origin}};
+  const context={kind:'web',headers:{cookie:qualityRun||verificationFlow?f.cookie:f.adminCookie,origin:f.fixture.origin}};
   const web=(operation,input)=>f.call('brai.bug_hunt.v1.'+operation,{context,input});
   if(qualityRun){
    let cursor;

@@ -14,6 +14,21 @@ from identity.ipc import RpcError
 PROFILE = {'profileId': '11111111-1111-4111-8111-111111111111', 'userId': 'owner'}
 
 class DurablePauseTest(unittest.TestCase):
+    def test_old_return_notice_cannot_adopt_generation_after_pause_resume(self):
+        from identity.telegram_runtime import Resolver
+        with tempfile.TemporaryDirectory() as root:
+            journal = IdentityJournal(Path(root)/'journal')
+            journal.set_chat_pause(PROFILE, ('123','77'), True)
+            resumed = journal.set_chat_pause(PROFILE, ('123','77'), False)
+            resolver = Resolver(SimpleNamespace(), journal=journal)
+            try:
+                with self.assertRaisesRegex(PermissionError, 'stale'):
+                    resolver.authorize_delivery(PROFILE,'send',{'chat_id':'123',
+                        'metadata':{'thread_id':'77','_brai_return_notice_generation':0}})
+                self.assertGreater(resumed['generation'],0)
+            finally:
+                resolver.ledger.close()
+
     def test_restart_idempotency_and_isolation(self):
         with tempfile.TemporaryDirectory() as root:
             journal = IdentityJournal(Path(root) / 'journal')
@@ -104,6 +119,7 @@ class WorkerPauseTest(unittest.IsolatedAsyncioTestCase):
         worker.ensure_tools = AsyncMock()
         event = dict(source=source_data, text='Новый вход', message_id='3', chat_generation=2, delivery_scope='scope')
         modules = {
+            'tools.approval_conversation': SimpleNamespace(gateway_input_prepared=AsyncMock(return_value=None)),
             'gateway.session': SimpleNamespace(SessionSource=SimpleNamespace(from_dict=source)),
             'gateway.platforms.event': SimpleNamespace(MessageType=lambda value: value,
                 MessageEvent=lambda **value: SimpleNamespace(**value, _gateway_accepted=False)),
@@ -372,6 +388,9 @@ class InteractiveProvenanceTest(unittest.IsolatedAsyncioTestCase):
                               edit_message_reply_markup=AsyncMock(return_value={'message_id': 200, 'chat': {'id': 456}}),
                               answer_callback_query=AsyncMock(return_value=True))
         resolver = Resolver(SimpleNamespace(_bot=bot), journal=journal)
+        # These tests exercise legacy presentation provenance without the
+        # Telegram polling/mirror fixture (covered separately).
+        resolver.mirror = None
         self.addCleanup(resolver.ledger.close)
         resolver.ledger.admit(profile, ('456', ''), {})
         resolver.ledger.record(profile, ('456', ''), 200)

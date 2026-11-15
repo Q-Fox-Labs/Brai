@@ -46,7 +46,7 @@ def parse_registry(raw):
         raise ValueError('Unsupported registry')
     profiles, profile_ids, scopes, users, telegram_ids = {}, set(), set(), set(), set()
     fields = {'userId', 'profileId', 'telegramId', 'home', 'homeScope', 'memoryEpoch', 'authorId', 'cubes', 'status'}
-    optional = {'username', 'workerSocket'}
+    optional = {'username', 'workerSocket', 'role', 'backgroundsSuspended', 'generation'}
     for uid, entry in registry['profiles'].items():
         if not uid.isascii() or not uid.isdecimal() or str(int(uid)) != uid or int(uid) == 0:
             raise ValueError('Invalid registry UID')
@@ -56,9 +56,15 @@ def parse_registry(raw):
             raise ValueError('Invalid registry profile field')
         if (not entry['telegramId'].isascii() or not entry['telegramId'].isdecimal()
                 or not entry['home'].startswith('/') or '\x00' in entry['home']
-                or any(not isinstance(entry[key], str) for key in optional & set(entry))
+                or any(not isinstance(entry[key], str) for key in (optional - {'backgroundsSuspended', 'generation'}) & set(entry))
                 or ('workerSocket' in entry and (not entry['workerSocket'].startswith('/') or '\x00' in entry['workerSocket']))):
             raise ValueError('Invalid registry identity')
+        if 'generation' in entry and (type(entry['generation']) is not int or entry['generation'] < 0):
+            raise ValueError('Invalid runtime generation')
+        if 'backgroundsSuspended' in entry and type(entry['backgroundsSuspended']) is not bool:
+            raise ValueError('Invalid background policy')
+        if 'role' in entry and entry['role'] not in ('creator','admin','user','guest'):
+            raise ValueError('Unknown registry role')
         cubes = entry['cubes']
         if not isinstance(cubes, list) or not cubes or any(not isinstance(c, str) or not c for c in cubes) or len(set(cubes)) != len(cubes):
             raise ValueError('Invalid registry cubes')

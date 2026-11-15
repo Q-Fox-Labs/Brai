@@ -19,12 +19,12 @@ Hermes вызывает lifecycle провайдера для recall и синх
 Ручной резервный клиент находится в `scripts/memos_client.py` директории скилла, возвращаемой `skill_view`. Далее `$SKILL_DIR` обозначает фактический `skill_dir` (переменную нужно задать, она не создаётся автоматически). Команды запускай через `terminal`; для add/feedback задавай timeout=300.
 
 ```sh
-python "$SKILL_DIR/scripts/memos_client.py" health
-python "$SKILL_DIR/scripts/memos_client.py" search --query 'нужный факт' --top-k 5
-python "$SKILL_DIR/scripts/memos_client.py" get --id 'UUID'
-python "$SKILL_DIR/scripts/memos_client.py" list --page 1 --page-size 20
-python "$SKILL_DIR/scripts/memos_client.py" add --text 'Подтверждённый факт; источник ...' --session 'точная-сессия' --info '{"source_type":"manual","speaker":"автор","project":"проект"}'
-python "$SKILL_DIR/scripts/memos_client.py" delete --id 'UUID' --confirm-delete
+python "${HERMESCUSTOM_ROOT}/skill-scripts/note-taking/memos-memory/scripts/memos_client.py" health
+python "${HERMESCUSTOM_ROOT}/skill-scripts/note-taking/memos-memory/scripts/memos_client.py" search --query 'нужный факт' --top-k 5
+python "${HERMESCUSTOM_ROOT}/skill-scripts/note-taking/memos-memory/scripts/memos_client.py" get --id 'UUID'
+python "${HERMESCUSTOM_ROOT}/skill-scripts/note-taking/memos-memory/scripts/memos_client.py" list --page 1 --page-size 20
+python "${HERMESCUSTOM_ROOT}/skill-scripts/note-taking/memos-memory/scripts/memos_client.py" add --text 'Подтверждённый факт; источник ...' --session 'точная-сессия' --info '{"source_type":"manual","speaker":"автор","project":"проект"}'
+python "${HERMESCUSTOM_ROOT}/skill-scripts/note-taking/memos-memory/scripts/memos_client.py" delete --id 'UUID' --confirm-delete
 ```
 
 В личном worker endpoint и owner берутся только из проверенного `memos-rest.json`; значения `root/main` не служат глобальными defaults. `--user=root` и `--base-url` отклоняются. Поиск использует scoped recall index; list/get — проверенный поток с локальной pagination. Результат `health` не подтверждает работу планировщика или feedback.

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {createProcessor,ModelFault,classificationQuestions,classificationResult,observationHash} from '../dist/processing.js';
 import {createModelPorts} from '../dist/model-ports.js';
+import {processingConfig,approvedProjection} from '../dist/config.js';
 import {EMBEDDING_MODEL} from '../dist/projection.js';
 const observation={title:'Synthetic failure',operation:'read',expected:'value',observed:'empty'};
 const vector=Array.from({length:768},(_,i)=>i===0?1:0);
@@ -122,4 +123,22 @@ test('temporarily unavailable Providers GET retains intent and never invokes aga
  f.state.attempts.push({id:randomUUID(),job_id:j.id,unit:0,phase:'dispatching',operation_id:randomUUID(),deadline_at:new Date(Date.now()+30000).toISOString()});
  f.deps.classifier.get=async()=>{throw new ModelFault('MODEL_STATUS_UNAVAILABLE');};
  await f.processor.tick();assert.equal(f.state.invokes,0);assert.equal(f.state.attempts[0].phase,'dispatching');assert.equal(f.state.finished[0].state,'waiting_dependency');
+});
+
+test('automatic preparation reaches classifier with durable policy metadata and never sends excluded fields',async()=>{
+ const j=job('classification');
+ j.observation={...observation,steps:'Open then read',diagnostic_text:'token=private',conversation_ref:'private-conversation'};
+ j.input_hash=observationHash(j.observation);
+ const f=fixture([j]);f.state.currentJob=j;
+ let policy=processingConfig({enabled:true,classificationEnabled:true,externalAllowedOwners:[j.owner_id],externalProjectionPolicy:'technical-fields-v1'});
+ f.deps.settings=()=>({...policy,externalProjection:async current=>approvedProjection(policy,current.owner_id,current.input_hash,current.observation)});
+ const processor=createProcessor(f.deps);
+ await processor.tick();
+ assert.equal(f.state.invokes,1);assert.equal(f.state.finished[0].state,'succeeded');
+ const attempt=f.state.attempts[0];
+ assert.match(attempt.body.state,/Open then read/);
+ assert.ok(!attempt.body.state.includes('private'));
+ assert.equal(attempt.metadata.projection.policy_version,'technical-fields-v1');
+ assert.ok(f.state.saved[0].excluded_fields.includes('diagnostic_text'));
+ assert.equal(f.state.saved[0].policy_version,'technical-fields-v1');
 });

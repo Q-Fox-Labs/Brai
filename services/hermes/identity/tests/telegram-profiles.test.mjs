@@ -2,12 +2,14 @@
 // ABOUTME: Рестарт, конкуренция, закрытое фото и сетевые ошибки не вызывают бесконечных загрузок.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createTelegramProfiles, telegramPhotoDownload } from '../telegram-profiles.mjs';
 function fixture() {
-  mkdirSync('tmp',{recursive:true});
-  return mkdtempSync(join(process.cwd(),'tmp/telegram-profile-'));
+  const root=mkdtempSync(join(tmpdir(),'telegram-profile-'));
+  chmodSync(root,0o700);
+  return root;
 }
 test('profile is fetched once, survives restart and keeps two accounts separate', async () => {
   const root=fixture(); let calls=0, photos=0;

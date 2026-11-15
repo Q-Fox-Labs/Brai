@@ -1,0 +1,258 @@
+// ABOUTME: Собирает неизменяемую поставку компонента из явных файлов и установленного npm lock closure.
+// ABOUTME: Не устанавливает зависимости, не собирает исходники и не включает внешние runtime или данные.
+import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { cpSync, copyFileSync, constants, existsSync, lstatSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
+import { lockInputs } from './lock-inputs.mjs';
+
+const run = promisify(execFile);
+const format = 'brai-component-runtime-v1';
+const manifestName = 'artifact-manifest.json';
+const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const json = path => JSON.parse(readFileSync(path, 'utf8'));
+const hash = data => createHash('sha256').update(data).digest('hex');
+const inside = (parent, child) => child === parent || child.startsWith(`${parent}${sep}`);
+const fail = message => { throw new Error(message); };
+const present = path => lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+// AIDEV-NOTE: После Root import payload читается сервисом с другим UID.
+const deliveryMode = mode => mode & 0o111 ? 0o755 : 0o644;
+
+function repositoryPath(value) {
+  if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0') || isAbsolute(value) || value === '.' || value !== posix.normalize(value) || value.startsWith('../')) fail(`INVALID_REPOSITORY_PATH: ${value}`);
+  return value;
+}
+
+function checkFirstPartyPath(key) {
+  if (key === 'docs/user-agent/usercustom' || key.startsWith('docs/user-agent/usercustom/')) fail(`FORBIDDEN_DELIVERY_FILE: ${key}`);
+  const parts = key.split('/');
+  if (parts.some(part => /^(?:\.env(?:\..*)?|\.git|node_modules|tests?|__tests__|data|datasets|weights)$/i.test(part)) || /(?:^|[/_.-])credentials?(?:[./_-]|$)/i.test(key) || /\.(?:key|pem|p12|pfx|gguf|safetensors|pt|pth|bin)$/i.test(key) || /\.(?:test|spec)\.[^/]+$/i.test(key)) fail(`FORBIDDEN_DELIVERY_FILE: ${key}`);
+  if (/\.(?:[cm]?tsx?|jsx)$/i.test(key) && !/\.d\.(?:ts|mts|cts)$/i.test(key)) fail(`UNBUILT_DELIVERY_SOURCE: ${key}`);
+}
+
+function copyDelivery(root, stage, key) {
+  repositoryPath(key);
+  if (key === manifestName) fail('RESERVED_DELIVERY_FILE');
+  checkFirstPartyPath(key);
+  const source = join(root, key);
+  if (!existsSync(source)) fail(`MISSING_DELIVERY_FILE: ${key}`);
+  if (!inside(root, realpathSync(source))) fail(`DELIVERY_SYMLINK_ESCAPE: ${key}`);
+  const info = lstatSync(source);
+  if (info.isSymbolicLink()) fail(`DELIVERY_SYMLINK: ${key}`);
+  if (info.isDirectory()) {
+    for (const name of readdirSync(source).sort(compare)) copyDelivery(root, stage, `${key}/${name}`);
+  } else if (info.isFile()) {
+    const destination = join(stage, key);
+    mkdirSync(dirname(destination), { recursive: true });
+    cpSync(source, destination);
+    chmodSync(destination, deliveryMode(info.mode));
+  } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
+}
+
+// Next owns this traced closure; preserve its layout while copying independent inodes.
+function copyStandalone(source, stage, key = '') {
+  const path=join(source,key),info=lstatSync(path);
+  if(key.split('/').some(part=>/^\.env(?:\.|$)/i.test(part)||part==='.git'||part==='usercustom') || /(?:^|\/)credentials?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i.test(key) || /\.(?:key|pem|p12|pfx)$/i.test(key))fail(`FORBIDDEN_DELIVERY_FILE: ${key}`);
+  if(info.isSymbolicLink())fail(`DELIVERY_SYMLINK: ${key}`);
+  if(info.isDirectory())for(const name of readdirSync(path).sort(compare))copyStandalone(source,stage,key?`${key}/${name}`:name);
+  else if(info.isFile()) {
+    const target=join(stage,key);mkdirSync(dirname(target),{recursive:true});
+    copyFileSync(path,target,constants.COPYFILE_FICLONE);chmodSync(target,deliveryMode(info.mode));
+  } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
+}
+
+function collectPackages(root, workspaces) {
+  const packages = new Map();
+  for (const {key,entry} of lockInputs(root,workspaces)) {
+    if (!key.split('/').includes('node_modules')) continue;
+    const installed=join(root,key);
+    if(!existsSync(installed)) fail(`MISSING_INSTALLED_PACKAGE: ${key}`);
+    if(entry.link) {
+      const target=repositoryPath(entry.resolved);
+      if(!inside(root,realpathSync(installed)) || realpathSync(installed)!==realpathSync(join(root,target)))fail(`WORKSPACE_LINK_MISMATCH: ${key}`);
+      const metadata=json(join(root,target,'package.json'));
+      packages.set(key,{key,entry,target,version:metadata.version});
+    } else {
+      const metadata=json(join(installed,'package.json'));
+      const name=key.slice(key.lastIndexOf('node_modules/')+'node_modules/'.length);
+      if(metadata.name!==(entry.name??name))fail(`PACKAGE_NAME_MISMATCH: ${key}`);
+      if(metadata.version!==entry.version)fail(`PACKAGE_VERSION_MISMATCH: ${key}`);
+      packages.set(key,{key,entry,installed,version:entry.version});
+    }
+  }
+  return packages;
+}
+
+function linkPackageFiles(source, destination, ancestors = new Set()) {
+  if (basename(source) === 'node_modules') return;
+  const resolved = realpathSync(source), info = statSync(resolved);
+  if (info.isDirectory()) {
+    if (ancestors.has(resolved)) fail(`PACKAGE_SYMLINK_CYCLE: ${source}`);
+    const next = new Set(ancestors).add(resolved);
+    mkdirSync(destination, { recursive: true });
+    for (const name of readdirSync(resolved).sort(compare)) linkPackageFiles(join(resolved, name), join(destination, name), next);
+  } else if (info.isFile()) {
+    if (info.mode & 0o022) fail(`PACKAGING_SOURCE_PERMISSIONS: ${source}: remove group and other write access from prepared dependencies`);
+    copyFileSync(resolved, destination, constants.COPYFILE_FICLONE);
+    chmodSync(destination, deliveryMode(info.mode));
+  } else fail(`UNSUPPORTED_PACKAGE_FILE: ${source}`);
+}
+
+function copyPackages(root, stage, packages) {
+  for (const { key, entry, installed, target } of [...packages.values()].sort((a, b) => compare(a.key, b.key))) {
+    const destination = join(stage, key);
+    mkdirSync(dirname(destination), { recursive: true });
+    if (entry.link) {
+      if (!existsSync(join(stage, target, 'package.json'))) fail(`WORKSPACE_RUNTIME_NOT_SELECTED: ${target}/package.json`);
+      symlinkSync(relative(dirname(destination), join(stage, target)), destination);
+    } else {
+      linkPackageFiles(installed, destination);
+    }
+  }
+}
+
+function inventory(directory, prefix = '') {
+  const files = [];
+  for (const name of readdirSync(join(directory, prefix)).sort(compare)) {
+    const key = prefix ? `${prefix}/${name}` : name;
+    if (!prefix && name === manifestName) continue;
+    const path = join(directory, key);
+    const info = lstatSync(path);
+    if (info.isDirectory()) files.push(...inventory(directory, key));
+    else if (info.isFile() || info.isSymbolicLink()) {
+      const content = info.isSymbolicLink() ? Buffer.from(readlinkSync(path)) : readFileSync(path);
+      files.push({ path: key, sha256: hash(content), size: content.length, mode: info.mode & 0o777, ...(info.isSymbolicLink() ? { symlink: content.toString() } : {}) });
+    } else fail(`UNSUPPORTED_PAYLOAD_FILE: ${key}`);
+  }
+  return files.sort((a, b) => compare(a.path, b.path));
+}
+
+// Root mounts the payload for a different UID; directories must also be traversable.
+function canonicalDirectories(path) {
+  chmodSync(path,0o755);
+  for(const name of readdirSync(path)) {
+    const child=join(path,name),info=lstatSync(child);
+    if(info.isDirectory())canonicalDirectories(child);
+  }
+}
+function verifyDirectories(path) {
+  if((lstatSync(path).mode & 0o777)!==0o755)fail(`IMMUTABLE_DIRECTORY_MODE: ${path}`);
+  for(const name of readdirSync(path)) {
+    const child=join(path,name),info=lstatSync(child);
+    if(info.isDirectory())verifyDirectories(child);
+  }
+}
+
+function payloadHash(files, runtime, runtimePackages) {
+  return hash(JSON.stringify({files,runtime,runtimePackages}));
+}
+
+async function validateRuntime(stage, component) {
+  for (const key of [...component.delivery.entrypoints, ...component.delivery.smokeImports]) {
+    repositoryPath(key);
+    if (!existsSync(join(stage, key)) || !lstatSync(join(stage, key)).isFile()) fail(`MISSING_RUNTIME_ENTRYPOINT: ${key}`);
+  }
+  // A read-only mount at /tmp prevents both ancestor node_modules resolution and mutation of shared files.
+  const isolated = '/tmp/brai-component-smoke';
+  const env = { PATH: process.env.PATH ?? '', NODE_PATH: '', NODE_OPTIONS: '' };
+  const options = { env, timeout: 30_000, maxBuffer: 1024 * 1024 };
+  const sandbox = ['--die-with-parent', '--ro-bind', '/', '/', '--tmpfs', '/tmp', '--ro-bind', stage, isolated, '--unshare-net', '--chdir', isolated, '--'];
+  try {
+    for (const key of component.delivery.entrypoints.filter(key => /\.(?:mjs|cjs|js)$/.test(key))) {
+      await run('/usr/bin/bwrap', [...sandbox, process.execPath, '--check', join(isolated, key)], options);
+    }
+    if (component.delivery.smokeImports.length) {
+      const script = component.delivery.smokeImports.map(key => `await import(${JSON.stringify(pathToFileURL(join(isolated, key)).href)}${key.endsWith('.json') ? ", { with: { type: 'json' } }" : ''});`).join('\n');
+      await run('/usr/bin/bwrap', [...sandbox, process.execPath, '--input-type=module', '--eval', script], options);
+    }
+  } catch (error) {
+    fail(`ARTIFACT_SMOKE_FAILED: ${error.stderr?.trim() || error.message}`);
+  }
+}
+
+function prepareOutput(root, outputRoot) {
+  const output = resolve(root, outputRoot);
+  const temporary = join(root, 'tmp');
+  if (!inside(temporary, output)) fail('OUTPUT_MUST_BE_UNDER_ROOT_TMP');
+  let cursor = root;
+  for (const segment of relative(root, output).split(sep)) {
+    cursor = join(cursor, segment);
+    if (present(cursor) && (lstatSync(cursor).isSymbolicLink() || !lstatSync(cursor).isDirectory())) fail('OUTPUT_NOT_OWNED');
+  }
+  mkdirSync(output, { recursive: true });
+  return output;
+}
+
+/**
+ * Собрать готовую поставку по описанию компонента без установки и сборки.
+ * Пути delivery и npm.workspaces относительны root; outputRoot находится в root/tmp.
+ * Для OCI delivery.command заменяет стандартный CMD node <первый entrypoint> без shell.
+ * Возвращает manifest с абсолютным path. При неполной поставке или конфликте lock бросает ошибку.
+ * Повторный вызов возвращает существующую поставку лишь после проверки её файлов и manifest.
+ */
+export async function packageComponent(root, component, outputRoot) {
+  root = realpathSync(root);
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(component.id)) fail('INVALID_COMPONENT_ID');
+  repositoryPath(component.directory);
+  if (!['ready-files', 'oci-context'].includes(component.delivery?.kind)) fail('INVALID_DELIVERY_KIND');
+  const output = prepareOutput(root, outputRoot);
+  const stage = mkdtempSync(join(output, '.component-stage-'));
+  try {
+    const standalone=component.delivery.strategy==='next-standalone';
+    if(standalone && (component.id!=='web' || component.directory!=='apps/web' || component.delivery.kind!=='oci-context'))fail('INVALID_STANDALONE_COMPONENT');
+    const standalonePath='apps/web/.next/standalone';
+    for (const key of [...new Set(component.delivery.files)]) {
+      if(standalone && key===standalonePath) {
+        const source=join(root,key);
+        if(!existsSync(source) || lstatSync(source).isSymbolicLink() || !inside(root,realpathSync(source)))fail('INVALID_STANDALONE_OUTPUT');
+        copyStandalone(source,stage);
+      } else copyDelivery(root, stage, key);
+    }
+    const packages = standalone ? new Map(lockInputs(root,component.npm?.workspaces ?? [])
+      .filter(({key})=>key.split('/').includes('node_modules') && existsSync(join(stage,key)))
+      .map(({key,entry})=>[key,{key,entry,version:entry.version??json(join(root,entry.resolved,'package.json')).version,...(entry.link?{target:entry.resolved}:{})}]))
+      : collectPackages(root, component.npm?.workspaces ?? []);
+    if(!standalone)copyPackages(root, stage, packages);
+    if (component.delivery.kind === 'oci-context') {
+      const entrypoint = component.delivery.entrypoints[0];
+      if (!entrypoint) fail('OCI_ENTRYPOINT_REQUIRED');
+      if (existsSync(join(stage, 'Dockerfile'))) fail('DOCKERFILE_ALREADY_SELECTED');
+      const command = component.delivery.command ?? ['node', posix.relative(component.directory, repositoryPath(entrypoint))];
+      if (!Array.isArray(command) || !command.length || command.some(value => typeof value !== 'string' || !value || value.includes('\0'))) fail('INVALID_DELIVERY_COMMAND');
+      const toolchainPath=join(root,'deploy/components/toolchain.json');
+      const base=existsSync(toolchainPath)?json(toolchainPath).nodeBase:'node:24.22.1-bookworm-slim';
+      writeFileSync(join(stage, 'Dockerfile'), `FROM ${base}\nWORKDIR ${JSON.stringify(`/app/${component.directory}`)}\nCOPY . /app\nCMD ${JSON.stringify(command)}\n`);
+      chmodSync(join(stage, 'Dockerfile'), 0o644);
+    }
+    if(standalone)canonicalDirectories(stage);
+    await validateRuntime(stage, component);
+    const files = inventory(stage);
+    const runtimePackages = [...packages.values()].map(({ key, entry, version, target }) => ({ lockKey: key, version, ...(entry.integrity ? { integrity: entry.integrity } : {}), ...(target ? { link: true, target } : {}) })).sort((a, b) => compare(a.lockKey, b.lockKey));
+    const runtime={kind:component.delivery.kind,workingDirectory:component.directory,entrypoints:component.delivery.entrypoints,command:component.delivery.command ?? (component.delivery.entrypoints.length?['node',posix.relative(component.directory,component.delivery.entrypoints[0])]:[]),systemRequirements:component.delivery.systemRequirements ?? []};
+    const manifest = { format, componentId: component.id, payloadHash: payloadHash(files,runtime,runtimePackages), files, bytes: files.reduce((sum, file) => sum + file.size, 0), runtimePackages, runtime, systemRequirements: runtime.systemRequirements };
+    const path = join(output, `${component.id}-${manifest.payloadHash}`);
+    const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(join(stage, manifestName), encoded);
+    chmodSync(join(stage, manifestName), 0o644);
+    if (present(path)) {
+      if(standalone)verifyDirectories(path);
+      if (lstatSync(path).isSymbolicLink() || !lstatSync(path).isDirectory() || !lstatSync(join(path, manifestName), { throwIfNoEntry: false })?.isFile() || readFileSync(join(path, manifestName), 'utf8') !== encoded || JSON.stringify(inventory(path)) !== JSON.stringify(files)) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
+      rmSync(stage, { recursive: true });
+    } else renameSync(stage, path);
+    return { ...manifest, path };
+  } catch (error) {
+    rmSync(stage, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+// A cached artifact is reused only after checking every delivered byte and mode.
+export function verifyPackage(path, componentId) {
+  if (lstatSync(path).isSymbolicLink()) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
+  const manifest=json(join(path,manifestName)),files=inventory(path);
+  if(componentId==='web' && manifest.runtime?.entrypoints?.[0]==='apps/web/server.js')verifyDirectories(path);
+  if(manifest.format!==format || manifest.componentId!==componentId || manifest.payloadHash!==payloadHash(files,manifest.runtime,manifest.runtimePackages) || JSON.stringify(manifest.files)!==JSON.stringify(files) || manifest.bytes!==files.reduce((sum,file)=>sum+file.size,0) || JSON.stringify(manifest.systemRequirements)!==JSON.stringify(manifest.runtime.systemRequirements)) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
+  return {...manifest,path};
+}

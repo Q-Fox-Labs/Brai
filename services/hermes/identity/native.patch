@@ -99,12 +99,13 @@
          if not self._bot:
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -5623,6 +5623,17 @@
+@@ -5623,6 +5623,18 @@
  def _start_gateway_start_cron_and_housekeeping(runner):
      """Start the cron scheduler thread + gateway housekeeping thread; returns
      ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
-+    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram" or (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and __import__("identity.native_policy", fromlist=["guest_mode"]).guest_mode()):
 +        # Общий gateway не исполняет пользовательские задания и связанные housekeeping jobs.
++        runner._brai_release_cron_supported = True
 +        stop = threading.Event()
 +        class _DisabledCron:
 +            def stop(self):
@@ -354,7 +355,7 @@
  ) -> list[Path]:
      """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
      fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
-+    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram" or (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and __import__("identity.native_policy", fromlist=["staging_mode"]).staging_mode()):
 +        # Parent получает только root-owned systemd EnvironmentFile, без HOME override.
 +        return []
      # Process home on purpose (never the per-turn override): a startup .env load must not follow a routed
@@ -491,6 +492,18 @@
          self._background_tasks.add(task)
          task.add_done_callback(self._background_tasks.discard)
 
+--- a/cron/scheduler_tick.py
++++ b/cron/scheduler_tick.py
+@@ -33,2 +33,8 @@
+ def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None):
++    import os
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from identity.native_policy import scheduler_permitted
++        if not scheduler_permitted():
++            return 0
++
+     from hermes_cli.backend_retirement import retirement
+
 --- a/gateway/config.py
 +++ b/gateway/config.py
 @@ -704,2 +704,9 @@
@@ -510,14 +523,6 @@
 -        if not human_platform:
 +        if not human_platform or source.platform == Platform.TELEGRAM:
              return
-@@ -4185,3 +4185,8 @@
-                 _sk, _streamed, _previewed, _content_delivered, _transformed, len(_final),
-             )
-+        if response.get("already_sent") and _sc is not None:
-+            # The normal-send receipt is absent when streaming delivered the question.
-+            from tools.approval_conversation import record_stream_delivery
-+            await asyncio.to_thread(record_stream_delivery,self,turn_ctx,_final,
-+                                    getattr(_sc,"message_id",None))
 
 --- a/cron/scheduler_delivery.py
 +++ b/cron/scheduler_delivery.py
@@ -533,3 +538,677 @@
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
 +            return None  # Automatic topic is resolved by the trusted Brai ingress.
          cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)
+
+--- a/hermes_cli/backend_retirement.py
++++ b/hermes_cli/backend_retirement.py
+@@ -21,6 +21,7 @@
+     def __init__(self):
+         self._lock = threading.Lock()
+         self._active = 0
++        self._brai_release_owner = None
+         self._preparing = False
+         self._token = None
+         self._committed = False
+@@ -34,7 +35,7 @@
+     def acquire(self):
+         with self._lock:
+             self._expire()
+-            if self._preparing or self._token is not None:
++            if self._preparing or self._token is not None or self._brai_release_owner is not None:
+                 return False
+             self._active += 1
+             return True
+@@ -42,6 +43,23 @@
+     def release(self):
+         with self._lock:
+             self._active -= 1
++
++    def brai_hold(self, owner):
++        """Freeze new source reservations once already admitted scans have ended."""
++        with self._lock:
++            if self._brai_release_owner not in (None, owner):
++                raise ValueError("BRAI_RELEASE_OWNER_CHANGED")
++            if self._active:
++                return False
++            self._brai_release_owner = owner
++            return True
++
++    def brai_resume(self, owner):
++        """Release only the matching operation, without changing Desktop permits."""
++        with self._lock:
++            if self._brai_release_owner not in (None, owner):
++                raise ValueError("BRAI_RELEASE_OWNER_CHANGED")
++            self._brai_release_owner = None
+
+     def active_count(self):
+         with self._lock:
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3890,6 +3890,19 @@
+         except Exception:
+             return None
+
++    _brai_release_protocol = 1
++
++    def _brai_release_source(self):
++        from contextlib import nullcontext
++        return nullcontext()
++
++    def _brai_release_completion(self):
++        from contextlib import nullcontext
++        return nullcontext()
++
++    def _brai_release_track(self, task):
++        return task
++
+     def _running_agent_count(self) -> int:
+         return len(self._running_agents)
+
+@@ -4680,6 +4693,14 @@
+ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
+     """Drain each profile's worker queue through its matching live adapters. A credential-less satellite
+     profile (empty adapter map) drains through the primary's adapters routed by its own profile routes."""
++    from hermes_cli.backend_retirement import retirement
++    with retirement.work() as admitted:
++        if not admitted:
++            return
++        return _brai_admitted_cron_deliveries(adapters, loop, runner)
++
++
++def _brai_admitted_cron_deliveries(adapters, loop, runner=None):
+     from cron import scheduler as cron_scheduler
+     from cron import scheduler_preflight as sched_preflight
+
+@@ -4766,7 +4787,10 @@
+         tick_count += 1
+         for every, label, fn in chores:
+             if tick_count % every == 0:
+-                _housekeeping_chore(label, fn)
++                from hermes_cli.backend_retirement import retirement
++                with retirement.work() as admitted:
++                    if admitted:
++                        _housekeeping_chore(label, fn)
+         wait_for_next_tick(stop_event, interval, queue_watch, _housekeeping_chore)
+     logger.info("Gateway housekeeping stopped")
+
+@@ -5612,6 +5636,7 @@
+     # External providers own one unscoped remote registry, so they can only serve a single home.
+     cron_provider = scheduler_for_profile_mode(
+         resolve_cron_scheduler(), multiplex_profiles=len(cron_profile_homes) > 1)
++    runner._brai_release_cron_supported = isinstance(cron_provider, InProcessCronScheduler)
+     cron_start_kwargs: dict[str, Any] = {"adapters": runner.adapters, "loop": asyncio.get_running_loop()}
+
+     if isinstance(cron_provider, InProcessCronScheduler) and cron_profile_homes:
+--- a/gateway/run_adapters.py
++++ b/gateway/run_adapters.py
+@@ -587,6 +587,7 @@
+                 inflight[session_id] = asyncio.ensure_future(
+                     _dispatch(row, session_id, session_db, profile_name)
+                 )
++                self._brai_release_track(inflight[session_id])
+
+         # A row still 'running' at startup died mid-dispatch and blocks request_handoff until reclaimed.
+         def _scope(profile_home):  # local: tests bind this watcher onto bare SimpleNamespace runners
+@@ -600,19 +601,20 @@
+                     await _reclaim_stale(self)
+         try:
+             while self._running:
+-                try:
+-                    for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
+-                        # Idle gate (run_idle_gates): skip the scope entry when the profile's store
+-                        # holds no pending handoff. The root poll (None) is unscoped and stays cheap.
+-                        if profile_home is not None and not await off_loop_gate(
+-                                self, lambda home=profile_home: profile_has_pending_handoff(home)):
+-                            continue
+-                        async with _scope(profile_home):
+-                            await _tick(profile_name)
+-                except asyncio.CancelledError:
+-                    raise
+-                except Exception as exc:
+-                    logger.debug("Handoff watcher tick error: %s", exc, exc_info=True)
++                async with self._brai_release_source():
++                    try:
++                        for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
++                            # Idle gate (run_idle_gates): skip the scope entry when the profile's store
++                            # holds no pending handoff. The root poll (None) is unscoped and stays cheap.
++                            if profile_home is not None and not await off_loop_gate(
++                                    self, lambda home=profile_home: profile_has_pending_handoff(home)):
++                                continue
++                            async with _scope(profile_home):
++                                await _tick(profile_name)
++                    except asyncio.CancelledError:
++                        raise
++                    except Exception as exc:
++                        logger.debug("Handoff watcher tick error: %s", exc, exc_info=True)
+                 await asyncio.sleep(interval)
+         finally:
+             # Bounded drain: cancelling would strand in-flight rows in 'running'.
+--- a/gateway/run_goals.py
++++ b/gateway/run_goals.py
+@@ -496,17 +496,18 @@
+                 await self._loop_wakeup_fire_one(sid, state, now, warned_no_route, profile_name)
+
+         while self._running:
+-            try:
+-                # Multiplex resolution walks the filesystem off-loop; a stalled walk on the loop
+-                # trips the loop-liveness watchdog (exit 75).
+-                for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
+-                    # Idle gate (run_idle_gates): skip the scope entry when the profile's store holds
+-                    # no active loop. The root scan (None) is unscoped and stays cheap.
+-                    if profile_home is not None and not await self._run_in_executor_with_context(
+-                            profile_has_active_loop, profile_home):
+-                        continue
+-                    async with _scope(profile_home):
+-                        await _scan_one_store(profile_name)
+-            except Exception as exc:
+-                logger.debug("loop wakeup watcher error: %s", exc)
++            async with self._brai_release_source():
++                try:
++                    # Multiplex resolution walks the filesystem off-loop; a stalled walk on the loop
++                    # trips the loop-liveness watchdog (exit 75).
++                    for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
++                        # Idle gate (run_idle_gates): skip the scope entry when the profile's store holds
++                        # no active loop. The root scan (None) is unscoped and stays cheap.
++                        if profile_home is not None and not await self._run_in_executor_with_context(
++                                profile_has_active_loop, profile_home):
++                            continue
++                        async with _scope(profile_home):
++                            await _scan_one_store(profile_name)
++                except Exception as exc:
++                    logger.debug("loop wakeup watcher error: %s", exc)
+             await asyncio.sleep(interval)
+--- a/gateway/kanban_watchers.py
++++ b/gateway/kanban_watchers.py
+@@ -101,23 +101,24 @@
+         _gc_next_at = 0.0
+
+         while self._running:
+-            try:
+-                _gc_due = time.monotonic() >= _gc_next_at
+-                _retention = 30
+-                if _gc_due:
+-                    _gc_next_at = time.monotonic() + _GC_INTERVAL_SECONDS
+-                    _retention = _gc_retention_days()
+-
+-                deliveries = await asyncio.to_thread(
+-                    _notifier_collect, self, _kb,
+-                    notifier_profile=notifier_profile, gc_due=_gc_due, gc_retention_days=_retention,
+-                )
+-                for d in deliveries:
+-                    await _KanbanNotification(
+-                        self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
+-                    ).deliver()
+-            except Exception as exc:
+-                logger.warning("kanban notifier tick failed: %s", exc)
++            async with self._brai_release_source():
++                try:
++                    _gc_due = time.monotonic() >= _gc_next_at
++                    _retention = 30
++                    if _gc_due:
++                        _gc_next_at = time.monotonic() + _GC_INTERVAL_SECONDS
++                        _retention = _gc_retention_days()
++
++                    deliveries = await asyncio.to_thread(
++                        _notifier_collect, self, _kb,
++                        notifier_profile=notifier_profile, gc_due=_gc_due, gc_retention_days=_retention,
++                    )
++                    for d in deliveries:
++                        await _KanbanNotification(
++                            self, d, platform_cls=_Platform, sub_fail_counts=sub_fail_counts,
++                        ).deliver()
++                except Exception as exc:
++                    logger.warning("kanban notifier tick failed: %s", exc)
+             await self._sleep_between_ticks(interval)
+
+     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> None:
+@@ -283,49 +284,50 @@
+
+         logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
+         while self._running:
+-            try:
+-                # Reap zombies before per-board work so a board DB failure
+-                # cannot block cleanup of unrelated workers.
+-                from hermes_cli import kanban_db_dispatch as _kbd
+-                pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
+-                if pids:
+-                    logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
+-            except Exception:
+-                logger.exception("kanban dispatcher: zombie reaper failed")
+-
+-            try:
+-                # Emergency stop (`hermes pause`): no auto-decompose or
+-                # dispatch while paused; running workers finish naturally.
+-                if not _kanban_dispatch_allowed():
+-                    bad_ticks = 0
+-                else:
+-                    # Re-read the auto-decompose toggle live so disabling it
+-                    # takes effect on the next tick, not on restart.
+-                    _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
+-                    # See #49638.
+-                    if _ad_enabled:
+-                        await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
+-                    results = await _to_thread_process_service(dispatcher.tick_once)
+-                    any_spawned = _log_spawn_results(results)
+-                    ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
+-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+-                now = int(time.time())
+-                if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
+-                    held = _kbd.describe_suppression(res for _slug, res in (results or []))
+-                    logger.warning(
+-                        "kanban dispatcher stuck: ready queue non-empty for "
+-                        "%d consecutive ticks but 0 workers spawned.%s Check "
+-                        "profile health (venv, PATH, credentials) and "
+-                        "`hermes kanban list --status ready`.",
+-                        bad_ticks, f" Last tick held back: {held}." if held else "",
+-                    )
+-                    last_warn_at = now
+-            except asyncio.CancelledError:
+-                logger.debug("kanban dispatcher: cancelled")
+-                self._release_kanban_dispatcher_lock()
+-                raise
+-            except Exception:
+-                logger.exception("kanban dispatcher: unexpected watcher error")
++            async with self._brai_release_source():
++                try:
++                    # Reap zombies before per-board work so a board DB failure
++                    # cannot block cleanup of unrelated workers.
++                    from hermes_cli import kanban_db_dispatch as _kbd
++                    pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
++                    if pids:
++                        logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
++                except Exception:
++                    logger.exception("kanban dispatcher: zombie reaper failed")
++
++                try:
++                    # Emergency stop (`hermes pause`): no auto-decompose or
++                    # dispatch while paused; running workers finish naturally.
++                    if not _kanban_dispatch_allowed():
++                        bad_ticks = 0
++                    else:
++                        # Re-read the auto-decompose toggle live so disabling it
++                        # takes effect on the next tick, not on restart.
++                        _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
++                        # See #49638.
++                        if _ad_enabled:
++                            await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
++                        results = await _to_thread_process_service(dispatcher.tick_once)
++                        any_spawned = _log_spawn_results(results)
++                        ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
++                        bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
++                    now = int(time.time())
++                    if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
++                        held = _kbd.describe_suppression(res for _slug, res in (results or []))
++                        logger.warning(
++                            "kanban dispatcher stuck: ready queue non-empty for "
++                            "%d consecutive ticks but 0 workers spawned.%s Check "
++                            "profile health (venv, PATH, credentials) and "
++                            "`hermes kanban list --status ready`.",
++                            bad_ticks, f" Last tick held back: {held}." if held else "",
++                        )
++                        last_warn_at = now
++                except asyncio.CancelledError:
++                    logger.debug("kanban dispatcher: cancelled")
++                    self._release_kanban_dispatcher_lock()
++                    raise
++                except Exception:
++                    logger.exception("kanban dispatcher: unexpected watcher error")
+
+             await self._sleep_between_ticks(interval)
+
+--- a/gateway/run_watchers.py
++++ b/gateway/run_watchers.py
+@@ -41,10 +41,11 @@
+         """Reclaim resources without ending durable conversations."""
+         await asyncio.sleep(60)
+         while self._running:
+-            try:
+-                await self._session_housekeeping()
+-            except Exception as e:
+-                logger.debug("Session housekeeping error: %s", e)
++            async with self._brai_release_source():
++                try:
++                    await self._session_housekeeping()
++                except Exception as e:
++                    logger.debug("Session housekeeping error: %s", e)
+             await _interruptible_sleep(self, interval)
+
+     async def _session_housekeeping(self) -> None:
+--- a/gateway/return_notices.py
++++ b/gateway/return_notices.py
+@@ -198,8 +198,9 @@
+         from gateway.run import _planned_restart_notification_path
+
+         while self._running:
+-            if read_return_notices(_planned_restart_notification_path()) is not None:
+-                await self._replay_pending_planned_restart_notification()
++            async with self._brai_release_source():
++                if read_return_notices(_planned_restart_notification_path()) is not None:
++                    await self._replay_pending_planned_restart_notification()
+             await asyncio.sleep(interval)
+
+     async def _replay_pending_planned_restart_notification(self) -> None:
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1872,43 +1872,44 @@
+         from tools.process_registry import process_registry as _pr
+         last_orphan_sweep = None
+         while self._running:
+-            with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
+-                # Completions whose owner process died while this gateway runs (#97202).
+-                if last_orphan_sweep is None or time.monotonic() - last_orphan_sweep >= ORPHAN_SWEEP_INTERVAL_S:
+-                    last_orphan_sweep = time.monotonic()
+-                    await asyncio.to_thread(self._sweep_orphaned_completion_ledgers)
+-                # Pattern events also need an idle consumer; foreground turns are optional.
+-                await self._drain_watch_notifications(_pr.completion_queue)
+-                # Process completions remain owned by their per-process watchers.
+-                requeue = []
+-                async_events = []
+-                while not _pr.completion_queue.empty():
+-                    try:
+-                        evt = _pr.completion_queue.get_nowait()
+-                    except Exception:
+-                        break
+-                    (async_events if evt.get("type") == "async_delegation" else requeue).append(evt)
+-                for evt in requeue:
+-                    _pr.completion_queue.put(evt)
+-                # A fan-out finishing together yields N completions for one session; group by full route +
+-                # parent session so each group becomes ONE consolidated turn.
+-                # A same-tick drain often carries several completions for the SAME originating session (a
+-                # fan-out of background subagents finishing together). Events for different sessions never
+-                # coalesce. See #70300.
+-                groups: dict[tuple[str, ...], list[dict]] = {}
+-                for evt in async_events:
+-                    self._enrich_async_delegation_routing(evt)
+-                    groups.setdefault(self._event_route_key(evt, self._ASYNC_GROUP_KEY_FIELDS), []).append(evt)
+-                for group in groups.values():
+-                    try:
+-                        delivered = await self._deliver_async_delegation_group(group)
+-                        if delivered is False:
++            async with self._brai_release_completion():
++                with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
++                    # Completions whose owner process died while this gateway runs (#97202).
++                    if last_orphan_sweep is None or time.monotonic() - last_orphan_sweep >= ORPHAN_SWEEP_INTERVAL_S:
++                        last_orphan_sweep = time.monotonic()
++                        await asyncio.to_thread(self._sweep_orphaned_completion_ledgers)
++                    # Pattern events also need an idle consumer; foreground turns are optional.
++                    await self._drain_watch_notifications(_pr.completion_queue)
++                    # Process completions remain owned by their per-process watchers.
++                    requeue = []
++                    async_events = []
++                    while not _pr.completion_queue.empty():
++                        try:
++                            evt = _pr.completion_queue.get_nowait()
++                        except Exception:
++                            break
++                        (async_events if evt.get("type") == "async_delegation" else requeue).append(evt)
++                    for evt in requeue:
++                        _pr.completion_queue.put(evt)
++                    # A fan-out finishing together yields N completions for one session; group by full route +
++                    # parent session so each group becomes ONE consolidated turn.
++                    # A same-tick drain often carries several completions for the SAME originating session (a
++                    # fan-out of background subagents finishing together). Events for different sessions never
++                    # coalesce. See #70300.
++                    groups: dict[tuple[str, ...], list[dict]] = {}
++                    for evt in async_events:
++                        self._enrich_async_delegation_routing(evt)
++                        groups.setdefault(self._event_route_key(evt, self._ASYNC_GROUP_KEY_FIELDS), []).append(evt)
++                    for group in groups.values():
++                        try:
++                            delivered = await self._deliver_async_delegation_group(group)
++                            if delivered is False:
++                                for evt in group:
++                                    _pr.completion_queue.put(evt)
++                        except Exception as e:
+                             for evt in group:
+                                 _pr.completion_queue.put(evt)
+-                    except Exception as e:
+-                        for evt in group:
+-                            _pr.completion_queue.put(evt)
+-                        logger.error("Async delegation injection error: %s", e)
++                            logger.error("Async delegation injection error: %s", e)
+             await asyncio.sleep(interval)
+
+     @staticmethod
+diff --git a/plugins/platforms/telegram/update_admission.py b/plugins/platforms/telegram/update_admission.py
+index be158a8..28cc883 100644
+--- a/plugins/platforms/telegram/update_admission.py
++++ b/plugins/platforms/telegram/update_admission.py
+@@ -99,6 +99,7 @@ class _Claim:
+     accepted: bool = False
+     completed: bool = False
+     failed: bool = False
++    deferred: bool = False
+     owners: int = 1
+ 
+ 
+@@ -188,6 +189,7 @@ def build_update_processor(extra, name: str) -> PerChatUpdateProcessor:
+ 
+ 
+ class TelegramApplication(Application):
++    _brai_identity_admission_protocol = 1
+     __slots__ = ("_current_claim", "adapter")
+ 
+     def __init__(self, *, adapter, **kwargs):
+@@ -272,8 +274,12 @@ class TelegramApplication(Application):
+         claim.owners -= 1
+         if claim.owners:
+             return
++        disposition = getattr(self.adapter, '_brai_identity_disposition', None)
++        if callable(disposition):
++            disposition(claim.key, {'deferred': claim.deferred, 'accepted': claim.accepted,
++                                    'completed': claim.completed, 'failed': claim.failed})
+         del self.adapter._inflight_update_ids[claim.key]
+-        if claim.accepted or (claim.completed and not claim.failed):
++        if not claim.deferred and (claim.accepted or (claim.completed and not claim.failed)):
+             _record_receipt(self.adapter, claim.key)
+ 
+     async def process_error(self, update, error, job=None, coroutine=None):
+@@ -295,6 +301,11 @@ class TelegramApplication(Application):
+         seen = self.adapter._seen_update_ids
+         pending = self.adapter._inflight_update_ids
+         if key in seen or key in pending:
++            duplicate = getattr(self.adapter, '_brai_identity_duplicate', None)
++            if duplicate is not None:
++                if not callable(duplicate):
++                    raise RuntimeError('BRAI_DUPLICATE_UNAVAILABLE')
++                await duplicate(update, key, 'seen' if key in seen else 'pending')
+             return
+         claim = _Claim(key, asyncio.current_task())
+         # Atomic on PTB's event loop: no await between lookup and claim. Dispatch and its
+@@ -302,6 +313,19 @@ class TelegramApplication(Application):
+         pending[key] = claim
+         token = self._current_claim.set(claim)
+         try:
++            gate = getattr(self.adapter, '_brai_identity_preflight', None)
++            if gate is not None:
++                if not callable(getattr(gate, 'enter', None)) or not callable(getattr(gate, 'classify', None)):
++                    raise RuntimeError('BRAI_PREFLIGHT_UNAVAILABLE')
++                ticket = gate.enter(claim.key, update)
++                deferred = await gate.classify(ticket, update)
++                if type(deferred) is not bool:
++                    raise RuntimeError('BRAI_PREFLIGHT_INVALID')
++                if deferred:
++                    if claim.owners != 1 or claim.accepted or claim.completed:
++                        raise RuntimeError('BRAI_PREFLIGHT_LATE')
++                    claim.deferred = True
++                    return
+             await super().process_update(update)
+         except BaseException:
+             claim.failed = True
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index 3689231..ad46317 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -528,6 +528,7 @@ class _PollingStallError(RuntimeError):
+ 
+ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+     """Telegram bot adapter: users/groups, MarkdownV2 replies, forum topics, media."""
++    _brai_identity_batch_protocol = 1
+ 
+     # Bound for the per-(chat_id, status_key) status-message cache; FIFO half-trim on overflow.
+     _STATUS_MESSAGE_IDS_MAX = 2000
+@@ -6593,7 +6594,13 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         if self._should_drop_delayed_delivery():
+             self._hold_inbound_event(event, where="text-enqueue")
+             return
++        hook = getattr(self, "_brai_identity_text_batch", None)
++        previous = dict(self._pending_text_batch_tasks) if callable(hook) else None
++        if previous is not None:
++            hook(event, previous, "before")
+         super()._enqueue_text_event(event)
++        if previous is not None:
++            hook(event, previous, "after")
+         self._accept_update()
+ 
+     async def _flush_buffered(self, pending: dict, tasks: dict, key: str, delay: float, where: str, log_fn=None) -> None:
+@@ -6692,6 +6699,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         if (os.environ.get("BRAI_IDENTITY_MODE") == "telegram"
+                 and self._brai_identity_batch_scope(existing.source) != self._brai_identity_batch_scope(event.source)):
+             raise PermissionError("BRAI_IDENTITY_BATCH_SOURCE_MISMATCH")
++        hook = getattr(self, "_brai_identity_merge_batch", None)
++        if callable(hook):
++            hook(existing, event)
+         import brai_files
+         brai_files.merge_events(existing, event)
+         existing.media_urls.extend(event.media_urls)
+@@ -6709,7 +6719,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         prior_task = self._pending_photo_batch_tasks.get(batch_key)
+         if prior_task and not prior_task.done():
+             prior_task.cancel()
+-        self._pending_photo_batch_tasks[batch_key] = asyncio.create_task(self._flush_photo_batch(batch_key))
++        task = asyncio.create_task(self._flush_photo_batch(batch_key))
++        self._pending_photo_batch_tasks[batch_key] = task
++        hook = getattr(self, "_brai_identity_track_batch", None)
++        if callable(hook):
++            hook(task, event)
+ 
+     async def _route_photo_event(self, msg, event: MessageEvent) -> None:
+         """Album items debounce on media_group_id; singles go through the photo burst batcher."""
+@@ -6948,7 +6962,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         prior_task = self._media_group_tasks.get(media_group_id)
+         if prior_task:
+             prior_task.cancel()
+-        self._media_group_tasks[media_group_id] = asyncio.create_task(self._flush_media_group_event(media_group_id))
++        task = asyncio.create_task(self._flush_media_group_event(media_group_id))
++        self._media_group_tasks[media_group_id] = task
++        hook = getattr(self, "_brai_identity_track_batch", None)
++        if callable(hook):
++            hook(task, event)
+ 
+     async def _flush_media_group_event(self, media_group_id: str) -> None:
+         await self._flush_buffered(
+@@ -7205,12 +7223,16 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+         from plugins.platforms.telegram.telegram_context import group_identity_prompt
+         _chat_id_str = str(chat.id)
+         channel_prompt = resolve_channel_prompt(self.config.extra, thread_id_str or _chat_id_str, _chat_id_str if thread_id_str else None)
+-        return MessageEvent(
++        event = MessageEvent(
+             text=expand_link_entities(message), message_type=msg_type, source=source, raw_message=message,
+             message_id=str(message.message_id), platform_update_id=update_id,
+             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text, auto_skill=topic_skill,
+             channel_prompt=group_identity_prompt(self, message, channel_prompt),
+             timestamp=message.date)
++        hook = getattr(self, "_brai_identity_tag_event", None)
++        if callable(hook):
++            hook(event, update_id)
++        return event
+ 
+     # -- Message reactions (processing lifecycle) --
+ 
+diff --git a/plugins/platforms/telegram/telegram_held_inbound.py b/plugins/platforms/telegram/telegram_held_inbound.py
+index e9819bc..800c70d 100644
+--- a/plugins/platforms/telegram/telegram_held_inbound.py
++++ b/plugins/platforms/telegram/telegram_held_inbound.py
+@@ -14,6 +14,7 @@ logger = logging.getLogger("plugins.platforms.telegram.adapter")
+ 
+ class TelegramHeldInboundMixin:
+     """Hold / redispatch / hand-over of inbound events for ``TelegramAdapter``."""
++    _brai_identity_held_protocol = 1
+ 
+     def _schedule_held_inbound_redispatch(self) -> None:
+         """Ensure a tracked drain runs when held events exist and delivery is live (no-op while
+@@ -44,6 +45,10 @@ class TelegramHeldInboundMixin:
+         update and advanced the offset — silent permanent loss, no log, no error.
+         """
+         if self._is_permanent_fatal():
++            preserve = getattr(self, "_brai_identity_preserve_held", None)
++            if callable(preserve):
++                preserve(event, where)
++                return
+             logger.warning(
+                 "[Telegram] Discarding inbound under non-retryable fatal (%s, %d chars)", where, len(getattr(event, "text", None) or ""))
+             return
+@@ -59,7 +64,7 @@ class TelegramHeldInboundMixin:
+         if any(existing is event for existing in held):
+             return
+         max_n = int(getattr(self, "HELD_INBOUND_MAX", 64) or 64)
+-        while len(held) >= max_n:
++        while len(held) >= max_n and not callable(getattr(self, "_brai_identity_preserve_held", None)):
+             dropped = held.pop(0)
+             logger.warning(
+                 "[Telegram] Held-inbound queue full (%d); dropping oldest (%d chars)", max_n, len(getattr(dropped, "text", None) or ""))
+@@ -103,26 +108,51 @@ class TelegramHeldInboundMixin:
+         held = getattr(self, "_held_inbound_events", None)
+         if self._is_permanent_fatal():
+             if held:
+-                n = len(held)
+-                held.clear()
+-                logger.warning("[Telegram] Redispatch aborted; discarded %d held inbound under non-retryable fatal", n)
++                preserve = getattr(self, "_brai_identity_preserve_held", None)
++                if callable(preserve):
++                    for event in held:
++                        preserve(event, "redispatch-fatal")
++                else:
++                    n = len(held)
++                    held.clear()
++                    logger.warning("[Telegram] Redispatch aborted; discarded %d held inbound under non-retryable fatal", n)
+             return
+         if not held:
+             return
+         # Take ownership atomically; concurrent holds append to the fresh list for a follow-up.
+         events = list(held)
++        hook = getattr(self, "_brai_identity_take_held", None)
++        if callable(hook):
++            hook(events)
+         held.clear()
+         logger.warning("[Telegram] Redispatching %d held inbound message(s)", len(events))
+         allow_followup_schedule = True
+         try:
+             for idx, event in enumerate(events):
++                can_redispatch = getattr(self, "_brai_identity_can_redispatch", None)
++                if callable(can_redispatch) and not can_redispatch(event):
++                    self._rehold_from(events, idx, "redispatch-unknown")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-unknown")
++                    allow_followup_schedule = False
++                    return
+                 if self._is_permanent_fatal() or self._should_drop_delayed_delivery():
+                     self._rehold_from(events, idx, "redispatch-interrupted")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-interrupted")
+                     return
+                 try:
+                     await self.handle_message(event)
++                    hook = getattr(self, "_brai_identity_finish_held", None)
++                    if callable(hook):
++                        hook(event)
+                 except asyncio.CancelledError:
+                     self._rehold_from(events, idx, "redispatch-cancelled")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-cancelled")
+                     raise
+                 except Exception:
+                     # Retryable failure: re-hold but do NOT reschedule now (a poison event would
+@@ -130,6 +160,9 @@ class TelegramHeldInboundMixin:
+                     logger.exception(
+                         "[Telegram] Failed to redispatch held inbound (%d chars); re-holding", len(getattr(event, "text", None) or ""))
+                     self._rehold_from(events, idx, "redispatch-failed")
++                    hook = getattr(self, "_brai_identity_rehold_held", None)
++                    if callable(hook):
++                        hook(events[idx:], "redispatch-failed")
+                     allow_followup_schedule = False
+                     return
+         finally:

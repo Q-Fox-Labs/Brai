@@ -21,7 +21,7 @@ def command(tool, arguments, *, home, python):
         return value
     flags = (['--ignore-config', '--no-js-runtimes', '--js-runtimes',
               'node:/usr/local/bin/node'] if tool == 'yt-dlp' else [])
-    return [python, '-B', '-m', MODULES[tool], *flags, *(rewrite(x) for x in arguments)]
+    return [python, '-s', '-P', '-B', '-m', MODULES[tool], *flags, *(rewrite(x) for x in arguments)]
 
 
 def main():

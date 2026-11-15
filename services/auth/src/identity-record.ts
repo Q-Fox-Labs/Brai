@@ -16,5 +16,5 @@ export async function insertIdentity(client:PoolClient,user:IdentityUser&{telegr
   await client.query("DELETE FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[author,user.id]);
   await client.query("INSERT INTO sys_telegram_account(telegram_id,user_id) VALUES($1,$2)",[telegramId,user.id]);
  }
- return {...user,telegramId:author};
+ return {...user,telegramId:author,generation:0,appliedGeneration:0};
 }

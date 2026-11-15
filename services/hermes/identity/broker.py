@@ -20,10 +20,15 @@ import uuid
 
 from .memory_registry import load_registry
 from .lifecycle import LifecycleRunner
+from .ipc import safe_failure
 try:
     from ..files.identity import OwnerFiles
+    from ..files.generated import GeneratedFiles
 except ImportError:
     from files.identity import OwnerFiles
+    from files.generated import GeneratedFiles
+
+TOOL_POLICY = json.loads((Path(__file__).with_name('tool-policy.json')).read_text())
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
 
@@ -163,7 +168,10 @@ class ControlPort:
                 if value.get('jsonrpc') != '2.0' or future is None or future.done():
                     raise ValueError('Invalid control response')
                 if 'error' in value:
-                    future.set_exception(PermissionError('Control rejected request'))
+                    error = PermissionError('Control rejected request')
+                    data = value['error'].get('data') if isinstance(value['error'], dict) else None
+                    error.diagnostic = safe_failure(**{k: data.get(k) for k in ('reason', 'stage')}) if isinstance(data, dict) else safe_failure(stage='control')
+                    future.set_exception(error)
                 elif 'result' in value:
                     future.set_result(value['result'])
                 else:
@@ -219,6 +227,30 @@ class Broker:
         self.unlink_offers = {}
         self.login_locks, self.login_state = {}, None
         self.files = OwnerFiles(config, control, protected_json)
+        self.generated = GeneratedFiles(self.files,self.authorize)
+        self._dev_gateway = None
+
+    def dev_gateway(self):
+        """Load only the Root-owned fixed DEV dispatcher; caller never supplies paths."""
+        if self.config.get('registryPath') != '/etc/brai-dev/identity/registry.json':
+            raise PermissionError('DEV release unavailable')
+        if self._dev_gateway is None:
+            import importlib.util
+            path = Path('/usr/local/libexec/brai-dev-release/dev_gateway.py')
+            for parent in (path.parent, *path.parents):
+                info = parent.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise PermissionError('DEV dispatcher unavailable')
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
+                raise PermissionError('DEV dispatcher unavailable')
+            spec = importlib.util.spec_from_file_location('_brai_fixed_dev_gateway', path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if Path(module.__file__).resolve() != path:
+                raise PermissionError('DEV dispatcher changed')
+            self._dev_gateway = module.load()
+        return self._dev_gateway
 
     def delivery_state(self):
         """Открыть постоянные квитанции из защищённой операторской конфигурации."""
@@ -233,16 +265,18 @@ class Broker:
         """Повторно прочитать защищённый реестр после каждого обновления."""
         return load_registry(self.config['registryPath'])
 
-    async def authorize(self, uid):
+    async def authorize(self, uid, *, timeout=3):
         """Сверить профиль с текущим состоянием Auth."""
         profile = self.profiles().get(uid)
         if not profile or profile['status'] != 'active':
             raise PermissionError('Profile unavailable')
-        principal = await self.control.call('authorize', {'uid': uid}, timeout=3)
+        principal = await self.control.call('authorize', {'uid': uid}, timeout=timeout)
         if (principal.get('userId') != profile['userId'] or
                 principal.get('profileId') != profile['profileId']):
             raise PermissionError('Principal mismatch')
-        return profile
+        if principal.get('role') not in TOOL_POLICY['roles']:
+            raise PermissionError('Role unavailable')
+        return {**profile, 'role': principal['role'], 'generation': principal.get('generation', 0)}
 
     async def resolve(self, telegram_id):
         """Найти только действующую связь Telegram → системный профиль."""
@@ -259,6 +293,41 @@ class Broker:
             raise PermissionError('Profile unavailable')
         uid, profile = matches[0]
         return {'uid': uid, **profile, 'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}
+
+    async def resolve_known(self, telegram_id):
+        """Различить достоверное отсутствие Auth от отказа или сбоя до Telegram ack."""
+        if not isinstance(telegram_id, str) or not telegram_id.isascii() or not telegram_id.isdecimal():
+            raise ValueError('Invalid Telegram identity')
+        async def resolved():
+            answer = await self.control.call('identity.resolve', {'telegramId': telegram_id}, timeout=None)
+            if not isinstance(answer, dict) or 'user' not in answer:
+                raise ValueError('Auth identity response unavailable')
+            user = answer['user']
+            if user is None:
+                return None
+            if (not isinstance(user, dict) or any(not isinstance(user.get(key), str) or not user[key]
+                    for key in ('id', 'profileId', 'telegramId', 'status'))):
+                raise ValueError('Auth identity response unavailable')
+            return user
+        user = await resolved()
+        if user is None:
+            return {'state': 'unregistered'}
+        if user['status'] != 'active':
+            return {'state': 'forbidden'}
+        matches = [(uid, profile) for uid, profile in self.profiles().items()
+                   if profile['userId'] == user['id'] and profile['profileId'] == user['profileId']
+                   and str(profile['telegramId']) == user['telegramId'] and profile['status'] == 'active']
+        if len(matches) != 1:
+            raise PermissionError('Profile unavailable')
+        uid, profile = matches[0]
+        checked = await self.authorize(uid, timeout=None)
+        if checked['userId'] != user['id'] or checked['profileId'] != user['profileId']:
+            raise PermissionError('Principal changed')
+        current = await resolved()
+        if current is None or any(current[key] != user[key] for key in ('id', 'profileId', 'telegramId', 'status')):
+            raise PermissionError('Telegram binding changed')
+        return {'state': 'known', 'profile': {'uid': uid, **checked,
+                'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}}
 
     async def publish(self, uid, profile, params):
         """Сохранить внутренний порт публикации через owner-bound snapshot."""
@@ -433,6 +502,13 @@ class Broker:
             uid = params['uid']
             profile = await self.authorize(uid)
             return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
+        if method == 'ingress.profiles-strict' and ingress and not params:
+            profiles = []
+            registry = self.profiles()
+            for uid, candidate in registry.items():
+                if candidate['status'] == 'active':
+                    profiles.append({'uid': uid, **(await self.authorize(uid, timeout=None))})
+            return {'profiles': profiles, 'allProfileIds': [candidate['profileId'] for candidate in registry.values()]}
         if method == 'ingress.profiles' and ingress and not params:
             profiles = []
             for uid, candidate in self.profiles().items():
@@ -454,6 +530,10 @@ class Broker:
                 return {'allowed': True}
             except Exception:
                 return {'allowed': False}
+        if method == 'ingress.resolve-known' and ingress:
+            if set(params) != {'telegramId'}:
+                raise ValueError('Invalid identity request')
+            return await self.resolve_known(params['telegramId'])
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
         if method == 'identity.link-redeem' and ingress:
@@ -579,7 +659,93 @@ class Broker:
                 # AIDEV-NOTE: Startup проверяется до активации. Здесь доступна лишь несекретная
                 # конфигурация своего профиля; данные и инструменты требуют active Auth.
                 return await self.files.configuration(peer_uid, bootstrap)
+        if method == 'permissions.bootstrap' and not params:
+            return await self.control.call(method, {'uid': peer_uid})
+        if method == 'tools.list' and not params:
+            result = await self.control.call(method, {'uid': peer_uid})
+            if not isinstance(result, dict):
+                raise ValueError('Tool catalog unavailable')
+            if self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json' and result.get('role') in ('creator', 'admin'):
+                return {**result, 'devRelease': True}
+            return result
+        if method == 'native.catalog' and set(params) == {'name'} and isinstance(params['name'], str):
+            state = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
+            name = params['name']
+            allowed = state['role'] != 'guest' or name in TOOL_POLICY['guestNative']
+            if name.startswith('mcp__brai__'):
+                short = name.removeprefix('mcp__brai__')
+                catalog = await self.control.call('tools.list', {'uid': peer_uid})
+                allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
+                    short in TOOL_POLICY['guestClient'] if state['role'] == 'guest' else short in (
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+            if name == 'mcp__brai__brai_dev_release':
+                allowed = state['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
+            current = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
+            return {'allowed': allowed and current == state, 'role': state['role'], 'generation': state['generation']}
         profile = await self.authorize(peer_uid)
+        if method == 'dev.release':
+            if self.config.get('registryPath') != '/etc/brai-dev/identity/registry.json' or profile['role'] not in ('creator', 'admin'):
+                raise PermissionError('DEV release unavailable')
+            action = params.get('action')
+            if action == 'status' and set(params) == {'action', 'operationId'}:
+                result = await asyncio.to_thread(self.dev_gateway().status, params['operationId'])
+            elif action == 'release' and set(params) == {'action', 'requestId', 'sourceSha', 'expectedBase'}:
+                request = {key:params[key] for key in ('requestId', 'sourceSha', 'expectedBase')}
+                gateway = self.dev_gateway()
+                prepared = await asyncio.to_thread(gateway.prepare, request)
+                current = await self.authorize(peer_uid)
+                if any(current.get(key) != profile.get(key) for key in ('userId','profileId','role','generation')):
+                    raise PermissionError('DEV release authority changed')
+                result = prepared if prepared.get('state') == 'unchanged' else await asyncio.to_thread(gateway.publish, prepared)
+            else:
+                raise ValueError('Invalid DEV release request')
+            current = await self.authorize(peer_uid)
+            if any(current.get(key) != profile.get(key) for key in ('userId','profileId','role','generation')):
+                raise PermissionError('DEV release authority changed')
+            return result
+        if method == 'permissions.get' and not params:
+            return {key: profile[key] for key in ('role', 'generation')}
+        if method == 'native.authorize' and set(params) == {'name'} and isinstance(params['name'], str):
+            name = params['name']
+            allowed = profile['role'] != 'guest' or name in TOOL_POLICY['guestNative']
+            if name.startswith('mcp__brai__'):
+                short = name.removeprefix('mcp__brai__')
+                catalog = await self.control.call('tools.list', {'uid': peer_uid})
+                allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
+                    short in TOOL_POLICY['guestClient'] if profile['role'] == 'guest' else short in (
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+            if name == 'mcp__brai__brai_dev_release':
+                allowed = profile['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                allowed = False
+            return {'allowed': allowed, 'role': profile['role'], 'generation': profile['generation']}
+        if profile['role'] == 'guest' and method in ('login.send','telegram.link','telegram.unlink','artifacts.publish'):
+            raise PermissionError('Role denied')
+        if method in ('generated.begin','generated.finish','generated.abort'):
+            if profile['role'] != 'guest':
+                raise PermissionError('Generation port unavailable')
+            action = getattr(self.generated,method.split('.')[1])
+            return await action(peer_uid,profile,params)
+        if method == 'files.create-text':
+            result = await self.files.create_text(peer_uid, profile, params)
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                raise PermissionError('Access changed')
+            return result
+        if method in ('files.create-document','files.create-spreadsheet'):
+            result = await self.files.create_structured(peer_uid,profile,params,
+                'document' if method == 'files.create-document' else 'workbook')
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                raise PermissionError('Access changed')
+            return result
+        if method == 'files.read-text':
+            result = await self.files.read_text(peer_uid, profile, params)
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                raise PermissionError('Access changed')
+            return result
         if method in ('telegram.link', 'telegram.unlink') and (request_turn is None or self.turns.get(peer_uid) is not request_turn):
             raise PermissionError('Owner turn changed')
         if method == 'tools.list' and not params:
@@ -593,7 +759,7 @@ class Broker:
         if method == 'files.configuration' and not params:
             return await self.files.configuration(peer_uid, profile)
         if method in ('artifacts.publish', 'files.publish'):
-            return await self.files.publish(peer_uid, profile, params)
+            return await self.files.publish(peer_uid, profile, params, admitted=profile['role'] == 'guest')
         if method in ('artifacts.fetch', 'files.fetch'):
             return await self.files.fetch(peer_uid, profile, params)
         if method in ('files.get', 'files.list', 'files.prepare'):
@@ -760,6 +926,7 @@ PARAMETERS = {
     'authorize': ({'uid'}, set()),
     'dialogues.authorize': (set(), set()),
     'identity.resolve': ({'telegramId'}, set()),
+    'ingress.resolve-known': ({'telegramId'}, set()),
     'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'accountAnswer', 'expectedUid', 'accountRefused'}),
@@ -768,9 +935,22 @@ PARAMETERS = {
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
     'ingress.open-artifact': ({'uid', 'artifactId'}, {'turnId', 'inputId'}),
+    'dev.release': ({'action'}, {'requestId','sourceSha','expectedBase','operationId'}),
+    'permissions.bootstrap': (set(), set()),
+    'permissions.get': (set(), set()),
+    'native.authorize': ({'name'}, set()),
+    'native.catalog': ({'name'}, set()),
+    'generated.begin': ({'kind'}, set()),
+    'generated.finish': ({'ticket','sizeBytes','sha256'}, set()),
+    'generated.abort': ({'ticket'}, set()),
+    'files.create-text': ({'filename','content','requestId'}, set()),
+    'files.read-text': ({'artifactId'}, set()),
+    'files.create-document': ({'filename','document','requestId'}, set()),
+    'files.create-spreadsheet': ({'filename','workbook','requestId'}, set()),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
     'ingress.profiles': (set(), set()),
+    'ingress.profiles-strict': (set(), set()),
     'ingress.delivery-artifact': ({'uid', 'artifactId'}, set()),
     'files.configuration': (set(), set()),
     'files.publish': ({'path', 'requestId'}, set()),
@@ -882,6 +1062,11 @@ async def rpc_request(broker, uid, request):
                     'error': type(error).__name__, 'cause': type(cause).__name__,
                     'errno': getattr(cause, 'errno', None)}) + '\n')
                 response = rpc_error(identifier, -32001, 'Request unavailable')
+                data = getattr(error, 'diagnostic', None)
+                response['error']['data'] = (safe_failure(**{k: data.get(k) for k in ('reason', 'stage')})
+                    if isinstance(data, dict) else safe_failure(
+                        reason='FORBIDDEN' if isinstance(error, PermissionError) else
+                        'DEADLINE_EXCEEDED' if isinstance(error, TimeoutError) else 'INTERNAL'))
     return None if notification else response
 
 
@@ -947,6 +1132,11 @@ async def serve(config):
     broker = Broker(config, control)
     lifecycle = (asyncio.create_task(LifecycleRunner(control, config['accessCommand']).run())
                  if config.get('accessCommand') else None)
+    async def reap_generated():
+        while True:
+            await asyncio.sleep(30)
+            await broker.generated.reap()
+    generation_reaper = asyncio.create_task(reap_generated())
     slots = asyncio.Semaphore(32)
     # AIDEV-NOTE: tools.call может ждать обратной авторизации обработчика; общий бюджет дал бы взаимную блокировку.
     personal_slots = asyncio.Semaphore(64)
@@ -1032,6 +1222,9 @@ async def serve(config):
         if lifecycle is not None:
             lifecycle.cancel()
             await asyncio.gather(lifecycle, return_exceptions=True)
+        generation_reaper.cancel()
+        await asyncio.gather(generation_reaper,return_exceptions=True)
+        await broker.generated.close()
         await control.close()
         if broker.login_state is not None:
             broker.login_state.close()

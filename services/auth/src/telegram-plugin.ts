@@ -22,7 +22,7 @@ export function telegramPlugin(pool:Pool,secret:string) {
   const client=await pool.connect();let valid=false;
   try{
    await client.query("BEGIN");await lifecycleLock(client);
-   const stamped=await client.query('UPDATE "session" s SET brai_generation=$3 FROM brai_identity i WHERE s.id=$1 AND s."userId"=$2 AND i.user_id=s."userId" AND i.status=\'active\' AND i.lifecycle_generation=$3 RETURNING s.id',[session.id,user.id,grant.generation]);
+   const stamped=await client.query('UPDATE "session" s SET brai_generation=$3 FROM brai_identity i WHERE s.id=$1 AND s."userId"=$2 AND i.user_id=s."userId" AND i.status=\'active\' AND i.role IN (\'creator\',\'admin\',\'user\') AND i.lifecycle_generation=$3 RETURNING s.id',[session.id,user.id,grant.generation]);
    valid=!!stamped.rowCount;
    if(!valid)await client.query('DELETE FROM "session" WHERE id=$1 AND "userId"=$2',[session.id,user.id]);
    await client.query("COMMIT");

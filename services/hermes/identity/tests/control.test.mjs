@@ -13,7 +13,7 @@ function setup(overrides = {}) {
     calls.push(op);
     if (op === 'session') return { status: 200, body: { user: { id: 'admin', role: 'admin', status: 'active' }, session: {} } };
     if (op === 'admin-audit') return { status: 200 };
-    if (op === 'telegram-resolve' || op === 'identity-get') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
+    if (op === 'telegram-resolve' || op === 'identity-get') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active', role: 'user' } };
     if (op === 'telegram-code-issue') return { code: '123456789ABC', origin: 'https://brai.example', expiresAt: 'later' };
   };
   const control = new Control({ origin: headers.origin, cursorKey: 'x'.repeat(32), registry, authCall,

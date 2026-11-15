@@ -44,7 +44,7 @@ def prepare(home):
         if path.is_symlink() or not path.resolve().is_relative_to(home):
             raise ValueError(f'Пользовательский каталог должен быть внутри профиля: {path}')
     for relative in ('', 'projects', 'files', 'files/uploads', 'files/exports',
-                     'files/admin', 'instructions', 'instructions/overrides', 'skills'):
+                     'files/admin', 'instructions', 'instructions/overrides', 'skills', 'skill-lessons'):
         path = root / relative
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise ValueError(f'Пользовательский каталог должен быть внутри userdata: {path}')

@@ -47,7 +47,7 @@ class FakeControl:
             profile = self.profiles.get(params.get("uid"))
             if not profile:
                 raise PermissionError("synthetic inactive principal")
-            return {"userId": profile["userId"], "profileId": profile["profileId"]}
+            return {"userId": profile["userId"], "profileId": profile["profileId"], "role": "user", "generation": 0}
         if method == "identity.resolve":
             telegram_id = params.get("telegramId")
             profile = next((p for p in self.profiles.values()
@@ -72,7 +72,7 @@ class FakeControl:
         if method == "login.send":
             return {"status": "sent", "code": "synthetic-code-must-not-escape"}
         if method == "tools.list":
-            return {"tools": []}
+            return {"role": "user", "generation": 0, "tools": []}
         if method == "tools.call":
             return {"ok": True}
         if method == "artifacts.publish":
@@ -707,17 +707,67 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 await self.broker.publish(WORKER_UID, self.profile, params)
         self.assertFalse(any(method == "artifacts.publish" for method, _params, _timeout in self.control.calls[before:]))
 
+    async def test_strict_profile_inventory_fails_instead_of_hiding_auth_error(self):
+        result = await self.broker.call(INGRESS_UID, 'ingress.profiles-strict', {})
+        self.assertEqual(result['profiles'][0]['uid'], WORKER_UID)
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'ingress.profiles-strict', {})
+        with mock.patch.object(self.control, 'call', side_effect=PermissionError('synthetic Auth outage')):
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'ingress.profiles-strict', {})
+
+    async def test_preack_identity_distinguishes_null_inactive_alias_and_failure(self):
+        params = {'telegramId': '333444'}
+        self.control.aliases['333444'] = self.profile['telegramId']
+        receipt = await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params)
+        self.assertEqual(receipt['state'], 'known')
+        self.assertEqual(receipt['profile']['uid'], WORKER_UID)
+        self.assertEqual(receipt['profile']['telegramId'], '333444')
+        self.assertEqual(receipt['profile']['authorTelegramId'], self.profile['telegramId'])
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'ingress.resolve-known', params)
+        with self.assertRaises(ValueError):
+            await self.broker.call(INGRESS_UID, 'ingress.resolve-known', {**params, 'extra': True})
+        async def null(*args, **kwargs): return {'user': None}
+        with mock.patch.object(self.control, 'call', side_effect=null):
+            self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params), {'state':'unregistered'})
+        async def inactive(*args, **kwargs):
+            return {'user': {'id':'user', 'profileId':'profile', 'telegramId':'111222', 'status':'blocked'}}
+        with mock.patch.object(self.control, 'call', side_effect=inactive):
+            self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params), {'state':'forbidden'})
+        for answer in ({}, {'user': {}}, {'user': 'bad'}):
+            with mock.patch.object(self.control, 'call', return_value=answer):
+                with self.assertRaises(ValueError):
+                    await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params)
+        with mock.patch.object(self.control, 'call', side_effect=PermissionError('synthetic outage')):
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params)
+
+    async def test_preack_identity_rechecks_alias_after_authorization(self):
+        initial = {'id':self.profile['userId'], 'profileId':self.profile['profileId'],
+                   'telegramId':self.profile['telegramId'], 'status':'active'}
+        changed = {**initial, 'status':'blocked'}
+        async def control(method, params, timeout=35):
+            if method == 'identity.resolve':
+                control.reads += 1
+                return {'user': initial if control.reads == 1 else changed}
+            return {'userId':initial['id'], 'profileId':initial['profileId'], 'role':'user'}
+        control.reads = 0
+        with mock.patch.object(self.control, 'call', side_effect=control):
+            with self.assertRaisesRegex(PermissionError, 'binding changed'):
+                await self.broker.call(INGRESS_UID, 'ingress.resolve-known', {'telegramId':'111222'})
+
     async def test_profile_inventory_is_ingress_only_and_keeps_stable_owner(self):
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, 'ingress.profiles', {})
         inventory = await self.broker.call(INGRESS_UID, 'ingress.profiles', {})
-        self.assertEqual(inventory['profiles'], [{'uid': WORKER_UID, **self.profile}])
+        self.assertEqual(inventory['profiles'], [{'uid': WORKER_UID, **self.profile, 'role': 'user', 'generation': 0}])
         self.control.aliases['333444'] = self.profile['telegramId']
         actual = await self.broker.resolve('333444')
         self.assertEqual(actual['telegramId'], '333444')
         self.assertEqual(actual['authorTelegramId'], self.profile['telegramId'])
         self.assertEqual((await self.broker.call(INGRESS_UID, 'ingress.profiles', {}))['profiles'],
-                         [{'uid': WORKER_UID, **self.profile}])
+                         [{'uid': WORKER_UID, **self.profile, 'role': 'user', 'generation': 0}])
         self.profile['status'] = 'blocked'
         self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.profiles', {}), {'profiles': []})
 
@@ -731,7 +781,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                     await self.broker.open_artifact(WORKER_UID, params)
                 self.assertEqual(await self.broker.open_artifact(INGRESS_UID, params),
                                  ({'artifactId': params['artifactId']}, fd))
-                opened.assert_awaited_once_with(WORKER_UID, self.profile, params['artifactId'])
+                opened.assert_awaited_once_with(WORKER_UID, {**self.profile, 'role': 'user', 'generation': 0}, params['artifactId'])
             finally:
                 os.close(fd)
             self.profile['status'] = 'blocked'
@@ -775,7 +825,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.delivery-artifact',
                 {'uid': WORKER_UID, 'artifactId': artifact}),
                 {'artifactId': artifact, 'localPath': '/verified/file'})
-            fetch.assert_awaited_once_with(WORKER_UID, self.profile,
+            fetch.assert_awaited_once_with(WORKER_UID, {**self.profile, 'role': 'user', 'generation': 0},
                                            {'artifactId': artifact}, ingress=True)
             self.profile['status'] = 'blocked'
             with self.assertRaises(PermissionError):
@@ -1115,7 +1165,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             broker_module._secure_login_state_path(str(TEMP_ROOT / 'unsafe-delivery.sqlite'))
 
-    async def test_provisioning_can_bootstrap_own_configuration_but_no_data_or_tools(self):
+    async def test_provisioning_can_discover_catalog_but_cannot_dispatch_or_read_data(self):
         self.profile['status'] = 'provisioning'
         home = self.profile['home']
         entry = {'userId': self.profile['userId'], 'profileId': self.profile['profileId'], 'home': home,
@@ -1136,12 +1186,14 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 ('files.prepare', {'mode': 'files', 'items': []}),
                 ('files.fetch', {'artifactId': 'a'}),
                 ('files.publish', {'path': home + '/workspace/file', 'requestId': 'request'}),
-                ('tools.list', {}), ('tools.call', {'name': 'any', 'args': {}}),
+                ('tools.call', {'name': 'any', 'args': {}}),
                 ('login.send', {}), ('memory.search', {}),
                 ('files.configuration', {'uid': OTHER_UID})]:
             with self.subTest(method=method), self.assertRaises(PermissionError):
                 await self.broker.call(WORKER_UID, method, params)
         self.assertEqual(self.control.calls, [])
+        await self.broker.call(WORKER_UID, 'tools.list', {})
+        self.assertEqual(self.control.calls, [('tools.list', {'uid': WORKER_UID}, 35)])
         with self.assertRaises(PermissionError):
             await self.broker.call(OTHER_UID, 'files.configuration', {})
         entry['userId'] = 'foreign-user'

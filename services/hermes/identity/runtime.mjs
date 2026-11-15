@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { validateConfig } from '../config.mjs';
 import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { createBraiTools, connectPorts } from '../runtime.mjs';
+import dialoguesTools from './dialogues-tools.json' with { type: 'json' };
 import { createHistoryCatalog } from './history.mjs';
 import { createBugHuntCatalog } from './bug-hunt.mjs';
 import { createOwnerTranscription } from './transcription.mjs';
@@ -104,8 +105,9 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
  }
  async function perUserRuntime(profile) {
   if(stopped)invalid();
-  const {uid,entry,tools,publisher,shared}=validateProfile(profile,'active');
-  const signature=JSON.stringify([entry,tools,publisher,shared,profile.role]), existing=cache.get(uid);
+  const phase=profile.bootstrap===true?'provisioning':'active';
+  const {uid,entry,tools,publisher,shared}=validateProfile(profile,phase);
+  const signature=JSON.stringify([entry,tools,publisher,shared,profile.role,profile.generation,phase]), existing=cache.get(uid);
   if(existing?.signature===signature)return existing.promise;
   if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
   const promise=(async()=>{
@@ -121,12 +123,14 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
     const endpoint=shared?.transcription;
     const transcription=endpoint&&endpoint.enabled!==false
      ? transcriptionFactory({userId:entry.userId,profileId:entry.profileId},endpoint,
-        {isAdmin:async()=>profile.role==='admin'}) : null;
+        {isAdmin:async()=>['creator','admin'].includes(profile.role)}) : null;
      runtime=await createBraiTools({...tools,history:{enabled:true},
       ...(transcription?{transcription:{enabled:true}}:{})},{
       ...ports,
       async list(name){
        if(name==='history')return history.list();
+       // Публичные схемы нужны до active; чтение данных по-прежнему требует active Auth.
+       if(name==='dialogues'&&phase==='provisioning')return structuredClone(dialoguesTools);
        if(name==='transcription'&&transcription)return transcription.list();
        return ports.list(name);
       },
@@ -143,6 +147,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    return {
     async listTools(){return [...(await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name)),...(bugHunt?.list()??[])];},
     async callTool(name,args,signal){
+     if(phase==='provisioning')invalid();
      if(['publish_file','fetch_file'].includes(name))invalid();
      if(name.startsWith('bug_hunt_')){if(!bugHunt)invalid();return bugHunt.call(name,args,signal);}
      // Личный broker принимает тот же короткий голосовой ввод, что и MCP.

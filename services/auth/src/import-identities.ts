@@ -4,9 +4,10 @@ import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { z } from "zod";
+import { lifecycleLock } from "./lifecycle.js";
 
 const id=z.string().min(1).max(128);
-const item=z.strictObject({userId:id,telegramId:z.string().regex(/^[0-9]{1,20}$/),profileId:id.nullable(),role:z.enum(["admin","user"]),status:z.enum(["provisioning","active","blocked"])});
+const item=z.strictObject({userId:id,telegramId:z.string().regex(/^[0-9]{1,20}$/),profileId:id.nullable(),role:z.enum(["creator","admin","user","guest"]),status:z.enum(["provisioning","active","blocked"])});
 const path=process.env.AUTH_IMPORT_FILE, databaseURL=process.env.AUTH_DATABASE_URL, owner=process.env.AUTH_OWNER_ROLE;
 if(!path||!databaseURL||!owner)throw new Error("Import configuration required");
 const fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW);let raw:string;
@@ -24,8 +25,7 @@ try{
   await client.query("BEGIN");
   const identity=(await client.query("SELECT current_user AS role,(SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()) AS owner")).rows[0];
   if(identity.role!==owner||identity.owner!==owner)throw new Error("Database owner required");
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('brai-identity-provision',0))");
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('brai-admin',0))");
+  await lifecycleLock(client);
   if(!(await client.query("SELECT 1 FROM brai_owner_bootstrap")).rowCount)throw new Error("Owner bootstrap required");
   for(const value of items){
    const inserted=await client.query("INSERT INTO brai_identity(user_id,telegram_id,profile_id,role,status) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO NOTHING RETURNING user_id",[value.userId,value.telegramId,value.profileId,value.role,value.status]);

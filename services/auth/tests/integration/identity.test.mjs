@@ -84,6 +84,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal(await unlinkTelegram(runtime,'10005','10002'),false);
   await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'alias-session-fixture',multi.id]);
   assert.equal(await unlinkTelegram(runtime,alias,alias),true);
+  multi.generation+=1;
   assert.equal(await resolveTelegram(pool,alias),null);
   assert.equal(await redeemTelegramLink(runtime,secret,alias,link.code),null);
   assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE "userId"=$1',[multi.id])).rows[0].count,'0');
@@ -114,6 +115,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   await pool.query("UPDATE sys_telegram_link SET consumed_by=NULL,consumed_at=NULL WHERE user_id=$1",[equal.id]);
   assert.equal(await redeemTelegramLink(runtime,secret,'30003',equalLink.code),null);
   assert.equal(await unlinkTelegram(runtime,'30002','30001'),true);
+  equal.generation+=1;
   assert.equal(await resolveTelegram(runtime,'30001'),null);
   assert.deepEqual(await resolveTelegram(runtime,'30002'),equal);
   await migrateIdentity(pool);await migrateIdentity(pool);
@@ -121,6 +123,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.ok(await issueCode(runtime,secret,'30002'));
   const detachedLink=await issueTelegramLink(runtime,secret,'30002');
   assert.equal(await unlinkTelegram(runtime,'30002','30002'),true);
+  equal.generation+=1;
   assert.deepEqual(await getIdentity(runtime,equal.id),{user:equal,telegramIds:[]});
   assert.equal(await resolveTelegram(runtime,'30002'),null);
   assert.equal(await redeemTelegramLink(runtime,secret,'30003',detachedLink.code),null);

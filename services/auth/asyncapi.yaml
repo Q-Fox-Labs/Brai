@@ -215,7 +215,7 @@ channels:
     messages:
       request:
         payload:
-          $ref: "./schemas/messages.schema.json#/definitions/AdminEmptyRequest"
+          $ref: "./schemas/messages.schema.json#/definitions/AdminInviteCreateRequest"
   inviteList:
     address: brai.auth.v2.invite-list
     bindings:
@@ -321,6 +321,9 @@ channels:
       identity:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+      inviteCreated:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminInviteCreateResponse"
       issued:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramCodeIssueResponse"
@@ -619,7 +622,7 @@ operations:
       channel:
         $ref: "#/channels/v2Replies"
       messages:
-        - $ref: "#/channels/v2Replies/messages/web"
+        - $ref: "#/channels/v2Replies/messages/inviteCreated"
   inviteList:
     action: receive
     channel:

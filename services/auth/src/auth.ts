@@ -8,6 +8,7 @@ import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import { otpEmail } from "./email.js";
 import { telegramPlugin } from "./telegram-plugin.js";
+import { stampEmailCode } from "./web-access.js";
 /** Собирает auth; callback ожидает принятия письма Resend и не журналирует данные. */
 export function createAuth(cfg:Config,pool:Pool,send?:(email:string,otp:string)=>Promise<void>) {
 
@@ -21,6 +22,7 @@ export function createAuth(cfg:Config,pool:Pool,send?:(email:string,otp:string)=
    generateOTP:()=>randomInt(0,1_000_000).toString().padStart(6,"0"),
    async sendVerificationOTP({email,otp,type}) {
     if(type!=="sign-in")throw new Error("Unsupported OTP purpose");
+    await stampEmailCode(pool,email,otp);
     if(send){await send(email,otp);return;}
     const result=await new Resend(cfg.resendKey).emails.send({from:cfg.emailFrom,to:email,...otpEmail(otp,cfg.origin)});
     if(result.error)throw new Error("Email delivery rejected");

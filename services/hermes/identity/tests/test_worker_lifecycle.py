@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import inspect
+import importlib.util
 import tempfile
 import os
 from pathlib import Path
@@ -94,6 +95,13 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.calls.append('active_auth')
         return active
 
+    async def test_exited_worker_cannot_report_ready(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker.runner, worker.adapter = NS(), NS()
+        worker.exited.set()
+        with self.assertRaisesRegex(RpcError, 'Worker not ready'):
+            await worker.health()
+
     def test_native_exit_funnel_preserves_stop_failure_and_restart_codes(self):
         for outcome, expected in [(None, 0), (SystemExit(None), 0),
                                   (SystemExit(1), 1), (SystemExit(75), 75)]:
@@ -142,6 +150,30 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop_runtime()
 
+    async def test_cold_policy_discovery_sees_validated_telegram_identity(self):
+        # Cold policy imports gateway before returning; its discovery must see the real owner.
+        path = Path(__file__).resolve().parents[2] / 'telegram/__init__.py'
+        spec = importlib.util.spec_from_file_location('_fixture_telegram_identity', path)
+        module = importlib.util.module_from_spec(spec)
+        policy = ModuleType('identity.native_policy')
+        class StopAfterDiscovery(Exception): pass
+        def install(*, cold_start):
+            self.assertTrue(cold_start)
+            self.assertEqual(module.Config.from_identity().owner, '123')
+            os.environ['BRAI_IDENTITY_TELEGRAM_ID'] = '124'
+            with self.assertRaisesRegex(ValueError, 'BRAI_TELEGRAM_IDENTITY_INVALID'):
+                module.Config.from_identity()
+            raise StopAfterDiscovery()
+        policy.install = install
+        with patch.dict(sys.modules, {'_fixture_telegram_identity': module, 'identity.native_policy': policy}), \
+             patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': '/tmp/synthetic-home'}):
+            sys.modules.pop('_brai_identity_human', None)
+            spec.loader.exec_module(module)
+            worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+            worker.release.cold_start = True
+            with self.assertRaises(StopAfterDiscovery):
+                await worker.start(NS(closed=False))
+
     async def test_bootstrap_does_not_start_tools_or_recovery(self):
         worker = await self.worker()
         try:
@@ -168,6 +200,102 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.calls.count('native_start'), 1)
         finally:
             await worker.stop_runtime()
+
+    async def test_provision_health_eof_preserves_listener_for_next_primary(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            path = directory + '/worker.sock'
+            server = await asyncio.start_unix_server(worker.serve_connection, path=path)
+            async def connect():
+                reader, writer = await asyncio.open_unix_connection(path)
+                peer = Peer(reader, writer, {})
+                return writer, peer, asyncio.create_task(peer.run())
+            writer, probe, reading = await connect()
+            try:
+                health = await probe.call('health', {'require_tools': True}, timeout=2)
+                self.assertTrue(health['operational'])
+                first_runner = worker.runner
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                self.assertFalse(worker.exited.is_set())
+                self.assertIsNone(worker.peer)
+                self.assertTrue(Path(path).is_socket())
+                self.shutdown.clear()
+                writer, ingress, reading = await connect()
+                health = await ingress.call('health', {'require_tools': True}, timeout=2)
+                self.assertTrue(health['operational'])
+                self.assertIsNot(worker.runner, first_runner)
+                self.assertFalse(worker.exited.is_set())
+                self.assertEqual(self.calls.count('native_start'), 2)
+            finally:
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                server.close()
+                await server.wait_closed()
+
+    async def test_failure_during_peer_drain_still_exits(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            peer = Peer(reader, writer, {})
+            reading = asyncio.create_task(peer.run())
+            try:
+                await peer.call('health', {'require_tools': True}, timeout=2)
+                self.exit_code = 75
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                self.assertTrue(worker.exited.is_set())
+                self.assertEqual(worker.exit_code, 75)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    async def test_explicit_clean_exit_during_peer_drain_still_exits(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            peer = Peer(reader, writer, {})
+            reading = asyncio.create_task(peer.run())
+            try:
+                await peer.call('health', {'require_tools': True}, timeout=2)
+                self.exit_code = 0
+                writer.close()
+                await reading
+                await asyncio.wait_for(worker.peer_released.wait(), 2)
+                self.assertTrue(worker.exited.is_set())
+                self.assertEqual(worker.exit_code, 0)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    async def test_concurrent_runtime_stop_is_serialized(self):
+        worker = await self.worker()
+        await worker.health(require_tools=True)
+        self.allow_finalize.clear()
+        first = asyncio.create_task(worker.stop_runtime())
+        await self.shutdown.wait()
+        second = asyncio.create_task(worker.stop_runtime())
+        await asyncio.sleep(0)
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        self.allow_finalize.set()
+        await asyncio.gather(first, second)
+        # start_gateway's own finally also calls runner.stop; only one call
+        # comes from the worker owner even with concurrent stop requests.
+        self.assertEqual(self.calls.count('stop'), 2)
 
     async def test_reconnect_waits_for_closed_bootstrap_peer_drain(self):
         worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
@@ -199,6 +327,209 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(worker.peer_released.wait(), 2)
                 server.close()
                 await server.wait_closed()
+
+    async def test_bootstrap_observer_never_claims_primary_and_supervisor_can_start(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            observer = Peer(reader, writer, {})
+            reading = asyncio.create_task(observer.run())
+            try:
+                with self.assertRaises(RpcError):
+                    await observer.call('health', {}, timeout=2)
+                self.assertIsNone(worker.peer)
+                self.assertIsNone(worker.runner)
+                writer.close()
+                await reading
+                reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+                supervisor = Peer(reader, writer, {})
+                reading = asyncio.create_task(supervisor.run())
+                receipt = await supervisor.call('health', {'require_tools': True}, timeout=2)
+                self.assertTrue(receipt['policyReady'])
+                self.assertIsNotNone(worker.peer)
+            finally:
+                writer.close()
+                await reading
+                if worker.peer is not None:
+                    await worker.peer_released.wait()
+                server.close()
+                await server.wait_closed()
+
+    async def test_failed_owned_recovery_notifies_waiter_and_keeps_gate_closed(self):
+        import identity.native_policy as policy
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        runner = NS(_exit_code=None, _request_clean_exit=lambda reason: None)
+        adapter = NS()
+        worker.runner, worker.adapter = runner, adapter
+        worker.operational.set()
+        worker.policy_ready.clear()
+        worker.release.operation = 'operation'
+        worker.release.cold_start = True
+        worker.release.open.clear()
+        expected = {'role': 'user', 'generation': 1}
+        async def activate(_runner, _adapter, _check, *, release_open):
+            async def recover():
+                await release_open.wait()
+                raise RuntimeError('synthetic recovery failure')
+            return asyncio.create_task(recover())
+        with patch.object(policy, 'principal', return_value=expected), \
+                patch.object(policy, 'activate_deferred_startup', side_effect=activate):
+            await worker._activate_user_startup(runner, adapter, expected)
+            with self.assertRaisesRegex(RuntimeError, 'Cold recovery failed'):
+                await worker.release.resume('operation')
+        self.assertTrue(worker.release.recovery_done.is_set())
+        self.assertFalse(worker.release.open.is_set())
+        self.assertIsNotNone(worker.policy_error)
+        self.assertEqual((await worker.release.status('operation'))['state'], 'blocked')
+
+    async def test_stopping_waits_for_already_admitted_recovery(self):
+        worker = await self.worker()
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def recovery():
+            started.set()
+            await finish.wait()
+        worker.release.recovery_open.set()
+        worker.cold_recovery_task = asyncio.create_task(recovery())
+        await started.wait()
+        stopping = asyncio.create_task(worker.stop_runtime())
+        await asyncio.sleep(0)
+        self.assertFalse(stopping.done())
+        self.assertFalse(worker.policy_stopping)
+        self.assertFalse(worker.cold_recovery_task.cancelled())
+        finish.set()
+        await stopping
+        self.assertTrue(worker.policy_stopping)
+
+    async def test_cold_reconnect_waits_for_new_recovery_not_cancelled_old_task(self):
+        import identity.native_policy as policy
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        runner = NS(_exit_code=None, _request_clean_exit=lambda reason: None, stop=AsyncMock())
+        adapter = NS();worker.runner, worker.adapter = runner, adapter
+        worker.operational.set();worker.release.operation='operation';worker.release.cold_start=True
+        worker.release.open.clear();worker.release.completions_open.clear()
+        finish=asyncio.Event();started=asyncio.Event();expected={'role':'user','generation':1}
+        async def activate(_runner,_adapter,_check,*,release_open):
+            async def recover():
+                await release_open.wait();started.set();await finish.wait()
+            return asyncio.create_task(recover())
+        with patch.object(policy,'principal',return_value=expected), \
+             patch.object(policy,'activate_deferred_startup',side_effect=activate):
+            await worker._activate_user_startup(runner,adapter,expected)
+            old=worker.cold_recovery_task
+            await worker.stop_runtime()
+            self.assertTrue(old.cancelled());self.assertTrue(worker.release.recovery_done.is_set())
+            worker.runtime_stopped=False;worker.policy_stopping=False;worker.policy_error=None
+            worker.operational.set();worker.policy_ready.clear()
+            await worker._activate_user_startup(runner,adapter,expected)
+            self.assertFalse(worker.release.recovery_done.is_set())
+            resumed=asyncio.create_task(worker.release.resume('operation'))
+            await started.wait();self.assertFalse(resumed.done())
+            self.assertFalse(worker.release.open.is_set())
+            finish.set()
+            self.assertEqual((await resumed)['state'],'resumed')
+            self.assertTrue(worker.release.open.is_set())
+
+    async def test_admitted_cold_recovery_outcome_is_not_reset_on_reconnect(self):
+        import identity.native_policy as policy
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        runner = NS(_exit_code=None, _request_clean_exit=lambda reason: None)
+        adapter = NS();worker.runner, worker.adapter = runner, adapter
+        worker.release.operation='operation';worker.release.cold_start=True
+        worker.release.recovery_open.set();worker.release.recovery_done.set()
+        expected={'role':'user','generation':1}
+        with patch.object(policy,'principal',return_value=expected), \
+             patch.object(policy,'activate_deferred_startup',new_callable=AsyncMock) as activate:
+            await worker._activate_user_startup(runner,adapter,expected)
+        activate.assert_not_awaited()
+        self.assertTrue(worker.release.recovery_done.is_set())
+        self.assertRegex(str(worker.policy_error),'outcome is unresolved')
+
+    async def test_stop_also_settles_recovery_created_during_prior_cleanup(self):
+        worker=Worker(os.getuid()+1,'owner','123',AsyncMock())
+        worker.runner=NS(stop=AsyncMock())
+        cancelled=asyncio.Event();finish=asyncio.Event()
+        async def old_recovery():
+            try: await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set();await finish.wait()
+        old=asyncio.create_task(old_recovery());await asyncio.sleep(0)
+        worker.cold_recovery_task=old
+        stopping=asyncio.create_task(worker.stop_runtime())
+        await cancelled.wait()
+        late=asyncio.create_task(asyncio.Event().wait())
+        worker.cold_recovery_task=late
+        finish.set();await stopping
+        self.assertTrue(late.cancelled())
+        self.assertIsNone(worker.cold_recovery_task)
+
+    async def test_cold_primary_eof_reconnect_waits_for_replacement_recovery(self):
+        import identity.native_policy as policy
+        worker=Worker(os.getuid()+1,'owner','123',AsyncMock())
+        worker._startup_gate=self.gate(worker)
+        worker.release.operation='operation';worker.release.cold_start=True
+        worker.release.open.clear();worker.release.completions_open.clear()
+        expected={'role':'user','generation':1};started=asyncio.Event();finish=asyncio.Event();policy_settled=asyncio.Event()
+        async def activate(runner,adapter,check,*,release_open):
+            async def recovery():
+                await release_open.wait();started.set();await finish.wait()
+            return asyncio.create_task(recovery())
+        async def ready(runner):
+            worker.operational.set();worker.policy_ready.clear()
+            await worker._activate_user_startup(runner,worker.adapter,expected)
+            policy_settled.set()
+        worker._operational_ready=ready
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('identity.worker.peer_uid',return_value=worker.ingress_uid), \
+             patch.object(policy,'principal',return_value=expected), \
+             patch.object(policy,'activate_deferred_startup',side_effect=activate):
+            path=directory+'/worker.sock'
+            server=await asyncio.start_unix_server(worker.serve_connection,path=path)
+            async def connect():
+                reader,writer=await asyncio.open_unix_connection(path)
+                peer=Peer(reader,writer,{})
+                return writer,peer,asyncio.create_task(peer.run())
+            writer,peer,reading=await connect()
+            try:
+                self.assertTrue((await peer.call('health',{'require_tools':True},timeout=2))['operational'])
+                await policy_settled.wait()
+                old=worker.cold_recovery_task
+                writer.close();await reading;await worker.peer_released.wait()
+                self.assertTrue(old.cancelled());self.assertTrue(worker.release.recovery_done.is_set())
+                self.shutdown.clear();policy_settled.clear()
+                writer,peer,reading=await connect()
+                await peer.call('health',{'require_tools':True},timeout=2)
+                await policy_settled.wait()
+                self.assertTrue((await peer.call('health',{'require_tools':True},timeout=2))['policyReady'])
+                self.assertFalse(worker.release.recovery_done.is_set())
+                pending=asyncio.create_task(peer.call('release.resume',{'operationId':'operation'},timeout=None))
+                await started.wait();self.assertFalse(pending.done())
+                finish.set();self.assertEqual((await pending)['state'],'resumed')
+            finally:
+                writer.close();await reading
+                if worker.peer is not None:await worker.peer_released.wait()
+                server.close();await server.wait_closed()
+
+    async def test_health_policy_ready_requires_settled_live_policy(self):
+        worker = await self.worker()
+        try:
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.operational.set()
+            self.assertTrue((await worker.health())['policyReady'])
+            worker.policy_ready.clear()
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.policy_ready.set()
+            worker.policy_error = RuntimeError('failed')
+            self.assertFalse((await worker.health())['policyReady'])
+            worker.policy_error = None
+            worker.policy_stopping = True
+            with self.assertRaisesRegex(RpcError, 'Worker not ready'):
+                await worker.health()
+        finally:
+            await worker.stop_runtime()
 
     async def test_secondary_operator_health_preserves_the_active_ingress_and_runtime(self):
         worker = await self.worker()
@@ -298,12 +629,13 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             profile.attach = attach
             self.calls.append('plugin_discovery')
         with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules):
-            with patch('identity.images.install_shared_provider', side_effect=discover):
+            with patch('identity.native_policy.revalidate_startup'), patch('identity.native_policy.install', side_effect=lambda **_kwargs: self.calls.append('role_policy')), patch('identity.images.install_shared_provider', side_effect=discover):
                 worker = await self.worker()
             try:
                 self.assertIs(sys.modules['_brai_identity_human'].attach, attach)
                 await worker.health(require_tools=True)
                 attach.assert_awaited_once_with(worker.adapter)
+                self.assertLess(self.calls.index('role_policy'), self.calls.index('plugin_discovery'))
                 self.assertLess(self.calls.index('plugin_discovery'), self.calls.index('native_start'))
             finally:
                 await worker.stop_runtime()
@@ -343,6 +675,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self.methods = methods
             async def run(self):
                 reading.set()
+                await self.methods['health'](require_tools=True)
                 await self_wait.wait()
         class Writer:
             def close(self):

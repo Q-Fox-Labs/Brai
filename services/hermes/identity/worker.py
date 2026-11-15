@@ -36,6 +36,12 @@ class Worker:
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
         self.lifecycle_task = None
+        self.policy_task = None
+        self.cold_recovery_task = None
+        self.policy_ready = asyncio.Event()
+        self.policy_ready.set()
+        self.policy_error = None
+        self.policy_stopping = False
         self.activation = asyncio.Event()
         self.exited = asyncio.Event()
         self.exit_code = None
@@ -46,76 +52,133 @@ class Worker:
         self.chat_dispatches = {}
         self.chat_interactive = {}
         self.chat_locks = {}
+        self.peer_lock = asyncio.Lock()
+        self.runtime_stop_lock = asyncio.Lock()
+        self.runtime_stopped = False
+        self.peer_draining = False
         self.peer_released = asyncio.Event()
         self.peer_released.set()
+        from .release_native import NativeRelease
+        self.release = NativeRelease(self)
 
     async def serve_connection(self, reader, writer):
-        """Читать duplex RPC до startup sends; не допускать второй native runtime."""
+        """Разрешить health-наблюдателя без захвата основного duplex канала."""
         if peer_uid(writer) != self.ingress_uid:
             writer.close()
             await writer.wait_closed()
             return
-        if self.peer is not None and self.peer.closed:
-            # EOF уже получен, но native drain ещё удерживает прежний канал.
-            try:
-                await asyncio.wait_for(self.peer_released.wait(), 30)
-            except TimeoutError:
-                writer.close()
-                await writer.wait_closed()
-                return
-        if self.peer is not None:
-            # Операторская health-проверка не забирает основной duplex канал
-            # и не останавливает работающий native lifecycle при своём EOF.
-            async def inspect_health(require_tools=False):
-                if require_tools:
+        claimed = asyncio.Event()
+        peer = None
+
+        async def claim():
+            async with self.peer_lock:
+                if self.peer is peer:
+                    return
+                if self.peer is not None and self.peer.closed:
+                    await self.peer_released.wait()
+                if self.peer is not None:
                     raise RpcError(-32602, 'Operational health requires the active ingress channel')
-                return await self.health()
-            try:
-                await asyncio.wait_for(Peer(reader, writer, {'health': inspect_health}).run(), 15)
-            except (TimeoutError, ConnectionError):
-                pass
-            return
-        peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel,
-                    'health': self.health, 'interactive': self.interactive, 'chat_pause': self.chat_pause})
-        self.peer = peer
-        self.peer_released.clear()
+                self.peer = peer
+                self.peer_released.clear()
+                try:
+                    await self.start(peer)
+                except BaseException as error:
+                    if isinstance(error, Exception):
+                        self.lifecycle_error = error
+                        self.exit_code = 1
+                        self.exited.set()
+                    claimed.set()
+                    raise
+                claimed.set()
+
+        async def check_health(require_tools=False):
+            if type(require_tools) is not bool:
+                raise RpcError(-32602, 'Invalid health check')
+            if require_tools:
+                await claim()
+            return await self.health(require_tools=require_tools)
+
+        def primary(method):
+            async def call(**params):
+                if self.peer is not peer:
+                    raise RpcError(-32601, 'Method not found')
+                return await method(**params)
+            return call
+
+        peer = Peer(reader, writer, {'health': check_health, 'dispatch': primary(self.dispatch),
+                    'cancel': primary(self.cancel), 'interactive': primary(self.interactive),
+                    'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin), 'release.try': primary(self.release.try_hold),
+                    'release.try_status': primary(self.release.try_status), 'release.reject_attempt': primary(self.release.reject_attempt),
+                    'release.status': primary(self.release.status), 'release.resume': primary(self.release.resume)})
         reading = asyncio.create_task(peer.run())
+        claimed_wait = asyncio.create_task(claimed.wait())
         try:
-            await self.start(peer)
-            await asyncio.wait((reading, self.lifecycle_task), return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait((reading, claimed_wait), return_when=asyncio.FIRST_COMPLETED)
+            if claimed.is_set() and self.peer is peer and self.lifecycle_task is not None:
+                await asyncio.wait((reading, self.lifecycle_task), return_when=asyncio.FIRST_COMPLETED)
         except Exception as error:
             self.lifecycle_error = error
             self.exit_code = 1
             self.exited.set()
         finally:
-            try:
-                await self.stop_runtime()
-            finally:
-                writer.close()
-                if not reading.done():
-                    reading.cancel()
+            claimed_wait.cancel()
+            await asyncio.gather(claimed_wait, return_exceptions=True)
+            if self.peer is peer:
+                # Only a peer EOF that precedes native exit is a clean handoff.
+                # A native lifecycle that already ended must keep its exit verdict.
+                self.peer_draining = (reading.done() and not reading.cancelled()
+                                      and self.lifecycle_task is not None
+                                      and not self.lifecycle_task.done())
+                try:
+                    await self.stop_runtime()
+                except Exception as error:
+                    self.lifecycle_error = error
+                    self.exit_code = 1
+                    self.exited.set()
+                    raise
+                finally:
+                    self.peer_draining = False
+                    if not reading.done():
+                        reading.cancel()
+                    await asyncio.gather(reading, return_exceptions=True)
+                    for task in list(self.typing.values()):
+                        task.cancel()
+                    await asyncio.gather(*self.typing.values(), return_exceptions=True)
+                    self.typing.clear()
+                    self.active.clear()
+                    self.turn_scopes.clear()
+                    self.operational.clear()
+                    self.adapter = self.runner = self.peer = None
+                    self.peer_released.set()
+            elif not reading.done():
+                reading.cancel()
                 await asyncio.gather(reading, return_exceptions=True)
-                for task in list(self.typing.values()):
-                    task.cancel()
-                await asyncio.gather(*self.typing.values(), return_exceptions=True)
-                self.typing.clear()
-                self.active.clear()
-                self.turn_scopes.clear()
-                self.operational.clear()
-                self.adapter = self.runner = self.peer = None
-                self.peer_released.set()
 
     async def start(self, peer):
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
+        if self.exited.is_set():
+            raise RuntimeError('Worker lifecycle already exited')
+        self.exit_code = None
+        self.lifecycle_error = None
+        self.runtime_stopped = False
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             self._install_telegram_profile()
+            from .native_policy import install
+            install(cold_start=self.release.cold_start)
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
+        self.release.install(self.runner)
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import revalidate_startup
+            revalidate_startup()
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
         self.tools_ready = False
+        self.policy_stopping = False
+        self.policy_error = None
+        self.policy_ready.set()
         self.operational.clear()
         self.activation.clear()
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
@@ -134,6 +197,14 @@ class Worker:
             lambda user_id, *args, **kwargs: platform == Platform.TELEGRAM
             and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
         self.runner._brai_identity_recovery_allowed = lambda source: self.route_allowed(source, recovery=True)
+        self.runner._brai_return_notice_state = self.return_notice_state
+        self.runner._brai_consent_generation = lambda source: (
+            self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
+            if self.route_allowed(source) else -1)
+        self.runner._brai_consent_route_current = lambda event: (
+            self.route_allowed(event.source) and
+            getattr(event, '_brai_chat_generation', 0) ==
+            self.chat_states.get(self._chat_route(event.source), {}).get('generation', 0))
         original_admit = getattr(self.runner, '_hm_admit_event', None)
         if callable(original_admit):
             async def paused_admit(event):
@@ -183,7 +254,8 @@ class Worker:
     async def _operational_ready(self, runner):
         """Подтвердить native startup вместе с MCP и scheduler."""
         from tools.registry import registry
-        if registry.get_entry('mcp__brai__brai_login') is None:
+        from .native_policy import guest_mode
+        if not guest_mode() and registry.get_entry('mcp__brai__brai_login') is None:
             raise RpcError(-32603, 'Worker login tool unavailable')
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             human = sys.modules.get('_brai_identity_human')
@@ -201,14 +273,100 @@ class Worker:
             for name in ('mcp__brai__dialogues_exchange', 'mcp__brai__dialogues_context_ack'):
                 if registry.get_entry(name) is None:
                     raise RpcError(-32603, 'Worker Dialogues tool unavailable')
+        if guest_mode():
+            from .native_policy import permitted, catalog_permitted
+            if registry.get_entry('mcp__brai__create_text_file') is None or not catalog_permitted('mcp__brai__create_text_file') or catalog_permitted('terminal') or catalog_permitted('mcp__brai__brai_login'):
+                raise RpcError(-32603, 'Worker role policy unavailable')
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import has_deferred_startup, prepared_principal
+            if has_deferred_startup(runner) and self.policy_task is None:
+                self.policy_ready.clear()
+                self.policy_task = asyncio.create_task(self._activate_user_startup(
+                    runner, self.adapter, prepared_principal()))
         self.tools_ready = True
         self.operational.set()
+
+    async def _activate_user_startup(self, runner, adapter, expected):
+        """Владеть ожиданием Auth и восстановлением; stop_runtime отменяет весь этап."""
+        from .native_policy import principal, activate_deferred_startup
+        def alive():
+            if self.policy_stopping or self.runner is not runner or self.adapter is not adapter:
+                raise asyncio.CancelledError()
+        async def check():
+            alive()
+            current = await asyncio.to_thread(principal)
+            alive()
+            if current != expected:
+                raise PermissionError('Runtime preparation changed')
+        try:
+            while True:
+                alive()
+                try:
+                    current = await asyncio.to_thread(principal)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await asyncio.sleep(.5)
+                    continue
+                alive()
+                if current != expected:
+                    raise PermissionError('Runtime preparation changed')
+                break
+            if self.release.cold_start:
+                if self.cold_recovery_task is not None:
+                    raise RuntimeError('Previous cold recovery is still owned')
+                if self.release.recovery_done.is_set():
+                    if self.release.recovery_open.is_set():
+                        raise RuntimeError('Previous cold recovery outcome is unresolved')
+                    self.release.recovery_done.clear()
+                self.cold_recovery_task = await activate_deferred_startup(
+                    runner, adapter, check, release_open=self.release.recovery_open)
+                def recovery_done(task):
+                    try:
+                        if task.cancelled():
+                            if self.release.recovery_open.is_set():
+                                self.policy_error = RuntimeError('Cold recovery cancelled')
+                            return
+                        error = task.exception()
+                        if error is None:
+                            try:
+                                self.release.finish_cold_recovery()
+                            except Exception as failure:
+                                error = failure
+                        if error is not None:
+                            self.policy_error = self.lifecycle_error = error
+                            self.exit_code = 1
+                            runner._exit_code = 1
+                            runner._request_clean_exit('role-activation-failed')
+                    finally:
+                        self.release.recovery_done.set()
+                if self.cold_recovery_task is not None:
+                    self.cold_recovery_task.add_done_callback(recovery_done)
+            else:
+                await activate_deferred_startup(runner, adapter, check)
+            alive()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.policy_error = self.lifecycle_error = error
+            self.exit_code = 1
+            runner._exit_code = 1
+            runner._request_clean_exit('role-activation-failed')
+        finally:
+            self.policy_ready.set()
+
+    async def ensure_user_policy(self):
+        """Не передавать первое событие одновременно с reload/restore пользователя."""
+        await self.policy_ready.wait()
+        if self.policy_stopping or self.policy_error is not None:
+            raise RpcError(-32603, 'Worker startup unavailable')
 
     async def _run_lifecycle(self):
         """Выполнить native daemon lifecycle и сохранить service restart verdict."""
         # Bootstrap health EOF не завершает ещё не активированный native daemon.
         # Отмена до try оставляет listener для будущего постоянного ingress.
         await self.activation.wait()
+        explicit_exit = False
         try:
             from gateway.run import start_gateway
             result = await start_gateway(
@@ -219,6 +377,7 @@ class Worker:
             if self.exit_code is None:
                 self.exit_code = 0 if result else 1
         except SystemExit as error:
+            explicit_exit = True
             self.exit_code = error.code if type(error.code) is int else 1
         except asyncio.CancelledError:
             raise
@@ -226,11 +385,44 @@ class Worker:
             self.lifecycle_error = error
             self.exit_code = 1
         finally:
+            if self.policy_error is not None:
+                self.exit_code = 1
             self.operational.clear()
-            self.exited.set()
+            if explicit_exit or not self.peer_draining or self.exit_code not in (None, 0) or self.lifecycle_error is not None:
+                self.exited.set()
 
     async def stop_runtime(self):
         """Дождаться native drain и внешней обвязки до освобождения peer."""
+        async with self.runtime_stop_lock:
+            if self.runtime_stopped:
+                return
+            await self._stop_runtime_once()
+            self.runtime_stopped = True
+
+    async def _stop_runtime_once(self):
+        recovery = self.cold_recovery_task
+        if recovery is not None and not recovery.done() and not self.release.recovery_open.is_set():
+            # Nothing was admitted while the cold source remained held.
+            recovery.cancel()
+        if recovery is not None:
+            await asyncio.gather(recovery, return_exceptions=True)
+        if self.cold_recovery_task is recovery:
+            self.cold_recovery_task = None
+        self.policy_stopping = True
+        policy = self.policy_task
+        if policy is not None and not policy.done():
+            policy.cancel()
+        if policy is not None:
+            await asyncio.gather(policy, return_exceptions=True)
+        self.policy_task = None
+        # Policy могла создать recovery пока ожидалось завершение предыдущей.
+        recovery = self.cold_recovery_task
+        if recovery is not None:
+            if not recovery.done() and not self.release.recovery_open.is_set():
+                recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
+            self.cold_recovery_task = None
+        self.policy_ready.set()
         task = self.lifecycle_task
         if task is not None and not self.activation.is_set() and not task.done():
             task.cancel()
@@ -242,6 +434,8 @@ class Worker:
     async def ensure_tools(self):
         """Однократно активировать полный startup и дождаться operational-ready."""
         async with self.tools_lock:
+            if self.release.operation is not None and not self.release.cold_start and not self.activation.is_set():
+                raise RpcError(-32603, 'Release holds native activation')
             if self.operational.is_set():
                 return
             if self.lifecycle_task is None or self.lifecycle_task.done():
@@ -260,15 +454,20 @@ class Worker:
         """Различить доступный bootstrap и полный operational lifecycle."""
         if type(require_tools) is not bool:
             raise RpcError(-32602, 'Invalid health check')
-        if self.runner is None or self.adapter is None:
+        if self.runner is None or self.adapter is None or self.exited.is_set() or self.policy_stopping:
             raise RpcError(-32603, 'Worker not ready')
         if require_tools:
             await self.ensure_tools()
-        return {'ready': True, 'operational': self.operational.is_set(),
+        from .native_policy import role_state
+        return {'role': role_state(), 'rolePolicyVersion': 1, 'ready': True, 'operational': self.operational.is_set(),
+                'policyReady': bool(self.operational.is_set() and self.policy_ready.is_set()
+                                    and self.policy_error is None and not self.policy_stopping),
                 'userId': self.user_id, 'telegramId': self.telegram_id}
 
     async def interactive(self, update, owner, scope_id, actor_telegram_id, chat_generation=None):
         """Передать проверенное интерактивное событие owner-bound адаптеру."""
+        if self.release.operation is not None:
+            raise RpcError(-32603, 'Release holds new dispatch')
         if (owner != self.user_id or not isinstance(update, dict)
                 or not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128
                 or not isinstance(actor_telegram_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', actor_telegram_id)):
@@ -302,6 +501,7 @@ class Worker:
         self.chat_interactive.setdefault(route, set()).add(active)
         try:
             await self.ensure_tools()
+            await self.ensure_user_policy()
             if not allowed():
                 raise RpcError(-32602, 'Paused or stale interactive action')
             from .scope import delivery_scope
@@ -318,8 +518,13 @@ class Worker:
         """Принять только событие привязанного владельца, не доверяя его metadata."""
         from gateway.platforms.event import MessageEvent, MessageType
         from gateway.session import SessionSource
+        if self.release.operation is not None:
+            raise RpcError(-32603, 'Release holds new dispatch')
         if owner != self.user_id or not isinstance(event, dict):
             raise RpcError(-32602, 'Invalid owner or event')
+        from .native_policy import guest_mode
+        if guest_mode() and str(event.get('text', '')).lstrip().startswith('/') and str(event.get('text', '')).split()[0].split('@')[0] not in ('/stop', '/cancel'):
+            raise RpcError(-32603, 'Эта команда недоступна для гостя')
         source = SessionSource.from_dict(event['source'])
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise RpcError(-32602, 'Invalid source')
@@ -365,6 +570,7 @@ class Worker:
             before = self.adapter._session_tasks.get(key)
             typing = self.adapter.start_turn_typing(message)
             await self.ensure_tools()
+            await self.ensure_user_policy()
             if generation > self.chat_states.get(route, {}).get('generation', 0):
                 # AIDEV-NOTE: Trusted ingress посылает dispatch только после durable resume.
                 # Новое поколение восстанавливает resume receipt, потерянный при разрыве IPC.
@@ -388,7 +594,17 @@ class Worker:
                     if (not self.route_allowed(source)
                             or generation != self.chat_states.get(route, {}).get('generation', 0)):
                         return {'accepted': False, 'turn_id': None}
-                await self.adapter.handle_message(message)
+                from tools.approval_conversation import gateway_input_prepared
+                reply = await gateway_input_prepared(self.runner, message, message)
+                if (not self.route_allowed(source)
+                        or generation != self.chat_states.get(route, {}).get('generation', 0)):
+                    return {'accepted': False, 'turn_id': None}
+                if reply is None:
+                    await self.adapter.handle_message(message)
+                else:
+                    if reply:
+                        await self.runner._send_busy_reply(message, self.adapter, reply)
+                    message._gateway_accepted = True
             task = self.adapter._session_tasks.get(key)
             state = self.chat_states.get(route)
             if message._gateway_accepted and state is not None and not state['paused'] and state['generation'] == generation:
@@ -457,6 +673,14 @@ class Worker:
                 or type(state.get('recoveryBlocked')) is not bool):
             raise RpcError(-32602, 'Invalid chat state')
 
+    def return_notice_state(self, chat, thread):
+        """Вернуть известное поколение маршрута без создания нового состояния."""
+        if not self.chat_snapshot_ready:
+            return None
+        route = self._chat_route(SimpleNamespace(chat_id=chat,thread_id=thread))
+        state = self.chat_states.get(route,{})
+        return {'generation': state.get('generation',0), 'paused': bool(state.get('paused'))}
+
     def route_allowed(self, source, *, recovery=False):
         """Закрыть dispatch/recovery при неизвестном snapshot, паузе или незавершённой отмене."""
         if not self.chat_snapshot_ready and (recovery or os.environ.get('BRAI_IDENTITY_MODE') == 'worker'):
@@ -494,6 +718,9 @@ class Worker:
             source = SessionSource.from_dict({'platform': 'telegram', 'chat_id': chat,
                 'chat_type': 'dm', 'thread_id': thread or None, 'user_id': self.telegram_id})
             key = self.adapter._event_session_key(SimpleNamespace(source=source))
+            cancel_consent = getattr(self.runner, '_brai_cancel_consent_for_source', None)
+            if callable(cancel_consent):
+                cancel_consent(source)
             task = self.adapter._session_tasks.get(key)
             tasks = set(self.chat_stopping.get(route, ()))
             if task is not None and not task.done():
@@ -619,24 +846,53 @@ def load_config(path, environ):
     return config['socketPath'], int(ingress), owner, telegram, egress
 
 
+async def publish_delivery_file(file_path, *, broker=None):
+    """Доставить уже принадлежащий артефакт по ID; guest публикует только admitted input."""
+    if broker is None:
+        from .tool_client import broker_call
+        broker = broker_call
+    import brai_files
+    reference = brai_files.reference_metadata(file_path)
+    if reference is not None:
+        descriptor = await asyncio.to_thread(broker, 'artifacts.fetch', {'artifactId': reference['artifactId']})
+        if descriptor.get('artifactId') != reference['artifactId']:
+            raise PermissionError('Artifact mismatch')
+    else:
+        permissions = await asyncio.to_thread(broker, 'permissions.get', {})
+        if permissions.get('role') not in ('creator', 'admin', 'user', 'guest'):
+            raise PermissionError('Access unavailable')
+        method = 'files.publish' if permissions['role'] == 'guest' else 'artifacts.publish'
+        descriptor = await asyncio.to_thread(broker, method, {'path': file_path, 'requestId': str(uuid.uuid4())})
+    if not isinstance(descriptor, dict) or not isinstance(descriptor.get('artifactId'), str) or not descriptor['artifactId']:
+        raise RuntimeError('Broker returned no artifact')
+    return {'artifact_id': descriptor['artifactId']}
+
+
 async def run(config_path):
     """Запустить relay и worker; остановить оба при штатном SIGTERM."""
     from .network import start_relay
     from .tool_client import broker_call
     # У файлового bootstrap только привязанный по UID broker; старый fixed-owner порт запрещён.
     os.environ['BRAI_IDENTITY_MODE'] = 'worker'
-    from .skills import install_policy
-    install_policy()
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)
-    async def publish_file(file_path):
-        descriptor = await asyncio.to_thread(broker_call, 'artifacts.publish', {'path': file_path, 'requestId': str(uuid.uuid4())})
-        if not isinstance(descriptor, dict) or not isinstance(descriptor.get('artifactId'), str) or not descriptor['artifactId']:
-            raise RuntimeError('Broker returned no artifact')
-        return {'artifact_id': descriptor['artifactId']}
-    worker = Worker(ingress, owner, telegram, publish_file)
+    worker = Worker(ingress, owner, telegram, publish_delivery_file)
+    worker.release.bootstrap(Path(__file__))
+    from .skills import install_policy
+    install_policy()
     relay = await start_relay(egress, port=18080)
+    browser_relay = None
+    try:
+        browser_egress = os.environ.get('BRAI_IDENTITY_BROWSER_EGRESS')
+        if browser_egress:
+            if browser_egress != '/run/brai-profile/browser-egress.sock':
+                raise ValueError('Invalid browser egress socket')
+            browser_relay = await start_relay(browser_egress, port=18081)
+    except BaseException:
+        relay.close()
+        await relay.wait_closed()
+        raise
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -651,6 +907,9 @@ async def run(config_path):
     finally:
         exited.cancel()
         await asyncio.gather(exited, return_exceptions=True)
+        if browser_relay is not None:
+            browser_relay.close()
+            await browser_relay.wait_closed()
         relay.close()
         await relay.wait_closed()
     if worker.exit_code:

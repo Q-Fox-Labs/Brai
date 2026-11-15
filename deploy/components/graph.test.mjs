@@ -1,0 +1,438 @@
+// ABOUTME: Acceptance fixtures exercise discovery, graph, lifecycle and separate build/check identities.
+// ABOUTME: Изолированные Git fixtures не читают live-данные основной копии.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync, openSync, closeSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { discover, fingerprints, checkGroupFingerprint, sourceFiles } from './graph.mjs';
+import { execute } from './cli.mjs';
+const repository=resolve(import.meta.dirname,'../..');
+function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
+function descriptor(id) {
+ const dir='services/'+id;
+ return {formatVersion:1,id,type:'program',status:'active',environments:['dev','prod'],executableSources:[dir+'/main.mjs'],inputs:{build:[dir+'/build.mjs'],runtime:[dir+'/main.mjs'],checks:[dir+'/tests.mjs']},dependencies:[],commands:{build:'node build.mjs',check:'node tests.mjs'},delivery:{kind:'ready-files',files:[dir+'/main.mjs'],entrypoints:[dir+'/main.mjs'],smokeImports:[],systemRequirements:['node:24.22.1']},deploy:{units:[id],migrations:[],health:null},npm:{workspaces:[]}};
+}
+function fixture(t) {
+ mkdirSync(join(repository,'tmp'),{recursive:true});
+ const root=mkdtempSync(join(repository,'tmp','component-fixture-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ execFileSync('git',['init','-q',root],{stdio:'pipe'});
+ put(root,'deploy/components/component.schema.json',readFileSync(join(repository,'deploy/components/component.schema.json')));
+ return root;
+}
+function add(root,id,edit=()=>{}) {
+ const d=descriptor(id);edit(d);
+ put(root,'services/'+id+'/component.json',JSON.stringify(d));
+ put(root,'.gitignore', '/docs/user-agent/usercustom/\n');
+ put(root,'AGENTS.md','[Docs](docs/README.md)');
+ put(root,'docs/README.md','[Components](components/README.md) [Environment](environment/README.md) [Agent](user-agent/README.md)');
+ put(root,'docs/environment/README.md','# Environment');
+ put(root,'docs/user-agent/README.md','# Agent');
+ const previous=(()=>{try{return readFileSync(join(root,'docs/components/README.md'),'utf8');}catch{return '# Components\n';}})();
+ put(root,'docs/components/README.md',previous+'\n['+id+']('+id+'.md)');
+ put(root,'docs/components/'+id+'.md','retired when applicable: [Technical](../../services/'+id+'/README.md)');
+ put(root,'services/'+id+'/README.md','# Technical');
+
+ put(root,'services/'+id+'/main.mjs','export const value=1;\n');
+ put(root,'services/'+id+'/build.mjs',"import{appendFileSync}from'node:fs';appendFileSync('build-count','1');\n");
+ put(root,'services/'+id+'/tests.mjs',"import assert from 'node:assert/strict';assert.equal(1,1);\n");return d;
+}
+function save(root,id,d){put(root,'services/'+id+'/component.json',JSON.stringify(d));}
+test('Git source boundary excludes unreadable ignored live directories and keeps tracked and new executable gates',t=>{
+ const root=fixture(t);add(root,'probe');
+ put(root,'.gitignore','.private-live/\nservices/probe/generated/\n');
+ put(root,'.private-live/main.py','#!/usr/bin/env python3\n');
+ put(root,'services/probe/generated/main.mjs','throw Error("live data");');
+ for(const path of ['.private-live','services/probe/generated']) {
+  chmodSync(join(root,path),0o000);
+ }
+ try {
+  assert.deepEqual(discover(root).order,['probe']);
+  assert.ok(!sourceFiles(root).some(path=>path.includes('private-live')||path.includes('generated')));
+  put(root,'tools/new-worker.py','#!/usr/bin/env python3\nprint(42)\n');chmodSync(join(root,'tools/new-worker.py'),0o755);
+  assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+  execFileSync('git',['-C',root,'add','tools/new-worker.py']);
+  put(root,'.gitignore','tools/\n.private-live/\nservices/probe/generated/\n');
+  assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+  rmSync(join(root,'tools'),{recursive:true});
+  assert.deepEqual(discover(root).order,['probe']);
+ } finally {for(const path of ['.private-live','services/probe/generated'])chmodSync(join(root,path),0o700);}
+});
+test('new described component enters pipeline without workflow editing; build once across build/check/package',async t=>{
+ const root=fixture(t);add(root,'probe');
+ assert.deepEqual(discover(root).order,['probe']);
+ await execute(root,'build',['probe']);await execute(root,'check',['probe']);
+ const result=await execute(root,'package',['probe']);
+ assert.equal(readFileSync(join(root,'services/probe/build-count'),'utf8'),'1');
+ assert.ok(result[0].artifact.payloadHash);assert.equal(result[0].compiled,false);
+ put(root,'services/probe/tests.mjs','// changed tests only\n');
+ const second=await execute(root,'package',['probe']);assert.equal(second[0].artifact.payloadHash,result[0].artifact.payloadHash);assert.equal(second[0].compiled,false);assert.equal(second[0].packaged,false);
+ put(result[0].artifact.path,'services/probe/main.mjs','export const value=9;');await assert.rejects(execute(root,'package',['probe']),/IMMUTABLE_OUTPUT_MISMATCH/);
+});
+test('fresh consumer builds unchanged dependency output without packaging it',async t=>{
+ const root=fixture(t);
+ const provider=add(root,'provider');provider.delivery.files.push('services/provider/dist/publisher.mjs');save(root,'provider',provider);
+ put(root,'services/provider/build.mjs',"import{mkdirSync,writeFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/publisher.mjs','export const ready=true;');appendFileSync('build-count','1');\n");
+ const consumer=add(root,'consumer');consumer.dependencies=[{id:'provider',inputs:[],delivery:['services/provider/dist/publisher.mjs']}];save(root,'consumer',consumer);
+ put(root,'.gitignore','/docs/user-agent/usercustom/\nservices/provider/dist/\n');
+ await assert.rejects(execute(root,'run',['consumer'],{includeDependencies:false}),/MISSING_DELIVERY_FILE/);
+ const built=await execute(root,'build',['consumer'],{includeDependencies:true});
+ assert.deepEqual(built.map(row=>row.id),['provider','consumer']);
+ assert.ok(built.every(row=>!row.artifact && !row.packaged));
+ const result=await execute(root,'run',['consumer'],{includeDependencies:false});
+ assert.deepEqual(result.map(row=>row.id),['consumer']);
+ assert.equal(readFileSync(join(result[0].artifact.path,'services/provider/dist/publisher.mjs'),'utf8'),'export const ready=true;');
+ await execute(root,'build',['consumer'],{includeDependencies:true});
+ assert.equal(readFileSync(join(root,'services/provider/build-count'),'utf8'),'1');
+});
+test('check receipt is reused only for unchanged successful inputs',async t=>{
+ const root=fixture(t);const d=add(root,'probe');d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];save(root,'probe',d);
+ const script="printf 1 >> ../../tmp/check-count\n";
+ put(root,'services/probe/tests.mjs',script);
+ let row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'executed');
+ row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'cached');
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'1');
+ put(root,'services/probe/tests.mjs',script+'exit 1\n');
+ await assert.rejects(execute(root,'run',['probe']),/COMMAND_FAILED/);
+ await assert.rejects(execute(root,'run',['probe']),/COMMAND_FAILED/);
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'111');
+ put(root,'services/probe/tests.mjs',script+'# changed\n');
+ row=(await execute(root,'run',['probe']))[0];assert.equal(row.checkProof,'executed');
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'1111');
+});
+test('unqualified check is always executed',async t=>{
+ const root=fixture(t);add(root,'probe');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+});
+for(const grouped of [false,true]) test(`check ${grouped?'group':'command'} ignores launcher metadata in its key and child`,async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];
+ if(grouped)d.commands.checkGroups=[{id:'checked',command:'sh tests.mjs',tools:['sh'],excludedInputs:[],extraInputs:[]}];
+ save(root,'probe',d);
+ put(root,'services/probe/tests.mjs','test -z "${SUDO_COMMAND+x}" || exit 11\ntest "$NEXT_TELEMETRY_DISABLED" = 1 || exit 12\nprintf 1 >> ../../tmp/check-count\n');
+ const names=['SUDO_COMMAND','NEXT_TELEMETRY_DISABLED','BRAI_COMPONENT_TEST_INPUT'];
+ const original=Object.fromEntries(names.map(name=>[name,process.env[name]]));
+ t.after(()=>{for(const name of names)if(original[name]===undefined)delete process.env[name];else process.env[name]=original[name];});
+ process.env.SUDO_COMMAND='/launcher/first';process.env.NEXT_TELEMETRY_DISABLED='0';process.env.BRAI_COMPONENT_TEST_INPUT='first';
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ process.env.SUDO_COMMAND='/launcher/second';process.env.NEXT_TELEMETRY_DISABLED='different';
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'cached');
+ process.env.BRAI_COMPONENT_TEST_INPUT='second';
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal(readFileSync(join(root,'tmp/check-count'),'utf8'),'11');
+});
+test('check groups reuse only proofs whose declared inputs are unchanged',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/other.mjs');
+ d.commands.checkGroups=[
+  {id:'all',command:'sh tests.mjs',tools:['sh'],excludedInputs:[],extraInputs:[]},
+  {id:'other',command:'sh other.mjs',tools:['sh'],excludedInputs:['services/probe/main.mjs'],extraInputs:[]}
+ ];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs','printf 1 >> ../../tmp/all-count\n');
+ put(root,'services/probe/other.mjs','printf 1 >> ../../tmp/other-count\n');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'cached');
+ put(root,'services/probe/main.mjs','export const value=2;');
+ assert.equal((await execute(root,'check',['probe']))[0].checkProof,'executed');
+ assert.equal(readFileSync(join(root,'tmp/all-count'),'utf8'),'11');
+ assert.equal(readFileSync(join(root,'tmp/other-count'),'utf8'),'1');
+});
+test('independent check groups cross a process barrier before receipts are saved',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'first',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'second',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ const wait=`import{existsSync,watch,writeFileSync}from'node:fs';\nconst wait=p=>new Promise(resolve=>{if(existsSync(p))return resolve();const w=watch('../../tmp',()=>{if(existsSync(p)){w.close();resolve()}});if(existsSync(p)){w.close();resolve()}});\n`;
+ put(root,'services/probe/tests.mjs',wait+"writeFileSync('../../tmp/first','ready');await wait('../../tmp/second');\n");
+ put(root,'services/probe/peer.mjs',wait+"await wait('../../tmp/first');writeFileSync('../../tmp/second','ready');\n");
+ const result=(await execute(root,'check',['probe']))[0];
+ assert.deepEqual(result.checkGroups.map(row=>[row.id,row.proof]),[['first','executed'],['second','executed']]);
+ assert.equal(readFileSync(join(root,'tmp/first'),'utf8'),'ready');
+ assert.equal(readFileSync(join(root,'tmp/second'),'utf8'),'ready');
+});
+test('a failed group waits for its peer and does not persist partial receipts',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'failure',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'peer',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs',"import{writeFileSync}from'node:fs';writeFileSync('../../tmp/failed','yes');process.exit(1);\n");
+ put(root,'services/probe/peer.mjs',`import{existsSync,watch,writeFileSync}from'node:fs';
+const p='../../tmp/failed';if(!existsSync(p))await new Promise(resolve=>{const w=watch('../../tmp',()=>{if(existsSync(p)){w.close();resolve()}});if(existsSync(p)){w.close();resolve()}});
+writeFileSync('../../tmp/peer-finished','yes');\n`);
+ await assert.rejects(execute(root,'check',['probe']),/COMMAND_FAILED/);
+ assert.equal(readFileSync(join(root,'tmp/peer-finished'),'utf8'),'yes');
+ assert.equal(JSON.parse(readFileSync(join(root,'tmp/component-state/probe.json'))).checkGroups,undefined);
+});
+test('concurrent groups inherit the publisher proof descriptor',t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.commands.checkGroups=[{id:'proof',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs',"import{readFileSync}from'node:fs';import assert from'node:assert/strict';assert.equal(readFileSync(3,'utf8'),'proof');\n");
+ const file=join(root,'proof');writeFileSync(file,'proof');const fd=openSync(file,'r');
+ try {
+  const script=`import{execute}from ${JSON.stringify(new URL('./cli.mjs',import.meta.url).href)};await execute(${JSON.stringify(root)},'check',['probe']);`;
+  execFileSync(process.execPath,['--input-type=module','-e',script],{env:{...process.env,BRAI_PUBLISHER_PROOF_FD:'3'},stdio:['ignore','pipe','pipe',fd]});
+ } finally {closeSync(fd);}
+});
+test('a group changing declared input invalidates the entire check',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'first',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'second',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ put(root,'services/probe/tests.mjs',"import{appendFileSync}from'node:fs';appendFileSync('main.mjs','\\n// changed');\n");
+ put(root,'services/probe/peer.mjs','export {};\n');
+ await assert.rejects(execute(root,'check',['probe']),/CHECK_INPUTS_CHANGED/);
+ assert.equal(JSON.parse(readFileSync(join(root,'tmp/component-state/probe.json'))).checkGroups,undefined);
+});
+test('changing installed dependency bytes invalidates check and package reuse',async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;d.commands.check='sh tests.mjs';d.commands.checkTools=['sh'];d.npm.workspaces=['services/probe'];
+ d.inputs.runtime.push('services/probe/package.json');save(root,'probe',d);
+ const manifest={name:'probe',version:'1.0.0',dependencies:{sample:'1.0.0'}};
+ put(root,'services/probe/package.json',JSON.stringify(manifest));
+ put(root,'package-lock.json',JSON.stringify({lockfileVersion:3,packages:{'services/probe':manifest,'node_modules/sample':{name:'sample',version:'1.0.0'}}}));
+ put(root,'node_modules/sample/package.json',JSON.stringify({name:'sample',version:'1.0.0'}));
+ put(root,'node_modules/sample/index.js','module.exports=1;');
+ put(root,'services/probe/tests.mjs','exit 0\n');
+ const first=(await execute(root,'run',['probe']))[0];
+ const second=(await execute(root,'run',['probe']))[0];
+ assert.equal(second.checkProof,'cached');assert.equal(second.packaged,false);
+ put(root,'node_modules/sample/index.js','module.exports=2;');
+ const third=(await execute(root,'run',['probe']))[0];
+ assert.equal(third.checkProof,'executed');assert.equal(third.packaged,true);
+ assert.notEqual(third.artifact.payloadHash,first.artifact.payloadHash);
+ assert.equal(readFileSync(join(first.artifact.path,'node_modules/sample/index.js'),'utf8'),'module.exports=1;');
+ put(root,'services/probe/tests.mjs','printf changed > ../../node_modules/sample/index.js\n');
+ await assert.rejects(execute(root,'check',['probe']),/CHECK_DEPENDENCIES_CHANGED/);
+});
+test('Hermes check groups select instructions and adapter consumers independently',t=>{
+ const root=fixture(t);
+ for(const path of sourceFiles(repository)) {
+  mkdirSync(dirname(join(root,path)),{recursive:true});cpSync(join(repository,path),join(root,path));
+ }
+ const descriptor='services/hermes/component.json';
+ const component={...JSON.parse(readFileSync(join(root,descriptor),'utf8')),directory:'services/hermes',descriptor};
+ const keys=()=>Object.fromEntries(component.commands.checkGroups.map(group=>[group.id,checkGroupFingerprint(root,component,group)]));
+ const changed=(a,b)=>Object.keys(a).filter(id=>a[id]!==b[id]);
+ const before=keys(), adapter='services/hermes/identity/adapter.py';
+ put(root,adapter,readFileSync(join(root,adapter),'utf8')+'\n# fixture change\n');
+ const adapterChanged=keys();assert.deepEqual(changed(before,adapterChanged),['instructions','identity']);
+ put(root,adapter,readFileSync(join(repository,adapter),'utf8'));
+ for (const path of ['services/hermes/identity/ordinary_admission.py','services/hermes/identity/update_inbox.py','services/hermes/identity/transport_inbox.py','services/hermes/identity/profile_release.py']) {
+  put(root,path,readFileSync(join(root,path),'utf8')+'\n# queue fixture change\n');
+  assert.deepEqual(changed(before,keys()),['identity']);
+  put(root,path,readFileSync(join(repository,path),'utf8'));
+ }
+ const instruction='docs/user-agent/instructions/context.md';
+ put(root,instruction,readFileSync(join(root,instruction),'utf8')+'\nfixture change\n');
+ assert.deepEqual(changed(before,keys()),['instructions']);
+ put(root,instruction,readFileSync(join(repository,instruction),'utf8'));
+ for(const path of ['docs/user-agent/instructions/hermes/skills/creative/art-director/SKILL.md',
+                    'docs/user-agent/instructions/skills/brai-task-workflows/SKILL.md']) {
+  put(root,path,readFileSync(join(root,path),'utf8')+'\nfixture change\n');
+  assert.deepEqual(changed(before,keys()),['instructions']);
+  put(root,path,readFileSync(join(repository,path),'utf8'));
+ }
+});
+test('strict schema, missing npm owner and missing executable are rejected',t=>{
+ const root=fixture(t),d=add(root,'probe');d.typo=true;save(root,'probe',d);
+ assert.throws(()=>discover(root),/COMPONENT_SCHEMA/);delete d.typo;save(root,'probe',d);
+ put(root,'services/new/package.json','{}');assert.throws(()=>discover(root),/MISSING_COMPONENT/);
+ rmSync(join(root,'services/new'),{recursive:true});put(root,'services/probe/sub/main.mjs','export{};');assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+ rmSync(join(root,'services/probe/sub'),{recursive:true});put(root,'services/probe/package.json',JSON.stringify({scripts:{start:'node extra.mjs'}}));assert.throws(()=>discover(root),/UNDECLARED_EXECUTABLE_SCRIPT/);
+});
+test('unknown dependencies and cycles are rejected',t=>{
+ const root=fixture(t),a=add(root,'a',d=>d.dependencies=[{id:'missing',inputs:[],delivery:[]}]);
+ assert.throws(()=>discover(root),/UNKNOWN_DEPENDENCY/);
+ const b=add(root,'b',d=>d.dependencies=[{id:'a',inputs:[],delivery:[]}]);
+ a.dependencies[0].id='b';save(root,'a',a);assert.throws(()=>discover(root),/COMPONENT_CYCLE/);
+});
+test('literal neighbor imports require declared exact build input',t=>{
+ const root=fixture(t),a=add(root,'a');add(root,'b');
+ put(root,'services/a/main.mjs',"import{value}from'../b/main.mjs';export{value};\n");
+ assert.throws(()=>discover(root),/UNDECLARED_IMPORT/);
+ a.dependencies=[{id:'b',inputs:['services/b/main.mjs'],delivery:['services/b/main.mjs']}];save(root,'a',a);
+ assert.deepEqual(discover(root).order,['b','a']);
+});
+test('shared contract touches consumer while test-only edits preserve build/runtime fingerprint',t=>{
+ const root=fixture(t);add(root,'b');const a=add(root,'a',d=>d.dependencies=[{id:'b',inputs:['services/b/contract.json'],delivery:['services/b/contract.json']}]);put(root,'services/b/contract.json','{}');
+ let before=fingerprints(root,a);put(root,'services/a/tests.mjs','// changed test\n');let after=fingerprints(root,a);
+ assert.equal(before.build,after.build);assert.equal(before.runtime,after.runtime);assert.notEqual(before.checks,after.checks);
+ put(root,'services/b/contract.json','{"revision":2}');const changed=fingerprints(root,a);assert.notEqual(changed.build,after.build);assert.notEqual(changed.runtime,after.runtime);
+});
+test('removal requires retirement; rename retains explicit tombstone and prevents ID reuse',t=>{
+ const root=fixture(t),a=add(root,'a');
+ const git=(...args)=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
+ git('init','-q');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture');
+ a.deploy.units=[];save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT/);a.deploy.units=['a'];
+ rmSync(join(root,'services/a'),{recursive:true});assert.throws(()=>discover(root,{base:'HEAD'}),/REMOVED_WITHOUT_RETIREMENT/);
+ a.status='retired';a.reason='Replaced explicitly';a.renamedTo='b';a.inputs={build:[],runtime:[],checks:[]};a.executableSources=[];save(root,'a',a);add(root,'b');assert.deepEqual(discover(root,{base:'HEAD'}).order,['b']);
+ a.renamedTo='unknown';save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/INVALID_RENAME/);
+ a.renamedTo='b';save(root,'a',a);git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','retire');a.status='active';delete a.renamedTo;save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/RETIRED_ID_REUSED/);
+});
+
+test('removing one active deploy unit requires its explicit retired tombstone',t=>{
+ const root=fixture(t),active=add(root,'probe',d=>d.deploy.units=['probe','old-worker']);
+ const git=(...args)=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
+ git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture');
+ active.deploy.units=['probe'];save(root,'probe',active);
+ assert.throws(()=>discover(root,{base:'HEAD'}),/DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: probe/);
+ const retired={...descriptor('old-worker'),status:'retired',reason:'Worker retired explicitly',executableSources:[],inputs:{build:[],runtime:[],checks:[]},commands:{build:null,check:null},delivery:{kind:'ready-files',files:[],entrypoints:[],smokeImports:[],systemRequirements:[]}};
+ save(root,'old-worker',retired);
+ const graph=discover(root,{base:'HEAD'});
+ assert.deepEqual(graph.order,['probe']);assert.equal(graph.components.get('old-worker').status,'retired');
+ assert.deepEqual(graph.components.get('old-worker').deploy.units,['old-worker']);
+ retired.deploy.units=['different-worker'];save(root,'old-worker',retired);
+ assert.throws(()=>discover(root,{base:'HEAD'}),/DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: probe/);
+});
+test('retired package metadata admits development scripts but rejects runtime scripts and bins',t=>{
+ const root=fixture(t),retired={...descriptor('probe'),status:'retired',reason:'Runtime removed',executableSources:[],inputs:{build:[],runtime:[],checks:[]},commands:{build:null,check:null},delivery:{kind:'ready-files',files:[],entrypoints:[],smokeImports:[],systemRequirements:[]}};
+ save(root,'probe',retired);
+ const metadata={name:'@fixture/probe',private:true,scripts:{test:'node --test',lint:'node tools/lint.mjs'}};
+ put(root,'services/probe/package.json',JSON.stringify(metadata));
+ put(root,'services/probe/src/main.mjs','export {};');
+ assert.deepEqual(discover(root).order,[]);
+ for(const runtime of [
+  {bin:'worker.mjs'},{bin:{worker:'worker.mjs'}},
+  ...['start','start:worker','mcp','migrate','health','trusted'].map(name=>({scripts:{[name]:'node worker.mjs'}})),
+ ]){
+  put(root,'services/probe/package.json',JSON.stringify({...metadata,...runtime}));
+  assert.throws(()=>discover(root),/MISSING_COMPONENT: services\/probe\/package.json/);
+ }
+ put(root,'services/probe/package.json',JSON.stringify(metadata));
+ rmSync(join(root,'services/probe/component.json'));
+ assert.throws(()=>discover(root),/MISSING_COMPONENT: services\/probe\/package.json/);
+});
+
+// These are executable behavior regressions: assert delivered bytes, not only key inequality.
+test('build config and effective dependency delivery cannot reuse stale payload',async t=>{
+ const root=fixture(t);
+ const d=add(root,'probe',d=>{
+  d.inputs.build.push('services/probe/config.json');
+  d.delivery.files=['services/probe/dist'];d.delivery.entrypoints=['services/probe/dist/main.mjs'];
+ });
+ put(root,'services/probe/config.json','{"value":1}');
+ put(root,'services/probe/build.mjs',"import{mkdirSync,readFileSync,writeFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/main.mjs','export const value='+JSON.parse(readFileSync('config.json')).value+';');appendFileSync('build-count','1');");
+ const first=(await execute(root,'package',['probe']))[0];
+ put(root,'services/probe/config.json','{"value":2}');
+ const second=(await execute(root,'package',['probe']))[0];
+ assert.equal(second.compiled,true);assert.equal(second.packaged,true);
+ assert.notEqual(first.artifact.payloadHash,second.artifact.payloadHash);
+ assert.equal(readFileSync(join(second.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=2;');
+ add(root,'neighbor');put(root,'services/neighbor/extra.json','{"revision":1}');
+ chmodSync(join(root,'services/neighbor/extra.json'),0o644);
+ d.dependencies=[{id:'neighbor',inputs:[],delivery:[]}];save(root,'probe',d);
+ const before=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
+ d.dependencies[0].delivery=['services/neighbor/extra.json'];save(root,'probe',d);
+ const added=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
+ assert.notEqual(before.runtime,added.runtime);assert.equal(added.packaged,true);
+ assert.equal(readFileSync(join(added.artifact.path,'services/neighbor/extra.json'),'utf8'),'{"revision":1}');
+ put(root,'services/neighbor/extra.json','{"revision":2}');
+ const changed=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
+ assert.equal(changed.compiled,false);assert.equal(changed.packaged,true);
+ assert.equal(readFileSync(join(changed.artifact.path,'services/neighbor/extra.json'),'utf8'),'{"revision":2}');
+ const repeat=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(repeat.packaged,false);
+ chmodSync(join(root,'services/neighbor/extra.json'),0o600);
+ const modeChanged=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(modeChanged.packaged,false);assert.equal(modeChanged.artifact.payloadHash,repeat.artifact.payloadHash);
+ chmodSync(join(root,'services/neighbor/extra.json'),0o755);
+ const executable=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(executable.packaged,true);assert.notEqual(executable.artifact.payloadHash,repeat.artifact.payloadHash);
+});
+test('executable admission covers package bins, runtime flags and executable shebang files',t=>{
+ const root=fixture(t),d=add(root,'probe');put(root,'services/probe/extra.mjs','export {};');
+ for(const manifest of [
+  {bin:{probe:'extra.mjs'}},{bin:'extra.mjs'},
+  {scripts:{start:'node --enable-source-maps "extra.mjs"'}},
+  {scripts:{'start:worker':"node --require init.cjs --conditions=production extra.mjs"}},
+  {scripts:{start:'python3 -B helper.py'}},
+ ]){put(root,'services/probe/package.json',JSON.stringify(manifest));assert.throws(()=>discover(root),/UNDECLARED_EXECUTABLE_(BIN|SCRIPT)/);}
+ rmSync(join(root,'services/probe/package.json'));
+ put(root,'tools/package.json',JSON.stringify({bin:{worker:'worker.py'}}));assert.throws(()=>discover(root),/MISSING_COMPONENT/);rmSync(join(root,'tools'),{recursive:true});
+ put(root,'tools/arbitrary-name.py','#!/usr/bin/env python3\nprint(42)\n');chmodSync(join(root,'tools/arbitrary-name.py'),0o755);
+ assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);rmSync(join(root,'tools'),{recursive:true});
+ put(root,'services/probe/helper.py','#!/usr/bin/env python3\nprint(42)\n');chmodSync(join(root,'services/probe/helper.py'),0o755);
+ assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+ d.executableSources.push('services/probe/helper.py');d.inputs.runtime.push('services/probe/helper.py');save(root,'probe',d);assert.deepEqual(discover(root).order,['probe']);
+});
+test('validation rejects missing own and dependency delivery files before execution',t=>{
+ const root=fixture(t),d=add(root,'probe');d.delivery.files.push('services/probe/missing.json');save(root,'probe',d);
+ assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);d.delivery.files.pop();add(root,'neighbor');
+ d.dependencies=[{id:'neighbor',inputs:[],delivery:['services/neighbor/missing.json']}];save(root,'probe',d);
+ assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);
+});
+test('generated output corruption is rejected until explicit build restores source bytes; legacy is not adopted',async t=>{
+ const root=fixture(t);add(root,'probe',d=>{d.delivery.files=['services/probe/dist'];d.delivery.entrypoints=['services/probe/dist/main.mjs'];});
+ put(root,'services/probe/build.mjs',"import{mkdirSync,copyFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});copyFileSync('main.mjs','dist/main.mjs');appendFileSync('build-count','1');");
+ const first=(await execute(root,'package',['probe']))[0],statePath=join(root,'tmp/component-state/probe.json');
+ const trusted=readFileSync(statePath,'utf8');
+ put(root,'services/probe/dist/main.mjs','export const value=999;');
+ await assert.rejects(execute(root,'package',['probe']),/BUILD_OUTPUT_MISMATCH/);
+ assert.equal(readFileSync(statePath,'utf8'),trusted);assert.equal(readFileSync(join(root,'services/probe/build-count'),'utf8'),'1');
+ assert.equal(readFileSync(join(first.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+ const restored=(await execute(root,'build',['probe']))[0];assert.equal(restored.compiled,true);assert.equal(restored.build,first.build);
+ assert.equal(readFileSync(join(root,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+ const repeated=(await execute(root,'package',['probe']))[0];assert.equal(repeated.compiled,false);assert.equal(repeated.packaged,false);assert.equal(repeated.artifact.payloadHash,first.artifact.payloadHash);
+ const legacy=JSON.parse(readFileSync(statePath));delete legacy.outputDigest;writeFileSync(statePath,JSON.stringify(legacy));
+ await assert.rejects(execute(root,'package',['probe']),/BUILD_OUTPUT_UNVERIFIED/);
+ assert.equal(readFileSync(join(root,'services/probe/build-count'),'utf8'),'11');
+ assert.equal((await execute(root,'build',['probe']))[0].compiled,true);
+ // A check must not mutate trusted output and then have run/package attest it.
+ put(root,'services/probe/tests.mjs',"import{writeFileSync}from'node:fs';writeFileSync('dist/main.mjs','export const value=999;');");
+ await assert.rejects(execute(root,'run',['probe']),/BUILD_OUTPUT_MISMATCH/);
+ assert.equal(readFileSync(join(first.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+});
+
+test('reference documentation leaves runtime keys unchanged while packaged instructions change them',t=>{
+ const root=fixture(t),d=add(root,'probe');
+ put(root,'docs/user-agent/instructions/context.md','accepted behavior\n');
+ d.inputs.runtime.push('docs/user-agent/instructions/context.md');
+ d.delivery.files.push('docs/user-agent/instructions/context.md');
+ save(root,'probe',d);
+ const before=fingerprints(root,discover(root).components.get('probe'));
+ put(root,'docs/components/probe.md','Updated user guide');
+ const reference=fingerprints(root,discover(root).components.get('probe'));
+ assert.equal(reference.runtime,before.runtime);assert.equal(reference.artifact,before.artifact);
+ put(root,'docs/user-agent/instructions/context.md','new behavior\n');
+ const changed=fingerprints(root,discover(root).components.get('probe'));
+ assert.notEqual(changed.runtime,before.runtime);assert.notEqual(changed.artifact,before.artifact);
+});
+
+test('cold source plan excludes generated bundle; built delivery admits its exact runtime reference',async t=>{
+ const root=fixture(t),d=add(root,'probe');
+ put(root,'services/probe/main.mjs',"export const bundle=new URL('./dist/workflows.js',import.meta.url);\n");
+ put(root,'services/probe/build.mjs',"import{mkdirSync,writeFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/workflows.js','module.exports={};');\n");
+ d.delivery.files.push('services/probe/dist/workflows.js');save(root,'probe',d);
+ assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);
+ const cold=(await execute(root,'plan',['probe']))[0];
+ await execute(root,'build',['probe']);
+ const built=(await execute(root,'plan',['probe']))[0];
+ for(const key of ['build','artifact','checks'])assert.equal(cold[key],built[key]);
+ assert.notEqual(cold.runtime,built.runtime);
+ assert.deepEqual(discover(root).order,['probe']);
+ const pkg=(await execute(root,'package',['probe']))[0];
+ assert.equal(readFileSync(join(pkg.artifact.path,'services/probe/dist/workflows.js'),'utf8'),'module.exports={};');
+ put(root,'services/probe/dist/other.js','module.exports={};');
+ put(root,'services/probe/main.mjs',"export const bundle=new URL('./dist/other.js',import.meta.url);\n");
+ assert.throws(()=>discover(root),/UNDECLARED_LOCAL_INPUT/);
+});
+
+
+test('source fingerprints ignore checkout permissions but retain executable bits', t => {
+ const root=fixture(t), c=add(root,'probe'), path=join(root,'services/probe/main.mjs');
+ c.commands.build=null;
+ const group={id:'probe',excludedInputs:[],extraInputs:[]};
+ chmodSync(join(root,'services/probe'),0o700);chmodSync(path,0o600);
+ const original=fingerprints(root,c),originalGroup=checkGroupFingerprint(root,c,group);
+ chmodSync(join(root,'services/probe'),0o775);
+ chmodSync(path,0o664); const groupWritable=fingerprints(root,c);
+ for(const key of ['build','artifact','checks','runtime'])assert.equal(groupWritable[key],original[key],key);
+ assert.equal(checkGroupFingerprint(root,c,group),originalGroup);
+ chmodSync(path,0o755); const executable=fingerprints(root,c);
+ assert.notEqual(executable.artifact,original.artifact);
+ assert.notEqual(executable.runtime,original.runtime);
+});

@@ -1,5 +1,6 @@
 # ABOUTME: Проверяет конфигурацию личного worker и ограниченный MCP-клиент.
 # ABOUTME: Учетные данные и настоящие сетевые службы не используются.
+import asyncio
 import json
 import os
 import sys
@@ -39,7 +40,7 @@ class WorkerConfigTest(unittest.TestCase):
 
 class ToolClientTest(unittest.TestCase):
     def test_native_sdk_null_params_are_supported(self):
-        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+        with patch.object(tool_client, 'broker_call', return_value={'role': 'user', 'tools': []}):
             result = tool_client.handle('tools/list', None)
         self.assertTrue(any(item['name'] == 'brai_login' for item in result['tools']))
         self.assertEqual(tool_client.handle('ping', None), {})
@@ -48,7 +49,7 @@ class ToolClientTest(unittest.TestCase):
                 tool_client.handle('tools/list', bad)
 
     def test_login_catalog_requires_explicit_request_in_private_telegram(self):
-        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+        with patch.object(tool_client, 'broker_call', return_value={'role': 'user', 'tools': []}):
             result = tool_client.handle('tools/list', {})
         login = next(item for item in result['tools'] if item['name'] == 'brai_login')
         self.assertIn('явной просьбе', login['description'])
@@ -57,7 +58,7 @@ class ToolClientTest(unittest.TestCase):
         self.assertFalse(login['inputSchema']['additionalProperties'])
 
     def test_account_tools_accept_only_full_text_confirmation_without_model_selected_owner(self):
-        with patch.object(tool_client, "broker_call", return_value={"tools": []}):
+        with patch.object(tool_client, "broker_call", return_value={"role": "user", "tools": []}):
             catalog = tool_client.handle("tools/list", {})["tools"]
         link = next(t for t in catalog if t["name"] == "brai_telegram_link_account")
         unlink = next(t for t in catalog if t["name"] == "brai_telegram_unlink_account")
@@ -149,25 +150,108 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, kind, callback):
                 self.callback = callback
         ctx, app = Context(), App()
+        app.bot = type('Bot', (), {'get_updates': lambda self: None})()
+        app.update_queue = asyncio.Queue()
         async def admit(event):
             return None
         async def original(event):
             return None
         async def admit_update(update, adapter):
             return True
-        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=admit, _is_user_authorized_for_source=lambda source, **kw: False), handle_message=original)
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=admit, _is_user_authorized_for_source=lambda source, **kw: False), handle_message=original, _drop_pending_on_cold_boot=True)
         telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
         telegram.Update = type('Update', (), {})
         ext.TypeHandler, ext.ApplicationHandlerStop = Handler, type('ApplicationHandlerStop', (Exception,), {})
+        closing=asyncio.Event()
+        class Resolver:
+            def __call__(self,source): return None
+            async def close(self): await closing.wait()
         with patch.dict(sys.modules, {'telegram':telegram, 'telegram.ext':ext}):
-            native_ingress.register(ctx, build_resolver=lambda adapter, runner: lambda source: None, admit_update=admit_update)
+            native_ingress.register(ctx, build_resolver=lambda adapter, runner: Resolver(), admit_update=admit_update)
             ctx.factory(app, adapter)
             self.assertTrue(adapter._brai_identity_ingress_ready)
+            self.assertFalse(adapter._drop_pending_on_cold_boot)
             self.assertTrue(callable(adapter._brai_identity_dispatch))
             self.assertIs(adapter.handle_message, original)
+            current=adapter._brai_identity_dispatch
+            with self.assertRaisesRegex(RuntimeError,'Previous ingress resolver still active'):
+                ctx.factory(app, adapter)
+            self.assertIs(adapter._brai_identity_dispatch,current)
             ctx.close()
             self.assertFalse(adapter._brai_identity_ingress_ready)
             self.assertIsNone(adapter._brai_identity_dispatch)
+            with self.assertRaisesRegex(RuntimeError,'Previous ingress resolver still active'):
+                ctx.factory(app,adapter)
+            closing.set()
+            for _ in range(4): await asyncio.sleep(0)
+            ctx.factory(app,adapter)
+            ctx.close()
+            for _ in range(4): await asyncio.sleep(0)
+
+    async def test_root_bootstrap_pair_holds_first_poll_until_explicit_resume(self):
+        import hashlib
+        from pathlib import Path
+        from types import SimpleNamespace, ModuleType
+        from identity import native_ingress
+        class Context:
+            def register_telegram_handler(self, callback): self.factory = callback
+            def on_unload(self, callback): self.close = callback
+        class Bot:
+            calls = 0
+            async def get_updates(self):
+                self.calls += 1
+                return ['update']
+        class App:
+            def __init__(self): self.bot, self.update_queue = Bot(), asyncio.Queue()
+            def add_handler(self, *args, **kwargs): pass
+            def remove_handler(self, *args, **kwargs): pass
+        class Resolver:
+            def __call__(self, source): pass
+            async def release_resume(self, operationId): return True
+        ctx, app, resolver = Context(), App(), Resolver()
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=lambda event: None))
+        def forward(event): pass
+        forward._brai_restore_authorize = lambda: None
+        telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
+        telegram.Update = type('Update', (), {})
+        ext.TypeHandler = lambda *a: object()
+        ext.ApplicationHandlerStop = type('ApplicationHandlerStop', (Exception,), {})
+        operation = '6115e95f-dd1d-4501-a9f2-31bc4c747818'
+        source = b'accepted ingress'
+        env = {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': operation,
+               'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': hashlib.sha256(source).hexdigest()}
+        with patch.dict(sys.modules, {'telegram': telegram, 'telegram.ext': ext}), \
+                patch.object(native_ingress, 'install', return_value=forward), \
+                patch.object(native_ingress, '__file__', '/opt/brai-profile/runtime/services/hermes/identity/native_ingress.py'), \
+                patch.object(Path, 'read_bytes', return_value=source), patch.dict(os.environ, env):
+            native_ingress.register(ctx, build_resolver=lambda *a: resolver)
+            ctx.factory(app, adapter)
+            self.assertEqual(resolver.release_gate.operation, operation)
+            poll = asyncio.create_task(app.bot.get_updates())
+            await resolver.release_gate.held.wait()
+            self.assertEqual(app.bot.calls, 0)
+            self.assertFalse(poll.done())
+            self.assertEqual((await resolver.release_gate.resume(operation))['state'], 'resumed')
+            self.assertEqual(await poll, ['update'])
+            ctx.close()
+
+    async def test_root_bootstrap_half_pair_and_wrong_source_fail_before_poll_install(self):
+        from types import SimpleNamespace
+        from identity import native_ingress
+        class Context:
+            def register_telegram_handler(self, callback): self.factory = callback
+            def on_unload(self, callback): pass
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=lambda event: None))
+        for env in ({'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': '6115e95f-dd1d-4501-a9f2-31bc4c747818'},
+                    {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': 'invalid', 'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': 'a'*64},
+                    {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': '6115e95f-dd1d-4501-a9f2-31bc4c747818', 'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': 'a'*64}):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), \
+                    patch.object(native_ingress.ReleaseGate, 'install') as install:
+                ctx = Context()
+                native_ingress.register(ctx, build_resolver=lambda *a: lambda source: None)
+                with self.assertRaises((RuntimeError, ValueError)):
+                    ctx.factory(SimpleNamespace(), adapter)
+                install.assert_not_called()
 
     def test_factory_fails_closed_without_runner(self):
         from types import SimpleNamespace
@@ -231,6 +315,8 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         async def native_admit(event):
             return None
         ctx, app = Context(), App()
+        app.bot = type('Bot', (), {'get_updates': lambda self: None})()
+        app.update_queue = asyncio.Queue()
         adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=native_admit, _is_user_authorized_for_source=lambda s, **k: False), handle_message=None)
         telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
         telegram.Update, ext.TypeHandler, ext.ApplicationHandlerStop = object, Handler, Stop
@@ -265,4 +351,4 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
             await worker.health()
         worker.runner = object()
         worker.adapter = object()
-        self.assertEqual(await worker.health(), {'ready':True, 'operational':False, 'userId':'owner', 'telegramId':'123'})
+        self.assertEqual(await worker.health(), {'role':None, 'rolePolicyVersion':1, 'ready':True, 'operational':False, 'policyReady':False, 'userId':'owner', 'telegramId':'123'})

@@ -40,7 +40,7 @@
 
 Provision идемпотентен по `requestId` и точным параметрам; конфликт повтора отклоняется. Telegram ID уникален среди всех аккаунтов; несколько Telegram ID могут ссылаться на одного пользователя. Стабильный автор памяти и profile ID сохраняются. Доверенный вызов не может создать первого администратора. `profile-ready` активирует пользователя с совпадающей привязкой, кроме блокированного. Приглашение случайно, действительно 24 часа и хранится как HMAC; повторное погашение тем же отправителем возвращает созданного пользователя. После первой административной lifecycle-операции profile-ready больше не активирует provisioning: активацию подтверждает только worker.
 
-Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная admin-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role}`, `status-set` — `{userId,status,requestId?}`, `sessions-revoke` — `{userId}`. Последнего активного администратора нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `chats.pause`, `chats.resume`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
+Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная creator/admin-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role,requestId?}`, `status-set` — `{userId,status,requestId?}`, `sessions-revoke` — `{userId}`. Последнего активного управляющего нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `chats.pause`, `chats.resume`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
 
 Первого владельца создаёт оператор после миграции командой `npm run bootstrap-owner --workspace=@brai/auth`. Через окружение передаются owner `AUTH_DATABASE_URL`, `AUTH_OWNER_ROLE` и `AUTH_BOOTSTRAP_FILE`. Последний указывает на принадлежащий процессу обычный JSON-файл с правами не шире 0600: `{telegramId,name,userId?,profileId?}`. С profileId владелец active, иначе provisioning до `profile-ready`. Повторная настройка запрещена; первый сетевой посетитель не становится владельцем. Данные пользователя не помещают в Git.
 
@@ -75,7 +75,7 @@ SSO выключен без пары AUTH_SSO_HUB_ORIGIN и AUTH_SSO_PREVIEW_ORI
 Отвязанный Telegram ID можно подключить к другому профилю или принять для него новое приглашение. Новый владелец получает собственный стабильный авторский ID и не наследует память прежнего профиля; миграция не возвращает старую привязку.
 ## Очередь пользовательских окружений
 
-Web-команды используют оболочку `{headers,body}`, действующую admin-сессию и разрешённый Origin; ответ `{status,body,setCookies}`. DTO принадлежат JSON Schema.
+Web-команды используют оболочку `{headers,body}`, действующую creator/admin-сессию и разрешённый Origin; ответ `{status,body,setCookies}`. DTO принадлежат JSON Schema.
 
 | Subject `brai.auth.v2.` | body | body ответа |
 | --- | --- | --- |
@@ -110,3 +110,7 @@ errorCode — безопасная константа `[A-Z][A-Z0-9_]{0,63}`; в
 Админка получает telegramIds — список действующих равноправных Telegram-аккаунтов. Исторический telegramId остаётся внутренним автором памяти, не каналом восстановления. Восстановление выбранного профиля передаёт userId в status-set, поэтому не создаёт чужой профиль по уже освобождённому ID. users-add ищет владельца по текущей таблице аккаунтов.
 
 Отвязка и административный lifecycle используют общий порядок блокировок. Отвязка повышает lifecycle_generation; завершение входа подтверждает поколение сессии под той же блокировкой. Погашенный до отвязки код не создаёт действительный вход после неё. Блокировка и переход в provisioning удаляют также выданные команды привязки.
+
+## Роли и применение профиля
+
+Нормативное поведение четырёх ролей, приглашений, role-set, поколений и совместимого обновления описано в [ROLES.md](ROLES.md). role-set возвращает user/operation из существующей очереди prepare/stop. Для новых users-add и invite-create необязательная role — user/guest; приглашение хранит назначенную роль. Нынешняя миграция не назначает creator автоматически.

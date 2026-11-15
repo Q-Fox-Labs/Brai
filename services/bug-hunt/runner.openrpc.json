@@ -1,0 +1,700 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Brai bug-hunt restricted runner",
+    "version": "3.0.0"
+  },
+  "methods": [
+    {
+      "name": "prepare",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "spec",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/RunSpec"
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "execution_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "spec_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "state": {
+              "const": "prepared"
+            }
+          },
+          "required": [
+            "execution_id",
+            "spec_sha256",
+            "state"
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32000,
+          "message": "Runner restriction"
+        }
+      ]
+    },
+    {
+      "name": "start",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "spec",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/RunSpec"
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32000,
+          "message": "Runner restriction"
+        }
+      ]
+    },
+    {
+      "name": "get",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "scope",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        {
+          "name": "execution_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32000,
+          "message": "Runner restriction"
+        }
+      ]
+    },
+    {
+      "name": "cancel",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "scope",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        {
+          "name": "execution_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32000,
+          "message": "Runner restriction"
+        }
+      ]
+    },
+    {
+      "name": "collect",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "scope",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        {
+          "name": "execution_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32000,
+          "message": "Runner restriction"
+        }
+      ]
+    },
+    {
+      "name": "cleanup",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "scope",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        {
+          "name": "execution_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32000,
+          "message": "Runner restriction"
+        }
+      ]
+    }
+  ],
+  "components": {
+    "schemas": {
+      "RunSpec": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "installation_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "owner_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "investigation_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "installation_id",
+              "owner_id",
+              "investigation_id"
+            ]
+          },
+          "recipe_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "recipe_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "source_commit": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}$"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "spec_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "oracle": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "requirement_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "requirement_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "expected": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "refutes_claim": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              },
+              "confirms_claim": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              }
+            },
+            "required": [
+              "requirement_id",
+              "requirement_sha256",
+              "expected",
+              "version"
+            ]
+          },
+          "oracle_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "fixture_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "deadline_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_tree_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "execution_id",
+          "scope",
+          "recipe_id",
+          "recipe_version",
+          "source_id",
+          "source_commit",
+          "source_sha256",
+          "spec_sha256",
+          "oracle",
+          "oracle_sha256",
+          "fixture_ref",
+          "deadline_at",
+          "source_tree_sha256"
+        ]
+      },
+      "Scope": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "installation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "owner_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "investigation_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "installation_id",
+          "owner_id",
+          "investigation_id"
+        ]
+      },
+      "Receipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "installation_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "owner_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "investigation_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "installation_id",
+              "owner_id",
+              "investigation_id"
+            ]
+          },
+          "recipe_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "recipe_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "source_commit": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}$"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "spec_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "oracle_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outcome": {
+            "enum": [
+              "reproduced",
+              "not_reproduced",
+              "not_attempted",
+              "blocked",
+              "invalid_test"
+            ]
+          },
+          "assertions": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "expected": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "actual": {
+                  "type": "string",
+                  "maxLength": 4000
+                },
+                "passed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "expected",
+                "actual",
+                "passed"
+              ]
+            }
+          },
+          "log_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "fidelity": {
+            "const": "synthetic"
+          },
+          "substituted_boundaries": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "cleanup": {
+            "enum": [
+              "done",
+              "pending"
+            ]
+          },
+          "state": {
+            "enum": [
+              "completed",
+              "failed",
+              "unknown",
+              "cancelled"
+            ]
+          },
+          "source_tree_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "node_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "dependencies_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "execution_id",
+          "scope",
+          "recipe_id",
+          "recipe_version",
+          "source_commit",
+          "source_sha256",
+          "spec_sha256",
+          "oracle_sha256",
+          "started_at",
+          "finished_at",
+          "exit_code",
+          "outcome",
+          "assertions",
+          "log_sha256",
+          "fidelity",
+          "substituted_boundaries",
+          "cleanup",
+          "state",
+          "source_tree_sha256",
+          "node_sha256",
+          "dependencies_sha256"
+        ]
+      }
+    }
+  }
+}

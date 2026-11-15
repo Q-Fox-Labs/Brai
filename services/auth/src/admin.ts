@@ -6,7 +6,7 @@ import type { Pool } from "pg";
 import { adminUserSelect, operationSelect, lifecycleLock, requestLifecycle } from "./lifecycle.js";
 
 const userSelect=adminUserSelect;
-const inviteSelect='SELECT id,created_at AS "createdAt",expires_at AS "expiresAt",revoked_at AS "revokedAt",consumed_at AS "consumedAt" FROM brai_invite';
+const inviteSelect='SELECT id,role,created_at AS "createdAt",expires_at AS "expiresAt",revoked_at AS "revokedAt",consumed_at AS "consumedAt" FROM brai_invite';
 type Operation="users-add"|"users-revoke"|"users-operation-get"|"users-list"|"users-get"|"role-set"|"status-set"|"sessions-revoke"|"invite-create"|"invite-list"|"invite-revoke"|"admin-audit";
 /** Исполняет проверенное действие администратора; actor берётся только из сессии. */
 export async function adminAction(pool:Pool,secret:string,actor:string,operation:Operation,body:Record<string,string>,sessionId?:string) {
@@ -18,9 +18,15 @@ export async function adminAction(pool:Pool,secret:string,actor:string,operation
    const session=await client.query('SELECT 1 FROM "session" s JOIN brai_identity i ON i.user_id=s."userId" WHERE s.id=$1 AND s."userId"=$2 AND s."expiresAt">now() AND s.brai_generation=i.lifecycle_generation FOR UPDATE OF s',[sessionId,actor]);
    if(!session.rowCount){await client.query("COMMIT");return {status:401,body:{code:"UNAUTHORIZED"}};}
   }
-  const admin=await client.query("SELECT 1 FROM brai_identity WHERE user_id=$1 AND role='admin' AND status='active' FOR UPDATE",[actor]);
+  const admin=await client.query("SELECT role FROM brai_identity WHERE user_id=$1 AND role IN ('creator','admin') AND status='active' FOR UPDATE",[actor]);
   if(!admin.rowCount){await client.query("COMMIT");return {status:403,body:{code:"FORBIDDEN"}};}
-  if(operation==="users-add"||operation==="users-revoke"||operation==="status-set"){
+  if(operation==='invite-create'&&body.role!==undefined&&!['user','guest'].includes(body.role)){await client.query('COMMIT');return {status:400,body:{code:'INVALID_ROLE'}};}
+  if(body.role==='creator'&&admin.rows[0].role!=='creator'){await client.query('COMMIT');return {status:403,body:{code:'FORBIDDEN'}};}
+  if(body.userId&&['role-set','status-set','users-revoke','sessions-revoke'].includes(operation)){
+   const target=await client.query('SELECT role FROM brai_identity WHERE user_id=$1 FOR UPDATE',[body.userId]);
+   if(target.rows[0]?.role==='creator'&&admin.rows[0].role!=='creator'){await client.query('COMMIT');return {status:403,body:{code:'FORBIDDEN'}};}
+  }
+  if(operation==="users-add"||operation==="users-revoke"||operation==="status-set"||operation==="role-set"){
    if(body.userId==='__quarantine__'){await client.query("COMMIT");return {status:404,body:{code:"NOT_FOUND"}};}
    const result=await requestLifecycle(client,actor,operation,body);await client.query("COMMIT");return result;
   }
@@ -39,26 +45,11 @@ export async function adminAction(pool:Pool,secret:string,actor:string,operation
   let result:Record<string,unknown>={success:true};
   if(operation==="users-list")result={users:(await client.query(userSelect+" ORDER BY u.id")).rows};
   if(operation==="users-get")result={user:(await client.query(userSelect+" WHERE u.id=$1",[target])).rows[0]};
-  if(operation==="role-set"){
-   const before=(await client.query("SELECT role,status,profile_id FROM brai_identity WHERE user_id=$1",[target])).rows[0];
-   const nextRole=body.role;
-   const nextStatus=before.status;
-   if(nextStatus==="active"&&!before.profile_id){await client.query("COMMIT");return {status:409,body:{code:"PROFILE_NOT_READY"}};}
-   if(before.role==="admin"&&before.status==="active"&&(nextRole!=="admin"||nextStatus!=="active")){
-    const count=await client.query("SELECT count(*)::integer AS count FROM brai_identity WHERE role='admin' AND status='active'");
-    if(count.rows[0].count<=1){await client.query("COMMIT");return {status:409,body:{code:"LAST_ADMIN"}};}
-   }
-   if(nextRole==="admin"){
-    const channels=await client.query("SELECT 1 FROM sys_telegram_account WHERE user_id=$1 LIMIT 1",[target]);
-    if(!channels.rowCount){await client.query("COMMIT");return {status:409,body:{code:"CONTACT_REQUIRED"}};}
-   }
-   await client.query("UPDATE brai_identity SET role=$2,status=$3 WHERE user_id=$1",[target,nextRole,nextStatus]);
-  }
   if(operation==="sessions-revoke")await client.query('DELETE FROM "session" WHERE "userId"=$1',[target]);
   if(operation==="invite-create"){
    const id=randomUUID(),code=randomBytes(32).toString("base64url");
    const digest=createHmac("sha256",secret).update("invite:"+code).digest("hex");
-   await client.query("INSERT INTO brai_invite(id,digest,created_by,expires_at) VALUES($1,$2,$3,now()+interval '24 hours')",[id,digest,actor]);
+   await client.query("INSERT INTO brai_invite(id,digest,created_by,expires_at,role) VALUES($1,$2,$3,now()+interval '24 hours',$4)",[id,digest,actor,body.role??"user"]);
    result={invite:{...(await client.query(inviteSelect+" WHERE id=$1",[id])).rows[0],code}};
   }
   if(operation==="invite-list")result={invites:(await client.query(inviteSelect+" ORDER BY created_at DESC,id")).rows};

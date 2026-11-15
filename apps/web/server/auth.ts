@@ -4,7 +4,8 @@ import { isIP } from "node:net";
 import { serviceDataScope } from "../../../services/auth/contracts/service-data-scope.mjs";
 import { valid } from "./contracts";
 import { GatewayError, natsConnection } from "./gateway";
-export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string; emailVerified?: boolean; name?: string; role?: "admin" | "user"; status?: "provisioning" | "active" | "blocked"; telegramId?: string | null; profileId?: string | null } };
+export type Role = "creator" | "admin" | "user" | "guest";
+export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string; emailVerified?: boolean; name?: string; role?: Role; status?: "provisioning" | "active" | "blocked"; telegramId?: string | null; profileId?: string | null } };
 type AuthReply = { status: number; body: unknown; setCookies: string[] };
 /** Проверяет Origin до мутации; TLS-прокси передаёт явный WEB_ORIGIN. */
 export function checkOrigin(request: Request): void {
@@ -52,7 +53,8 @@ export async function requireSession(request: Request): Promise<Session> {
  }
  const value = reply.body as Session | null;
  if (!value?.user?.id || !value.session?.id || value.session.userId !== value.user.id || !(Date.parse(value.session.expiresAt) > Date.now())) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
- if (telegramIdentity() && (!["active", "provisioning"].includes(value.user.status ?? "") || !["admin", "user"].includes(value.user.role ?? ""))) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
+ if ((telegramIdentity() || value.user.role !== undefined) && !["creator", "admin", "user"].includes(value.user.role ?? "")) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
+ if (telegramIdentity() && !["active", "provisioning"].includes(value.user.status ?? "")) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
  return value;
 }
 /** Проксирует JSON auth с отдельной обработкой всех Set-Cookie; не возвращает сессионный token. */
