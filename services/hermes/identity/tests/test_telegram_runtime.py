@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет связку Telegram ingress с брокером личного процесса.
 # ABOUTME: Все сетевые вызовы заменены локальными подставными ответами.
 import asyncio
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import telegram_runtime as runtime
 from identity.ingress import Bridge
 from identity.ipc import RpcError
+from identity.reply_outbox import ReplyOutbox
+from identity.routes import RouteLedger
+from identity.delivery_journal import delivery_id
+from identity.broker import Broker
 
 
 def profile():
@@ -25,6 +30,150 @@ def event():
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_restored_profile_reply_uses_canonical_owner_and_reaches_transport(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        registered = {**profile(), 'profileId': 'profile', 'status': 'active'}
+        async def auth(method, params, timeout=35):
+            if method == 'authorize':
+                return {'userId': 'owner', 'profileId': 'profile', 'role': 'user', 'generation': 0}
+            self.assertEqual(method, 'identity.resolve')
+            return {'user': {'id': 'owner', 'profileId': 'profile', 'telegramId': '123', 'status': 'active'}}
+        broker = Broker({'ingressUid': 995}, NS(call=auth))
+        async def broker_rpc(method, params):
+            return await broker.call(995, method, params)
+        with patch.object(broker, 'profiles', return_value={101: registered}):
+            restored = (await broker.call(995, 'ingress.profiles', {}))['profiles'][0]
+            self.assertNotIn('authorTelegramId', restored)
+            active = await broker.call(995, 'identity.resolve', {'telegramId': '123'})
+        self.assertEqual(active['authorTelegramId'], '123')
+        route = ('123', '77')
+        resolver.ledger.admit(restored, route, {'thread_id': '77'}, '55')
+        resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        ident = delivery_id('restored-reply')
+        body = {'profile': restored, 'action': 'send', 'generation': 0,
+                'payload': {'chat_id': '123', 'content': 'Ответ', 'metadata': {'thread_id': '77'}}}
+        outbox.enqueue(ident, RouteLedger.owner(restored), body)
+        with patch.object(broker, 'profiles', return_value={101: registered}), \
+                patch.object(runtime, 'broker_call', broker_rpc):
+            await outbox.flush()
+        self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
+        resolver._deliver_route.assert_awaited_once()
+
+    async def test_saved_reply_rejects_changed_owner_role_and_generation(self):
+        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        for change in ({'uid': 202}, {'userId': 'foreign'}, {'profileId': 'foreign'},
+                       {'authorTelegramId': '456'}, {'role': 'guest'}, {'generation': 1}):
+            with self.subTest(change=change):
+                resolver = runtime.Resolver(NS())
+                self.addCleanup(resolver.ledger.close)
+                resolver._deliver_route = AsyncMock()
+                body = {'profile': restored, 'action': 'send', 'generation': 0,
+                        'payload': {'chat_id': '123', 'metadata': {}}}
+                active = {**restored, 'authorTelegramId': '123', **change}
+                with patch.object(runtime, 'broker_call', AsyncMock(return_value=active)):
+                    with self.assertRaises(PermissionError):
+                        await resolver._deliver_saved_reply(body)
+                resolver._deliver_route.assert_not_awaited()
+
+    async def test_supervisor_bridge_saves_explicit_author_before_first_send(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        active = {**restored, 'authorTelegramId': '123'}
+        resolver.mirror = NS(restartable=True, accepted=AsyncMock(), inbox=NS(
+            delivery_source=lambda *args: {'chat': '123', 'chat_generation': 0,
+                'payload': json.dumps({'message': {'message_thread_id': 77}})}))
+        resolver.ledger.admit(restored, ('123', '77'), {'thread_id': '77'}, '55')
+        resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        bridge = resolver._bridge(restored)
+        ident = delivery_id('supervisor-reply')
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=active)):
+            result = await bridge.durable_delivery('owner', 'send', {
+                'chat_id': '123', 'content': 'Ответ', 'metadata': {'thread_id': '77'}}, ident, delivery_id('input'))
+        self.assertEqual(result, {'success': True, 'message_id': '56'})
+        body = json.loads(resolver.ledger.db.execute('SELECT body FROM reply_outbox WHERE id=?', (ident,)).fetchone()[0])
+        self.assertEqual(body['profile']['authorTelegramId'], '123')
+        self.assertNotIn('authorTelegramId', restored)
+
+    async def test_recovery_ignores_explicit_owner_and_nonlegacy_or_unknown_failure(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        outbox = ReplyOutbox(resolver.ledger.db, AsyncMock())
+        forbidden = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
+        for label, saved, state, receipt in [
+                ('explicit', {**profile(), 'authorTelegramId': '123'}, 'blocked', forbidden),
+                ('different', profile(), 'blocked', {**forbidden, 'error': 'Revoked'}),
+                ('new', profile(), 'blocked', {**forbidden, 'error_kind': 'forbidden'}),
+                ('unknown', profile(), 'sending', forbidden)]:
+            ident = delivery_id(label)
+            outbox.enqueue(ident, RouteLedger.owner(saved), {'profile': saved})
+            resolver.ledger.db.execute('UPDATE reply_outbox SET state=?,receipt=? WHERE id=?',
+                                      (state, json.dumps(receipt), ident))
+        before = resolver.ledger.db.execute('SELECT * FROM reply_outbox ORDER BY seq').fetchall()
+        self.assertEqual(outbox.recover_legacy_binding_blocks(), 0)
+        self.assertEqual(resolver.ledger.db.execute('SELECT * FROM reply_outbox ORDER BY seq').fetchall(), before)
+
+    async def test_legacy_blocked_reply_recovers_saved_bytes_once_without_native_dispatch(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        active = {**restored, 'authorTelegramId': '123'}
+        resolver.ledger.admit(restored, ('123', '77'), {'thread_id': '77'}, '55')
+        resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        ident = delivery_id('legacy-reply')
+        body = {'profile': restored, 'action': 'send', 'generation': 0,
+                'payload': {'chat_id': '123', 'content': 'Точный сохранённый ответ', 'metadata': {'thread_id': '77'}}}
+        outbox.enqueue(ident, RouteLedger.owner(restored), body)
+        before = resolver.ledger.db.execute('SELECT body FROM reply_outbox WHERE id=?', (ident,)).fetchone()[0]
+        forbidden = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
+        resolver.ledger.db.execute("UPDATE reply_outbox SET state='blocked',receipt=? WHERE id=?", (json.dumps(forbidden), ident))
+        self.assertEqual(outbox.recover_legacy_binding_blocks(), 1)
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=active)):
+            await outbox.flush()
+            await outbox.flush()
+        self.assertEqual(outbox.recover_legacy_binding_blocks(), 0)
+        self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
+        after = resolver.ledger.db.execute('SELECT body FROM reply_outbox WHERE id=?', (ident,)).fetchone()[0]
+        self.assertEqual(before, after)
+        resolver._deliver_route.assert_awaited_once()
+        self.assertEqual(resolver._deliver_route.call_args.args[2]['content'], 'Точный сохранённый ответ')
+
+    async def test_legacy_recovery_rechecks_revocation_and_never_rearms_new_denial(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        resolver._deliver_route = AsyncMock()
+        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        ident = delivery_id('revoked-legacy-reply')
+        outbox.enqueue(ident, RouteLedger.owner(restored), {
+            'profile': restored, 'action': 'send', 'generation': 0,
+            'payload': {'chat_id': '123', 'metadata': {}}})
+        forbidden = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
+        resolver.ledger.db.execute("UPDATE reply_outbox SET state='blocked',receipt=?", (json.dumps(forbidden),))
+        self.assertEqual(outbox.recover_legacy_binding_blocks(), 1)
+        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=PermissionError('revoked'))):
+            await outbox.flush()
+        self.assertEqual(outbox.result(ident)['error_kind'], 'forbidden')
+        self.assertEqual(outbox.recover_legacy_binding_blocks(), 0)
+        resolver._deliver_route.assert_not_awaited()
+
+    async def test_saved_reply_pause_blocks_transport(self):
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        resolver.journal = NS(chat_state=lambda *args: {'paused': True, 'generation': 0})
+        resolver._deliver_route = AsyncMock()
+        body = {'profile': restored, 'action': 'send', 'generation': 0,
+                'payload': {'chat_id': '123', 'metadata': {}}}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={**restored, 'authorTelegramId': '123'})):
+            with self.assertRaises(PermissionError):
+                await resolver._deliver_saved_reply(body)
+        resolver._deliver_route.assert_not_awaited()
+
     async def test_delayed_batch_cannot_cross_auth_generation_change(self):
         resolver=runtime.Resolver.__new__(runtime.Resolver)
         resolver.mirror=NS(block_event=AsyncMock())
