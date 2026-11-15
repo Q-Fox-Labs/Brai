@@ -151,7 +151,7 @@ class FailureNoticeTest(unittest.TestCase):
         for path in (Path(candidate) / 'agent').glob('*.py'):
             for node in ast.walk(ast.parse(path.read_text())):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and node.func.attr in {'_emit_warning', '_emit_status', '_emit_wait_notice', '_emit_startup_warning'}
+                        and node.func.attr in {'_emit_warning', '_emit_status', '_emit_wait_notice', '_emit_startup_warning', '_emit_diagnostic_wait'}
                         and node.args and isinstance(node.args[0], (ast.Constant, ast.JoinedStr))):
                     continue
                 value = node.args[0]
@@ -160,6 +160,49 @@ class FailureNoticeTest(unittest.TestCase):
                 if re.search(r'[A-Za-z]{3,}\s+[A-Za-z]{3,}', text):
                     offenders.append(f'{path.name}:{node.lineno}')
         self.assertEqual(offenders, [])
+
+    def test_automatic_recovery_notice_is_russian_without_commands(self):
+        import os
+        from typing import Any
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_recovery_autorecover.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'ladder_notice')
+        scope = {'Any': Any}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        notice = scope['ladder_notice'](object(), wait_s=30, cycle=2, total=3)
+        self.assertIn('через 30 сек.', notice)
+        self.assertIn('попытка 2/3', notice)
+        self.assertNotIn('/stop', notice)
+        self.assertNotIn('Provider', notice)
+
+    def test_retry_wait_localizes_known_reset_time(self):
+        import os
+        import re
+        from typing import Any
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_recovery.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'compute_error_backoff')
+        scope = {'Any': Any, 're': re, 'reset_hint': lambda error: '~2h 16m', '_ZAI_POLICY_NOTES': {},
+                 'logger': logging.getLogger('notice-test')}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        statuses, waits = [], []
+        agent = types.SimpleNamespace(_emit_diagnostic_status=statuses.append, _buffer_diagnostic_status=statuses.append,
+            _emit_diagnostic_wait=waits.append, _client_log_context=lambda: '')
+        retry = types.SimpleNamespace(LIVE_RETRY_WAIT_CAP_S=60, RETRY_AFTER_CAP_S=120,
+            adaptive_rate_limit_backoff=lambda *args, **kwargs: (30, None),
+            jittered_backoff=lambda *args, **kwargs: 30, provider_retry_after_seconds=lambda error: None)
+        with patch.dict('sys.modules', {'agent.retry_utils': retry,
+                'hermes_cli.anon_auth': types.SimpleNamespace(on_free_model=lambda *args: False)}):
+            wait = scope['compute_error_backoff'](agent, Exception('limit'), retry_count=1, max_retries=3,
+                is_rate_limited=True, is_zai_coding_overload=False, base_url='', model='example')
+        self.assertEqual(wait, 30)
+        self.assertIn('ограничение снимут примерно через 2 ч 16 мин.', waits[0])
+        self.assertIn('автоматически через 30 сек.', waits[0])
+        self.assertNotIn('retrying', waits[0])
 
     def test_diagnostic_status_is_localized_without_rewriting_normal_text(self):
         import os

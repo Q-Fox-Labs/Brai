@@ -1115,3 +1115,105 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
    skills:
      disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
      not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"
+diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
+--- a/agent/turn_recovery.py
++++ b/agent/turn_recovery.py
+@@ -1504,12 +1504,16 @@
+     # (rewritten by the next frame, cleared on recovery), so it names the wait on every retry
+     # without adding transcript chatter. The reset window belongs here too: during the wait this
+     # line is where the user learns whether to sit it out or switch models.
++    _live_reason = ("Бесплатная модель занята" if _free_busy else "Доступ к ИИ временно ограничен"
++                    if is_rate_limited else "Сервис ИИ временно недоступен")
+     if _reset:
+-        _live_reason = f"{_wait_reason.lower()} — resets in {_reset},"
+-    else:
+-        _live_reason = "the free model is busy —" if _free_busy else "waiting on provider —"
++        _reset_ru = re.sub(r"(?<=\d)([smhd])\b", lambda match: {
++            "s": " сек.", "m": " мин.", "h": " ч", "d": " дн.",
++        }[match.group(1)], _reset)
++        _live_reason += f"; ограничение снимут примерно через {_reset_ru.lstrip('~')}"
+     agent._emit_diagnostic_wait(
+-        f"⏳ {_live_reason} retrying in {wait_time:.0f}s (attempt {retry_count}/{max_retries})"
++        f"⏳ {_live_reason}. Повторю автоматически через {wait_time:.0f} сек. "
++        f"(попытка {retry_count}/{max_retries})."
+     )
+     logger.warning(
+         "Retrying API call in %ss (attempt %s/%s) %s policy=%s error=%s",
+diff --git a/agent/turn_recovery_autorecover.py b/agent/turn_recovery_autorecover.py
+--- a/agent/turn_recovery_autorecover.py
++++ b/agent/turn_recovery_autorecover.py
+@@ -30,17 +30,6 @@
+ # A provider that names its own cooldown knows better than the schedule, within reason.
+ _RETRY_AFTER_CAP_S = 120.0
+
+-# How the user stops the wait on this surface; the ladder text must say so plainly.
+-_STOP_HINTS = {
+-    "cli": "press Esc to stop",
+-    "tui": "press Esc to stop",
+-    "desktop": "press Esc to stop",
+-    "api_server": "cancel the request to stop",
+-    "cron": "",
+-}
+-_DEFAULT_STOP_HINT = "send /stop to cancel"
+-
+-
+ def auto_recovery_cycles(agent: Any) -> int:
+     """Configured ``agent.auto_recovery_cycles`` (0 disables the ladder)."""
+     return max(int(getattr(agent, "_auto_recovery_cycles", 0) or 0), 0)
+@@ -66,9 +55,8 @@
+
+
+ def ladder_notice(agent: Any, *, wait_s: float, cycle: int, total: int) -> str:
+-    hint = _STOP_HINTS.get(str(getattr(agent, "platform", "") or "").lower(), _DEFAULT_STOP_HINT)
+-    text = f"⏳ Provider temporarily unavailable — retrying automatically in {wait_s:.0f}s (cycle {cycle}/{total})"
+-    return f"{text}; {hint}" if hint else text
++    return (f"⏳ Сервис ИИ временно недоступен. Попробую восстановить соединение "
++            f"через {wait_s:.0f} сек. (попытка {cycle}/{total}).")
+
+
+ def auto_recover_after_exhaustion(
+diff --git a/agent/turn_truncation.py b/agent/turn_truncation.py
+--- a/agent/turn_truncation.py
++++ b/agent/turn_truncation.py
+@@ -640,7 +640,7 @@
+                     f"{agent.log_prefix}↻ Codex reasoning-only stall after {streak} attempts — "
+                     f"switching to fallback {agent.model} ({agent.provider})", diagnostic=True,
+                 )
+-            agent._emit_diagnostic_wait("↻ model stuck on internal reasoning — switching to fallback provider")
++            agent._emit_diagnostic_wait("↻ Модель не завершила ответ. Переключаюсь на резервное подключение.")
+             agent._session_messages = messages
+             return CODEX_FALLBACK_ACTIVATED
+         # No fallback left: fall through to the terminal sentinel.
+@@ -682,7 +682,7 @@
+         # each of these retries can spend minutes waiting on the provider, and without a distinct notice the
+         # user only sees a generic thinking spinner ("infinite thinking", #64434).
+         agent._emit_diagnostic_wait(
+-            f"↻ model returned reasoning with no final answer — asking it to continue ({n}/3)"
++            f"↻ Модель не завершила ответ. Пытаюсь продолжить ({n}/3)."
+         )
+         agent._session_messages = messages
+         return None
+diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstream.py
+--- a/agent/chat_completion_nonstream.py
++++ b/agent/chat_completion_nonstream.py
+@@ -212,7 +212,7 @@
+             f"⚠️ No first stream event from provider in {int(elapsed)}s (codex stream, model: {self._model()}). "
+             f"Reconnecting." + (f" {silent_hint}" if silent_hint else ""))
+         self._abort_request("codex_ttfb_kill")
+-        agent._emit_diagnostic_wait(f"⚠ no response from provider in {int(elapsed)}s — reconnecting...")
++        agent._emit_diagnostic_wait(f"⚠️ Нет ответа от сервиса {int(elapsed)} сек. Восстанавливаю соединение...")
+         agent._touch_activity(f"codex stream killed after {int(elapsed)}s with no first stream event")
+         self._await_worker_after_kill(
+             f"Codex stream produced no parsed stream event within {int(elapsed)}s "
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -3891,7 +3891,7 @@
+         self._count_stale_attempt()
+         # Reset the timer so we don't kill repeatedly while the worker unwinds.
+         self.last_chunk_time["t"] = time.time()
+-        self.agent._emit_diagnostic_wait(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
++        self.agent._emit_diagnostic_wait(f"⚠️ Нет ответа от сервиса {int(elapsed)} сек. Восстанавливаю соединение...")
+         self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
+
+     def _abort_for_interrupt(self, stale_elapsed: float) -> None:
