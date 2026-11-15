@@ -134,6 +134,31 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertIn('начат новый разговор', text)
         self.assertNotIn('/compress', text)
 
+    def test_subscription_limit_is_distinct_from_generic_throttling(self):
+        text = self.render('rate_limit', result={'brai_subscription_limit': True,
+            'brai_connection_kind': 'external', 'failure_resets_at': 1121}, now=1000, partial=True)
+        self.assertIn('Исчерпан лимит подписки на ИИ-размышления', text)
+        self.assertIn('примерно 3 мин.', text)
+        self.assertIn('напишите «продолжай»', text)
+        self.assertIn('Некоторые действия могли уже выполниться', text)
+        self.assertNotIn('ChatGPT', text)
+        self.assertNotIn('/retry', text)
+        later = self.render('rate_limit', result={'brai_subscription_limit': True,
+            'failure_resets_at': 9160}, now=1000)
+        self.assertIn('примерно 2 ч 16 мин.', later)
+        self.assertIn('Исчерпан лимит подписки', self.render('billing', result={'brai_subscription_limit': True}))
+        generic = self.render('rate_limit', result={'brai_connection_kind': 'external'})
+        self.assertNotIn('лимит подписки', generic.lower())
+        self.assertIn('напишите «продолжай»', generic)
+
+    def test_no_failure_copy_suggests_commands(self):
+        for code in [*self.notice._COPY, 'unknown']:
+            for kind in ('external', 'local', 'unknown'):
+                with self.subTest(code=code, kind=kind):
+                    text = self.render(code, result={'brai_connection_kind': kind})
+                    for command in ('/retry', '/model', '/new', '/compress'):
+                        self.assertNotIn(command, text)
+
     def test_diagnostic_is_redacted_and_failure_to_log_does_not_leak_original(self):
         with self.assertLogs(self.log, 'WARNING') as records:
             text = self.notice.explain_failure('secret original', surface={'code':'auth'},
@@ -181,7 +206,7 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertNotIn('/compress', text)
         text = self.render('context_overflow', result={'compaction_disabled':True, 'failure_retryable':False})
         self.assertIn('автоматическое сокращение отключено', text)
-        self.assertIn('/compress', text)
+        self.assertNotIn('/compress', text)
 
     def test_terminal_error_keeps_status_and_attempts_for_diagnostics(self):
         import os
@@ -208,6 +233,47 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertEqual(result['brai_error_model'], 'example')
         kept = scope['_verdict']('return', {'brai_attempts':1})['result']
         self.assertEqual(kept['brai_attempts'], 1)
+
+    def test_provider_error_marker_survives_only_confirmed_subscription_limit(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for API error integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_api_error.py').read_text())
+        outer = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'handle_api_error')
+        fn = next(node for node in outer.body if isinstance(node, ast.FunctionDef) and node.name == '_verdict')
+        fn.returns = None
+        for arg in fn.args.args + fn.args.kwonlyargs:
+            arg.annotation = None
+        from agent import error_classifier as classifier
+        scope = {'ApiErrorVerdict': lambda **kwargs: kwargs,
+            'api_error': types.SimpleNamespace(status_code=429, body={'error': {'type': 'usage_limit_reached'}}),
+            'agent': types.SimpleNamespace(provider='openai-codex', model='example'),
+            'retry_count': 3, 'max_retries': 3, 'thinking_spinner': None, 'messages': [],
+            'active_system_prompt': '', 'conversation_history': [], 'approx_tokens': 0,
+            'compression_attempts': 0, '_provider_overflow_recovery_pending': False}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        with patch.dict('sys.modules', {'agent.error_classifier': classifier}):
+            def marked(reason='rate_limit'):
+                return scope['_verdict']('return', {'failure_reason': reason})['result'].get('brai_subscription_limit')
+            self.assertTrue(marked())
+            self.assertTrue(marked('billing'))
+            scope['api_error'].body = {'error': {'type': 'usage_limit_reached', 'code': 'rate_limit_exceeded'}}
+            self.assertTrue(marked())
+            scope['api_error'].body = {'error': {'code': 'usage_limit_reached'}}
+            self.assertTrue(marked())
+            scope['api_error'].body = {'error': {'type': 'rate_limit_exceeded'}}
+            self.assertIsNone(marked())
+            scope['api_error'].body = {'error': {'type': 'usage_limit_reached'}}
+            scope['agent'].provider = 'openai'
+            self.assertIsNone(marked())
+            scope['agent'].provider = 'openai-codex'
+            scope['api_error'].status_code = 503
+            self.assertIsNone(marked())
+            scope['api_error'].status_code = 429
+            scope['api_error'].body = None
+            scope['api_error'].response = types.SimpleNamespace(json=lambda: {'error': {'type': 'usage_limit_reached'}})
+            self.assertTrue(marked())
 
     def test_engine_marks_distinct_rejections_before_gateway(self):
         import os
@@ -332,6 +398,7 @@ class FailureNoticeTest(unittest.TestCase):
             'gateway.run': types.SimpleNamespace(_wrap_current_message_with_observed_context=lambda text, context: text),
             'tools.approval': types.SimpleNamespace(register_gateway_notify=lambda *args: None, unregister_gateway_notify=lambda *args: None),
             'tools.approval_context': types.SimpleNamespace(set_current_session_key=lambda value: None, reset_current_session_key=lambda value: None),
+            'tools.approval_conversation': types.SimpleNamespace(turn_scope=None, enabled=lambda: False, resume_note=None, gateway_generation=None),
             'agent.notification_presentation': types.SimpleNamespace(notification_turn=lambda *args, **kwargs: contextlib.nullcontext()),
             'brai_files': types.SimpleNamespace(inbound_handoff=lambda *args, **kwargs: contextlib.nullcontext()),
             'gateway.russian_failure_notice': self.notice,
@@ -351,7 +418,7 @@ class FailureNoticeTest(unittest.TestCase):
                       and any(isinstance(target, ast.Name) and target.id == 'common' for target in node.targets)
                       and isinstance(node.value, ast.Dict)
                       and any(isinstance(key, ast.Constant) and key.value == 'failure_reason' for key in node.value.keys if key))
-        result = {'failed':True, 'failure_reason':'rate_limit', 'error':'error', 'brai_connection_kind':'external',
+        result = {'failed':True, 'failure_reason':'rate_limit', 'error':'error', 'brai_connection_kind':'external', 'brai_subscription_limit':True,
                   'brai_delivered_partial':'partial answer', 'brai_failure_kind':'truncated_tool_call',
                   'failure_resets_at':1121, 'billing_unverified':True, 'billing_block':{},
                   'free_tier':{'kind':'rate_limited'}, 'api_key':'secret', 'brai_original_error':'diagnostic',
@@ -362,7 +429,7 @@ class FailureNoticeTest(unittest.TestCase):
                  'history_offset':0, 'compacted_in_place':False, 'effective_session_id':'s', 'usage':{}}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[common], type_ignores=[])), '<candidate>', 'exec'), scope)
         output = scope['common']
-        for key in ('brai_connection_kind', 'brai_delivered_partial', 'brai_failure_kind',
+        for key in ('brai_connection_kind', 'brai_subscription_limit', 'brai_delivered_partial', 'brai_failure_kind',
                     'failure_resets_at', 'billing_unverified', 'billing_block', 'free_tier', 'brai_original_error',
                     'brai_http_status', 'brai_attempts', 'brai_error_provider', 'brai_error_model',
                     'brai_request_tokens', 'brai_context_window', 'compaction_disabled', 'failure_retryable'):
@@ -371,7 +438,7 @@ class FailureNoticeTest(unittest.TestCase):
         text = self.notice.explain_failure('english', surface={'code':'rate_limit'}, diagnostic='',
             logger=self.log, redact=str, now=1000, result={key:value for key,value in output.items() if key not in {'brai_failure_kind', 'compaction_disabled'}},
             delivered_partial=output['brai_delivered_partial'])
-        self.assertIn('Сторонний сервис ИИ', text)
+        self.assertIn('Исчерпан лимит подписки на ИИ-размышления', text)
         self.assertIn('примерно 3 мин.', text)
         self.assertTrue(text.startswith('partial answer'))
 
