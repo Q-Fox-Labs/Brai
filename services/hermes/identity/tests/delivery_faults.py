@@ -43,8 +43,11 @@ async def run(config, fixture, native, receipt):
     stage = 'prepare'
     try:
         runtime = root / 'candidate'
+        stage = 'candidate-archive'
         fixture.stage_archive(fixture.candidate_archive(source, config['sourceSha']), runtime)
+        stage = 'software-compose'
         software, _instructions, _files = fixture.prepare_software(root, runtime, native, receipt)
+        stage = 'profile-prepare'
         uid = fixture.unused_uid()
         home = root / 'profiles/personal'
         home.parent.mkdir(mode=0o711)
@@ -223,7 +226,7 @@ async def run(config, fixture, native, receipt):
             proof.update(state='verified', delivered=len(deliveries), uniqueInputs=len(set(consumed)),
                          processKills=2, modelRequests=len(model.requests), manualQueueResets=0)
     except BaseException as error:
-        proof.update(state='failed', stage=stage, errorType=type(error).__name__)
+        proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
         if consumer is not None and consumer.done() and not consumer.cancelled():
             proof['consumerError'] = type(consumer.exception()).__name__ if consumer.exception() else None
     finally:
