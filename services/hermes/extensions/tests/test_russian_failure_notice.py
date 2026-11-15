@@ -150,15 +150,32 @@ class FailureNoticeTest(unittest.TestCase):
         offenders = []
         for path in (Path(candidate) / 'agent').glob('*.py'):
             for node in ast.walk(ast.parse(path.read_text())):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and node.func.attr in {'_emit_warning', '_emit_status', '_emit_wait_notice', '_emit_startup_warning', '_emit_diagnostic_wait'}
-                        and node.args and isinstance(node.args[0], (ast.Constant, ast.JoinedStr))):
+                if not isinstance(node, ast.Call):
                     continue
-                value = node.args[0]
-                parts = [value] if isinstance(value, ast.Constant) else value.values
-                text = ''.join(part.value for part in parts if isinstance(part, ast.Constant) and isinstance(part.value, str))
-                if re.search(r'[A-Za-z]{3,}\s+[A-Za-z]{3,}', text):
-                    offenders.append(f'{path.name}:{node.lineno}')
+                if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                    '_emit_warning', '_emit_status', '_emit_wait_notice', '_emit_startup_warning',
+                    '_emit_diagnostic_wait', '_emit_diagnostic_status', '_buffer_diagnostic_status',
+                    '_vprint', '_safe_print', '_buffer_vprint', '_buffer_status',
+                }:
+                    values = node.args[:1]
+                elif isinstance(node.func, ast.Name) and node.func.id in {'_vlines', '_plines', '_blines'}:
+                    values = node.args[1:]
+                else:
+                    continue
+                def literal_parts(part):
+                    if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                        return part.value
+                    if isinstance(part, ast.JoinedStr):
+                        return ''.join(literal_parts(child) for child in part.values)
+                    if isinstance(part, ast.BinOp):
+                        return literal_parts(part.left) + literal_parts(part.right)
+                    return ''
+                for value in values:
+                    text = literal_parts(value)
+                    text = re.sub(r'Microsoft Entra ID|Nous Portal', '', text)
+                    if re.search(r'[A-Za-z]{3,}\s+[A-Za-z]{3,}', text):
+                        offenders.append(f'{path.name}:{node.lineno}')
+                        break
         self.assertEqual(offenders, [])
 
     def test_automatic_recovery_notice_is_russian_without_commands(self):
@@ -202,7 +219,183 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertEqual(wait, 30)
         self.assertIn('ограничение снимут примерно через 2 ч 16 мин.', waits[0])
         self.assertIn('автоматически через 30 сек.', waits[0])
+        self.assertIn('2 ч 16 мин.', statuses[0])
+        self.assertIn('попытка 2/3', statuses[0])
+        self.assertNotIn('Rate limited', statuses[0])
         self.assertNotIn('retrying', waits[0])
+
+    def test_failure_copy_and_subagent_notices_are_russian(self):
+        import os
+        import re
+        from typing import Any, Optional
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        source = (root / 'agent/turn_failure_copy.py').read_text()
+        tree = ast.parse(source)
+        class Reason:
+            def __getattr__(self, name):
+                return types.SimpleNamespace(value=name)
+        scope = {'Any': Any, 'Optional': Optional, 'FailoverReason': Reason(),
+                 'display_hermes_home': lambda: '/tmp/hermes'}
+        names = {'_NEXT_STEPS_RETRY', '_EXHAUSTED_LEADS', '_EXHAUSTED_DEFAULT_LEAD',
+                 '_EXHAUSTED_FIRST_ATTEMPT_LEADS', '_FAILURE_CODE_COPY', '_ONE_OFF_COPY',
+                 '_SITE_COPY', '_NEXT_STEPS_LOOP', '_Defaults', 'exhausted_copy', 'site_copy',
+                 'FAILURE_CAUSE_GLOSS', 'failure_cause_gloss'}
+        nodes = [n for n in tree.body if
+                 isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names or
+                 isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id in names or
+                 isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets)]
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), scope)
+        result = scope['exhausted_copy']('rate_limit', label='example', attempts=3,
+                                         summary='SECRET original provider error', reset_seconds=8160)
+        self.assertIn('3 попытках', result)
+        self.assertIn('2 ч 16 мин.', result)
+        self.assertIn('продолжай', result)
+        self.assertNotIn('SECRET', result)
+        self.assertNotIn('/retry', result)
+        for code in scope['_SITE_COPY']:
+            with self.subTest(code=code):
+                text = scope['site_copy'](code, model='model', label='service', attempts=3, limit=20, tokens=500, window=1000)
+                self.assertRegex(text, '[А-Яа-я]')
+                self.assertNotRegex(text, r'/retry|/model|/new')
+        delegate = ast.parse((root / 'tools/delegate_tool_progress.py').read_text())
+        functions = [n for n in delegate.body if isinstance(n, ast.FunctionDef)
+                     and n.name in {'_format_duration', 'format_subagent_failure_line'}]
+        exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])), '<candidate>', 'exec'), scope)
+        module = types.SimpleNamespace(failure_cause_gloss=scope['failure_cause_gloss'])
+        with patch.dict('sys.modules', {'agent.turn_failure_copy': module}):
+            notice = scope['format_subagent_failure_line']('проверка', 'failed',
+                error='SECRET raw exception', duration_seconds=13, failure_reason='rate_limit')
+        self.assertIn('13 сек.', notice)
+        self.assertIn('сервис ИИ временно ограничил доступ', notice)
+        self.assertNotIn('SECRET', notice)
+        self.assertNotIn('/agents', notice)
+
+    def test_billing_free_access_and_timeout_copy_are_localized(self):
+        import os
+        from typing import Any, Optional
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        def functions(path, names, scope):
+            tree = ast.parse((root / path).read_text())
+            nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+            exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), scope)
+        scope = {'Optional': Optional, '_is_nous_inference_route': lambda *args: False}
+        functions('agent/conversation_loop.py', {'_billing_or_entitlement_message', '_billing_terminal_label'}, scope)
+        billing = types.SimpleNamespace(build_billing_block=lambda **kwargs: types.SimpleNamespace(billing_url=None))
+        with patch.dict('sys.modules', {'agent.billing_links': billing}):
+            confirmed = scope['_billing_or_entitlement_message'](capability='model access', provider='example',
+                                                                 base_url='', model='model')
+            uncertain = scope['_billing_or_entitlement_message'](capability='model access', provider='example',
+                                                                 base_url='', model='model', unverified=True)
+        self.assertIn('исчерпании', confirmed)
+        self.assertIn('причина не подтверждена', uncertain)
+        self.assertIn('фильтр безопасности', uncertain)
+        self.assertNotIn('SECRET', scope['_billing_terminal_label']('SECRET error', False))
+        self.assertNotIn('/model', confirmed + uncertain)
+        scope = {'Any': Any, 'GUEST_MODEL': 'free-model'}
+        functions('hermes_cli/anon_auth.py', {'welcome_refusal_copy'}, scope)
+        for reason in ('model_not_free', 'feature_not_free', 'at_capacity', 'admission_closed', 'rate_limited'):
+            with self.subTest(reason=reason):
+                text = scope['welcome_refusal_copy']({'reason': reason, 'retry_after': 30}, model='example')
+                self.assertRegex(text, '[А-Яа-я]')
+                self.assertNotIn('/login', text)
+        scope = {'Optional': Optional}
+        functions('agent/thinking_timeout_guidance.py', {'build_thinking_timeout_guidance'}, scope)
+        timeout = scope['build_thinking_timeout_guidance']('service', 'example')
+        self.assertIn('продолжай', timeout)
+        self.assertNotIn('/reasoning', timeout)
+
+    def test_connection_and_scheduled_failure_notices_keep_useful_details(self):
+        import os
+        from typing import Any, Optional
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        def extract(path, names, scope):
+            tree = ast.parse((root / path).read_text())
+            nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+            exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), scope)
+        scope = {'Any': Any, 'Optional': Optional, 'LARGE_REQUEST_HINT_BYTES': 256 * 1024}
+        extract('agent/stream_diag.py', {'_failed_request', '_request_body_bytes', 'connect_exhausted_notice'}, scope)
+        error = Exception('PRIVATE RAW ERROR')
+        error.request = types.SimpleNamespace(url='https://example.test/api', content=b'x' * (300 * 1024))
+        notice = scope['connect_exhausted_notice'](error, attempts=3, base_url='')
+        self.assertIn('example.test', notice)
+        self.assertIn('3 попыток', notice)
+        self.assertIn('300 КБ', notice)
+        self.assertIn('большие запросы', notice)
+        self.assertNotIn('PRIVATE', notice)
+        scope = {'Any': Any, 'Optional': Optional, '_TRANSIENT_REASONS': {'rate_limit'},
+                 '_provider_failure_cause': lambda reason: 'сервис ИИ временно ограничил доступ',
+                 '_PROVIDER_FAILURE_ACTION': {}, '_DEFAULT_FAILURE_ACTION': ''}
+        extract('cron/scheduler_failure_copy.py', {'provider_failure_notice', 'generic_failure_notice'}, scope)
+        notice = scope['provider_failure_notice']('Проверка', 'job', 'rate_limit',
+            backup_provider_phrase='Резервный сервис не настроен.')
+        self.assertIn('Проверка', notice)
+        self.assertIn('сервис ИИ временно ограничил доступ', notice)
+        self.assertIn('по расписанию', notice)
+        self.assertNotIn('hermes cron', notice)
+        self.assertNotIn('RAW', scope['generic_failure_notice']('Проверка', 'job', 'RAW ERROR'))
+
+    def test_nous_access_messages_keep_distinct_causes(self):
+        import os
+        from typing import Optional
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        tree = ast.parse((Path(candidate) / 'hermes_cli/nous_account.py').read_text())
+        names = {'format_nous_portal_entitlement_message', '_no_paid_access_message'}
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        scope = {'Optional': Optional, 'NousPortalAccountInfo': object,
+                 'NousPaidServiceAccessInfo': lambda: None,
+                 '_is_anonymous_tier': lambda info: False,
+                 'nous_portal_billing_url': lambda info: 'https://example.test/billing',
+                 'FREE_TIER_NEEDS_ACCOUNT': 'нужен аккаунт', 'FREE_TIER_NEEDS_ACCOUNT_CHAT': 'нужен аккаунт'}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), scope)
+        access = types.SimpleNamespace(member_spend_cap_exceeded=True, member_spend_cap_usd=25,
+            member_spend_usd=24, has_active_subscription=True, active_subscription_is_paid=True, reason='no_usable_credits')
+        info = types.SimpleNamespace(tool_gateway_entitled=False, logged_in=True, paid_service_access=False,
+            paid_service_access_info=access)
+        text = scope['format_nous_portal_entitlement_message'](info)
+        self.assertIn('лимит расходов участника', text)
+        self.assertIn('$25.00', text)
+        self.assertIn('$24.00', text)
+        self.assertNotIn('hermes model', text)
+        access.member_spend_cap_exceeded = False
+        self.assertIn('Средства Nous Portal исчерпаны', scope['format_nous_portal_entitlement_message'](info))
+        info.tool_gateway_entitled = True
+        self.assertIsNone(scope['format_nous_portal_entitlement_message'](info))
+        self.assertIn('не входит', scope['format_nous_portal_entitlement_message'](
+            types.SimpleNamespace(tool_gateway_entitled=True, tool_gateway_entitled_for=lambda category: False),
+            coverage_category='web'))
+
+    def test_gateway_attachment_and_channel_messages_are_russian(self):
+        import os
+        from typing import Any, Optional
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        scope = {'Any': Any, 'Optional': Optional, 'HostGateway': object}
+        for path, names in [('gateway/host_attach.py', {'attach_message', '_unknown_served_message',
+                                  '_refuse_message', 'standalone_rescan_message'}),
+                            ('gateway/channel_directory.py', {'format_directory_for_display'})]:
+            tree = ast.parse((root / path).read_text())
+            nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+            exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), scope)
+        owner = types.SimpleNamespace(describe=lambda: 'PID 42')
+        self.assertIn('профиль «тест»', scope['attach_message'](owner, 'тест'))
+        self.assertIn('повторит попытку', scope['_unknown_served_message'](owner, 'тест'))
+        self.assertIn('Второй шлюз не запущен', scope['_refuse_message'](owner, 'тест'))
+        self.assertNotIn('hermes gateway', scope['_refuse_message'](owner, 'тест'))
+        self.assertIn('Нет подключённых', scope['format_directory_for_display']({}))
+        self.assertIn('каналы ещё не обнаружены', scope['format_directory_for_display']({'telegram': []}))
 
     def test_diagnostic_status_is_localized_without_rewriting_normal_text(self):
         import os

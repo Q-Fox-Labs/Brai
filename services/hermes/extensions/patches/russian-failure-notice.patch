@@ -102,110 +102,6 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
 
      def _hmwa_discard_stale_result(self, source, _quick_key, run_generation):
          """A newer run generation superseded this turn: drop its deferred post-delivery callback."""
-diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
---- a/agent/turn_recovery.py
-+++ b/agent/turn_recovery.py
-@@ -1113,18 +1113,22 @@
-     else:
-         agent._persist_session(messages, conversation_history)
-     if classified.reason == FailoverReason.content_policy_blocked:
--        return _content_policy_blocked_result(
-+        result = _content_policy_blocked_result(
-             messages, api_call_count,
-             final_response="⚠️ " + content_policy_copy(label=_plabel, summary=_nonretryable_summary),
-             error_detail=_nonretryable_summary,
-         )
-+        result["brai_original_error"] = result.get("final_response", "")
-+        return result
-     # Billing walls get the same structured recovery descriptor as the max-retries path
-     # so every surface renders one consistent signal.
-     if classified.reason == FailoverReason.billing:
--        return _billing_failure_result(
-+        result = _billing_failure_result(
-             classified=classified, summary=_nonretryable_summary, messages=messages,
-             api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
-         )
-+        result["brai_original_error"] = result.get("final_response", "")
-+        return result
-     if _welcome_hint:
-         # A free-tier refusal is fully explained by its own sentence; the raw provider summary
-         # (status codes, JSON) is for the log, not for a first-time user's chat.
-@@ -1138,16 +1142,20 @@
-     # Same verdict fields as the max-retries path: without them the UI descriptor
-     # (agent/error_surface.py) reads a rejected OAuth token as a retryable
-     # "Provider error" and offers Retry instead of a re-login.
-+    # Сохраняем именно текст ошибки, без уже выданного фрагмента ответа.
-+    _error_response = _final_response
-     _final_response, _keep_partial = _with_delivered_partial(
-         _final_response, _nonretryable_summary, delivered,
-     )
-     result = _failed_turn_result(_final_response, messages, api_call_count, _nonretryable_summary)
-+    result["brai_original_error"] = _error_response
-     result.update({
-         "failure_reason": classified.reason.value,
-         "failure_retryable": bool(classified.retryable),
-     })
-     if _keep_partial:
-         result["partial"] = True
-+        result["brai_delivered_partial"] = delivered.strip()
-     _stamp_limit_reset(result, agent, api_error)
-     if _welcome_hint and (_kind := _welcome_surface_kind(classified)):
-         # The card form: the desktop renders the sign-in as a button, so no "To sign in" tail.
-@@ -1275,6 +1283,8 @@
-             "smaller sections (or via execute_code with Python's open())."
-         )
-     result = _failed_turn_result(_final_response, messages, api_call_count, _final_summary)
-+    result["brai_original_error"] = _final_response
-+    result["brai_attempts"] = attempts
-     result.update({
-         # Classified reason so callers (kanban worker in cli.py) can tell a quota wall
-         # (``rate_limit`` / ``billing``) from a task failure.
-@@ -1295,6 +1305,7 @@
-     if _keep_partial:
-         result["final_response"] = _final_response
-         result["partial"] = True
-+        result["brai_delivered_partial"] = delivered.strip()
-     _stamp_limit_reset(result, agent, api_error)
-     if _free_tier_kind:
-         _stamp_free_tier(result, _free_tier_kind, (
-diff --git a/agent/turn_tool_validation.py b/agent/turn_tool_validation.py
---- a/agent/turn_tool_validation.py
-+++ b/agent/turn_tool_validation.py
-@@ -53,7 +53,7 @@
-         })
-
-
--def _partial_exit(agent, messages, conversation_history, api_call_count, final_response: str) -> dict[str, Any]:
-+def _partial_exit(agent, messages, conversation_history, api_call_count, final_response: str, *, brai_failure_kind: str) -> dict[str, Any]:
-     """Terminal partial result. Prior retries or an earlier tool batch leave a tool-result
-     tail; close it as interrupt aborts do so the next turn is not tool→user (#48879).
-     This path never reaches finalize_turn, so persist here."""
-@@ -65,6 +65,7 @@
-         "api_calls": api_call_count,
-         "completed": False,
-         "partial": True,
-+        "brai_failure_kind": brai_failure_kind,
-         "error": final_response,
-     }, "truncated", True)
-
-@@ -137,7 +138,7 @@
-             agent._invalid_tool_retries = 0
-             return _verdict("return", _partial_exit(
-                 agent, messages, conversation_history, api_call_count,
--                f"Model generated invalid tool call: {invalid_preview}",
-+                f"Model generated invalid tool call: {invalid_preview}", brai_failure_kind="invalid_tool_call",
-             ))
-
-         append_message(messages, agent._build_assistant_message(assistant_message, finish_reason))
-@@ -199,7 +200,7 @@
-                 else site_copy("truncated_unreported")
-             )
-             return _verdict("return", _partial_exit(
--                agent, messages, conversation_history, api_call_count, _copy,
-+                agent, messages, conversation_history, api_call_count, _copy, brai_failure_kind="truncated_tool_call",
-             ))
-
-         agent._invalid_json_retries += 1
 diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
 --- a/gateway/run_turn_runner.py
 +++ b/gateway/run_turn_runner.py
@@ -236,56 +132,6 @@ diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
          }
          if not final_response:
              final_response = _normalize_empty_agent_response(result, final_response or "", history_len=len(agent_history))
-diff --git a/agent/turn_overflow.py b/agent/turn_overflow.py
---- a/agent/turn_overflow.py
-+++ b/agent/turn_overflow.py
-@@ -391,7 +391,7 @@
-                 f"{agent.log_prefix}Output-cap error not routed into compression "
-                 f"(max_tokens over provider cap): {error_msg[:200]}",
-             ),
--            compression_exhausted=False,
-+            compression_exhausted=False, brai_failure_kind="output_cap_exceeded",
-         )
-
-     new_ctx = _adopt_provider_context_limit(st, error_msg, old_ctx)
-@@ -426,6 +426,8 @@
-                 "skipping compression: %s", agent.log_prefix, f"{request_tokens:,}", f"{window:,}", error_msg[:200],
-             ),
-             compression_exhausted=False, reason=FailoverReason.server_error.value, retryable=True,
-+            brai_failure_kind="server_context_rejection", brai_request_tokens=request_tokens,
-+            brai_context_window=window,
-         )
-
-     exhausted = st.count_attempt()
-diff --git a/agent/turn_api_error.py b/agent/turn_api_error.py
---- a/agent/turn_api_error.py
-+++ b/agent/turn_api_error.py
-@@ -63,6 +63,25 @@
-     _provider_overflow_recovery_pending = False
-
-     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ApiErrorVerdict:
-+        # AIDEV-NOTE: факты отказа нужны для связанных диагностических записей.
-+        if action == "return" and isinstance(result, dict):
-+            try:
-+                status = getattr(api_error, "status_code", None)
-+                if type(status) is int and 400 <= status <= 599:
-+                    result["brai_http_status"] = status
-+                if type(retry_count) is int and retry_count > 0:
-+                    result.setdefault("brai_attempts", retry_count)
-+                result["brai_error_provider"] = getattr(agent, "provider", "")
-+                result["brai_error_model"] = getattr(agent, "model", "")
-+                # AIDEV-NOTE: 429 сам по себе не подтверждает лимит подписки.
-+                if result.get("failure_reason") in {"rate_limit", "billing"} and status == 429 and getattr(agent, "provider", "") == "openai-codex":
-+                    from agent.error_classifier import _extract_error_body
-+                    body = _extract_error_body(api_error)
-+                    error = body.get("error", {}) if isinstance(body, dict) else {}
-+                    if isinstance(error, dict) and "usage_limit_reached" in (error.get("type"), error.get("code")):
-+                        result["brai_subscription_limit"] = True
-+            except Exception:
-+                pass
-         return ApiErrorVerdict(
-             action=action, thinking_spinner=thinking_spinner, messages=messages,
-             active_system_prompt=active_system_prompt, conversation_history=conversation_history,
 diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.py
 new file mode 100644
 --- /dev/null
@@ -689,33 +535,6 @@ diff --git a/agent/chat_completion_wait_notice.py b/agent/chat_completion_wait_n
      return text
 
 
-diff --git a/agent/turn_failure_copy.py b/agent/turn_failure_copy.py
---- a/agent/turn_failure_copy.py
-+++ b/agent/turn_failure_copy.py
-@@ -37,11 +37,11 @@
- # (``gateway/run_turn.py::_hmwa_close_failed_turn``) say the same thing.
-
- FAILED_TURN_NOTICE = (
--    "Your request was not processed. Send it again if you still want me to carry it out."
-+    "Запрос не был обработан. Отправьте его ещё раз, если он по-прежнему нужен."
- )
- PARTIAL_FAILED_TURN_NOTICE = (
--    "This turn did not complete. Some actions may already have run; verify their effects "
--    "before resending."
-+    "Работа не завершена. Некоторые действия могли уже выполниться; проверьте их результат "
-+    "перед повтором."
- )
- # ``messages.display_kind`` of that row: display-only (stripped before every provider request),
- # so renderers show a Hermes notice and room pollers never read it as the model's reply.
-@@ -53,6 +53,8 @@
-     (exact notice text, so a real reply quoting it stays a reply); read-side only."""
-     if role == "assistant" and isinstance(content, str) and content.strip() in (
-         FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE,
-+        "Your request was not processed. Send it again if you still want me to carry it out.",
-+        "This turn did not complete. Some actions may already have run; verify their effects before resending.",
-     ):
-         return FAILED_TURN_DISPLAY_KIND
-     return None
 diff --git a/agent/turn_facade_lease.py b/agent/turn_facade_lease.py
 --- a/agent/turn_facade_lease.py
 +++ b/agent/turn_facade_lease.py
@@ -827,19 +646,6 @@ diff --git a/agent/turn_liveness.py b/agent/turn_liveness.py
 +            "Некоторые действия могли выполниться; проверьте результат перед повтором.",
              "Failed to emit committed-abort warning",
          )
-diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
---- a/agent/chat_completion_helpers.py
-+++ b/agent/chat_completion_helpers.py
-@@ -3582,8 +3582,7 @@
-             # buffered retry chatter is dropped on successful recovery. Fires at most once per
-             # session (streaming is off from here on).
-             self.agent._emit_warning(
--                "⚠️ Provider stream returned an empty keepalive frame — retrying this turn "
--                "without streaming (streaming stays off for this session).")
-+                "⚠️ Сервис прислал пустой ответ. Продолжаю без потоковой передачи в этом разговоре.")
-             return
-         from agent.anthropic_adapter import _is_stream_unavailable_error
-         if not _is_stream_unavailable_error(e):
 diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
 --- a/agent/conversation_compression.py
 +++ b/agent/conversation_compression.py
@@ -912,49 +718,6 @@ diff --git a/agent/conversation_compression.py b/agent/conversation_compression.
          # The transcript is returned unchanged, so the session is still over
          # threshold. Without a brake the next turn retries immediately.
          _record_codex_compaction_failure(agent, str(getattr(result, "error", None) or "compaction interrupted"))
-diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
---- a/agent/chat_completion_helpers.py
-+++ b/agent/chat_completion_helpers.py
-@@ -850,17 +850,17 @@
-         model = str(api_kwargs.get("model", ""))
-         progress = get_loading_progress().get(model)
-         if progress is not None:
--            return (f"⏳ loading {model} into memory — {progress['percent']}% "
--                "(responses start once the model is loaded)")
-+            return (f"⏳ Загружаю модель {model}: {progress['percent']}%. "
-+                "Ответ появится после загрузки.")
-         prefill = get_prefill_progress(model)
-         if prefill is None:
-             return None
-         processed = int(prefill["processed"])
-         total = estimate_request_context_tokens(api_kwargs)
-         if total and total >= processed:
--            return f"⚙ processing prompt — {max(0, min(100, round(processed / total * 100)))}%"
-+            return f"⚙ Обрабатываю запрос — {max(0, min(100, round(processed / total * 100)))}%"
-         # Counter past the estimate (estimator undercounted): no honest denominator, label-only.
--        return "⚙ processing prompt"
-+        return "⚙ Обрабатываю запрос"
-     except Exception:
-         return None
-
-diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
---- a/agent/agent_runtime_helpers.py
-+++ b/agent/agent_runtime_helpers.py
-@@ -2805,11 +2805,9 @@
-             if key not in _empty_heal_user_notified:
-                 _empty_heal_user_notified.add(key)
-                 _empty_heal_pending_notice[key] = (
--                    "⚠️ Your session transcript required repeated repair "
--                    f"({total_events} heal passes so far). Replies keep "
--                    "working, but a corrupted turn is stuck in this "
--                    "session's history — run /debug share or `hermes "
--                    "doctor` to capture diagnostics, or /new to start a clean session."
-+                    f"⚠️ Историю разговора пришлось исправлять несколько раз ({total_events}). "
-+                    "Ответы продолжают работать, но в истории осталась повреждённая запись. "
-+                    "Обратитесь к администратору или начните новый разговор."
-                 )
-     if escalate:
-         _ra().logger.error(
 diff --git a/gateway/config.py b/gateway/config.py
 --- a/gateway/config.py
 +++ b/gateway/config.py
@@ -1115,30 +878,169 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
    skills:
      disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
      not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"
-diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
---- a/agent/turn_recovery.py
-+++ b/agent/turn_recovery.py
-@@ -1504,12 +1504,16 @@
-     # (rewritten by the next frame, cleared on recovery), so it names the wait on every retry
-     # without adding transcript chatter. The reset window belongs here too: during the wait this
-     # line is where the user learns whether to sit it out or switch models.
-+    _live_reason = ("Бесплатная модель занята" if _free_busy else "Доступ к ИИ временно ограничен"
-+                    if is_rate_limited else "Сервис ИИ временно недоступен")
-     if _reset:
--        _live_reason = f"{_wait_reason.lower()} — resets in {_reset},"
--    else:
--        _live_reason = "the free model is busy —" if _free_busy else "waiting on provider —"
-+        _reset_ru = re.sub(r"(?<=\d)([smhd])\b", lambda match: {
-+            "s": " сек.", "m": " мин.", "h": " ч", "d": " дн.",
-+        }[match.group(1)], _reset)
-+        _live_reason += f"; ограничение снимут примерно через {_reset_ru.lstrip('~')}"
-     agent._emit_diagnostic_wait(
--        f"⏳ {_live_reason} retrying in {wait_time:.0f}s (attempt {retry_count}/{max_retries})"
-+        f"⏳ {_live_reason}. Повторю автоматически через {wait_time:.0f} сек. "
-+        f"(попытка {retry_count}/{max_retries})."
+diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstream.py
+--- a/agent/chat_completion_nonstream.py
++++ b/agent/chat_completion_nonstream.py
+@@ -193,10 +193,9 @@
+             "but sent no stream events. Killing connection so the retry loop can reconnect.", elapsed,
+             wd.ttfb_timeout, self._model())
+         agent._buffer_diagnostic_status(
+-            f"⚠️ No first stream event from provider in {int(elapsed)}s (codex stream, model: {self._model()}). "
+-            f"Reconnecting." + (f" {silent_hint}" if silent_hint else ""))
++            f"⚠️ Сервис ИИ не ответил за {int(elapsed)} сек. (модель: {self._model()}). Переподключаюсь.")
+         self._abort_request("codex_ttfb_kill")
+-        agent._emit_diagnostic_wait(f"⚠ no response from provider in {int(elapsed)}s — reconnecting...")
++        agent._emit_diagnostic_wait(f"⚠️ Нет ответа от сервиса {int(elapsed)} сек. Восстанавливаю соединение...")
+         agent._touch_activity(f"codex stream killed after {int(elapsed)}s with no first stream event")
+         self._await_worker_after_kill(
+             f"Codex stream produced no parsed stream event within {int(elapsed)}s "
+@@ -210,8 +209,7 @@
+             "for %.0fs (threshold %.0fs, model=%s, context=~%s tokens). Reconnecting.",
+             elapsed, wd.progress_timeout, self._model(), f"{wd.est_tokens:,}")
+         agent._buffer_diagnostic_status(
+-            f"⚠️ Codex stream opened but made no model progress for {int(elapsed)}s "
+-            f"(model: {self._model()}). Reconnecting.")
++            f"⚠️ Модель не отвечает уже {int(elapsed)} сек. (модель: {self._model()}). Переподключаюсь.")
+         self._abort_request("codex_progress_kill")
+         agent._touch_activity(f"codex stream killed after {int(elapsed)}s without model progress")
+         self._await_worker_after_kill(
+@@ -232,8 +230,7 @@
+             "connection so the retry loop can reconnect.", event_stale_elapsed, arm_point, wd.idle_timeout,
+             self._model(), f"{wd.est_tokens:,}")
+         agent._buffer_diagnostic_status(
+-            f"⚠️ Codex stream sent no events for {int(event_stale_elapsed)}s after {arm_point} "
+-            f"(model: {self._model()}). Reconnecting.")
++            f"⚠️ Данные от модели не поступают уже {int(event_stale_elapsed)} сек. (модель: {self._model()}). Переподключаюсь.")
+         self._abort_request("codex_stream_idle_kill")
+         agent._touch_activity(f"codex stream killed after {int(event_stale_elapsed)}s with no SSE events")
+         self._await_worker_after_kill(
+diff --git a/agent/fallback_cooldown.py b/agent/fallback_cooldown.py
+--- a/agent/fallback_cooldown.py
++++ b/agent/fallback_cooldown.py
+@@ -111,8 +111,7 @@
+         model, provider,
      )
-     logger.warning(
-         "Retrying API call in %ss (attempt %s/%s) %s policy=%s error=%s",
+     agent._buffer_diagnostic_status(
+-        f"🚫 This account is not entitled to {model} via {provider}; it will be skipped "
+-        "until restart. Switch to an entitled model via /model or `hermes model`."
++        f"🚫 У этого аккаунта нет доступа к модели {model} через {provider}. Модель пропущена до перезапуска."
+     )
+     return True
+
+diff --git a/agent/turn_empty_response.py b/agent/turn_empty_response.py
+--- a/agent/turn_empty_response.py
++++ b/agent/turn_empty_response.py
+@@ -72,11 +72,11 @@
+         n, budget, wait_time, agent.model,
+     )
+     _budget_note = (
+-        " — high-cost request, reduced retry budget"
++        " — число повторов уменьшено из-за высокой стоимости запроса"
+         if budget < _empty_guard.DEFAULT_EMPTY_RETRY_BUDGET else ""
+     )
+     agent._buffer_diagnostic_status(
+-        f"⚠️ Empty response from model — retrying ({n}/{budget}) in {wait_time:.0f}s{_budget_note}"
++        f"⚠️ Модель вернула пустой ответ. Повторю через {wait_time:.0f} сек. (попытка {n}/{budget}){_budget_note}."
+     )
+     _interrupted = interruptible_backoff_sleep(
+         agent, wait_time, None,
+@@ -101,8 +101,7 @@
+     _streak_cost = _empty_guard.streak_cost_usd(agent)
+     if _streak_cost is not None:
+         agent._buffer_diagnostic_status(
+-            f"ℹ️ Estimated cost of these empty attempts: ~${_streak_cost:.2f} (input tokens are billed "
+-            f"per attempt even when no answer is produced)"
++            f"ℹ️ Примерная стоимость попыток с пустым ответом: ${_streak_cost:.2f}. Входные данные могут оплачиваться при каждой попытке."
+         )
+     agent._flush_status_buffer()
+     reasoning_text = agent._extract_reasoning(assistant_message)
+@@ -120,9 +119,7 @@
+             agent.provider,
+         )
+         agent._emit_diagnostic_status(
+-            "❌ Model returned no content after all retries"
+-            + (" and fallback attempts." if agent._fallback_chain else
+-               ". No fallback providers configured.")
++            "❌ Модель не ответила после всех попыток" + (" и обращения к резервным сервисам." if agent._fallback_chain else ". Резервные сервисы не настроены.")
+         )
+         return "(empty)"
+
+@@ -132,7 +129,7 @@
+         agent._empty_content_retries, agent.model, agent.provider,
+     )
+     agent._emit_diagnostic_status(
+-        "⚠️ Model produced reasoning but no visible response after all retries. Returning empty."
++        "⚠️ Модель рассуждала, но после всех попыток так и не подготовила ответ."
+     )
+     return "(empty)"
+
+@@ -169,7 +166,7 @@
+             "Partial stream content delivered (%d chars) — using as final response",
+             len(_recovered),
+         )
+-        agent._emit_diagnostic_status("↻ Stream interrupted — using delivered content " "as final response")
++        agent._emit_diagnostic_status("↻ Ответ прервался. Показываю уже полученную часть.")
+         final_response = _recovered
+         # A streamed fragment isn't a confirmed preview: gateway fallback delivery
+         # sends the text plus the abnormal-turn explanation.
+@@ -183,7 +180,7 @@
+     if fallback and getattr(agent, '_last_content_tools_all_housekeeping', False):
+         _turn_exit_reason = "fallback_prior_turn_content"
+         logger.info("Empty follow-up after tool calls — using prior turn content as final response")
+-        agent._emit_diagnostic_status("↻ Empty response after tool calls — using earlier content as final answer")
++        agent._emit_diagnostic_status("↻ После выполнения действий модель вернула пустой ответ. Показываю ранее полученный текст.")
+         agent._last_content_with_tools = None
+         agent._last_content_tools_all_housekeeping = False
+         agent._empty_content_retries = 0
+@@ -210,7 +207,7 @@
+         agent._last_content_with_tools = None
+         agent._last_content_tools_all_housekeeping = False
+         logger.info("Empty response after tool calls — nudging model " "to continue processing")
+-        agent._buffer_diagnostic_status("⚠️ Model returned empty after tool calls — " "nudging to continue")
++        agent._buffer_diagnostic_status("⚠️ После выполнения действий модель вернула пустой ответ. Прошу её продолжить.")
+         # tool → assistant("(empty)") → user keeps the sequence valid.
+         _nudge_msg = agent._build_assistant_message(assistant_message, finish_reason)
+         _nudge_msg["content"] = "(empty)"
+@@ -236,7 +233,7 @@
+             agent._thinking_prefill_retries,
+         )
+         agent._buffer_diagnostic_status(
+-            f"↻ Thinking-only response — prefilling to continue ({agent._thinking_prefill_retries}/2)"
++            f"↻ Модель рассуждала, но не ответила. Прошу продолжить (попытка {agent._thinking_prefill_retries}/2)."
+         )
+         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
+         interim_msg["_thinking_prefill"] = True
+@@ -263,8 +260,7 @@
+             agent.model, agent.provider, finish_reason,
+         )
+         agent._buffer_diagnostic_status(
+-            "⚠️ Model is repeatedly returning empty content — skipping further retries "
+-            "to avoid repeat charges"
++            "⚠️ Модель несколько раз вернула пустой ответ. Прекращаю повторы, чтобы избежать дополнительных расходов."
+         )
+
+     # Exhausted retries — try the next provider in the chain before "(empty)".
+@@ -273,7 +269,7 @@
+             "Empty response after %d retries — attempting fallback (model=%s, provider=%s)",
+             agent._empty_content_retries, agent.model, agent.provider,
+         )
+-        agent._buffer_diagnostic_status("⚠️ Model returning empty responses — " "switching to fallback provider...")
++        agent._buffer_diagnostic_status("⚠️ Модель возвращает пустые ответы. Пробую резервный сервис ИИ.")
+         if agent._try_activate_fallback():
+             active_system_prompt = _sync_failover_system_message(agent, api_messages, active_system_prompt)
+             agent._empty_content_retries = 0
+diff --git a/agent/turn_preflight_gate.py b/agent/turn_preflight_gate.py
+--- a/agent/turn_preflight_gate.py
++++ b/agent/turn_preflight_gate.py
+@@ -49,7 +49,7 @@
+         v.failed = True
+         v._turn_exit_reason = "ollama_runtime_context_too_small"
+         append_message(messages, {"role": "assistant", "content": v.final_response})
+-        agent._emit_diagnostic_status("❌ Ollama runtime context is too small for Hermes tool use")
++        agent._emit_diagnostic_status("❌ Окно контекста локальной модели слишком мало для работы с инструментами.")
+         v.api_call_count -= 1
+         agent._api_call_count = v.api_call_count
+         with suppress(Exception):
 diff --git a/agent/turn_recovery_autorecover.py b/agent/turn_recovery_autorecover.py
 --- a/agent/turn_recovery_autorecover.py
 +++ b/agent/turn_recovery_autorecover.py
@@ -1172,19 +1074,1370 @@ diff --git a/agent/turn_recovery_autorecover.py b/agent/turn_recovery_autorecove
 
 
  def auto_recover_after_exhaustion(
+@@ -87,7 +75,7 @@
+     used = int(getattr(_retry, "auto_recovery_cycles_used", 0) or 0)
+     if used >= total:
+         agent._emit_diagnostic_status(
+-            f"⏳ Automatic recovery gave up after {total} cycles — the provider is still unavailable."
++            f"⏳ Не удалось восстановить соединение после {total} попыток. Сервис ИИ пока недоступен."
+         )
+         return None
+     cycle = used + 1
+diff --git a/agent/turn_stop_gates.py b/agent/turn_stop_gates.py
+--- a/agent/turn_stop_gates.py
++++ b/agent/turn_stop_gates.py
+@@ -170,8 +170,7 @@
+             os.environ.get("HERMES_KANBAN_TASK", ""),
+         )
+         agent._emit_diagnostic_status(
+-            "⚠️ Kanban worker tried to exit without a terminal board call "
+-            "(kanban_complete/kanban_request_review/kanban_block) — nudging to finish"
++            "⚠️ Исполнитель не завершил работу с задачей. Прошу его закончить."
+         )
+         return verdict
+     return StopGateVerdict(
+diff --git a/agent/stream_diag.py b/agent/stream_diag.py
+--- a/agent/stream_diag.py
++++ b/agent/stream_diag.py
+@@ -153,18 +153,18 @@
+     log_stream_retry(
+         agent, kind=kind, error=error, attempt=attempt, max_attempts=max_attempts, mid_tool_call=mid_tool_call, diag=diag
+     )
+-    provider = agent.provider or "provider"
++    provider = agent.provider or "сервис ИИ"
+     _suffix = ""
+     try:
+         started = diag.get("started_at") if isinstance(diag, dict) else None
+         if started is not None:
+-            _suffix = f" after {max(0.0, time.time() - float(started)):.1f}s"
++            _suffix = f" через {max(0.0, time.time() - float(started)):.1f} сек."
+     except Exception:
+         pass
+     try:
+         agent._buffer_diagnostic_status(
+-            f"⚠️ {provider} stream {kind} ({type(error).__name__}){_suffix} "
+-            f"— attempt {attempt}/{max_attempts} dropped, reconnecting"
++            f"⚠️ Соединение с {provider} прервалось{_suffix}"
++            f"{' во время подготовки действия' if mid_tool_call else ''}. Переподключаюсь (попытка {attempt}/{max_attempts})."
+         )
+         agent._touch_activity(f"stream retry {attempt}/{max_attempts} after {type(error).__name__}")
+     except Exception:
+@@ -208,15 +208,15 @@
+     distinguishable from an outage without reading agent.log."""
+     from urllib.parse import urlparse
+     request = _failed_request(error)
+-    host = urlparse(str(getattr(request, "url", None) or base_url or "")).hostname or "the endpoint"
++    host = urlparse(str(getattr(request, "url", None) or base_url or "")).hostname or "сервисом ИИ"
+     size = _request_body_bytes(request)
+-    line = f"❌ Could not open a stream to {host} after {attempts} attempt{'s' if attempts != 1 else ''}"
++    line = f"❌ Не удалось подключиться к {host} после {attempts} попыток"
+     if size is None:
+-        return line + "; the endpoint looks unreachable — try again in a moment."
+-    line += f" (request {max(1, round(size / 1024))} KB)"
++        return line + ". Сервис может быть недоступен."
++    line += f" (размер запроса: {max(1, round(size / 1024))} КБ)"
+     if size >= LARGE_REQUEST_HINT_BYTES:
+-        return line + "; the endpoint or a proxy in front of it may reject requests this large."
+-    return line + "; the endpoint looks unreachable — try again in a moment."
++        return line + ". Сервис или промежуточный сервер может отклонять такие большие запросы."
++    return line + ". Сервис может быть недоступен."
+
+
+ def buffer_connect_exhausted_notice(agent: Any, error: BaseException, *, attempts: int, base_url: Any) -> None:
+diff --git a/agent/turn_failure_copy.py b/agent/turn_failure_copy.py
+--- a/agent/turn_failure_copy.py
++++ b/agent/turn_failure_copy.py
+@@ -37,11 +37,11 @@
+ # (``gateway/run_turn.py::_hmwa_close_failed_turn``) say the same thing.
+
+ FAILED_TURN_NOTICE = (
+-    "Your request was not processed. Send it again if you still want me to carry it out."
++    "Запрос не был обработан. Отправьте его ещё раз, если он по-прежнему нужен."
+ )
+ PARTIAL_FAILED_TURN_NOTICE = (
+-    "This turn did not complete. Some actions may already have run; verify their effects "
+-    "before resending."
++    "Работа не завершена. Некоторые действия могли уже выполниться; проверьте их результат "
++    "перед повтором."
+ )
+ # ``messages.display_kind`` of that row: display-only (stripped before every provider request),
+ # so renderers show a Hermes notice and room pollers never read it as the model's reply.
+@@ -53,6 +53,8 @@
+     (exact notice text, so a real reply quoting it stays a reply); read-side only."""
+     if role == "assistant" and isinstance(content, str) and content.strip() in (
+         FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE,
++        "Your request was not processed. Send it again if you still want me to carry it out.",
++        "This turn did not complete. Some actions may already have run; verify their effects before resending.",
+     ):
+         return FAILED_TURN_DISPLAY_KIND
+     return None
+@@ -162,194 +164,75 @@
+
+ # ---- chat copy tables -----------------------------------------------------------------------
+
+-_NEXT_STEPS_RETRY = "Wait a minute and send /retry, or switch models with /model."
+-_NEXT_STEPS_LOOP = (
+-    "Your message is saved. Send `continue` to try again, or start a new session with /new. "
+-    "If it happens again, run `hermes doctor` and share the error details."
+-)
+-
+-# Lead sentence per classifier reason once retries and fallback are exhausted.
++_NEXT_STEPS_RETRY = "Немного подождите и напишите «продолжай»."
++_NEXT_STEPS_LOOP = "Ваше сообщение сохранено. Напишите «продолжай», чтобы попробовать ещё раз."
++
+ _EXHAUSTED_LEADS: dict[str, str] = {
+-    FailoverReason.rate_limit.value: "{label} rate-limited every one of {attempts} attempts",
+-    FailoverReason.upstream_rate_limit.value: "{label} rate-limited every one of {attempts} attempts",
+-    FailoverReason.overloaded.value: "{label} reported it was overloaded on all {attempts} attempts",
+-    FailoverReason.server_error.value: "{label} returned a server error on all {attempts} attempts",
+-    FailoverReason.timeout.value: "{label} didn't respond in time on any of {attempts} attempts",
+-}
+-_EXHAUSTED_DEFAULT_LEAD = "{label} didn't answer after {attempts} attempts"
+-# One attempt: an attended free-tier session ended the cycle on a cooldown longer than it waits.
++    FailoverReason.rate_limit.value: "Сервис ИИ ограничил доступ во всех {attempts} попытках",
++    FailoverReason.upstream_rate_limit.value: "Сервис ИИ ограничил доступ во всех {attempts} попытках",
++    FailoverReason.overloaded.value: "Сервис ИИ был перегружен во всех {attempts} попытках",
++    FailoverReason.server_error.value: "Сервис ИИ вернул ошибку во всех {attempts} попытках",
++    FailoverReason.timeout.value: "Сервис ИИ не ответил вовремя ни в одной из {attempts} попыток",
++}
++_EXHAUSTED_DEFAULT_LEAD = "Сервис ИИ не ответил после {attempts} попыток"
+ _EXHAUSTED_FIRST_ATTEMPT_LEADS: dict[str, str] = {
+-    FailoverReason.rate_limit.value: "{label} is rate-limiting requests right now",
+-    FailoverReason.upstream_rate_limit.value: "{label} is rate-limiting requests right now",
+-}
+-
+-# Terminal copy for a non-retryable provider rejection, keyed by classifier reason.
++    FailoverReason.rate_limit.value: "Сервис ИИ временно ограничил доступ",
++    FailoverReason.upstream_rate_limit.value: "Сервис ИИ временно ограничил доступ",
++}
+ _NONRETRYABLE_COPY: dict[str, str] = {
+-    FailoverReason.model_not_found.value: (
+-        "Model '{model}' isn't available on {label}. Pick a different model with /model "
+-        "(or `hermes model` in a terminal).{prefix_hint}"
+-    ),
+-    FailoverReason.format_error.value: (
+-        "{label} rejected this request as malformed, so the model didn't answer. Start a clean "
+-        "session with /new or switch models with /model; if it keeps happening, run `hermes doctor`."
+-    ),
+-    FailoverReason.role_alternation.value: (
+-        "{label} requires user and assistant turns to strictly alternate and rejected this "
+-        "conversation's shape. Start a clean session with /new or switch models with /model."
+-    ),
+-    FailoverReason.ssl_cert_verification.value: (
+-        "Hermes couldn't verify {label}'s security certificate, so the connection was refused. "
+-        "This is usually a corporate proxy or an outdated certificate store on this computer — "
+-        "see the terminal or `{home}/logs/agent.log` for the exact fix, or try another provider "
+-        "with /model."
+-    ),
+-    FailoverReason.provider_policy_blocked.value: (
+-        "{label} refused this request because of a policy on your account (its data/privacy "
+-        "settings, or a block the model's upstream provider placed on the account), so the model "
+-        "didn't answer and retrying won't help. Check the account with the provider, or switch "
+-        "models with /model."
+-    ),
+-    FailoverReason.upstream_blocked.value: (
+-        "A firewall/CDN in front of {label} blocked the request before it reached the model, so "
+-        "your key is probably fine. Set a custom User-Agent via the provider's extra_headers, check "
+-        "the proxy/WAF rules, or switch providers with /model."
+-    ),
+-}
+-_NONRETRYABLE_DEFAULT_COPY = (
+-    "{label} rejected the request and retrying won't help. Pick another model with /model, "
+-    "or check the details in `{home}/logs/agent.log`."
+-)
++    FailoverReason.model_not_found.value: "Модель «{model}» недоступна в сервисе {label}.{prefix_hint}",
++    FailoverReason.format_error.value: "Сервис {label} отклонил запрос из-за ошибки в его формате.",
++    FailoverReason.role_alternation.value: "Сервис {label} отклонил запрос из-за порядка сообщений в разговоре.",
++    FailoverReason.ssl_cert_verification.value: "Не удалось проверить сертификат безопасности сервиса {label}. Соединение не установлено.",
++    FailoverReason.provider_policy_blocked.value: "Сервис {label} отклонил запрос из-за настроек или правил аккаунта. Проверьте доступ к сервису.",
++    FailoverReason.upstream_blocked.value: "Система сетевой защиты перед сервисом {label} заблокировала запрос.",
++}
++_NONRETRYABLE_DEFAULT_COPY = "Сервис {label} отклонил запрос. Повторить его автоматически не получится."
+ _AUTH_COPY: dict[str, str] = {
+-    "oauth": "{label} rejected your sign-in, so the model can't be reached. Sign in again: `{relogin}`.",
+-    "api_key": (
+-        "{label} rejected your API key, so the model can't be reached. Update it in "
+-        "Settings → Providers, or run `hermes setup` in a terminal."
+-    ),
+-}
+-
+-CONTENT_POLICY_NEXT_STEPS = (
+-    "Try rewording your message or removing sensitive attachments, or switch to another "
+-    "model with /model."
+-)
+-
+-# ---- one reason → "what happened" gloss, shared by cron, subagent and chat notices ------------
+-
+-# FailoverReason / site code → one clause (no HTTP codes, no "provider" jargon). ``{subject}``
+-# is who was asking ("the job", "it"), ``{possessive}`` its possessive ("the job's", "its").
+-# Reasons absent here are NOT provider-shaped; callers fall back to the raw error text.
++    "oauth": "Сервис {label} отклонил авторизацию. Нужно войти в аккаунт заново.",
++    "api_key": "Сервис {label} отклонил ключ доступа. Нужно проверить настройки подключения.",
++}
++CONTENT_POLICY_NEXT_STEPS = "Попробуйте переформулировать запрос или убрать вложения."
++
+ FAILURE_CAUSE_GLOSS: dict[str, str] = {
+-    FailoverReason.timeout.value: "the AI model service did not respond in time",
+-    FailoverReason.rate_limit.value: "the AI model service was rate-limited (too many requests)",
+-    FailoverReason.upstream_rate_limit.value: "the AI model service was rate-limited (too many requests)",
+-    FailoverReason.overloaded.value: "the AI model service is overloaded right now",
+-    FailoverReason.server_error.value: "the AI model service returned an internal error",
+-    FailoverReason.billing.value: "the AI model service says the account's usage or credit limit is reached",
+-    # Wire-level billing code (not a FailoverReason) that error_surface routes to the billing layer.
+-    "billing_unverified": "the AI model service says the account's usage or credit limit is reached",
+-    FailoverReason.auth.value: "the AI model service rejected the sign-in",
+-    FailoverReason.auth_permanent.value: "the AI model service rejected the sign-in",
+-    FailoverReason.upstream_blocked.value: "a firewall/CDN in front of the AI model service blocked the request",
+-    FailoverReason.model_not_found.value: "the model {subject} uses was not found at the AI model service",
+-    FailoverReason.content_policy_blocked.value: "the AI model service's safety filter rejected the request",
+-    FailoverReason.provider_policy_blocked.value: (
+-        "the AI model service refused the request because of a policy on the account"
+-    ),
+-    "context_overflow": "{possessive} request grew too large for the model",
+-    "payload_too_large": "{possessive} request grew too large for the model",
+-}
+-
++    FailoverReason.timeout.value: "сервис ИИ не ответил вовремя",
++    FailoverReason.rate_limit.value: "сервис ИИ временно ограничил доступ",
++    FailoverReason.upstream_rate_limit.value: "сервис ИИ временно ограничил доступ",
++    FailoverReason.overloaded.value: "сервис ИИ перегружен",
++    FailoverReason.server_error.value: "сервис ИИ вернул внутреннюю ошибку",
++    FailoverReason.billing.value: "сервис ИИ сообщил об исчерпании средств или лимита использования",
++    "billing_unverified": "сервис ИИ сообщил о возможном исчерпании средств или лимита использования",
++    FailoverReason.auth.value: "сервис ИИ отклонил авторизацию",
++    FailoverReason.auth_permanent.value: "сервис ИИ отклонил авторизацию",
++    FailoverReason.upstream_blocked.value: "система сетевой защиты заблокировала запрос к сервису ИИ",
++    FailoverReason.model_not_found.value: "сервис ИИ не нашёл нужную модель",
++    FailoverReason.content_policy_blocked.value: "фильтр безопасности сервиса ИИ отклонил запрос",
++    FailoverReason.provider_policy_blocked.value: "сервис ИИ отклонил запрос из-за правил аккаунта",
++    "context_overflow": "запрос слишком велик для модели",
++    "payload_too_large": "запрос слишком велик для модели",
++}
+
+ def failure_cause_gloss(reason: Any, *, subject: str = "it", possessive: str = "its") -> Optional[str]:
+-    """Plain clause for a classified ``failure_reason``; None when the reason has no gloss."""
+     template = FAILURE_CAUSE_GLOSS.get(str(reason or ""))
+     return template.format(subject=subject, possessive=possessive) if template else None
+
+-
+-# ---- site-code copy -------------------------------------------------------------------------
+-
+-# Chat copy for the codes in SITE_FAILURE_CODES that a loop site renders itself
+-# (``empty_response`` is worded by agent/turn_explainers.py, ``session_busy`` by the lease).
+ _FAILURE_CODE_COPY: dict[str, str] = {
+-    "context_overflow": (
+-        "This conversation has grown too long for {model} to read, and Hermes couldn't shrink "
+-        "it enough automatically. Start a new session with /new (your history is kept), or try "
+-        "/compress once more. Switching to a model with a bigger context window also works."
+-    ),
+-    "truncated": (
+-        "The model's reply was cut off before it finished (it hit its output length limit), so "
+-        "Hermes didn't run the incomplete action. Nothing was changed. Send `continue`, ask for "
+-        "the work in smaller steps, or raise max_tokens for this model."
+-    ),
+-    "invalid_response": (
+-        "{label} sent back an empty or broken reply {attempts} times — it is probably overloaded "
+-        "or rate-limiting you. " + _NEXT_STEPS_RETRY + "\n\nDetails: {detail}"
+-    ),
+-    "loop_error": (
+-        "Hermes hit repeated errors and stopped this turn so it wouldn't keep retrying. "
+-        + _NEXT_STEPS_LOOP + "\n\nDetails: {detail}"
+-    ),
+-    "interpreter_shutdown": (
+-        "Hermes was shutting down and stopped this turn. Your conversation is saved — reopen "
+-        "it{resume} and send your message again."
+-    ),
+-}
+-
+-# One-off outcome strings: deterministic loop exits that are NOT failure codes (the result
+-# they ride carries a code from the table above, or none at all).
++    "context_overflow": "Разговор стал слишком длинным для модели {model}, и автоматически сократить его не удалось.",
++    "truncated": "Ответ модели оборвался из-за ограничения длины. Незавершённое действие не выполнялось. Напишите «продолжай» или попросите выполнить задачу по частям.",
++    "invalid_response": "Сервис ИИ {attempts} раз вернул пустой или некорректный ответ. " + _NEXT_STEPS_RETRY,
++    "loop_error": "При обработке запроса несколько раз произошла ошибка. Работа остановлена. " + _NEXT_STEPS_LOOP,
++    "interpreter_shutdown": "Работа остановлена из-за завершения приложения. Разговор сохранён; откройте его и отправьте сообщение ещё раз.",
++}
+ _ONE_OFF_COPY: dict[str, str] = {
+-    "payload_too_large": (
+-        "This conversation (including attachments) has grown too large to send to {model}, and "
+-        "Hermes couldn't shrink it enough automatically. Start a new session with /new (your "
+-        "history is kept), or try /compress once more."
+-    ),
+-    "compression_disabled": (
+-        "This conversation is too long for {model} and automatic shrinking is turned off in "
+-        "your settings (compression.enabled). Run /compress to shrink it now, /new to start "
+-        "fresh, or pick a model with a bigger context window."
+-    ),
+-    # Wording deliberately avoids the overflow phrases gateway/run_turn.py matches on
+-    # (``_CONTEXT_OVERFLOW_ERROR_PHRASES``): this failure is transient, so the user's
+-    # message must stay in the transcript and the session must not be auto-reset.
+-    "server_context_rejection": (
+-        "The model server rejected this request as too large, but this conversation is only "
+-        "about {tokens:,} tokens — well under the {window:,}-token window Hermes knows for "
+-        "{model} — so shrinking it would not help. Another request on the same server (for "
+-        "example a background memory review from an earlier session) was probably holding its "
+-        "capacity, or the server runs {model} with a smaller window than Hermes assumes. Wait a "
+-        "moment and send /retry; if it keeps happening, check the server's context setting."
+-    ),
+-    # Rides failure_reason="truncated": args were cut mid-JSON but the model never reported
+-    # an output-length stop, so don't claim it hit one (#91717).
+-    "truncated_unreported": (
+-        "The model's action arrived cut off partway through, so Hermes didn't run it. Nothing was changed. The model didn't report hitting its output "
+-        "limit, so this was most likely a dropped connection or a provider/router cutting the "
+-        "reply short. Send /retry; if it keeps happening, ask for the work in smaller steps."
+-    ),
+-    "stream_dropped_tool_call": (
+-        "The connection to {label} kept dropping while the model was writing a large action, "
+-        "so nothing was run. Check your network and send /retry; asking for the file in smaller "
+-        "pieces also helps."
+-    ),
+-    # Rides failure_reason="truncated": clean EOF (no transport error, no finish_reason)
+-    # mid tool-call, retries exhausted — not a network problem on the user's side (#102766).
+-    "stream_closed_tool_call": (
+-        "{label} kept closing the stream before the model finished writing its action, without "
+-        "reporting an error, so nothing was run. This is usually the provider or a proxy in front "
+-        "of it cutting long replies short. Send /retry; asking for the work in smaller steps also helps."
+-    ),
+-    # Rides failure_reason="loop_error" (advisory; the turn is incomplete, not failed).
+-    "local_processing_error": (
+-        "Hermes hit an internal error while handling the model's reply and stopped this turn. "
+-        + _NEXT_STEPS_LOOP + "\n\nDetails: {detail}"
+-    ),
+-    "max_iterations_no_summary": (
+-        "I ran out of steps for this turn ({limit} tool calls) before finishing, and couldn't "
+-        "produce a summary. Send `continue` to keep going, or raise `max_iterations` in your config."
+-    ),
+-    "nous_rate_limit": (
+-        "Wait for the reset and send /retry, or switch models with /model. To avoid waits, add "
+-        "a backup provider with `hermes fallback add`."
+-    ),
++    "payload_too_large": "Разговор с вложениями стал слишком большим для модели {model}, и автоматически сократить его не удалось.",
++    "compression_disabled": "Разговор слишком длинный для модели {model}, а автоматическое сокращение отключено в настройках.",
++    "server_context_rejection": "Сервер модели отклонил запрос как слишком большой, хотя его размер — около {tokens:,} токенов при ожидаемом окне {window:,} токенов для {model}. Возможно, сервер занят или настроен на меньший размер контекста. Попробуйте позже.",
++    "truncated_unreported": "Действие модели пришло не полностью и не выполнялось. Ответ мог оборваться из-за соединения или сервиса ИИ. Напишите «продолжай» или попросите выполнить задачу по частям.",
++    "stream_dropped_tool_call": "Соединение с {label} прерывалось во время подготовки действия. Действие не выполнялось. Напишите «продолжай» или попросите выполнить задачу по частям.",
++    "stream_closed_tool_call": "Сервис {label} закрывал соединение до завершения подготовки действия. Действие не выполнялось. Напишите «продолжай» или попросите выполнить задачу по частям.",
++    "local_processing_error": "При обработке ответа модели произошла внутренняя ошибка. Работа остановлена. " + _NEXT_STEPS_LOOP,
++    "max_iterations_no_summary": "Не удалось закончить работу и подготовить итог: достигнуто ограничение числа действий ({limit}). Напишите «продолжай».",
++    "nous_rate_limit": "Дождитесь снятия ограничения и напишите «продолжай».",
+ }
+ _SITE_COPY: dict[str, str] = {**_FAILURE_CODE_COPY, **_ONE_OFF_COPY}
+
+@@ -366,17 +249,12 @@
+     first_attempt = attempts == 1 and reason in _EXHAUSTED_FIRST_ATTEMPT_LEADS
+     lead = (_EXHAUSTED_FIRST_ATTEMPT_LEADS if first_attempt else _EXHAUSTED_LEADS).get(
+         reason, _EXHAUSTED_DEFAULT_LEAD).format(label=label, attempts=attempts)
+-    # The free-tier cutoff (one attempt) fires on any cooldown over a minute, so it always names the reset.
+-    if reset_seconds is not None and (reset_seconds >= 120 or first_attempt and reset_seconds > 0):
+-        from agent.retry_utils import format_reset_window
+-        situation = (f"its usage limit resets in {format_reset_window(reset_seconds)}. "
+-                     "Send /retry after that, or switch models with /model.")
+-    else:
+-        situation = f"it looks temporarily unavailable. {_NEXT_STEPS_RETRY}"
+-    return (
+-        f"{lead} — {situation} To avoid this in future, "
+-        f"add a backup provider with `hermes fallback add`.\n\nProvider said: {summary}"
+-    )
++    if reset_seconds is not None and reset_seconds > 0:
++        minutes = max(1, int((reset_seconds + 59) // 60))
++        hours, minutes = divmod(minutes, 60)
++        wait = f"{hours} ч {minutes} мин." if hours else f"{minutes} мин."
++        return f"{lead}. Ограничение может сняться примерно через {wait}. После этого напишите «продолжай»."
++    return f"{lead}. {_NEXT_STEPS_RETRY}"
+
+
+ def limit_reset_copy(resets_at: float, now: Optional[float] = None) -> str:
+@@ -388,8 +266,8 @@
+     if remaining <= 0:
+         return ""
+     hours, minutes = divmod((remaining + 59) // 60, 60)
+-    wait = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+-    return f"Limit resets at {time.strftime('%H:%M', time.localtime(resets_at))} (in {wait})."
++    wait = f"{hours} ч {minutes:02d} мин." if hours else f"{minutes} мин."
++    return f"Ограничение снимут в {time.strftime('%H:%M', time.localtime(resets_at))} (через {wait})."
+
+
+ def oauth_relogin_command(provider: Any) -> str:
+@@ -434,19 +312,18 @@
+     else:
+         template = _NONRETRYABLE_COPY.get(classified.reason.value, _NONRETRYABLE_DEFAULT_COPY)
+     prefix_hint = (
+-        f" If you typed the name yourself it may be missing its vendor prefix — did you mean "
+-        f"'{prefix_suggestion}'?"
++        f" Возможно, в названии пропущен префикс поставщика. Вы имели в виду «{prefix_suggestion}»?"
+         if prefix_suggestion else ""
+     )
+     body = template.format(label=label, model=model, home=display_hermes_home(), prefix_hint=prefix_hint,
+                            relogin=oauth_relogin_command(provider))
+-    return f"{body}\n\nProvider said: {summary}"
++    return body
+
+
+ def content_policy_copy(*, label: str, summary: str) -> str:
+     return (
+-        f"{label}'s safety filter refused this request, so the model didn't answer. "
+-        f"{CONTENT_POLICY_NEXT_STEPS}\n\nProvider said: {summary}"
++        f"Фильтр безопасности сервиса {label} отклонил запрос, поэтому модель не ответила. "
++        f"{CONTENT_POLICY_NEXT_STEPS}"
+     )
+
+
+diff --git a/tools/delegate_tool_progress.py b/tools/delegate_tool_progress.py
+--- a/tools/delegate_tool_progress.py
++++ b/tools/delegate_tool_progress.py
+@@ -58,7 +58,7 @@
+ def _format_duration(seconds: Any) -> str:
+     if not isinstance(seconds, (int, float)) or seconds <= 0:
+         return ""
+-    return f"{round(seconds / 60)} min" if seconds >= 120 else f"{round(seconds)}s"
++    return f"{round(seconds / 60)} мин." if seconds >= 120 else f"{round(seconds)} сек."
+
+
+ def format_subagent_failure_line(
+@@ -76,21 +76,17 @@
+     goal_part = f' — "{goal_label}"' if goal_label else ""
+     elapsed = _format_duration(duration_seconds)
+     if status == "timeout":
+-        # The child's own timeout text repeats the duration and names mechanisms (API/tool calls); the
+-        # user needs the outcome and the knob.
+-        after = f" after {elapsed}" if elapsed else ""
+-        return (
+-            f"⚠️ Subagent timed out{goal_part}{after} without finishing. I will carry on without it; ask me to "
+-            "retry it, or raise delegation.child_timeout_seconds in config.yaml if these tasks legitimately "
+-            "take longer."
+-        )
+-    line = f"⚠️ Subagent failed{goal_part}"
++        after = f" за {elapsed}" if elapsed else ""
++        return f"⚠️ Помощник не успел завершить задачу{goal_part}{after}. Продолжу работу без него."
++    line = f"⚠️ Помощник не выполнил задачу{goal_part}"
+     if elapsed:
+-        line += f" after {elapsed}"
+-    reason = describe_subagent_failure(failure_reason, error)
++        line += f" за {elapsed}"
++    from agent.turn_failure_copy import failure_cause_gloss
++    reason = failure_cause_gloss(failure_reason)
+     if reason:
+         line += f": {reason.rstrip('.')}"
+-    return line + ". Details: /agents, or ask me to retry with a smaller task."
++    return line + ". Можно попросить меня попробовать ещё раз."
++
+
+
+ class DelegateEvent(str, enum.Enum):
+diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
+--- a/cron/scheduler_failure_copy.py
++++ b/cron/scheduler_failure_copy.py
+@@ -54,35 +54,18 @@
+ # Reason -> what to do. Transient reasons get the backup-provider clause from the scheduler
+ # (it knows whether a fallback chain is configured) instead of a fixed sentence.
+ _PROVIDER_FAILURE_ACTION: dict[str, str] = {
+-    "billing": (
+-        "Top up or wait for the limit to reset, or pin another provider with "
+-        "`hermes cron edit {job_id} --provider <name>`."
+-    ),
+-    "auth": (
+-        "Sign in again with /login (or `{relogin}` in a terminal), or pin a "
+-        "working provider with `hermes cron edit {job_id} --provider <name>`, then "
+-        "`hermes cron run {job_id}` to retry."
+-    ),
+-    "model_not_found": "Pick another model with `hermes cron edit {job_id} --model <name>`.",
+-    "upstream_blocked": (
+-        "A firewall in front of the provider blocked the request (not your key): set a User-Agent "
+-        "via `extra_headers` on the provider's custom_providers entry, or pin another provider with "
+-        "`hermes cron edit {job_id} --provider <name>`."
+-    ),
+-    "context_overflow": "Shorten the job's prompt with `hermes cron edit {job_id} --prompt <text>`.",
++    "billing": "Проверьте оплату и лимит использования сервиса ИИ.",
++    "auth": "Проверьте авторизацию в сервисе ИИ.",
++    "model_not_found": "Проверьте настройки модели для задачи.",
++    "upstream_blocked": "Проверьте сетевой доступ к сервису ИИ.",
++    "context_overflow": "Сократите запрос задачи.",
++    "content_policy_blocked": "Попробуйте переформулировать запрос задачи.",
++    "provider_policy_blocked": "Проверьте настройки и доступ аккаунта в сервисе ИИ.",
+ }
+ _PROVIDER_FAILURE_ACTION["auth_permanent"] = _PROVIDER_FAILURE_ACTION["auth"]
+ _PROVIDER_FAILURE_ACTION["billing_unverified"] = _PROVIDER_FAILURE_ACTION["billing"]
+ _PROVIDER_FAILURE_ACTION["payload_too_large"] = _PROVIDER_FAILURE_ACTION["context_overflow"]
+-_PROVIDER_FAILURE_ACTION["content_policy_blocked"] = (
+-    "Reword the job's prompt with `hermes cron edit {job_id} --prompt <text>`, or pick another "
+-    "model with `hermes cron edit {job_id} --model <name>`."
+-)
+-_PROVIDER_FAILURE_ACTION["provider_policy_blocked"] = (
+-    "Retrying won't help: check the account's status and data/privacy settings with the provider, "
+-    "or pin another model with `hermes cron edit {job_id} --model <name>`."
+-)
+-_DEFAULT_FAILURE_ACTION = "Run it again with `hermes cron run {job_id}`, or edit it with `hermes cron edit {job_id}`."
++_DEFAULT_FAILURE_ACTION = "Проверьте настройки задачи и попробуйте снова."
+
+
+ def provider_failure_notice(
+@@ -94,55 +77,23 @@
+     if cause is None:
+         return None
+     if reason in _TRANSIENT_REASONS:
+-        action = (
+-            f"{backup_provider_phrase} It will run again at its next scheduled time; "
+-            f"`hermes cron run {job_id}` tries now."
+-        )
++        action = f"{backup_provider_phrase} Задача запустится снова по расписанию."
+     else:
+-        from agent.turn_failure_copy import relogin_command_hint
+-
+-        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION).format(
+-            job_id=job_id, relogin=relogin_command_hint(provider))
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: {cause}. {action} "
+-        f"Run log: `hermes cron runs {job_id}`."
+-    )
++        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
++    return f"⚠️ Задача «{job_name}» не выполнена: {cause}. {action}"
+
+
+ def generic_failure_notice(job_name: str, job_id: str, cleaned_error: str) -> str:
+-    """Unclassified failure: the cleaned error text plus where to look and what to do."""
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: {cleaned_error}. "
+-        f"See the full run with `hermes cron runs {job_id}` (output saved under "
+-        f"{cron_output_dir_display(job_id)}); run it again with `hermes cron run {job_id}`, "
+-        f"edit it with `hermes cron edit {job_id}`, or pause it with `hermes cron pause {job_id}`."
+-    )
++    return f"⚠️ Задача «{job_name}» завершилась с ошибкой. Подробности сохранены в журнале выполнения."
+
+
+ def script_timeout_notice(job_name: str, job_id: str) -> str:
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: its script timed out. No model was invoked. "
+-        f"Check the script's output under {cron_output_dir_display(job_id)} or `hermes cron runs {job_id}`, "
+-        f"then run it again with `hermes cron run {job_id}`."
+-    )
++    return f"⚠️ Задача «{job_name}» не выполнена: скрипт не завершился вовремя. Модель не запускалась. Проверьте журнал выполнения."
+
+
+ def inactivity_notice(job_name: str, job_id: str) -> str:
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: the job stalled — it stopped doing anything for too long "
+-        f"and was cut off. Check what it was doing in the saved output under "
+-        f"{cron_output_dir_display(job_id)} (`hermes cron runs {job_id}`), then run it again with "
+-        f"`hermes cron run {job_id}`."
+-    )
++    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности. Проверьте журнал выполнения."
+
+
+ def blocked_config_notice(job_name: str, reason: str) -> str:
+-    """One-time notice when the pre-run configuration check refused to start the job."""
+-    reason = reason.rstrip()
+-    if reason and reason[-1] not in ".!?":
+-        reason += "."
+-    return (
+-        f"⛔ Cron '{job_name}' did not run: {reason} Nothing was charged. Hermes will try again at "
+-        "the next scheduled time and will not repeat this alert; check with "
+-        "`hermes cron doctor`."
+-    )
++    return f"⛔ Задача «{job_name}» не запущена из-за ошибки настроек. Оплата не взималась. Повторю запуск по расписанию."
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -112,22 +112,16 @@
+     config can't be read — never crash delivery.
+     """
+     if job is not None and _job_route_pinned(job):
+-        return (
+-            "This job is pinned to its own provider/model, so it does not fall back to "
+-            f"`fallback_providers`; `hermes cron edit {job.get('id')} --unpin` lets it follow the "
+-            "main model and its fallback chain."
+-        )
++        return "Для задачи закреплён отдельный сервис ИИ; резервные сервисы не использовались."
+     try:
+         cfg = load_config() or {}
+         chain = get_fallback_chain(cfg)
+     except Exception:
+-        return "No backup provider succeeded either."
++        return "Не удалось получить ответ и от резервных сервисов ИИ."
+     if chain:
+-        return "No backup provider succeeded either."
+-    return (
+-        "No backup provider is configured — add one with `hermes fallback add`, "
+-        "or set a cron-wide default via `cron.model` + `cron.model_provider` in config.yaml."
+-    )
++        return "Не удалось получить ответ и от резервных сервисов ИИ."
++    return "Резервный сервис ИИ не настроен."
++
+
+
+ def _failure_streak_nudge(job: dict) -> str:
+@@ -153,9 +147,8 @@
+         return ""
+     job_ref = job.get("name") or job.get("id") or "this job"
+     return (
+-        f"\nThis job has failed {streak} runs in a row — worth a review. "
+-        f"Fix its prompt/config, or pause it with `hermes cron pause {job_ref}` "
+-        "(resume/remove also available) to stop the noise."
++        f"\nЗадача завершилась с ошибкой {streak} раз подряд. Стоит проверить её настройки."
++
+     )
+
+
+@@ -314,9 +307,8 @@
+         if skew is not None:
+             boot_rev, disk_rev = skew
+             message += (
+-                f" Likely cause: the gateway is running stale code (booted "
+-                f"on {boot_rev}, disk is at {disk_rev}) — run "
+-                "`hermes gateway restart` to fix it."
++                " Возможная причина: служба работает со старой версией кода. "
++                "Администратору нужно проверить и перезапустить её."
+             )
+
+     return message
+diff --git a/agent/turn_response_check.py b/agent/turn_response_check.py
+--- a/agent/turn_response_check.py
++++ b/agent/turn_response_check.py
+@@ -82,7 +82,7 @@
+         finish_reason, normalized, messages
+     ):
+         agent._vprint(
+-            f"{agent.log_prefix}⚠️  Treating suspicious Ollama/GLM stop response as truncated",
++            f"{agent.log_prefix}⚠️ Ответ локальной модели выглядит незавершённым.",
+             force=True, diagnostic=True,
+         )
+         return "length"
+@@ -122,7 +122,7 @@
+     thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
+
+     if not agent.quiet_mode:
+-        agent._vprint(f"{agent.log_prefix}⏱️  API call completed in {api_duration:.2f}s")
++        agent._vprint(f"{agent.log_prefix}⏱️ Запрос к модели выполнен за {api_duration:.2f} сек.")
+
+     if agent.verbose_logging:
+         resp_model = getattr(response, 'model', 'N/A') if response else 'N/A'
+@@ -278,13 +278,13 @@
+             error_context=_soft_ctx, billing_unverified=_soft.billing_unverified,
+         )
+         if _recovered:
+-            agent._buffer_diagnostic_status(f"🔄 Codex soft failure ({_soft.reason.value}) — switched to the next pool credential, retrying...")
++            agent._buffer_diagnostic_status("🔄 Не удалось получить ответ от модели. Пробую другие учётные данные.")
+             return _verdict("continue")
+     retry_count += 1
+
+     # Eager fallback: empty/malformed responses often mean rate limiting.
+     if agent._fallback_index < len(agent._fallback_chain):
+-        agent._buffer_diagnostic_status("⚠️ Empty/malformed response — switching to fallback...")
++        agent._buffer_diagnostic_status("⚠️ Модель вернула пустой или некорректный ответ. Пробую резервный сервис ИИ.")
+     if agent._try_activate_fallback():
+         active_system_prompt = _arm_fallback_restart(
+             agent, api_messages, active_system_prompt, _retry)
+@@ -295,14 +295,14 @@
+     error_msg, provider_name, _failure_hint = describe_invalid_response(
+         agent, response, api_duration
+     )
+-    agent._buffer_vprint(f"⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}")
++    agent._buffer_vprint(f"⚠️ Сервис ИИ вернул некорректный ответ (попытка {retry_count}/{max_retries}).")
+     agent._buffer_vprint(f"   🏢 Provider: {provider_name}")
+-    agent._buffer_vprint(f"   📝 Provider message: {agent._clean_error_message(error_msg)}")
++    agent._buffer_vprint("   📝 Подробности ответа сервиса сохранены в журнале.")
+     agent._buffer_vprint(f"   ⏱️  {_failure_hint}")
+
+     if retry_count >= max_retries:
+         if agent._has_pending_fallback():
+-            agent._buffer_diagnostic_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
++            agent._buffer_diagnostic_status(f"⚠️ Модель вернула некорректный ответ после {max_retries} попыток. Пробую резервный сервис ИИ.")
+         if agent._try_activate_fallback():
+             active_system_prompt = _arm_fallback_restart(
+                 agent, api_messages, active_system_prompt, _retry)
+@@ -311,7 +311,7 @@
+             return _verdict("break")
+         # Terminal — flush buffered retry trace so user sees what happened.
+         agent._flush_status_buffer()
+-        agent._emit_diagnostic_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
++        agent._emit_diagnostic_status(f"❌ После {max_retries} попыток модель продолжает возвращать некорректный ответ.")
+         logger.error("%sInvalid API response after %d retries.", agent.log_prefix, max_retries)
+         agent._persist_session(messages, conversation_history)
+         # "model=<id>" is describe_invalid_response's OpenRouter fallback, not a provider name.
+diff --git a/agent/turn_iteration_prep.py b/agent/turn_iteration_prep.py
+--- a/agent/turn_iteration_prep.py
++++ b/agent/turn_iteration_prep.py
+@@ -306,9 +306,9 @@
+     """Print the request summary (verbose) or start the quiet-mode thinking indicator."""
+     thinking_spinner = None
+     if not agent.quiet_mode:
+-        agent._vprint(f"\n{agent.log_prefix}🔄 Making API call #{api_call_count}/{agent.max_iterations}...")
+-        agent._vprint(f"{agent.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)")
+-        agent._vprint(f"{agent.log_prefix}   🔧 Available tools: {len(agent.tools) if agent.tools else 0}")
++        agent._vprint(f"\n{agent.log_prefix}🔄 Обращаюсь к модели (запрос {api_call_count}/{agent.max_iterations}).")
++        agent._vprint(f"{agent.log_prefix}   📊 Размер запроса: {len(api_messages)} сообщений, около {approx_tokens:,} токенов ({total_chars:,} символов).")
++        agent._vprint(f"{agent.log_prefix}   🔧 Доступно действий: {len(agent.tools) if agent.tools else 0}.")
+     else:
+         # Animated thinking spinner in quiet mode
+         face = random.choice(KawaiiSpinner.get_thinking_faces())
+@@ -379,7 +379,7 @@
+         _issuer = interrupt_issuer(agent)
+         _turn_exit_reason = f"interrupted_by_system({_issuer})" if _issuer else "interrupted_by_user"
+         if not agent.quiet_mode:
+-            agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
++            agent._safe_print("\n⚡ Выполнение действий прервано.")
+         return _verdict("break")
+
+     # Aggregate input budget for detached auxiliary forks bounds the whole review, not
+@@ -388,9 +388,7 @@
+         _turn_exit_reason = "review_input_budget_exhausted"
+         if not agent.quiet_mode:
+             agent._safe_print(
+-                f"\n⏹️  Review input budget exhausted "
+-                f"({int(agent.session_input_tokens):,} tokens) — stopping "
+-                f"the review tool loop before the next provider call.", diagnostic=True,
++                f"\n⏹️ Достигнуто ограничение входных данных проверки ({int(agent.session_input_tokens):,} токенов). Останавливаю работу.", diagnostic=True,
+             )
+         return _verdict("break")
+
+@@ -407,7 +405,7 @@
+     elif not agent.iteration_budget.consume():
+         _turn_exit_reason = "budget_exhausted"
+         if not agent.quiet_mode:
+-            agent._safe_print(f"\n⚠️  Iteration budget exhausted ({agent.iteration_budget.used}/{agent.iteration_budget.max_total} iterations used)", diagnostic=True)
++            agent._safe_print(f"\n⚠️ Достигнуто ограничение числа шагов ({agent.iteration_budget.used}/{agent.iteration_budget.max_total}).", diagnostic=True)
+         return _verdict("break")
+     return _verdict("fallthrough")
+
+@@ -550,7 +548,7 @@
+     # All retries may exhaust with `response` still None; break out cleanly.
+     if response is None:
+         _turn_exit_reason = "all_retries_exhausted_no_response"
+-        agent._emit_diagnostic_status("❌ The model provider didn't answer after all retries. Send /retry, or switch models with /model.")
++        agent._emit_diagnostic_status("❌ Сервис ИИ не ответил после всех попыток. Напишите «продолжай», чтобы попробовать ещё раз.")
+         agent._persist_session(messages, conversation_history)
+         return _verdict("break")
+     # A response arrived, so the turn is not stuck re-issuing a cancelled request: start
+diff --git a/agent/turn_api_error.py b/agent/turn_api_error.py
+--- a/agent/turn_api_error.py
++++ b/agent/turn_api_error.py
+@@ -63,6 +63,25 @@
+     _provider_overflow_recovery_pending = False
+
+     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ApiErrorVerdict:
++        # AIDEV-NOTE: факты отказа нужны для связанных диагностических записей.
++        if action == "return" and isinstance(result, dict):
++            try:
++                status = getattr(api_error, "status_code", None)
++                if type(status) is int and 400 <= status <= 599:
++                    result["brai_http_status"] = status
++                if type(retry_count) is int and retry_count > 0:
++                    result.setdefault("brai_attempts", retry_count)
++                result["brai_error_provider"] = getattr(agent, "provider", "")
++                result["brai_error_model"] = getattr(agent, "model", "")
++                # AIDEV-NOTE: 429 сам по себе не подтверждает лимит подписки.
++                if result.get("failure_reason") in {"rate_limit", "billing"} and status == 429 and getattr(agent, "provider", "") == "openai-codex":
++                    from agent.error_classifier import _extract_error_body
++                    body = _extract_error_body(api_error)
++                    error = body.get("error", {}) if isinstance(body, dict) else {}
++                    if isinstance(error, dict) and "usage_limit_reached" in (error.get("type"), error.get("code")):
++                        result["brai_subscription_limit"] = True
++            except Exception:
++                pass
+         return ApiErrorVerdict(
+             action=action, thinking_spinner=thinking_spinner, messages=messages,
+             active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+@@ -321,8 +340,7 @@
+             _retry.copilot_stale_cred_retry_attempted = True
+             if agent._try_recover_stale_copilot_credential():
+                 agent._buffer_vprint(
+-                    "🔐 Copilot credential re-exchanged after "
+-                    "model_not_available 400. Retrying request..."
++                    "🔐 Доступ к Copilot обновлён после ошибки модели. Повторяю запрос."
+                 )
+                 retry_count = 0
+                 return _verdict("continue")
+@@ -335,8 +353,8 @@
+             # Announce the fallback only when a chain exists, else "trying fallback..." lies
+             # before a silent abort.
+             if agent._has_pending_fallback():
+-                _label = _NONRETRYABLE_LABELS.get(classified.reason, f"Non-retryable error (HTTP {status_code})")
+-                agent._buffer_diagnostic_status(f"⚠️ {_label} — trying fallback...")
++                _label = _NONRETRYABLE_LABELS.get(classified.reason, f"Сервис отклонил запрос (HTTP {status_code})")
++                agent._buffer_diagnostic_status(f"⚠️ {_label}. Пробую резервный сервис ИИ.")
+             reset_at = error_context.get("reset_at") if isinstance(error_context, dict) else None
+             if agent._try_activate_fallback(reason=classified.reason, reset_at=reset_at):
+                 # Direct ``return _verdict("break")`` is load-bearing: the restart handler
+@@ -375,7 +393,7 @@
+             agent._fallback_activated = False
+             return _verdict("continue")
+         if agent._has_pending_fallback():
+-            agent._buffer_diagnostic_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
++            agent._buffer_diagnostic_status(f"⚠️ Повторить запрос не удалось после {max_retries} попыток. Пробую резервный сервис ИИ.")
+         reset_at = error_context.get("reset_at") if isinstance(error_context, dict) else None
+         if agent._try_activate_fallback(reason=classified.reason, reset_at=reset_at):
+             # Direct ``return _verdict("break")`` is load-bearing: the restart handler
+diff --git a/agent/turn_final_response.py b/agent/turn_final_response.py
+--- a/agent/turn_final_response.py
++++ b/agent/turn_final_response.py
+@@ -301,8 +301,7 @@
+             agent._dropped_toolcall_retries, agent.model, agent.provider,
+         )
+         agent._emit_diagnostic_status(
+-            "↻ Model signaled a tool call but sent none — "
+-            f"re-prompting ({agent._dropped_toolcall_retries}/3)"
++            f"↻ Модель собиралась выполнить действие, но не передала его. Прошу повторить (попытка {agent._dropped_toolcall_retries}/3)."
+         )
+         # Both halves of the re-prompt pair are ephemeral scaffolding: never persisted,
+         # and the finalization pop strips an unanswered tail pair.
+@@ -378,5 +377,5 @@
+
+     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
+     if not agent.quiet_mode:
+-        agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
++        agent._safe_print(f"🎉 Работа завершена после {api_call_count} обращений к модели.")
+     return _verdict("break")
+diff --git a/agent/turn_response_intake.py b/agent/turn_response_intake.py
+--- a/agent/turn_response_intake.py
++++ b/agent/turn_response_intake.py
+@@ -161,12 +161,12 @@
+     # output tokens mid-reasoning — retry up to 2 times, then save as partial.
+     if has_incomplete_scratchpad(content or ""):
+         agent._incomplete_scratchpad_retries += 1
+-        agent._buffer_vprint("⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
++        agent._buffer_vprint("⚠️ Модель вернула незавершённый блок рассуждений.")
+         if agent._incomplete_scratchpad_retries <= 2:
+-            agent._buffer_vprint(f"🔄 Retrying API call ({agent._incomplete_scratchpad_retries}/2)...")
++            agent._buffer_vprint(f"🔄 Повторяю запрос к модели (попытка {agent._incomplete_scratchpad_retries}/2).")
+             return _verdict("continue")  # don't add the broken message
+         agent._flush_status_buffer()
+-        agent._vprint(f"{agent.log_prefix}❌ Max retries (2) for incomplete scratchpad. Saving as partial.", force=True, diagnostic=True)
++        agent._vprint(f"{agent.log_prefix}❌ После двух попыток рассуждения модели остаются незавершёнными. Сохраняю частичный результат.", force=True, diagnostic=True)
+         agent._incomplete_scratchpad_retries = 0
+         rolled_back_messages = agent._get_messages_up_to_last_assistant(messages)
+         agent._cleanup_task_resources(effective_task_id)
+diff --git a/agent/turn_tool_round.py b/agent/turn_tool_round.py
+--- a/agent/turn_tool_round.py
++++ b/agent/turn_tool_round.py
+@@ -66,7 +66,7 @@
+         )
+
+     if not agent.quiet_mode:
+-        agent._vprint(f"{agent.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
++        agent._vprint(f"{agent.log_prefix}🔧 Выполняю действий: {len(assistant_message.tool_calls)}.")
+
+     if agent.verbose_logging:
+         for tc in assistant_message.tool_calls:
+@@ -177,7 +177,7 @@
+         decision = agent._tool_guardrail_halt_decision
+         _turn_exit_reason = "guardrail_halt"
+         final_response = agent._toolguard_controlled_halt_response(decision)
+-        agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
++        agent._emit_diagnostic_status(f"⚠️ Выполнение действия {decision.tool_name} остановлено проверкой безопасности.")
+         append_message(messages, {"role": "assistant", "content": final_response})
+         # Emit the halt so it isn't mistaken for a crash; the stream callback is still
+         # alive, so SSE/TUI clients see the explanation.
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -1452,7 +1452,7 @@
+                 # Tools without interrupt checks (web_search, read_file) run to
+                 # completion; cancel unstarted futures so we don't block on them.
+                 agent._vprint(
+-                    f"{agent.log_prefix}⚡ Interrupt: cancelling {len(not_done)} pending concurrent tool(s)",
++                    f"{agent.log_prefix}⚡ Работа прервана. Отменяю ожидающие действия: {len(not_done)}.",
+                     force=True,
+                 )
+             else:
+diff --git a/agent/turn_usage.py b/agent/turn_usage.py
+--- a/agent/turn_usage.py
++++ b/agent/turn_usage.py
+@@ -167,7 +167,7 @@
+             from agent.model_metadata import save_provider_context_length
+
+             save_provider_context_length(agent.model, agent.base_url, ctx, agent.provider)
+-            agent._safe_print(f"{agent.log_prefix}💾 Cached context length: {ctx:,} tokens for {agent.model}")
++            agent._safe_print(f"{agent.log_prefix}💾 Сохранённый контекст модели {agent.model}: {ctx:,} токенов.")
+         compressor._context_probed = False
+         compressor._context_probe_persistable = False
+
+diff --git a/agent/turn_finalizer.py b/agent/turn_finalizer.py
+--- a/agent/turn_finalizer.py
++++ b/agent/turn_finalizer.py
+@@ -150,13 +150,11 @@
+         else:
+             # _handle_max_iterations makes one extra toolless request for a summary.
+             agent._emit_diagnostic_status(
+-                f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+-                "— asking model to summarise"
++                f"⚠️ Достигнуто ограничение числа шагов ({api_call_count}/{agent.max_iterations}). Прошу модель подвести итог."
+             )
+             if not agent.quiet_mode:
+                 agent._safe_print(
+-                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+-                    "— requesting summary...", diagnostic=True,
++                    f"\n⚠️ Достигнуто ограничение числа шагов ({api_call_count}/{agent.max_iterations}). Прошу модель подвести итог.", diagnostic=True,
+                 )
+             _summary_start = time.time()
+             try:
+diff --git a/agent/turn_overflow.py b/agent/turn_overflow.py
+--- a/agent/turn_overflow.py
++++ b/agent/turn_overflow.py
+@@ -32,7 +32,7 @@
+
+ logger = logging.getLogger("agent.conversation_loop")
+
+-_RETRY_HINT = "   💡 Try /new to start a fresh conversation, or /compress to retry compression."
++_RETRY_HINT = "   💡 Напишите «продолжай», чтобы попробовать ещё раз."
+
+ # A provider "context exceeded" whose request (incl. the output reservation) is under this share
+ # of the known window is not explained by the transcript; the rough estimator is ±30%, so a real
+@@ -134,14 +134,14 @@
+             return self.fail_turn(
+                 site_copy("payload_too_large", model=self.agent.model),
+                 notices=(
+-                    f"❌ Max compression attempts ({cap}) reached for payload-too-large error.",
++                    f"❌ Не удалось достаточно уменьшить большой запрос за {cap} попыток.",
+                     _RETRY_HINT,
+                 ),
+                 log=("%s413 compression failed after %d attempts.", self.agent.log_prefix, cap),
+             )
+         return self.fail_turn(
+             site_copy("context_overflow", model=self.agent.model),
+-            notices=(f"❌ Max compression attempts ({cap}) reached.", _RETRY_HINT),
++            notices=(f"❌ Не удалось сократить разговор за {cap} попыток.", _RETRY_HINT),
+             log=("%sContext compression failed after %d attempts.", self.agent.log_prefix, cap),
+         )
+
+@@ -234,8 +234,7 @@
+     if exhausted is not None:
+         return exhausted
+     agent._buffer_diagnostic_status(
+-        f"⚠️  Request payload too large (413) — compression attempt "
+-        f"{st.compression_attempts}/{st.max_compression_attempts}..."
++        f"⚠️ Запрос слишком велик (HTTP 413). Уменьшаю его (попытка {st.compression_attempts}/{st.max_compression_attempts})."
+     )
+
+     messages = st.messages
+@@ -262,7 +261,7 @@
+             agent._buffer_diagnostic_status(COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE.format(before=original_len, after=len(messages)))
+         else:
+             agent._buffer_diagnostic_status(
+-                f"🗜️ Compressed {original_bytes:,} → {new_bytes:,} " f"payload bytes, retrying..."
++                f"🗜️ Размер запроса уменьшен с {original_bytes:,} до {new_bytes:,} байт. Повторяю."
+             )
+         time.sleep(2)  # Brief pause between compression retries
+         _retry.restart_with_compressed_messages = True
+@@ -270,14 +269,13 @@
+
+     if agent._try_strip_image_parts_from_tool_messages(st.api_messages, remember_model=False):
+         agent._buffer_diagnostic_status(
+-            "📐 Compression could not reduce the request further — "
+-            "removed retained vision payloads and retrying..."
++            "📐 Уменьшить запрос больше не удалось. Удаляю сохранённые данные изображений из запроса и повторяю."
+         )
+         return st.done("continue")
+
+     return st.fail_turn(
+         site_copy("payload_too_large", model=agent.model),
+-        notices=("❌ Payload too large and cannot compress further.", _RETRY_HINT),
++        notices=("❌ Запрос слишком велик; больше сократить его не удалось.", _RETRY_HINT),
+         log=("%s413 payload too large. Cannot compress further.", agent.log_prefix),
+     )
+
+@@ -296,9 +294,7 @@
+         safe_out = max(1, available_out - 64)
+     agent._ephemeral_max_output_tokens = safe_out
+     agent._buffer_vprint(
+-        f"⚠️  Output cap too large for current prompt — retrying with max_tokens={safe_out:,} "
+-        f"(provider_available={available_out:,}, estimated_request_tokens={request_input_estimate:,}; "
+-        f"context_length unchanged at {old_ctx:,})"
++        f"⚠️ Допустимый размер ответа уменьшен до {safe_out:,} токенов. Повторяю запрос."
+     )
+     # Still count against compression_attempts so a recurring error can't loop forever.
+     exhausted = st.count_attempt()
+@@ -329,7 +325,7 @@
+     compressor = agent.context_compressor
+     new_ctx = get_context_length_from_provider_error(error_msg, old_ctx)
+     if new_ctx is not None:
+-        agent._buffer_vprint(f"Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})")
++        agent._buffer_vprint(f"Сервис сообщил размер контекста: {new_ctx:,} токенов (ранее {old_ctx:,}).")
+         compressor.update_model(
+             model=agent.model, context_length=new_ctx, base_url=agent.base_url,
+             api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
+@@ -343,7 +339,7 @@
+         if hasattr(compressor, "_context_probed"):
+             compressor._context_probed = True
+             compressor._context_probe_persistable = True
+-        agent._buffer_vprint(f"⚠️  Context length exceeded — using provider limit: {old_ctx:,} → {new_ctx:,} tokens")
++        agent._buffer_vprint(f"⚠️ Превышен размер контекста. Применяю ограничение сервиса: {old_ctx:,} → {new_ctx:,} токенов.")
+         return new_ctx
+
+     is_minimax_provider = (
+@@ -352,13 +348,11 @@
+     )
+     if is_minimax_provider and "context window exceeds limit (" in error_msg:
+         agent._buffer_vprint(
+-            f"Provider reported overflow amount only; "
+-            f"keeping context_length at {old_ctx:,} tokens."
++            f"Сервис сообщил только о размере превышения. Сохраняю размер контекста {old_ctx:,} токенов."
+         )
+     else:
+         agent._buffer_vprint(
+-            f"⚠️  Context length exceeded, but provider did not report a max context length; "
+-            f"keeping context_length at {old_ctx:,} tokens."
++            f"⚠️ Превышен размер контекста; сервис не сообщил новый предел. Сохраняю размер {old_ctx:,} токенов."
+         )
+     return None
+
+@@ -378,20 +372,19 @@
+     # fits) and would death-loop on the same 400. Fail fast.
+     if is_output_cap_error(error_msg):
+         return st.fail_turn(
+-            "The requested output length exceeds the provider's output cap for this model, "
+-            "and the error did not state the allowed limit.",
++            "Запрошенная длина ответа превышает ограничение сервиса ИИ для этой модели. "
++            "Допустимый размер в ответе сервиса не указан.",
+             notices=(
+-                "❌ The provider rejected the request because the requested output length exceeds its "
+-                "output cap for this model, and the error did not state the allowed limit.",
+-                "   💡 Hermes has no user setting for the output cap — check the endpoint's default max output "
+-                "(completion) tokens for this model on the server or proxy. "
+-                "(This is an output-cap error, not a context overflow — compression cannot fix it.)",
++                "❌ Сервис ИИ отклонил запрос: запрошенная длина ответа превышает ограничение модели. "
++                "Допустимый размер неизвестен.",
++                "   💡 Администратору нужно проверить ограничение длины ответа на сервере модели. "
++                "Сокращение истории не устранит эту ошибку.",
+             ),
+             log=(
+                 f"{agent.log_prefix}Output-cap error not routed into compression "
+                 f"(max_tokens over provider cap): {error_msg[:200]}",
+             ),
+-            compression_exhausted=False,
++            compression_exhausted=False, brai_failure_kind="output_cap_exceeded",
+         )
+
+     new_ctx = _adopt_provider_context_limit(st, error_msg, old_ctx)
+@@ -416,16 +409,17 @@
+         return st.fail_turn(
+             site_copy("server_context_rejection", model=agent.model, tokens=request_tokens, window=window),
+             notices=(
+-                f"❌ The server rejected the request as too large, but it is only ~{request_tokens:,} "
+-                f"tokens against a {window:,}-token window — not compressing.",
+-                "   💡 Wait a moment and /retry; another request on the same server (e.g. a background "
+-                "review) may have been holding its context.",
++                f"❌ Сервер отклонил запрос как слишком большой, хотя его размер — около {request_tokens:,} "
++                f"токенов при ожидаемом окне {window:,}. Историю не сокращаю.",
++                "   💡 Возможно, сервер занят другим запросом. Подождите и напишите «продолжай».",
+             ),
+             log=(
+                 "%sProvider context rejection not explained by request size (~%s of %s tokens); "
+                 "skipping compression: %s", agent.log_prefix, f"{request_tokens:,}", f"{window:,}", error_msg[:200],
+             ),
+             compression_exhausted=False, reason=FailoverReason.server_error.value, retryable=True,
++            brai_failure_kind="server_context_rejection", brai_request_tokens=request_tokens,
++            brai_context_window=window,
+         )
+
+     exhausted = st.count_attempt()
+@@ -451,7 +445,7 @@
+     return st.fail_turn(
+         site_copy("context_overflow", model=agent.model),
+         notices=(
+-            f"❌ The conversation is too long for the model ({new_tokens:,} tokens) and cannot be shrunk further.",
++            f"❌ Разговор слишком длинный для модели ({new_tokens:,} токенов); больше сократить его не удалось.",
+             _RETRY_HINT,
+         ),
+         log=("%sContext length exceeded: %s tokens. Cannot compress further.", agent.log_prefix, f"{new_tokens:,}"),
+diff --git a/agent/turn_tool_validation.py b/agent/turn_tool_validation.py
+--- a/agent/turn_tool_validation.py
++++ b/agent/turn_tool_validation.py
+@@ -53,7 +53,7 @@
+         })
+
+
+-def _partial_exit(agent, messages, conversation_history, api_call_count, final_response: str) -> dict[str, Any]:
++def _partial_exit(agent, messages, conversation_history, api_call_count, final_response: str, *, brai_failure_kind: str) -> dict[str, Any]:
+     """Terminal partial result. Prior retries or an earlier tool batch leave a tool-result
+     tail; close it as interrupt aborts do so the next turn is not tool→user (#48879).
+     This path never reaches finalize_turn, so persist here."""
+@@ -65,6 +65,7 @@
+         "api_calls": api_call_count,
+         "completed": False,
+         "partial": True,
++        "brai_failure_kind": brai_failure_kind,
+         "error": final_response,
+     }, "truncated", True)
+
+@@ -104,7 +105,7 @@
+         if tc.function.name not in valid_names:
+             repaired = agent._repair_tool_call(tc.function.name)
+             if repaired:
+-                agent._vprint(f"{agent.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'",
++                agent._vprint(f"{agent.log_prefix}🔧 Исправлено название действия: «{tc.function.name}» → «{repaired}».",
+                               force=True, diagnostic=True)
+                 tc.function.name = repaired
+                 repaired_ids.add(id(tc))
+@@ -122,22 +123,21 @@
+         agent._invalid_tool_retries = 0
+         _n_valid = sum(1 for tc in tool_calls if tc.function.name in valid_names)
+         agent._buffer_vprint(
+-            f"⚠️  Unknown tool '{_preview_name(invalid_tool_calls[0])}' in batch — erroring that call, "
+-            f"executing {_n_valid} valid call(s)"
++            f"⚠️ Модель запросила неизвестное действие «{_preview_name(invalid_tool_calls[0])}». Остальные действия ({_n_valid}) продолжат выполняться."
+         )
+     elif invalid_tool_calls:
+         agent._invalid_tool_retries += 1
+         # Return helpful error to model — model can agent-correct next turn
+         invalid_preview = _preview_name(invalid_tool_calls[0])
+-        agent._buffer_vprint(f"⚠️  Unknown tool '{invalid_preview}' — sending error to model for agent-correction ({agent._invalid_tool_retries}/3)")
++        agent._buffer_vprint(f"⚠️ Модель запросила неизвестное действие «{invalid_preview}». Прошу её исправить запрос (попытка {agent._invalid_tool_retries}/3).")
+
+         if agent._invalid_tool_retries >= 3:
+             agent._flush_status_buffer()
+-            agent._vprint(f"{agent.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True, diagnostic=True)
++            agent._vprint(f"{agent.log_prefix}❌ После трёх попыток модель продолжает запрашивать неверные действия. Сохраняю частичный результат.", force=True, diagnostic=True)
+             agent._invalid_tool_retries = 0
+             return _verdict("return", _partial_exit(
+                 agent, messages, conversation_history, api_call_count,
+-                f"Model generated invalid tool call: {invalid_preview}",
++                f"Model generated invalid tool call: {invalid_preview}", brai_failure_kind="invalid_tool_call",
+             ))
+
+         append_message(messages, agent._build_assistant_message(assistant_message, finish_reason))
+@@ -186,8 +186,7 @@
+         )
+         if _truncated:
+             agent._vprint(
+-                f"{agent.log_prefix}⚠️  Truncated tool call arguments detected "
+-                f"(finish_reason={finish_reason!r}) — refusing to execute.",
++                f"{agent.log_prefix}⚠️ Параметры действия получены не полностью. Действие не выполняю.",
+                 force=True, diagnostic=True,
+             )
+             agent._invalid_json_retries = 0
+@@ -199,20 +198,20 @@
+                 else site_copy("truncated_unreported")
+             )
+             return _verdict("return", _partial_exit(
+-                agent, messages, conversation_history, api_call_count, _copy,
++                agent, messages, conversation_history, api_call_count, _copy, brai_failure_kind="truncated_tool_call",
+             ))
+
+         agent._invalid_json_retries += 1
+         tool_name, error_msg = invalid_json_args[0]
+-        agent._buffer_vprint(f"⚠️  Invalid JSON in tool call arguments for '{tool_name}': {error_msg}")
++        agent._buffer_vprint(f"⚠️ Модель передала некорректные параметры действия «{tool_name}».")
+
+         if agent._invalid_json_retries < 3:
+-            agent._buffer_vprint(f"🔄 Retrying API call ({agent._invalid_json_retries}/3)...")
++            agent._buffer_vprint(f"🔄 Повторяю запрос к модели (попытка {agent._invalid_json_retries}/3).")
+             # Don't add anything to messages, just retry the API call
+             return _verdict("continue")
+         # Instead of returning partial, inject tool error results so the model can recover.
+         # Using tool results (not user messages) preserves role alternation.
+-        agent._buffer_vprint("⚠️  Injecting recovery tool results for invalid JSON...")
++        agent._buffer_vprint("⚠️ Восстанавливаю работу после некорректных параметров действия.")
+         agent._invalid_json_retries = 0  # Reset for next attempt
+         # Append the assistant message with its (broken) tool_calls, then one
+         # error result per call.
+diff --git a/agent/turn_api_call.py b/agent/turn_api_call.py
+--- a/agent/turn_api_call.py
++++ b/agent/turn_api_call.py
+@@ -184,7 +184,7 @@
+         _retry.restart_with_redirected_messages = True
+         return ApiInterruptVerdict("break", thinking_spinner, interrupted, final_response)
+     api_elapsed = time.time() - api_start_time
+-    agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
++    agent._vprint(f"{agent.log_prefix}⚡ Запрос к модели прерван.", force=True)
+     interrupted = True
+     # A Stop during the empty-response nudge request leaves the synthetic assistant+nudge
+     # pair after an executed tool result; strip it so the row appended below follows the tool
+@@ -258,7 +258,7 @@
+                         reset=anon_auth.friendly_wait(_nous_remaining))
+                 else:
+                     _nous_msg = f"Your Nous account has hit its rate limit; it resets in {reset}."
+-                agent._buffer_vprint(f"⏳ {_nous_msg} Trying fallback...")
++                agent._buffer_vprint("⏳ Сервис ИИ временно ограничил доступ. Пробую резервный сервис.")
+                 agent._buffer_diagnostic_status(f"⏳ {_nous_msg}")
+                 if agent._try_activate_fallback():
+                     active_system_prompt = _arm_fallback_restart(
+diff --git a/agent/turn_preflight.py b/agent/turn_preflight.py
+--- a/agent/turn_preflight.py
++++ b/agent/turn_preflight.py
+@@ -308,7 +308,7 @@
+         # Compression is running: reset blocked-overflow warning dedup so a
+         # future blocked turn can warn again.
+         _clear_overflow_warn(agent)
+-        agent._safe_print("  ⟳ compacting context…")
++        agent._safe_print("  ⟳ Сокращаю историю разговора…")
+         _post_tool_input = messages
+         # Pass overhead-aware _real_tokens, not last_prompt_tokens (0 in the
+         # no-usage fallback), so the overflow guard sees the true size.
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -1215,8 +1215,7 @@
+         _rebuild_primary_client(agent, rt, reason="primary_recovery")
+         wait_time = min(3 + retry_count, 8)
+         agent._vprint(
+-            f"{agent.log_prefix}🔁 Transient {error_type} on {agent.provider} — "
+-            f"rebuilt client, waiting {wait_time}s before one last primary attempt.", force=True, diagnostic=True,
++            f"{agent.log_prefix}🔁 Временная ошибка сервиса {agent.provider}. Повторю подключение через {wait_time} сек.", force=True, diagnostic=True,
+         )
+         time.sleep(wait_time)
+         return True
+@@ -1483,8 +1482,7 @@
+             # Notification surfaces are best-effort and must never undo a successful restore.
+             with contextlib.suppress(Exception):
+                 agent._emit_diagnostic_status(
+-                    f"✅ Primary model restored: {agent.model} via {agent.provider}; "
+-                    f"fallback {previous_model} via {previous_provider} is no longer active."
++                    f"✅ Основная модель снова доступна: {agent.model} ({agent.provider}). Резервная модель {previous_model} ({previous_provider}) больше не используется."
+                 )
+         return True
+     except Exception as e:
+@@ -1597,7 +1595,7 @@
+         _serialized = json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
+         _redacted_payload = json.loads(redact_sensitive_text(_serialized, force=True))
+         atomic_json_write(dump_file, _redacted_payload, default=str)
+-        agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
++        agent._vprint(f"{agent.log_prefix}🧾 Диагностика запроса сохранена: {dump_file}")
+         if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
+             print(json.dumps(_redacted_payload, ensure_ascii=False, indent=2, default=str))
+         return dump_file
+@@ -2805,11 +2803,9 @@
+             if key not in _empty_heal_user_notified:
+                 _empty_heal_user_notified.add(key)
+                 _empty_heal_pending_notice[key] = (
+-                    "⚠️ Your session transcript required repeated repair "
+-                    f"({total_events} heal passes so far). Replies keep "
+-                    "working, but a corrupted turn is stuck in this "
+-                    "session's history — run /debug share or `hermes "
+-                    "doctor` to capture diagnostics, or /new to start a clean session."
++                    f"⚠️ Историю разговора пришлось исправлять несколько раз ({total_events}). "
++                    "Ответы продолжают работать, но в истории осталась повреждённая запись. "
++                    "Обратитесь к администратору или начните новый разговор."
+                 )
+     if escalate:
+         _ra().logger.error(
 diff --git a/agent/turn_truncation.py b/agent/turn_truncation.py
 --- a/agent/turn_truncation.py
 +++ b/agent/turn_truncation.py
-@@ -640,7 +640,7 @@
-                     f"{agent.log_prefix}↻ Codex reasoning-only stall after {streak} attempts — "
-                     f"switching to fallback {agent.model} ({agent.provider})", diagnostic=True,
+@@ -273,10 +273,10 @@
+     ):
+         return None
+     agent._vprint(
+-        f"{agent.log_prefix}🛡️  Content filter terminated stream — activating fallback provider...",
++        f"{agent.log_prefix}🛡️ Фильтр безопасности прервал ответ. Пробую резервный сервис.",
+         force=True, diagnostic=True,
+     )
+-    agent._emit_diagnostic_status("Content filter terminated stream; switching to fallback...")
++    agent._emit_diagnostic_status("⚠️ Фильтр безопасности прервал ответ. Пробую резервный сервис ИИ.")
+     if agent._try_activate_fallback():
+         # Roll partial content back to the last clean turn so the fallback gets a
+         # coherent continuation point; unmark survivors (their text left the partial).
+@@ -295,8 +295,7 @@
+         _retry.restart_with_rebuilt_messages = True
+         return st.done("break")
+     agent._vprint(
+-        f"{agent.log_prefix}⚠️  No fallback provider configured — retrying with same provider "
+-        f"(may re-hit filter)...",
++        f"{agent.log_prefix}⚠️ Резервный сервис не настроен. Повторяю запрос к прежнему сервису; фильтр может снова его отклонить.",
+         force=True, diagnostic=True,
+     )
+     return None
+@@ -328,13 +327,12 @@
+         _dropped_tools = getattr(st.response, "_dropped_tool_names", None)
+         if st.is_stub and _dropped_tools:
+             agent._vprint(
+-                f"{agent.log_prefix}↻ Stream interrupted mid "
+-                f"tool-call ({', '.join(_dropped_tools[:3])}) — requesting chunked retry ({n}/4)...", diagnostic=True,
++                f"{agent.log_prefix}↻ Ответ прервался во время подготовки действия ({', '.join(_dropped_tools[:3])}). Пробую выполнить его по частям (попытка {n}/4).", diagnostic=True,
+             )
+         elif st.is_stub:
+-            agent._vprint(f"{agent.log_prefix}↻ Stream interrupted — requesting continuation ({n}/4)...", diagnostic=True)
++            agent._vprint(f"{agent.log_prefix}↻ Ответ прервался. Прошу модель продолжить (попытка {n}/4).", diagnostic=True)
+         else:
+-            agent._vprint(f"{agent.log_prefix}↻ Requesting continuation ({n}/4)...", diagnostic=True)
++            agent._vprint(f"{agent.log_prefix}↻ Прошу модель продолжить (попытка {n}/4).", diagnostic=True)
+         append_message(messages, {
+             "role": "user", "content": _get_continuation_prompt(st.is_stub, _dropped_tools),
+             "_length_continuation_nudge": True,
+@@ -406,9 +404,9 @@
+         st.truncated_tool_call_retries += 1
+         n = st.truncated_tool_call_retries
+         if st.is_stub:
+-            agent._buffer_vprint(f"⚠️  Stream interrupted mid tool-call — retrying ({n}/4)...")
++            agent._buffer_vprint(f"⚠️ Ответ прервался во время подготовки действия. Повторяю (попытка {n}/4).")
+         else:
+-            agent._buffer_vprint(f"⚠️  Truncated tool call detected — retrying API call ({n}/4)...")
++            agent._buffer_vprint(f"⚠️ Действие получено не полностью. Повторяю запрос (попытка {n}/4).")
+         agent._ephemeral_max_output_tokens = boosted_output_cap(
+             agent, agent._requested_output_cap_from_api_kwargs(api_kwargs), n
+         )
+@@ -419,20 +417,20 @@
+         # #102766: no transport error — the server (or a proxy) closed the stream cleanly
+         # without a finish_reason, so "check your network" copy / a timeout stamp would mislead.
+         agent._vprint(
+-            f"{agent.log_prefix}⚠️  Server kept closing the stream mid tool-call after 4 retries — the action was not executed.",
++            f"{agent.log_prefix}⚠️ Сервер закрывал соединение при подготовке действия. После четырёх попыток действие не выполнено.",
+             force=True, diagnostic=True,
+         )
+         _final_response = site_copy("stream_closed_tool_call", label=provider_label_for(agent.provider))
+         _failure = "truncated"
+     elif st.is_stub:
+         agent._vprint(
+-            f"{agent.log_prefix}⚠️  Stream kept dropping mid tool-call after 4 retries — the action was not executed.",
++            f"{agent.log_prefix}⚠️ Соединение прерывалось при подготовке действия. После четырёх попыток действие не выполнено.",
+             force=True, diagnostic=True,
+         )
+         _final_response = site_copy("stream_dropped_tool_call", label=provider_label_for(agent.provider))
+     else:
+         agent._vprint(
+-            f"{agent.log_prefix}⚠️  Truncated tool call response detected again — refusing to execute incomplete tool arguments.",
++            f"{agent.log_prefix}⚠️ Действие снова получено не полностью; не выполняю его.",
+             force=True, diagnostic=True,
+         )
+         _final_response = _TRUNCATED_FINAL
+@@ -493,9 +491,7 @@
+     if getattr(st.response, "_overflow_terminal", False):
+         agent._flush_status_buffer()
+         agent._vprint(
+-            f"{agent.log_prefix}⚠️ Stream ended on a context-overflow error after "
+-            "partial delivery — not continuing (the request no longer fits the model's "
+-            "context window).",
++            f"{agent.log_prefix}⚠️ Ответ прервался из-за переполнения контекста. Часть ответа уже получена; продолжить запрос не удалось.",
+             force=True, diagnostic=True,
+         )
+         # Prior tool batches can leave a tool-result tail; this path never reaches
+@@ -532,13 +528,13 @@
+             return _retry_truncated_tool_call(st, api_kwargs)
+
+     if len(messages) > 1:
+-        agent._vprint(f"{agent.log_prefix}   ⏪ Rolling back to last complete assistant turn", diagnostic=True)
++        agent._vprint(f"{agent.log_prefix}   ⏪ Возвращаюсь к последнему полному ответу.", diagnostic=True)
+         return st.end_turn(
+             _TRUNCATED_FINAL, result_messages=agent._get_messages_up_to_last_assistant(messages)
+         )
+     # First message was truncated - mark as failed
+     agent._flush_status_buffer()
+-    agent._vprint(f"{agent.log_prefix}❌ First response truncated - cannot recover", force=True, diagnostic=True)
++    agent._vprint(f"{agent.log_prefix}❌ Первый ответ оборвался; восстановить его не удалось.", force=True, diagnostic=True)
+     return st.end_turn(_FIRST_TRUNCATED_FINAL, cleanup=False, failed=True)
+
+
+@@ -637,10 +633,9 @@
+             agent._codex_reasoning_only_streak = 0
+             if not agent.quiet_mode:
+                 agent._vprint(
+-                    f"{agent.log_prefix}↻ Codex reasoning-only stall after {streak} attempts — "
+-                    f"switching to fallback {agent.model} ({agent.provider})", diagnostic=True,
++                    f"{agent.log_prefix}↻ Модель не подготовила ответ после {streak} попыток. Переключаюсь на резервную модель {agent.model} ({agent.provider}).", diagnostic=True,
                  )
 -            agent._emit_diagnostic_wait("↻ model stuck on internal reasoning — switching to fallback provider")
 +            agent._emit_diagnostic_wait("↻ Модель не завершила ответ. Переключаюсь на резервное подключение.")
              agent._session_messages = messages
              return CODEX_FALLBACK_ACTIVATED
          # No fallback left: fall through to the terminal sentinel.
-@@ -682,7 +682,7 @@
+@@ -670,7 +665,7 @@
+                 agent, None, n, base=agent.max_tokens or int(observed or 0) or 4096
+             )
+         if not agent.quiet_mode:
+-            agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({n}/3)", diagnostic=True)
++            agent._vprint(f"{agent.log_prefix}↻ Ответ модели не завершён. Продолжаю (попытка {n}/3).", diagnostic=True)
+         # Spinner/heartbeat notice: these retries can take minutes and otherwise look
+         # like infinite thinking.
+         # #70773: same FD-recycle corruption vector as #67142. The shared OpenAI client's connection pool
+@@ -682,7 +677,7 @@
          # each of these retries can spend minutes waiting on the provider, and without a distinct notice the
          # user only sees a generic thinking spinner ("infinite thinking", #64434).
          agent._emit_diagnostic_wait(
@@ -1193,22 +2446,162 @@ diff --git a/agent/turn_truncation.py b/agent/turn_truncation.py
          )
          agent._session_messages = messages
          return None
-diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstream.py
---- a/agent/chat_completion_nonstream.py
-+++ b/agent/chat_completion_nonstream.py
-@@ -212,7 +212,7 @@
-             f"⚠️ No first stream event from provider in {int(elapsed)}s (codex stream, model: {self._model()}). "
-             f"Reconnecting." + (f" {silent_hint}" if silent_hint else ""))
-         self._abort_request("codex_ttfb_kill")
--        agent._emit_diagnostic_wait(f"⚠ no response from provider in {int(elapsed)}s — reconnecting...")
-+        agent._emit_diagnostic_wait(f"⚠️ Нет ответа от сервиса {int(elapsed)} сек. Восстанавливаю соединение...")
-         agent._touch_activity(f"codex stream killed after {int(elapsed)}s with no first stream event")
-         self._await_worker_after_kill(
-             f"Codex stream produced no parsed stream event within {int(elapsed)}s "
+@@ -741,7 +736,7 @@
+     stop_thinking_spinner(agent, thinking_spinner)
+
+     if agent._has_pending_fallback():
+-        agent._buffer_diagnostic_status("⚠️ Model declined to respond (safety refusal) — trying fallback...")
++        agent._buffer_diagnostic_status("⚠️ Модель отказалась отвечать по соображениям безопасности. Пробую резервный сервис ИИ.")
+     if agent._try_activate_fallback():
+         active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
+         return RefusalVerdict("break", None, active_system_prompt)
+@@ -757,7 +752,7 @@
+         getattr(response, "stop_reason", None) or "n/a", _stop_details or "n/a",
+         _refusal_log or "(no text)",
+     )
+-    agent._emit_diagnostic_status("⚠️ The model declined to respond to this request (safety refusal).")
++    agent._emit_diagnostic_status("⚠️ Модель отказалась отвечать на этот запрос по соображениям безопасности.")
+     _refusal_response = "⚠️ " + content_policy_copy(
+         label=provider_label_for(agent.provider),
+         summary=_refusal_text or "the model returned no explanation",
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -631,9 +631,7 @@
+         with suppress(Exception):
+             if agent._cleanup_dead_connections():
+                 agent._emit_diagnostic_status(
+-                    "🔌 Detected stale connections from a previous provider "
+-                    "issue — cleaned up automatically. Proceeding with fresh "
+-                    "connection."
++                    "🔌 Устаревшее соединение после ошибки сервиса закрыто. Подключаюсь заново."
+                 )
+     # Replay compression warning through status_callback for gateway platforms.
+     if agent._compression_warning:
+@@ -1120,8 +1118,7 @@
+
+     if not agent.quiet_mode:
+         agent._safe_print(
+-            f"💬 Starting conversation: '{_preview_text[:60]}"
+-            f"{'...' if len(_preview_text) > 60 else ''}'"
++            f"💬 Начинаю разговор: «{_preview_text[:60]}{'...' if len(_preview_text) > 60 else ''}»"
+         )
+
+     # System prompt is cached per session for prefix caching.
 diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
 --- a/agent/chat_completion_helpers.py
 +++ b/agent/chat_completion_helpers.py
-@@ -3891,7 +3891,7 @@
+@@ -594,7 +594,7 @@
+         stale_timeout, model, f"{estimate_request_context_tokens(api_kwargs):,}")
+     try:
+         agent._buffer_diagnostic_status(
+-            f"⚠️ No response from provider for {int(elapsed)}s (non-streaming, model: {model}). {hint or 'Aborting call.'}")
++            f"⚠️ Сервис ИИ не отвечает уже {int(elapsed)} сек. (модель: {model}). Прерываю запрос.")
+     except Exception:
+         logger.debug("stale status buffering failed", exc_info=True)
+
+@@ -850,17 +850,17 @@
+         model = str(api_kwargs.get("model", ""))
+         progress = get_loading_progress().get(model)
+         if progress is not None:
+-            return (f"⏳ loading {model} into memory — {progress['percent']}% "
+-                "(responses start once the model is loaded)")
++            return (f"⏳ Загружаю модель {model}: {progress['percent']}%. "
++                "Ответ появится после загрузки.")
+         prefill = get_prefill_progress(model)
+         if prefill is None:
+             return None
+         processed = int(prefill["processed"])
+         total = estimate_request_context_tokens(api_kwargs)
+         if total and total >= processed:
+-            return f"⚙ processing prompt — {max(0, min(100, round(processed / total * 100)))}%"
++            return f"⚙ Обрабатываю запрос — {max(0, min(100, round(processed / total * 100)))}%"
+         # Counter past the estimate (estimator undercounted): no honest denominator, label-only.
+-        return "⚙ processing prompt"
++        return "⚙ Обрабатываю запрос"
+     except Exception:
+         return None
+
+@@ -2596,9 +2596,7 @@
+         # attempt (one lifecycle boundary).
+         from agent.bedrock_adapter import normalize_converse_response
+         self.agent._disable_streaming = True
+-        self.agent._safe_print("\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream — "
+-            "falling back to non-streaming InvokeModel.\n"
+-            "   Grant that action to restore streaming output.\n", diagnostic=True)
++        self.agent._safe_print("\n⚠ Не хватает прав AWS для потокового ответа Bedrock. Переключаюсь на обычный режим.\n", diagnostic=True)
+         logger.info("bedrock: converse_stream denied by IAM (%s) — "
+             "using non-streaming converse() for this session.", type(exc).__name__)
+         return normalize_converse_response(client.converse(**final_kwargs))
+@@ -2672,7 +2670,7 @@
+         logger.warning("Bedrock stream stale for %.0fs (threshold %.0fs) — no events "
+             "received. region=%s model=%s. Aborting call.", stale_elapsed, self.stale_timeout, self.region,
+             self._model())
+-        agent._buffer_diagnostic_status(f"⚠️ No events from Bedrock for {int(stale_elapsed)}s (model: {self._model()}). Aborting...")
++        agent._buffer_diagnostic_status(f"⚠️ Сервис Bedrock не отвечает уже {int(stale_elapsed)} сек. (модель: {self._model()}). Прерываю запрос.")
+         _bump_stale_streak(agent)
+         # Evict the region's cached client so the NEXT call gets a fresh pool.
+         # This does NOT abort the in-flight botocore EventStream (no external
+@@ -3582,8 +3580,7 @@
+             # buffered retry chatter is dropped on successful recovery. Fires at most once per
+             # session (streaming is off from here on).
+             self.agent._emit_warning(
+-                "⚠️ Provider stream returned an empty keepalive frame — retrying this turn "
+-                "without streaming (streaming stays off for this session).")
++                "⚠️ Сервис прислал пустой ответ. Продолжаю без потоковой передачи в этом разговоре.")
+             return
+         from agent.anthropic_adapter import _is_stream_unavailable_error
+         if not _is_stream_unavailable_error(e):
+@@ -3597,18 +3594,14 @@
+                 return
+             self.agent._disable_streaming = True
+             self.agent._safe_print(
+-                "\n⚠  Provider sent Anthropic stream events out of order. Switching to non-streaming.\n",
++                "\n⚠ Сервис ИИ прислал данные ответа в неправильном порядке. Переключаюсь на обычный режим.\n",
+                 diagnostic=True,
+             )
+             return
+         # Remaining matches: stream rejected outright, or Bedrock IAM stream denial.
+         self.agent._disable_streaming = True
+         self.agent._safe_print(
+-            "\n⚠  Streaming is not supported for this model/provider. Switching to non-streaming.\n"
+-            "   To avoid this delay, set display.streaming: false in config.yaml\n"
+-            if _is_stream_unsupported else
+-            "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream. Switching to non-streaming.\n"
+-            "   Grant that action to restore streaming output.\n",
++            "\n⚠ Не хватает прав AWS для потокового ответа Bedrock. Переключаюсь на обычный режим.\n",
+             diagnostic=True,
+         )
+
+@@ -3672,7 +3665,7 @@
+             # Marker explains the re-streamed preamble (``_emit_stream_drop`` logs the WARNING);
+             # reset the streamed-text buffer so it isn't double-recorded; fresh accumulators.
+             if self.agent._warning_presentation_enabled():
+-                self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n")
++                self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Соединение прервалось во время подготовки действия. Подключаюсь снова…\n\n")
+             self._quiet(self.agent._reset_stream_delivery_tracking)
+             self.deltas_were_sent["yes"] = False
+             self.first_delta_fired["done"] = False
+@@ -3692,7 +3685,7 @@
+                 _what = ("Provider returned malformed streaming data after" if _is_stream_parse_err
+                          else "Provider returned an empty response stream after")
+                 self.agent._buffer_diagnostic_status(
+-                    f"❌ {_what} {max_retries + 1} attempts. The provider may be experiencing issues — try again in a moment.")
++                    f"❌ После {max_retries + 1} попыток сервис ИИ вернул {'некорректные данные' if _is_stream_parse_err else 'пустой ответ'}. Попробую продолжить позже.")
+             else:
+                 from agent.stream_diag import buffer_connect_exhausted_notice
+                 buffer_connect_exhausted_notice(self.agent, e, attempts=max_retries + 1, base_url=self.agent.base_url)
+@@ -3879,8 +3872,7 @@
+             elapsed, self._stream_stale_timeout, self.api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
+         )
+         self.agent._buffer_diagnostic_status(
+-            f"⚠️ No response from provider for {int(elapsed)}s (model: {self.api_kwargs.get('model', 'unknown')}, "
+-            f"context: ~{_est_ctx:,} tokens). Reconnecting...")
++            f"⚠️ Сервис ИИ не отвечает уже {int(elapsed)} сек. (модель: {self.api_kwargs.get('model', 'unknown')}, контекст: около {_est_ctx:,} токенов). Переподключаюсь.")
+         # Captured BEFORE the cancel/abort: the pool sweep can miss a checked-out
+         # connection, so shut down the killed attempt's own socket too — still
+         # shutdown-only, never close (see the helper).
+@@ -3892,7 +3884,7 @@
          self._count_stale_attempt()
          # Reset the timer so we don't kill repeatedly while the worker unwinds.
          self.last_chunk_time["t"] = time.time()
@@ -1217,3 +2610,1195 @@ diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
          self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
 
      def _abort_for_interrupt(self, stale_elapsed: float) -> None:
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -1142,7 +1142,7 @@
+         requirements = model_tools.check_toolset_requirements()
+         missing_reqs = [name for name, available in requirements.items() if not available]
+         if missing_reqs:
+-            agent._safe_print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}", diagnostic=True)
++            agent._safe_print(f"⚠️ Некоторые действия могут быть недоступны из-за отсутствующих компонентов: {missing_reqs}", diagnostic=True)
+     else:
+         print("🛠️  No tools loaded (all tools filtered out or unavailable)")
+     if agent.save_trajectories:
+diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
+--- a/agent/turn_recovery.py
++++ b/agent/turn_recovery.py
+@@ -136,11 +136,7 @@
+             if getattr(agent, "client", None) is not None and hasattr(agent.client, "api_key"):
+                 agent.client.api_key = _clean_key
+             _repaired = True
+-            _vlines(
+-                agent,
+-                "⚠️  API key contained non-ASCII characters (bad copy-paste?) — stripped them. "
+-                "If auth fails, re-copy the key from your provider's dashboard.",
+-            )
++            _vlines(agent, "⚠️ В ключе доступа обнаружены посторонние символы, они удалены. Если авторизация не удастся, проверьте ключ.")
+     return _repaired
+
+
+@@ -187,10 +183,7 @@
+         if not _repair_transport_credentials(agent):
+             return False, active_system_prompt
+         agent._unicode_sanitization_passes += 1
+-        _vlines(
+-            agent,
+-            "⚠️  Repaired non-ASCII request credentials/headers without changing conversation content. Retrying...",
+-        )
++        _vlines(agent, "⚠️ Исправлены символы в данных подключения. Повторяю запрос; содержание разговора не изменено.")
+         return True, active_system_prompt
+
+     agent._force_ascii_payload = True
+@@ -212,12 +205,7 @@
+     # Always retry on ASCII codec detection: _force_ascii_payload sanitizes the full
+     # api_kwargs next iteration even when the checks above find nothing.
+     agent._unicode_sanitization_passes += 1
+-    _vlines(
+-        agent,
+-        "⚠️  System encoding is ASCII — stripped non-ASCII characters from request payload. Retrying..."
+-        if (_messages_sanitized or _system_sanitized or _transport_repaired) else
+-        "⚠️  System encoding is ASCII — enabling full-payload sanitization for retry...",
+-    )
++    _vlines(agent, "⚠️ Системная кодировка не поддерживает часть символов. Подготавливаю запрос для повторной отправки.")
+     return True, active_system_prompt
+
+
+@@ -227,7 +215,7 @@
+     Shared by the corrupt-image recoveries: a bad payload says nothing about the model, so it
+     is stripped for this attempt only and the model is never recorded as image-rejecting."""
+     if isinstance(api_messages, list) and _strip_images_from_messages(api_messages):
+-        _vlines(agent, "⚠️  Provider rejected a corrupted image — stripped images from the retry payload and retrying...")
++        _vlines(agent, "⚠️ Сервис отклонил повреждённое изображение. Повторяю запрос без изображений.")
+         return True
+     return False
+
+@@ -253,7 +241,7 @@
+     # succeed at fast speed, and it says nothing about the key's standard-speed limits. Stop
+     # sending ``speed`` to this model and retry now, before credential rotation benches the key.
+     if fast_mode_unprovisioned(api_error, api_kwargs) and mark_fast_mode_unavailable(agent):
+-        _vlines(agent, f"⚠️  Fast mode isn't available for {agent.model} on this Anthropic organization — using standard speed for this session, retrying...")
++        _vlines(agent, f"⚠️ Быстрый режим для модели {agent.model} недоступен. На время этого разговора использую обычный режим.")
+         logger.warning("%sFast mode: %s has a fast-mode limit of 0; standard speed for this session", agent.log_prefix, agent.model)
+         return True, active_system_prompt
+
+@@ -289,11 +277,7 @@
+             # Record the model; the retry re-enters build_api_request with the same
+             # api_messages and strip_images_for_rejecting_model strips them there.
+             _rejected.add(_model_key)
+-            _vlines(
+-                agent,
+-                "⚠️  Server rejected image content — sending text only to this model; "
+-                "images stay in the session history.",
+-            )
++            _vlines(agent, "⚠️ Сервис отклонил изображения. Отправляю модели только текст; изображения останутся в истории разговора.")
+             return True, active_system_prompt
+
+     # AnthropicBedrock SDK raises "Unexpected event order" when Bedrock errors before
+@@ -310,7 +294,7 @@
+         agent._bedrock_region = getattr(agent, "_bedrock_region", None) or "us-east-1"
+         agent.client = None  # Drop the AnthropicBedrock client
+         agent._client_kwargs = {}
+-        _vlines(agent, "⚠️  AnthropicBedrock SDK streaming failed — falling back to native Converse API for this session.")
++        _vlines(agent, "⚠️ Потоковый режим Bedrock недоступен. Для этого разговора переключаюсь на другой способ подключения.")
+         return True, active_system_prompt
+     return False, active_system_prompt
+
+@@ -327,7 +311,7 @@
+             _body_text = str(_body)[:200]
+     except Exception:
+         pass
+-    _plines(agent, "🔐 Nous 401 — Portal authentication failed.")
++    _plines(agent, "🔐 Сервис Nous отклонил авторизацию (HTTP 401).")
+     if _body_text:
+         _plines(agent, f"   Response: {_body_text}")
+     try:
+@@ -335,21 +319,13 @@
+         if is_anonymous_agent(agent):
+             # The free tier has no credits, no agent key and no auth.json to inspect: its session
+             # ended and could not be replaced. The two doors are a sign-in or another provider.
+-            _plines(agent, "   Your session ended and Hermes couldn't start a new one.",
+-                    "   Sign in with a Nous account (it's free), or switch providers with /model.")
++            _plines(agent, "   Сеанс завершён. Не удалось начать новый; проверьте авторизацию в сервисе.")
+             return
+     except Exception:
+         pass
+     if not _print_nous_entitlement_guidance(agent, "Nous model access"):
+-        _plines(agent, "   Most likely: Portal OAuth expired, account out of credits, or agent key revoked.")
+-    _plines(
+-        agent,
+-        "   Troubleshooting:",
+-        "     • Re-authenticate: hermes auth add nous",
+-        "     • Check credits / billing: https://portal.nousresearch.com",
+-        f"     • Verify stored credentials: {display_hermes_home()}/auth.json",
+-        "     • Switch providers temporarily: /model <model> --provider openrouter",
+-    )
++        _plines(agent, "   Возможные причины: истёк срок авторизации, закончились средства или отозван ключ доступа.")
++    _plines(agent, "   Проверьте авторизацию, настройки и доступ к сервису ИИ.")
+
+
+ def _print_anthropic_401_diagnostics(agent: Any, key: Any) -> None:
+@@ -357,35 +333,16 @@
+     from agent.anthropic_credentials import _is_oauth_token
+     from agent.azure_identity_adapter import is_token_provider
+     from hermes_constants import display_hermes_home
+-    _plines(agent, "🔐 Anthropic 401 — authentication failed.")
++    _plines(agent, "🔐 Сервис Anthropic отклонил авторизацию (HTTP 401).")
+     if is_token_provider(key):
+         # Azure Foundry Entra ID: JWT minted per-request by an httpx hook; 401 = Azure
+         # rejected it (RBAC, az login, IMDS).
+-        _plines(
+-            agent,
+-            "   Auth method: Microsoft Entra ID (httpx event hook)",
+-            "   Run `hermes doctor` for credential-chain diagnostics, or",
+-            "   `az login` if your developer session expired.",
+-        )
++        _plines(agent, "   Используется авторизация Microsoft Entra ID. Проверьте доступ к аккаунту.")
+     else:
+         auth_method = "Bearer (OAuth/setup-token)" if _is_oauth_token(key) else "x-api-key (API key)"
+-        _plines(
+-            agent,
+-            f"   Auth method: {auth_method}",
+-            f"   Token prefix: {key[:12]}..." if isinstance(key, str) and len(key) > 12 else "   Token: (empty or short)",
+-        )
++        _plines(agent, "   Проверьте данные авторизации сервиса.")
+     _dhh = display_hermes_home()
+-    _plines(
+-        agent,
+-        "   Troubleshooting:",
+-        f"     • Check ANTHROPIC_TOKEN in {_dhh}/.env for Hermes-managed OAuth/setup tokens",
+-        f"     • Check ANTHROPIC_API_KEY in {_dhh}/.env for API keys or legacy token values",
+-        "     • For API keys: verify at https://platform.claude.com/settings/keys",
+-        "     • Hermes login (OAuth): run 'hermes auth add anthropic' to sign in again, then retry",
+-        "     • Inspect what Hermes holds: hermes auth list anthropic",
+-        "     • Legacy cleanup: hermes config set ANTHROPIC_TOKEN \"\"",
+-        "     • Clear stale keys: hermes config set ANTHROPIC_API_KEY \"\"",
+-    )
++    _plines(agent, "   Проверьте авторизацию, настройки и доступ к сервису ИИ.")
+
+
+ def _refresh_credentials_after_401(
+@@ -406,12 +363,12 @@
+         _retry.codex_auth_retry_attempted = True
+         if agent._try_refresh_codex_client_credentials(force=True):
+             _label = "xAI OAuth" if agent.provider == "xai-oauth" else "Codex"
+-            agent._buffer_vprint(f"🔐 {_label} auth refreshed after 401. Retrying request...")
++            agent._buffer_vprint(f"🔐 Доступ к {_label} обновлён после ошибки 401. Повторяю запрос.")
+             return True
+     if agent.api_mode == "chat_completions" and agent.provider == "vertex" and not _retry.vertex_auth_retry_attempted:
+         _retry.vertex_auth_retry_attempted = True
+         if agent._try_refresh_vertex_client_credentials():
+-            agent._buffer_vprint("🔐 Vertex AI token refreshed after 401. Retrying request...")
++            agent._buffer_vprint("🔐 Доступ к Vertex AI обновлён после ошибки 401. Повторяю запрос.")
+             return True
+     if (
+         agent.api_mode in ("chat_completions", "anthropic_messages")
+@@ -420,13 +377,13 @@
+     ):
+         _retry.nous_auth_retry_attempted = True
+         if agent._try_refresh_nous_client_credentials(force=True):
+-            agent._buffer_vprint("🔐 Nous agent key refreshed after 401. Retrying request...")
++            agent._buffer_vprint("🔐 Ключ доступа обновлён после ошибки 401. Повторяю запрос.")
+             return True
+         _print_nous_401_diagnostics(agent, api_error)
+     if _is_copilot_provider(agent) and not _retry.copilot_auth_retry_attempted:
+         _retry.copilot_auth_retry_attempted = True
+         if agent._try_refresh_copilot_client_credentials():
+-            agent._buffer_vprint("🔐 Copilot credentials refreshed after 401. Retrying request...")
++            agent._buffer_vprint("🔐 Доступ к Copilot обновлён после ошибки 401. Повторяю запрос.")
+             return True
+     if (
+         agent.api_mode == "anthropic_messages"
+@@ -435,7 +392,7 @@
+     ):
+         _retry.anthropic_auth_retry_attempted = True
+         if agent._try_refresh_anthropic_client_credentials():
+-            _plines(agent, "🔐 Anthropic credentials refreshed after 401. Retrying request...")
++            _plines(agent, "🔐 Доступ к Anthropic обновлён после ошибки 401. Повторяю запрос.")
+             return True
+         _print_anthropic_401_diagnostics(agent, agent._anthropic_api_key)
+     return False
+@@ -488,11 +445,7 @@
+         if isinstance(_m, dict):
+             _m.pop("codex_reasoning_items", None)
+     action = "stripped stale" if keep_replay else "disabled replay for this session and stripped"
+-    _vlines(
+-        agent,
+-        f"⚠️  Encrypted reasoning replay was rejected by the provider — "
+-        f"{action} {replay_stats['items']} item(s) from {replay_stats['messages']} message(s), retrying...",
+-    )
++    _vlines(agent, f"⚠️ Сервис отклонил сохранённые зашифрованные рассуждения из {replay_stats['messages']} сообщений. Подготавливаю повторный запрос.")
+     logger.warning(
+         "%sInvalid encrypted reasoning recovery: %s %d items from %d messages",
+         agent.log_prefix, action, replay_stats["items"], replay_stats["messages"],
+@@ -525,7 +478,7 @@
+                     message.pop("reasoning_details", None)
+                     removed += 1
+             detail = "stripped reasoning_details"
+-        _vlines(agent, f"⚠️  Thinking block signature invalid, {detail} and retrying...")
++        _vlines(agent, "⚠️ Сервис отклонил подпись блока рассуждений. Подготавливаю повторный запрос.")
+         logger.warning(
+             "%sThinking block signature recovery: %s from %d carrier/message(s) "
+             "(canonical messages unchanged)",
+@@ -551,11 +504,7 @@
+         if is_native_compaction_rejection(api_error, getattr(api_error, "status_code", None)):
+             _retry.native_compaction_reject_retry_attempted = True
+             agent.codex_responses_native_compaction = False
+-            _vlines(
+-                agent,
+-                "⚠️  Provider rejected native compaction (context_management) — disabled for this session, "
+-                "local compression stays active. Retrying...",
+-            )
++            _vlines(agent, "⚠️ Сервис отклонил встроенное сокращение истории. На время разговора использую локальное сокращение и повторяю запрос.")
+             logger.warning(
+                 "%sNative compaction rejection recovery: disabled "
+                 "codex_responses_native for this session and retrying",
+@@ -574,7 +523,7 @@
+             logger.warning("%sllama.cpp grammar recovery: strip helper failed: %s", agent.log_prefix, _strip_exc)
+             _stripped = 0
+         if _stripped:
+-            _vlines(agent, f"⚠️  llama.cpp rejected tool schema grammar — stripped {_stripped} pattern/format keyword(s), retrying...")
++            _vlines(agent, f"⚠️ Локальная модель отклонила схему действий. Исправлено ограничений: {_stripped}; повторяю запрос.")
+             logger.warning(
+                 "%sllama.cpp grammar recovery: stripped %d "
+                 "pattern/format keyword(s) from tool schemas",
+@@ -624,7 +573,7 @@
+                 agent._nous_model_switch = (requested, target)
+             except Exception:
+                 return False
+-            _vlines(agent, f"↪️  {requested} isn't available without signing in; using {target} for now. Retrying...")
++            _vlines(agent, f"↪️ Модель {requested} недоступна без входа. Временно использую {target} и повторяю запрос.")
+             logger.info("%sNous free tier: moved %s -> %s after model_not_free", agent.log_prefix, requested, target)
+             return True
+     route = ctx.get("welcome_route") if isinstance(ctx, dict) else None
+@@ -635,7 +584,7 @@
+         except Exception:
+             healed = False
+         if healed:
+-            _vlines(agent, f"🔐 {_WELCOME_ROUTE_HEAL_COPY[route]} Retrying request...")
++            _vlines(agent, "🔐 Доступ к сервису обновлён. Повторяю запрос.")
+             return True
+     return False
+
+@@ -656,7 +605,7 @@
+         return False
+     _retry.affordable_402_clamp_attempted = True
+     agent._ephemeral_max_output_tokens = affordable
+-    _vlines(agent, f"💳 Credit balance covers fewer output tokens — retrying with max_tokens={affordable:,}...")
++    _vlines(agent, f"💳 Доступный баланс позволяет получить более короткий ответ. Повторяю с ограничением {affordable:,} токенов.")
+     logger.info("%sCredit-limited 402: retrying once with max_tokens=%d", agent.log_prefix, affordable)
+     return True
+
+@@ -700,7 +649,7 @@
+     ):
+         _retry.nous_paid_entitlement_refresh_attempted = True
+         if _try_refresh_nous_paid_entitlement_credentials(agent):
+-            _vlines(agent, "🔐 Nous paid access verified — refreshed runtime credentials and retrying request...")
++            _vlines(agent, "🔐 Платный доступ подтверждён; данные подключения обновлены. Повторяю запрос.")
+             return True, False
+
+     recovered_with_pool, _retry.has_retried_429 = agent._recover_with_credential_pool(
+@@ -717,7 +666,7 @@
+         if agent._try_shrink_image_parts_in_messages(
+             api_messages, max_dimension=_image_error_max_dimension(api_error) or 8000
+         ):
+-            _vlines(agent, "📐 Image(s) exceeded provider size limit — shrank and retrying...")
++            _vlines(agent, "📐 Изображения превышали допустимый размер. Уменьшаю их и повторяю запрос.")
+             return True, recovered_with_pool
+         logger.info(
+             "image-shrink recovery: no data-URL image parts found "
+@@ -732,7 +681,7 @@
+     ):
+         _retry.multimodal_tool_content_retry_attempted = True
+         if agent._try_strip_image_parts_from_tool_messages(api_messages):
+-            _vlines(agent, "📐 Provider rejected list-type tool content — downgraded screenshots to text and retrying...")
++            _vlines(agent, "📐 Сервис отклонил формат результата действия. Преобразую снимки в текст и повторяю запрос.")
+             return True, recovered_with_pool
+         logger.info(
+             "multimodal-tool-content recovery: no list-type tool "
+@@ -757,7 +706,7 @@
+             # level (#100536: ``reasoning.effort: max`` on a Responses relay). Dropping a disable
+             # would resend the identical request; omit the reasoning fields instead (route default).
+             agent._reasoning_effort_rejected = True
+-            _vlines(agent, f"⚠️  {agent.model} rejects reasoning effort {sent['effort']} — using the route's default for this session, retrying...")
++            _vlines(agent, f"⚠️ Модель {agent.model} не поддерживает выбранный уровень рассуждений. Использую стандартный уровень и повторяю запрос.")
+             logger.warning("%sReasoning-effort recovery: dropping reasoning config for %s", agent.log_prefix, agent.model)
+             return True, recovered_with_pool
+         agent._reasoning_disable_rejected = True
+@@ -774,11 +723,11 @@
+             pass
+         if agent._reasoning_floor_required:
+             from agent.auxiliary_reasoning_floor import REASONING_FLOOR_EFFORT
+-            _vlines(agent, f"⚠️  {agent.model} cannot disable reasoning — using effort={REASONING_FLOOR_EFFORT} for this session, retrying...")
++            _vlines(agent, f"⚠️ В модели {agent.model} нельзя отключить рассуждения. Использую минимальный доступный уровень и повторяю запрос.")
+             logger.warning("%sReasoning-disable recovery: stepping reasoning up to %s for %s",
+                            agent.log_prefix, REASONING_FLOOR_EFFORT, agent.model)
+         else:
+-            _vlines(agent, f"⚠️  {agent.model} rejects disabling reasoning — using the route's default for this session, retrying...")
++            _vlines(agent, f"⚠️ Модель {agent.model} не позволяет отключить рассуждения. Использую стандартные настройки и повторяю запрос.")
+             logger.warning("%sReasoning-disable recovery: dropping reasoning disable for %s", agent.log_prefix, agent.model)
+         return True, recovered_with_pool
+
+@@ -808,7 +757,7 @@
+             except Exception:
+                 pass
+             agent._rebuild_anthropic_client()
+-            _vlines(agent, "🔕 OAuth subscription doesn't support the 1M-context beta — disabled for this session and retrying...")
++            _vlines(agent, "🔕 Подписка не поддерживает расширенный контекст. Отключаю его на время разговора и повторяю запрос.")
+             return True, recovered_with_pool
+
+     if _refresh_credentials_after_401(agent, api_error, _retry, status_code):
+@@ -899,50 +848,25 @@
+         if provider == "openai-codex":
+             from agent.turn_failure_copy import oauth_relogin_command
+
+-            _vlines(
+-                agent,
+-                "   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been",
+-                "      refreshed by another client (Codex CLI, VS Code) or another Hermes profile.",
+-                f"      Sign this profile in again: `{oauth_relogin_command(provider)}`",
+-            )
++            _vlines(agent, "   💡 Сервис ИИ отклонил авторизацию (HTTP 401). Нужно войти в аккаунт заново.")
+         elif provider == "xai-oauth":
+-            _vlines(
+-                agent,
+-                "   💡 xAI OAuth token was rejected (HTTP 401). To fix:",
+-                "      re-authenticate with xAI Grok OAuth (SuperGrok / Premium+) from `hermes model`.",
+-            )
++            _vlines(agent, "   💡 Сервис xAI отклонил авторизацию (HTTP 401). Нужно войти в аккаунт заново.")
+         else:  # nous
+-            _vlines(
+-                agent,
+-                "   💡 Nous Portal OAuth token was rejected (HTTP 401). Your token may be",
+-                "      expired, revoked, or your account may be out of credits. To fix:",
+-                "      1. Re-authenticate: hermes portal",
+-                "      2. Check your portal account: https://portal.nousresearch.com",
+-            )
++            _vlines(agent, "   💡 Сервис Nous отклонил авторизацию (HTTP 401). Проверьте вход в аккаунт и доступные средства.")
+             # ``:free`` is OpenRouter slug syntax; Nous Portal will reject the model
+             # name even after a successful re-auth.
+             if isinstance(model, str) and model.endswith(":free"):
+-                _vlines(
+-                    agent,
+-                    f"      ⚠️  Note: `{model}` looks like an OpenRouter slug (`:free` suffix).",
+-                    "         Nous Portal won't recognize that model name. Either switch to a",
+-                    f"         Nous catalog model, or run `/model openrouter:{model}` to use OpenRouter.",
+-                )
++                _vlines(agent, f"      ⚠️ Название «{model}» похоже на модель OpenRouter, которую Nous Portal не распознаёт.")
+         return
+     from hermes_cli.auth_plugin_providers import plugin_refresh_hook
+     if status_code == 401 and plugin_refresh_hook(str(provider or "")) is not None:
+         # A plugin OAuth grant the pool could not refresh: the fix is a fresh sign-in, not a key.
+         from agent.turn_failure_copy import oauth_relogin_command
+-        _vlines(agent, f"   💡 {provider} sign-in was rejected (HTTP 401). Sign in again: `{oauth_relogin_command(provider)}`")
++        _vlines(agent, f"   💡 Сервис {provider} отклонил авторизацию. Нужно войти заново.")
+         return
+-    _vlines(
+-        agent,
+-        "   💡 Your API key was rejected by the provider. Check:",
+-        "      • Is the key valid? Run: hermes setup",
+-        f"      • Does your account have access to {model}?",
+-    )
++    _vlines(agent, f"   💡 Сервис отклонил ключ доступа. Проверьте ключ и доступ к модели {model}.")
+     if base_url_host_matches(str(base_url), "openrouter.ai"):
+-        _vlines(agent, "      • Check credits: https://openrouter.ai/settings/credits")
++        _vlines(agent, "      • Проверьте баланс: https://openrouter.ai/settings/credits")
+
+
+ def _welcome_tier_guidance(classified: Any, *, model: Any, in_chat: bool, door: bool = True) -> str:
+@@ -1007,11 +931,11 @@
+
+ # Terminal status label per non-retryable reason (default names the HTTP status).
+ _NONRETRYABLE_LABELS = {
+-    FailoverReason.content_policy_blocked: "The provider's safety filter refused this request",
+-    FailoverReason.upstream_blocked: "A firewall/CDN in front of the provider blocked this request",
+-    FailoverReason.ssl_cert_verification: "The provider's security certificate could not be verified",
++    FailoverReason.content_policy_blocked: "Фильтр безопасности сервиса отклонил запрос",
++    FailoverReason.upstream_blocked: "Система сетевой защиты заблокировала запрос",
++    FailoverReason.ssl_cert_verification: "Не удалось проверить сертификат безопасности сервиса",
+     # Only reached after the one-shot image shrink ran (recover_after_classification sets the flag first).
+-    FailoverReason.image_too_large: "Request still exceeded the provider's size limit after shrinking images",
++    FailoverReason.image_too_large: "Запрос слишком велик даже после уменьшения изображений",
+ }
+
+
+@@ -1067,64 +991,48 @@
+             agent, classified, status_code=status_code, provider=provider, base_url=base_url, model=model
+         )
+     elif classified.reason == FailoverReason.model_not_found:
+-        _vlines(agent, f"   💡 Model '{model}' isn't available on {_plabel}. Pick another with /model.")
++        _vlines(agent, f"   💡 Модель «{model}» недоступна в сервисе {_plabel}.")
+         if _prefix_suggestion:
+-            _vlines(agent, f"      Did you mean '{_prefix_suggestion}'? It looks like the vendor prefix is missing.")
++            _vlines(agent, f"      Возможно, пропущен префикс поставщика. Вы имели в виду «{_prefix_suggestion}»?")
+     elif classified.reason not in _NONRETRYABLE_LABELS:
+-        _vlines(agent, f"   💡 Fix: pick another model (/model), or check `{display_hermes_home()}/logs/agent.log`.")
++        _vlines(agent, "   💡 Проверьте настройки модели и подключения к сервису.")
+     # A WAF/CDN block (#53099, #70566): the key never reached the provider; the usual cause
+     # is the SDK User-Agent, which the per-provider extra_headers override.
+     if classified.reason == FailoverReason.upstream_blocked:
+-        _vlines(
+-            agent,
+-            "   💡 The endpoint's firewall/CDN blocked the request before it reached the model — your key",
+-            "      and model access are probably fine. Relays often reject the SDK's default User-Agent:",
+-            "      set `extra_headers: {User-Agent: HermesAgent/1.0}` on the custom_providers entry,",
+-            "      or check the proxy/WAF rules and your network.",
+-        )
++        _vlines(agent, "   💡 Система сетевой защиты заблокировала запрос до его передачи модели. Проверьте настройки сети и сервиса.")
+     # Content-policy blocks: the provider refused this prompt, so recovery is a rephrase
+     # or another model, not key/retry advice.
+     if classified.reason == FailoverReason.content_policy_blocked:
+-        _vlines(
+-            agent,
+-            f"   💡 {CONTENT_POLICY_NEXT_STEPS}",
+-            "      To route future blocks to another provider automatically: hermes fallback add",
+-        )
++        _vlines(agent, f"   💡 {CONTENT_POLICY_NEXT_STEPS}")
+     # TLS certificate failures are environment problems — name the knobs for each cause.
+     if classified.reason == FailoverReason.ssl_cert_verification:
+-        _vlines(
+-            agent,
+-            "   💡 Hermes couldn't verify the provider's security certificate. This fails the same",
+-            "      way on every retry — fix the environment, then try again:",
+-            "      • Corporate TLS-inspecting proxy? Ask your administrator to install",
+-            "        its root certificate in the operating system trust store.",
+-            "      • Missing/stale system CA store? Refresh the OS certificate store.",
+-            "        A provider-specific CA can also be configured with ssl_ca_cert.",
+-            "      • Self-signed local endpoint (llama.cpp, LM Studio, vLLM)? Use http://",
+-            "        for localhost, or add the server's cert to your trust store.",
+-        )
++        _vlines(agent, "   💡 Не удалось проверить сертификат безопасности сервиса. Обратитесь к администратору для проверки сертификатов и сетевого подключения.")
+     logger.error("%sNon-retryable client error: %s", agent.log_prefix, api_error)
+     # Skip persistence on likely context-overflow (400 + large session): persisting the
+     # failed message grows the session and repeats the failure.
+     # Persisting the failed user message would make the session even larger, causing the same failure on the
+     # next attempt. (#1630)
+     if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
+-        _vlines(agent, "⚠️  Skipping session persistence for large failed session to prevent growth loop.")
++        _vlines(agent, "⚠️ Не сохраняю неудачный запрос в длинном разговоре, чтобы он не увеличивался при повторе.")
+     else:
+         agent._persist_session(messages, conversation_history)
+     if classified.reason == FailoverReason.content_policy_blocked:
+-        return _content_policy_blocked_result(
++        result = _content_policy_blocked_result(
+             messages, api_call_count,
+             final_response="⚠️ " + content_policy_copy(label=_plabel, summary=_nonretryable_summary),
+             error_detail=_nonretryable_summary,
+         )
++        result["brai_original_error"] = result.get("final_response", "")
++        return result
+     # Billing walls get the same structured recovery descriptor as the max-retries path
+     # so every surface renders one consistent signal.
+     if classified.reason == FailoverReason.billing:
+-        return _billing_failure_result(
++        result = _billing_failure_result(
+             classified=classified, summary=_nonretryable_summary, messages=messages,
+             api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
+         )
++        result["brai_original_error"] = result.get("final_response", "")
++        return result
+     if _welcome_hint:
+         # A free-tier refusal is fully explained by its own sentence; the raw provider summary
+         # (status codes, JSON) is for the log, not for a first-time user's chat.
+@@ -1138,16 +1046,20 @@
+     # Same verdict fields as the max-retries path: without them the UI descriptor
+     # (agent/error_surface.py) reads a rejected OAuth token as a retryable
+     # "Provider error" and offers Retry instead of a re-login.
++    # Сохраняем именно текст ошибки, без уже выданного фрагмента ответа.
++    _error_response = _final_response
+     _final_response, _keep_partial = _with_delivered_partial(
+         _final_response, _nonretryable_summary, delivered,
+     )
+     result = _failed_turn_result(_final_response, messages, api_call_count, _nonretryable_summary)
++    result["brai_original_error"] = _error_response
+     result.update({
+         "failure_reason": classified.reason.value,
+         "failure_retryable": bool(classified.retryable),
+     })
+     if _keep_partial:
+         result["partial"] = True
++        result["brai_delivered_partial"] = delivered.strip()
+     _stamp_limit_reset(result, agent, api_error)
+     if _welcome_hint and (_kind := _welcome_surface_kind(classified)):
+         # The card form: the desktop renders the sign-in as a button, so no "To sign in" tail.
+@@ -1186,11 +1098,10 @@
+         if classified.billing_unverified:
+             # Ambiguous body — hedge the terminal line.
+             agent._emit_diagnostic_status(
+-                "❌ Provider reported usage/credit exhaustion "
+-                f"(unverified — may be a content-filter rejection) — {_final_summary}"
++                "❌ Сервис ИИ сообщил об исчерпании оплаты или лимита, но причина не подтверждена: запрос также мог быть отклонён фильтром безопасности."
+             )
+         else:
+-            agent._emit_diagnostic_status(f"❌ Billing or credits exhausted — {_final_summary}")
++            agent._emit_diagnostic_status("❌ Исчерпаны средства или оплаченный лимит сервиса ИИ.")
+         _billing_kw = dict(
+             capability="model access", provider=provider, base_url=str(base_url), model=model,
+             unverified=classified.billing_unverified,
+@@ -1199,13 +1110,16 @@
+         _print_billing_or_entitlement_guidance(agent, **_billing_kw)
+     elif is_rate_limited:
+         _reset = reset_hint(api_error)
++        _reset_ru = re.sub(r"(?<=\d)([smhd])\b", lambda match: {
++            "s": " сек.", "m": " мин.", "h": " ч", "d": " дн.",
++        }[match.group(1)], _reset).lstrip("~") if _reset else ""
++        _reset_note = f" Ограничение может сняться примерно через {_reset_ru}." if _reset_ru else ""
+         agent._emit_diagnostic_status(
+-            f"❌ Rate limited after {attempts} {'attempt' if attempts == 1 else 'retries'} — {_final_summary}"
+-            f"{f' (resets in {_reset})' if _reset else ''}"
++            f"❌ Сервис ИИ ограничил доступ после {attempts} попыток.{_reset_note}"
+         )
+     else:
+-        agent._emit_diagnostic_status(f"❌ API failed after {attempts} retries — {_final_summary}")
+-    _vlines(agent, f"   💀 Final error: {_final_summary}")
++        agent._emit_diagnostic_status(f"❌ Сервис ИИ не ответил после {attempts} попыток.")
++    _vlines(agent, "   💀 Ошибка сервиса ИИ. Подробности сохранены в журнале.")
+     _welcome_hint = _welcome_tier_guidance(classified, model=model, in_chat=False)
+     if _welcome_hint:
+         _vlines(agent, f"   💡 {_welcome_hint}")
+@@ -1217,13 +1131,7 @@
+         and any(p in error_msg for p in _STREAM_DROP_MARKERS)
+     )
+     if _is_stream_drop:
+-        _vlines(
+-            agent,
+-            "   💡 The provider's stream connection keeps dropping. This often happens "
+-            "when the model tries to write a very large file in a single tool call.",
+-            "      Try asking the model to use execute_code with Python's open() for "
+-            "large files, or to write the file in smaller sections.",
+-        )
++        _vlines(agent, "   💡 Соединение с сервисом ИИ прерывается. Если задача включает большой файл, попробуйте попросить выполнить её по частям.")
+
+     # A known reasoning model hit a transport error before the first content token.
+     # Distinct from _is_stream_drop; detection lives in agent.thinking_timeout_guidance.
+@@ -1270,11 +1178,12 @@
+         _final_response += "\n\n" + build_thinking_timeout_guidance(provider=provider, model=model)
+     elif _is_stream_drop:
+         _final_response += (
+-            "\n\nThe connection kept dropping while the model was writing — this often "
+-            "happens when it writes a very large file in one go. Ask me to write the file in "
+-            "smaller sections (or via execute_code with Python's open())."
++            "\n\nСоединение прерывалось во время ответа модели. Если задача включает большой файл, "
++            "попросите меня выполнить её по частям."
+         )
+     result = _failed_turn_result(_final_response, messages, api_call_count, _final_summary)
++    result["brai_original_error"] = _final_response
++    result["brai_attempts"] = attempts
+     result.update({
+         # Classified reason so callers (kanban worker in cli.py) can tell a quota wall
+         # (``rate_limit`` / ``billing``) from a task failure.
+@@ -1295,6 +1204,7 @@
+     if _keep_partial:
+         result["final_response"] = _final_response
+         result["partial"] = True
++        result["brai_delivered_partial"] = delivered.strip()
+     _stamp_limit_reset(result, agent, api_error)
+     if _free_tier_kind:
+         _stamp_free_tier(result, _free_tier_kind, (
+@@ -1344,25 +1254,17 @@
+         _blines(agent, f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
+
+     if agent._is_openrouter_url() and "support tool use" in error_msg:
+-        _blines(agent, f"   💡 No OpenRouter providers for {_model} support tool calling with your current settings.")
++        _blines(agent, f"   💡 Для модели {_model} не найден сервис OpenRouter с поддержкой действий при текущих настройках.")
+         from agent.chat_completion_helpers import _provider_preferences_for_agent
+         if _provider_preferences_for_agent(agent).get("only"):
+-            _blines(
+-                agent,
+-                "      Your provider_routing.only restriction is filtering out tool-capable providers.",
+-                "      Try removing the restriction or adding providers that support tools for this model.",
+-            )
+-        _blines(agent, f"      Check which providers support tools: https://openrouter.ai/models/{_model}")
++            _blines(agent, "      Текущие настройки исключают сервисы с поддержкой действий. Проверьте маршрутизацию.")
++        _blines(agent, f"      Доступные сервисы и модели: https://openrouter.ai/models/{_model}")
+
+     # Bare 404 on a ``vendor/model`` catalogue usually means the id lost its prefix; the
+     # provider never names the model, so we do.
+     _suggestion = _missing_vendor_prefix_suggestion(api_error, _provider, _model)
+     if _suggestion:
+-        _blines(
+-            agent,
+-            f"   💡 Model '{_model}' is not a valid id for provider {_provider} — it is missing its vendor prefix.",
+-            f"      Did you mean '{_suggestion}'?  Re-pick it with /model.",
+-        )
++        _blines(agent, f"   💡 В названии модели «{_model}» для сервиса {_provider} может отсутствовать префикс поставщика. Возможно, имелось в виду «{_suggestion}».")
+     return error_type, error_msg, _provider, _base, _model
+
+
+@@ -1474,15 +1376,19 @@
+         )
+     _reset = reset_hint(api_error) if _adaptive else ""
+     _free_busy = is_rate_limited and on_free_model(agent, base_url)
+-    _wait_reason = ("The free model is busy" if _free_busy
+-                    else "Provider overloaded" if is_zai_coding_overload and not is_rate_limited else "Rate limited")
++    _wait_reason = ("Бесплатная модель занята" if _free_busy else
++                    "Сервис ИИ перегружен" if is_zai_coding_overload and not is_rate_limited else
++                    "Доступ к сервису ИИ временно ограничен")
+     if _adaptive:
+-        _policy_note = _ZAI_POLICY_NOTES.get(_backoff_policy or "", "")
+-        _status = (f"⏱️ {_wait_reason}.{f' Resets in {_reset}.' if _reset else ''} Waiting {wait_time:.1f}s "
+-                   f"(attempt {retry_count + 1}/{max_retries}){_policy_note}...")
++        _reset_status = re.sub(r"(?<=\d)([smhd])\b", lambda match: {
++            "s": " сек.", "m": " мин.", "h": " ч", "d": " дн.",
++        }[match.group(1)], _reset).lstrip("~") if _reset else ""
++        _reset_text = f" Ограничение снимут примерно через {_reset_status}." if _reset_status else ""
++        _status = (f"⏱️ {_wait_reason}.{_reset_text} Повторю через {wait_time:.1f} сек. "
++                   f"(попытка {retry_count + 1}/{max_retries}).")
+         _announce_now = _backoff_policy == "zai_coding_overload_long"
+     else:
+-        _status = f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})..."
++        _status = f"⏳ Повторю через {wait_time:.1f} сек. (попытка {retry_count}/{max_retries})."
+         # A 5xx Retry-After can reach the cap; buffering it would leave the user silent for minutes.
+         _announce_now = _retry_after is not None and _retry_after > LIVE_RETRY_WAIT_CAP_S
+     if _announce_now:
+@@ -1493,12 +1399,16 @@
+     # (rewritten by the next frame, cleared on recovery), so it names the wait on every retry
+     # without adding transcript chatter. The reset window belongs here too: during the wait this
+     # line is where the user learns whether to sit it out or switch models.
++    _live_reason = ("Бесплатная модель занята" if _free_busy else "Доступ к ИИ временно ограничен"
++                    if is_rate_limited else "Сервис ИИ временно недоступен")
+     if _reset:
+-        _live_reason = f"{_wait_reason.lower()} — resets in {_reset},"
+-    else:
+-        _live_reason = "the free model is busy —" if _free_busy else "waiting on provider —"
++        _reset_ru = re.sub(r"(?<=\d)([smhd])\b", lambda match: {
++            "s": " сек.", "m": " мин.", "h": " ч", "d": " дн.",
++        }[match.group(1)], _reset)
++        _live_reason += f"; ограничение снимут примерно через {_reset_ru.lstrip('~')}"
+     agent._emit_diagnostic_wait(
+-        f"⏳ {_live_reason} retrying in {wait_time:.0f}s (attempt {retry_count}/{max_retries})"
++        f"⏳ {_live_reason}. Повторю автоматически через {wait_time:.0f} сек. "
++        f"(попытка {retry_count}/{max_retries})."
+     )
+     logger.warning(
+         "Retrying API call in %ss (attempt %s/%s) %s policy=%s error=%s",
+@@ -1726,9 +1636,7 @@
+             compressor._context_probed = True
+             compressor._context_probe_persistable = False
+         agent._buffer_vprint(
+-            f"⚠️  Anthropic long-context tier "
+-            f"requires extra usage — reducing context: "
+-            f"{old_ctx:,} → {_LONG_CONTEXT_TIER_CAP:,} tokens"
++            f"⚠️ Длинный контекст требует дополнительной оплаты. Уменьшаю его: {old_ctx:,} → {_LONG_CONTEXT_TIER_CAP:,} токенов."
+         )
+     return old_ctx
+
+@@ -1860,12 +1768,7 @@
+         and not _is_output_cap_error
+     ):
+         agent._flush_status_buffer()
+-        _vlines(
+-            agent,
+-            "❌ The conversation is too long for the model and automatic shrinking is off (compression.enabled: false).",
+-            "   💡 Run /compress to shrink it now, /new to start fresh, "
+-            "pick a model with a bigger context window, or remove attachments.",
+-        )
++        _vlines(agent, "❌ Разговор слишком длинный для модели, а автоматическое сокращение отключено. Проверьте настройки или уменьшите объём вложений.")
+         logger.error(
+             f"{agent.log_prefix}Context overflow ({classified.reason.value}) with "
+             f"auto-compaction disabled — not compressing."
+@@ -1958,8 +1861,7 @@
+     ):
+         _retry.auth_failover_attempted = True
+         agent._buffer_diagnostic_status(
+-            "🔐 Authentication failed and could not be refreshed — "
+-            "switching to fallback provider..."
++            "🔐 Не удалось подтвердить доступ к сервису ИИ. Пробую резервный сервис."
+         )
+         if agent._try_activate_fallback(reason=classified.reason):
+             return _fallback_break()
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -481,14 +481,18 @@
+
+ def _nous_entitlement_message(capability: str) -> str:
+     try:
+-        from hermes_cli.nous_account import (
+-            format_nous_portal_entitlement_message,
+-            get_nous_portal_account_info,
+-        )
++        from hermes_cli.nous_account import format_nous_portal_entitlement_message, get_nous_portal_account_info
+         account_info = get_nous_portal_account_info(force_fresh=True)
+-        return format_nous_portal_entitlement_message(
+-            account_info, capability=capability, in_chat=True
+-        ) or ""
++        original = format_nous_portal_entitlement_message(account_info, capability=capability, in_chat=True)
++        if not original:
++            return ""
++        if account_info is None:
++            return "Не удалось проверить доступ к сервису Nous. Проверьте подключение и авторизацию."
++        if not account_info.logged_in:
++            return "Для доступа к сервису Nous нужно войти в аккаунт."
++        if account_info.paid_service_access is False:
++            return "Сервис Nous сообщил, что платный доступ недоступен. Проверьте подписку и баланс."
++        return "Не удалось подтвердить доступ к сервису Nous. Проверьте настройки аккаунта и оплату."
+     except Exception:
+         return ""
+
+@@ -530,55 +534,16 @@
+ ) -> str:
+     if _is_nous_inference_route(provider, base_url):
+         return _nous_entitlement_message(capability)
+-
+-    provider_label = (provider or "").strip() or "the selected provider"
+-    model_label = (model or "").strip() or "the selected model"
+-
+-    # Anthropic Pro/Max OAuth surfaces "extra usage" exhaustion as a hard 400 — "add credits"
+-    # does not apply. ``unverified`` (#82154): the same 400 is returned for a server-side
+-    # content-filter rejection, so hedge and name the other cause.
+-    if (provider or "").strip().lower() == "anthropic":
+-        switch = (
+-            "You can also switch to an Anthropic API key or another provider with "
+-            "/model <model> --provider <provider>."
+-        )
+-        if unverified:
+-            return "\n".join([
+-                f"{provider_label} reported that your Claude subscription usage may be exhausted for "
+-                f"{model_label} (included quota + extra-usage credits) — but this specific error is "
+-                "not proof of a billing problem.",
+-                "If https://claude.ai/settings/usage still shows quota remaining, this is probably NOT "
+-                "a billing problem: on a Claude subscription (OAuth) token Anthropic returns this same "
+-                "message when its content filter rejects part of the request — typically a phrase in "
+-                "the system prompt.",
+-                "If usage really is exhausted: wait for the billing cycle to reset, or add extra usage "
+-                "at https://claude.ai/settings/usage",
+-                switch,
+-                # The exhaustion latch replays the stored error without a request.
+-                "Retry with a fresh credential state: `hermes auth reset anthropic`. Until that "
+-                "cooldown clears, this error can be replayed from cache without contacting the API.",
+-            ])
+-        return "\n".join([
+-            f"{provider_label} reported that your Claude subscription usage is exhausted for "
+-            f"{model_label} (included quota + extra-usage credits).",
+-            "Options: wait for the billing cycle to reset, or add extra usage at https://claude.ai/settings/usage",
+-            switch,
+-        ])
+-
+-    # Provider-agnostic billing URL so every text surface shows the same actionable link.
++    if unverified:
++        return ("Сервис ИИ сообщил о возможном исчерпании лимита или средств, но причина не подтверждена: "
++                "такую же ошибку может вызывать фильтр безопасности. Проверьте лимит и оплату у поставщика сервиса.")
+     try:
+         from agent.billing_links import build_billing_block
+-        _link = build_billing_block(provider=provider, base_url=base_url, model=model)
+-        provider_label = _link.provider_label or provider_label
+-        billing_url = _link.billing_url
++        billing_url = build_billing_block(provider=provider, base_url=base_url, model=model).billing_url
+     except Exception:
+         billing_url = None
+-    return "\n".join([
+-        f"{provider_label} reported that billing, credits, or account entitlement is exhausted for {model_label}.",
+-        "Add credits or update billing with that provider, then retry.",
+-        *([f"{provider_label} billing: {billing_url}"] if billing_url else []),
+-        "You can switch providers temporarily with /model <model> --provider <provider>.",
+-    ])
++    message = "Сервис ИИ сообщил об исчерпании средств или лимита использования. Проверьте оплату и дождитесь обновления лимита."
++    return message + (f" Настройки оплаты: {billing_url}" if billing_url else "")
+
+
+ def _billing_block_dict(provider, base_url, model, message="", *, unverified: bool = False) -> Optional[dict]:
+@@ -596,14 +561,9 @@
+
+
+ def _billing_terminal_label(summary: str, unverified: bool) -> str:
+-    """Terminal-failure prefix for a billing-classified error; ``unverified`` (#82154) must
+-    not assert exhaustion as fact."""
+     if unverified:
+-        return (
+-            "Provider reported usage/credit exhaustion (unverified — the same "
+-            f"error can be a content-filter rejection, not billing): {summary}"
+-        )
+-    return f"Billing or credits exhausted: {summary}"
++        return "Сервис ИИ сообщил о возможном исчерпании лимита или средств. Причина не подтверждена."
++    return "Сервис ИИ сообщил об исчерпании средств или лимита использования."
+
+
+ def _billing_failure_result(
+diff --git a/agent/thinking_timeout_guidance.py b/agent/thinking_timeout_guidance.py
+--- a/agent/thinking_timeout_guidance.py
++++ b/agent/thinking_timeout_guidance.py
+@@ -36,16 +36,6 @@
+
+
+ def build_thinking_timeout_guidance(provider: str, model: str, model_label: Optional[str] = None) -> str:
+-    """User-facing guidance appended to the final response: easiest fix first (``/reasoning
+-    low``), the config knob last. ``model`` is used verbatim in the config path so it is
+-    copy-pasteable; ``model_label`` is the optional prose name."""
+-    from hermes_constants import display_hermes_home
+-
+     label = model_label or model
+-    return (
+-        f"{label} was thinking for so long that the connection timed out before it wrote anything "
+-        "(common for reasoning models behind cloud gateways such as NVIDIA NIM, OpenAI, Anthropic, "
+-        "DeepSeek). Easiest fixes: `/reasoning low`, or switch to a faster model with /model. "
+-        f"Advanced: set `providers.{provider}.models.{model}.stale_timeout_seconds: 900` in "
+-        f"`{display_hermes_home()}/config.yaml` to allow a longer wait."
+-    )
++    return (f"Соединение прервалось, пока модель {label} готовила ответ. "
++            "Возможно, сервис не дождался завершения рассуждений. Попробуйте позже и напишите «продолжай».")
+diff --git a/hermes_cli/anon_auth.py b/hermes_cli/anon_auth.py
+--- a/hermes_cli/anon_auth.py
++++ b/hermes_cli/anon_auth.py
+@@ -702,25 +702,16 @@
+     ("invalid jwt", "session_expired"),
+ )
+ _WELCOME_ROUTE_COPY = {
+-    # Only reachable when the route heal (``turn_recovery._recover_welcome_tier``) could not move
+-    # the session: the one cause left is a user-set NOUS_INFERENCE_BASE_URL naming the paid host.
+-    "anon_on_paid_host": "This install is set to use a different Nous server (NOUS_INFERENCE_BASE_URL). "
+-                         "Unset it to use the free model, or sign in. {signin}",
+-    "named_on_welcome_host": "This Nous account needs to reconnect. {model_hint}",
+-    "tier_disabled": "Using Hermes without signing in is switched off right now. "
+-                     "Sign in to keep chatting, it's free. {signin}",
+-    # Only reachable when re-exchanging the free credential failed (``turn_recovery._recover_welcome_tier``).
+-    "session_expired": "Hermes couldn't renew its connection to the free model. "
+-                       "Send your message again, or sign in to keep chatting, it's free. {signin}",
++    "anon_on_paid_host": "Для бесплатной модели настроен другой сервер. Проверьте настройки подключения или войдите в аккаунт.",
++    "named_on_welcome_host": "Нужно заново подключить аккаунт к сервису Nous.",
++    "tier_disabled": "Доступ без входа сейчас отключён. Войдите в аккаунт, чтобы продолжить.",
++    "session_expired": "Не удалось обновить соединение с бесплатной моделью. Попробуйте ещё раз или войдите в аккаунт.",
+ }
+-# The sign-in door, phrased for a chat surface (slash command) and for a terminal.
+-_SIGNIN_CHAT = "To sign in: /login."
+-_SIGNIN_TERMINAL = "To sign in: `hermes auth upgrade`."
+-_MODEL_HINT_CHAT = "Run /model and pick the Nous row again."
+-_MODEL_HINT_TERMINAL = "Run `hermes model` and pick the Nous row again."
+-# Terminal copy for a free-model outage once the retries are spent (5xx, transport failure).
+-FREE_TIER_OUTAGE_COPY = ("The free model is having trouble responding right now. "
+-                         "Try sending your message again in a minute.")
++_SIGNIN_CHAT = "Войдите в аккаунт."
++_SIGNIN_TERMINAL = "Войдите в аккаунт."
++_MODEL_HINT_CHAT = "Проверьте настройки модели."
++_MODEL_HINT_TERMINAL = "Проверьте настройки модели."
++FREE_TIER_OUTAGE_COPY = "Бесплатная модель сейчас не отвечает. Подождите и напишите «продолжай»."
+
+
+ def parse_welcome_refusal(body: Any) -> Optional[dict[str, Any]]:
+@@ -747,33 +738,20 @@
+
+
+ def welcome_refusal_copy(refusal: dict[str, Any], *, model: str = "", in_chat: bool = True, door: bool = True) -> str:
+-    """User copy for a structured welcome-tier refusal: what happened and the one way forward.
+-
+-    Never guest / anonymous / claim; ``in_chat`` picks ``/login`` over the terminal verb.
+-    ``door=False`` leaves the "To sign in: …" tail off, for a surface that renders the sign-in as
+-    a button beside the sentence (the desktop's error card)."""
+-    signin = (_SIGNIN_CHAT if in_chat else _SIGNIN_TERMINAL) if door else ""
+     reason = str(refusal.get("reason") or "")
+     alternates = refusal.get("alternates") or []
+     serves = alternates[0] if alternates else GUEST_MODEL
+     retry = int(refusal.get("retry_after") or 0)
+-    wait = friendly_wait(retry) if retry > 0 else "a little while"
++    wait = f" примерно через {retry} сек." if retry > 0 else " позже"
+     if reason == "model_not_free":
+-        what = f"{model} isn't" if model else "That model isn't"
+-        return (f"{what} available without signing in, so Hermes uses {serves} for now. "
+-                f"Sign in for more models. {signin}").rstrip()
++        return f"Модель {model or 'выбранная модель'} недоступна без входа. Пока использую {serves}."
+     if reason == "feature_not_free":
+-        return f"That isn't available without signing in. Sign in to use it, it's free. {signin}".rstrip()
+-    if reason == "at_capacity":
+-        return ("Chatting without signing in is really busy right now. Sign in to skip the queue, "
+-                f"it's free, or try again in {wait}. {signin}").rstrip()
+-    if reason == "admission_closed":
+-        return ("Chatting without signing in is full right now. Sign in to keep going, "
+-                f"it's free, or try again in {wait}. {signin}").rstrip()
++        return "Эта возможность доступна после входа в аккаунт."
++    if reason in {"at_capacity", "admission_closed"}:
++        return f"Бесплатная модель сейчас занята. Попробуйте{wait} или войдите в аккаунт."
+     if reason == "rate_limited":
+-        return (f"You've used up the allowance for chatting without signing in. It refreshes in {wait}. "
+-                f"Sign in for a bigger allowance, it's free. {signin}").rstrip()
+-    return f"Hermes couldn't send that without signing in. Signing in is free. {signin}".rstrip()
++        return f"Лимит бесплатного доступа исчерпан. Попробуйте{wait} или войдите в аккаунт."
++    return "Не удалось отправить запрос без входа в аккаунт."
+
+
+ def welcome_route_refusal(status: Any, message: Any, base_url: Any = None) -> Optional[str]:
+@@ -798,7 +776,7 @@
+
+
+ def welcome_route_refusal_copy(kind: str, *, in_chat: bool = True, door: bool = True) -> str:
+-    template = _WELCOME_ROUTE_COPY.get(kind) or "Hermes couldn't reach the free model on this route."
++    template = _WELCOME_ROUTE_COPY.get(kind) or "Не удалось подключиться к бесплатной модели."
+     return template.format(
+         host=DEFAULT_NOUS_WELCOME_URL, signin=(_SIGNIN_CHAT if in_chat else _SIGNIN_TERMINAL) if door else "",
+         model_hint=_MODEL_HINT_CHAT if in_chat else _MODEL_HINT_TERMINAL).rstrip()
+@@ -870,7 +848,7 @@
+     status = getattr(agent, "_buffer_status", None)
+     if callable(status):
+         try:
+-            status(f"Model is now {backing} (your account's model; {requested} is the free tier's).")
++            status(f"Использую модель аккаунта {backing} вместо бесплатной {requested}.")
+         except Exception:
+             pass
+     return backing
+diff --git a/agent/turn_context_compaction.py b/agent/turn_context_compaction.py
+--- a/agent/turn_context_compaction.py
++++ b/agent/turn_context_compaction.py
+@@ -97,4 +97,4 @@
+     agent._buffer_status(
+-        f"📈 Context window grown to {grown // 1024}K "
+-        f"(local model; conversation continues uncompressed)"
++        f"📈 Контекст локальной модели увеличен до {grown // 1024} тыс. токенов. "
++        f"Разговор продолжится без сокращения истории."
+     )
+diff --git a/gateway/host_attach.py b/gateway/host_attach.py
+--- a/gateway/host_attach.py
++++ b/gateway/host_attach.py
+@@ -100,8 +100,8 @@
+     def describe(self) -> str:
+         if not self.served_known:
+-            served = "not published yet (its control socket has not answered)"
++            served = "пока неизвестно: служба не ответила"
+         else:
+-            served = ", ".join(self.profiles) if self.profiles else "nothing"
+-        return f"PID {self.pid} (launched by profile '{self.profile_label}'; serves: {served})"
++            served = ", ".join(self.profiles) if self.profiles else "нет"
++        return f"PID {self.pid} (запущен профилем «{self.profile_label}»; обслуживает: {served})"
+
+
+@@ -264,40 +264,19 @@
+
+ def attach_message(gateway: HostGateway, profile: str) -> str:
+-    return (
+-        f"✓ The host gateway already serves profile '{profile}' — nothing to start.\n"
+-        f"  {gateway.describe()}\n"
+-        f"  One gateway per host serves every profile; manage it with "
+-        f"`hermes -p {gateway.profile_label} gateway restart`.")
++    return f"✓ Шлюз уже обслуживает профиль «{profile}»; новый запуск не требуется.\n  {gateway.describe()}"
+
+
+ def _unknown_served_message(gateway: HostGateway, profile: str) -> str:
+-    return (
+-        f"⏳ A gateway already owns this host and has not published its served set yet.\n"
+-        f"   {gateway.describe()}\n"
+-        f"   Whether it will serve profile '{profile}' is unknown, so starting a second gateway\n"
+-        f"   now could double-bind this profile's platforms. Nothing was started; this is a\n"
+-        f"   transient state and a service supervisor will retry.\n"
+-        f"   Take the host over (only from the home that launched it):  hermes gateway run --replace\n"
+-        f"   Start anyway:  hermes gateway run --force")
++    return (f"⏳ Шлюз уже работает, но пока неизвестно, обслуживает ли он профиль «{profile}». "
++            f"Второй шлюз не запущен, чтобы избежать конфликта. Служба повторит попытку.\n   {gateway.describe()}")
+
+
+ def _refuse_message(gateway: HostGateway, profile: str) -> str:
+-    from hermes_cli.gateway_migrate import MIGRATE_COMMAND
+-
+-    return (
+-        f"❌ A gateway already owns this host and will not serve profile '{profile}'.\n"
+-        f"   {gateway.describe()}\n"
+-        f"   Exactly one gateway per host serves every profile, so starting a second one\n"
+-        f"   would double-bind this profile's platforms.\n"
+-        f"   Fold this profile into it:   {MIGRATE_COMMAND}\n"
+-        f"   Or start one anyway:         hermes gateway run --force\n"
+-        f"   (--replace only replaces an owner that serves this profile, so it would not take this one over.)")
++    return (f"❌ Шлюз уже работает, но не обслуживает профиль «{profile}». Второй шлюз не запущен, "
++            f"чтобы избежать конфликта подключений. Проверьте настройки профилей.\n   {gateway.describe()}")
+
+
+ def standalone_rescan_message(profile: str) -> str:
+-    return (
+-        f"The host gateway still serves profile '{profile}'; gateway.standalone is not live yet. "
+-        "Wait for the host gateway to rescan (<=30s), or send the rescan-profiles control verb "
+-        "to the host gateway before starting this profile's gateway.")
++    return f"Шлюз всё ещё обслуживает профиль «{profile}». Дождитесь обновления списка профилей перед запуском отдельного шлюза."
+
+
+diff --git a/gateway/host_topology.py b/gateway/host_topology.py
+--- a/gateway/host_topology.py
++++ b/gateway/host_topology.py
+@@ -52,6 +52,6 @@
+         """``the host gateway (PID 42) serving profiles default, coder`` — one shared phrasing so
+         doctor, cron status and the state.db holder lines cannot drift apart."""
+-        roster = ", ".join(self.profiles) if self.profiles else "an unknown profile set"
+-        return f"the host gateway (PID {self.pid}) serving profiles {roster}"
++        roster = ", ".join(self.profiles) if self.profiles else "список профилей неизвестен"
++        return f"шлюз узла (PID {self.pid}), профили: {roster}"
+
+
+diff --git a/gateway/channel_directory.py b/gateway/channel_directory.py
+--- a/gateway/channel_directory.py
++++ b/gateway/channel_directory.py
+@@ -445,12 +445,12 @@
+         platforms = load_directory().get("platforms", {})
+     if not platforms:
+-        return "No messaging platforms connected or no channels discovered yet."
+-    lines = ["Available messaging targets:\n"]
++        return "Нет подключённых платформ сообщений или доступные каналы ещё не обнаружены."
++    lines = ["Доступные адреса для сообщений:\n"]
+     for plat_name, channels in sorted(platforms.items()):
+         if not channels:
+             lines.append(f"{plat_name.title()}:")
+             lines.append(
+-                f"  (no channels discovered yet — send directly with "
+-                f"{plat_name}:<chat_id>, or bare '{plat_name}' for the home channel)"
++                f"  (каналы ещё не обнаружены; доступна отправка по адресу "
++                f"{plat_name}:<chat_id> или в основной канал через '{plat_name}')"
+             )
+         elif plat_name == "discord":
+@@ -462,5 +462,5 @@
+             groups = [(f"Discord ({g}):", sorted(chs, key=lambda c: c["name"])) for g, chs in sorted(guilds.items())]
+             if dms:
+-                groups.append(("Discord (DMs):", dms))
++                groups.append(("Discord (личные сообщения):", dms))
+             for header, group in groups:
+                 lines.append(header)
+@@ -470,5 +470,5 @@
+             lines.extend(f"  {plat_name}:{_channel_target_name(plat_name, ch)}" for ch in channels)
+         lines.append("")
+-    lines.append('Use these as the "target" parameter when sending.')
+-    lines.append('Bare platform name (e.g. "telegram") sends to home channel.')
++    lines.append('Используйте эти адреса в параметре "target" при отправке.')
++    lines.append('Название платформы без адреса (например, "telegram") означает основной канал.')
+     return "\n".join(lines)
+diff --git a/hermes_cli/nous_account.py b/hermes_cli/nous_account.py
+--- a/hermes_cli/nous_account.py
++++ b/hermes_cli/nous_account.py
+@@ -68,10 +68,10 @@
+
+
+ _ANON_ACCOUNT_TIER = "anonymous"
+ # Every billing / top-up / entitlement surface says exactly this for the free tier (R-USR-1).
+-FREE_TIER_NEEDS_ACCOUNT = "This needs a Nous account. Run `hermes auth upgrade`."
+-FREE_TIER_NEEDS_ACCOUNT_CHAT = "This needs a Nous account. Use /login to sign in."
++FREE_TIER_NEEDS_ACCOUNT = "Для этой возможности нужен аккаунт Nous."
++FREE_TIER_NEEDS_ACCOUNT_CHAT = "Для этой возможности нужен аккаунт Nous."
+
+
+ def _is_anonymous_tier(account_info: Optional["NousPortalAccountInfo"]) -> bool:
+     return account_info is not None and account_info.is_anonymous_tier
+@@ -179,70 +179,34 @@
+     account_info: Optional[NousPortalAccountInfo], *, capability: str = "this feature",
+     include_refresh_hint: bool = True, coverage_category: Optional[str] = None,
+     in_chat: bool = False,
+ ) -> Optional[str]:
+-    """User-facing guidance for a missing Nous tool-gateway entitlement; ``None`` when entitled.
+-
+-    Entitled = paid access OR a live free pool that covers it (normalized fields, not price:
+-    purchased credits without a subscription count as paid, an exhausted paid subscription does
+-    not). ``coverage_category`` scopes the check to one category; an otherwise-entitled user whose
+-    access doesn't fund it gets a neutral billing nudge, never an "exhausted" message. The
+-    pool-vs-paid distinction is never surfaced.
+-    """
+     if _is_anonymous_tier(account_info):
+         return FREE_TIER_NEEDS_ACCOUNT_CHAT if in_chat else FREE_TIER_NEEDS_ACCOUNT
+     billing_url = nous_portal_billing_url(account_info)
+-
+     if account_info is not None:
+         if coverage_category is not None:
+             if account_info.tool_gateway_entitled_for(coverage_category):
+                 return None
+             if account_info.tool_gateway_entitled:
+-                return (
+-                    f"{capability} isn't included with your current Nous Portal access. "
+-                    f"Add credits or a subscription to enable it at {billing_url}."
+-                )
++                return f"Эта возможность не входит в текущий доступ Nous Portal. Проверьте подписку или баланс: {billing_url}."
+         elif account_info.tool_gateway_entitled:
+             return None
+     if account_info is None:
+-        return (
+-            f"Hermes could not verify your Nous Portal entitlement, so {capability} is unavailable. "
+-            f"Run `hermes model` to refresh your login, or check billing at {billing_url}."
+-        )
++        return f"Не удалось проверить доступ к Nous Portal. Проверьте авторизацию и оплату: {billing_url}."
+     if not account_info.logged_in:
+         if account_info.inference_credential_present:
+-            return (
+-                f"Nous inference credentials are configured, but Hermes cannot verify your Nous Portal "
+-                f"paid access for {capability}. Log in with `hermes model` to enable Portal-managed "
+-                f"features. Billing and credits are managed at {billing_url}."
+-            )
+-        return (
+-            f"Log in to Nous Portal to use {capability}: run `hermes model`. "
+-            f"Billing and credits are managed at {billing_url}."
+-        )
++            return f"Данные подключения к Nous настроены, но платный доступ не подтверждён. Войдите в аккаунт и проверьте оплату: {billing_url}."
++        return f"Для этой возможности нужно войти в Nous Portal. Информация об оплате: {billing_url}."
+     if account_info.paid_service_access is None:
+-        detail = f"Hermes could not verify your Nous Portal paid access, so {capability} is unavailable."
+-        if account_info.error:
+-            detail += f" Account lookup failed: {account_info.error}."
+-        if include_refresh_hint:
+-            detail += " Run `hermes model` to refresh your session."
+-        return detail + f" Check billing at {billing_url}."
++        return f"Не удалось проверить платный доступ к Nous Portal. Проверьте авторизацию и оплату: {billing_url}."
+     access = account_info.paid_service_access_info
+     reason = access.reason if access else None
+     if reason == "account_missing":
+-        return (
+-            f"Hermes could not find a Nous Portal account or organisation for this login, so {capability} "
+-            f"is unavailable. Run `hermes model` to authenticate again; if the problem persists, contact Nous support."
+-        )
++        return "Аккаунт или организация Nous Portal для этого входа не найдены. Проверьте авторизацию или обратитесь в поддержку Nous."
+     if reason == "no_usable_credits" or account_info.paid_service_access is False:
+-        message = _no_paid_access_message(account_info, capability, billing_url, in_chat=in_chat)
+-        if include_refresh_hint and not account_info.fresh:
+-            message += " If you recently bought credits, run `hermes model` to refresh Hermes."
+-        return message
+-    return (
+-        f"Your Nous Portal account does not currently have paid service access, "
+-        f"so {capability} is unavailable. Add credits or update billing at {billing_url}."
+-    )
++        return _no_paid_access_message(account_info, capability, billing_url, in_chat=in_chat)
++    return f"В аккаунте Nous Portal сейчас нет платного доступа. Проверьте подписку и оплату: {billing_url}."
+
+
+ def _no_paid_access_message(
+     account_info: NousPortalAccountInfo, capability: str, billing_url: str, *, in_chat: bool = False,
+@@ -250,46 +214,20 @@
+     if _is_anonymous_tier(account_info):
+         return FREE_TIER_NEEDS_ACCOUNT_CHAT if in_chat else FREE_TIER_NEEDS_ACCOUNT
+     access = account_info.paid_service_access_info or NousPaidServiceAccessInfo()
+     active, paid = access.has_active_subscription, access.active_subscription_is_paid
+-    labelled = (
+-        ("usable", access.total_usable_credits),
+-        ("subscription", access.subscription_credits_remaining),
+-        ("purchased", access.purchased_credits_remaining),
+-    )
+-    parts = [f"{label} ${amount:.2f}" for label, amount in labelled if amount is not None]
+-    credit_detail = f" ({', '.join(parts)})" if parts else ""
+     if access.member_spend_cap_exceeded:
+         cap, spent = access.member_spend_cap_usd, access.member_spend_usd
+-        cap_detail = ""
+-        if cap is not None and spent is not None:
+-            cap_detail = f" Your organisation's per-member spend cap is ${cap:.2f} and you've spent ${spent:.2f} of it."
+-        elif cap is not None:
+-            cap_detail = f" Your organisation's per-member spend cap is ${cap:.2f}."
+-        return (
+-            f"Your Nous Portal access is paused because you've exceeded the per-member spend cap set by "
+-            f"your organisation.{cap_detail}{credit_detail} Ask your organisation admin to raise the "
+-            f"member spend cap at {billing_url}, then run `hermes model` to refresh."
+-        )
++        detail = f" Лимит: ${cap:.2f}; использовано: ${spent:.2f}." if cap is not None and spent is not None else (
++            f" Лимит: ${cap:.2f}." if cap is not None else "")
++        return f"Доступ к Nous Portal приостановлен: исчерпан лимит расходов участника организации.{detail} Обратитесь к администратору: {billing_url}."
+     if active and paid:
+-        return (
+-            f"Your Nous Portal credits are exhausted{credit_detail}, so {capability} is unavailable. "
+-            f"Top up or renew credits at {billing_url}."
+-        )
++        return f"Средства Nous Portal исчерпаны. Проверьте баланс или продлите доступ: {billing_url}."
+     if active and paid is False:
+-        return (
+-            f"Your current Nous Portal plan does not include paid service access, "
+-            f"so {capability} is unavailable. Upgrade or add credits at {billing_url}."
+-        )
++        return f"Текущий тариф Nous Portal не включает платный доступ. Проверьте подписку и баланс: {billing_url}."
+     if active is False:
+-        return (
+-            f"Your Nous Portal account has no active subscription or usable credits{credit_detail}, "
+-            f"so {capability} is unavailable. Subscribe or add credits at {billing_url}."
+-        )
+-    return (
+-        f"Your Nous Portal account has no usable paid credits{credit_detail}, so "
+-        f"{capability} is unavailable. Add credits or update billing at {billing_url}."
+-    )
++        return f"В аккаунте Nous Portal нет действующей подписки или доступных средств. Проверьте оплату: {billing_url}."
++    return f"В аккаунте Nous Portal нет доступных платных средств. Проверьте баланс и оплату: {billing_url}."
+
+
+ def reset_nous_portal_account_info_cache() -> None:
+     """Clear the short-lived account-info cache used by tests."""
