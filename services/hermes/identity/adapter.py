@@ -3,9 +3,10 @@
 """Создание адаптера отложено до загрузки закреплённого Hermes."""
 import asyncio
 import logging
+import uuid
 from contextvars import ContextVar
 from .ipc import RpcError
-from .scope import delivery_scope
+from .scope import delivery_scope, input_delivery
 from .telegram_proxy import BotProxy
 
 
@@ -113,9 +114,23 @@ def make_adapter(config, platform, peer, publish_file):
                 from tools.approval_conversation import pending_delivery
                 pending = pending_delivery(getattr(self, 'gateway_runner', None), source[2], payload.get('content'))
             try:
-                value = await peer.call('send', {'action': name, 'payload': payload, 'scope_id': delivery_scope.get()})
+                wire = {'payload': payload, 'scope_id': delivery_scope.get()}
+                journal = getattr(self, '_brai_delivery_journal', None)
+                persistent = (journal is not None and input_delivery.get() is not None
+                    and name in {'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation'})
+                ident = None
+                if persistent:
+                    from .delivery_journal import delivery_id
+                    ident = delivery_id(['output', uuid.uuid4().hex])
+                    wire['input_delivery_id'] = input_delivery.get()
+                    journal.queue_output(ident, name, wire)
+                value = await peer.call('send', {'action': name, **wire, **({'delivery_id': ident} if ident else {})})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
                     raise ValueError('invalid send result')
+                if ident and value.get('success') and value.get('message_id'):
+                    journal.output_state(ident, 'sent', value)
+                elif ident and value.get('retryable') is False:
+                    journal.output_state(ident, 'blocked', value)
                 fields = ('success', 'message_id', 'error', 'raw_response', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind')
                 result = SendResult(**{key: value[key] for key in fields if key in value})
                 if pending and result.success and result.message_id:

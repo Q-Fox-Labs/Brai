@@ -2,7 +2,7 @@
   "openrpc": "1.2.6",
   "info": {
     "title": "Brai Hermes worker IPC",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "methods": [
     {
@@ -141,6 +141,22 @@
             },
             "additionalProperties": false
           }
+        },
+        {
+          "name": "delivery_id",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "input_digest",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
         }
       ],
       "result": {
@@ -160,11 +176,19 @@
                 "string",
                 "null"
               ]
+            },
+            "delivery_state": {
+              "type": "string",
+              "enum": [
+                "accepted",
+                "completed"
+              ]
             }
           },
           "additionalProperties": false
         }
-      }
+      },
+      "description": "DEV: оба delivery-параметра передаются вместе. Один ID закрепляет неизменяемый исходный batch. Повтор возвращает прежнюю фактическую квитанцию; неизвестный начатый dispatch не переисполняется."
     },
     {
       "name": "cancel",
@@ -248,6 +272,22 @@
             ],
             "minLength": 1,
             "maxLength": 128
+          }
+        },
+        {
+          "name": "delivery_id",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "input_delivery_id",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
           }
         }
       ],
@@ -1083,6 +1123,120 @@
               ]
             }
           }
+        }
+      }
+    },
+    {
+      "name": "dispatch.status",
+      "summary": "Сверить факт приёма прежнего DEV input, не запуская native заново.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "delivery_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        {
+          "name": "input_digest",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "status",
+        "schema": {
+          "type": "object",
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "not_received",
+                "dispatching",
+                "accepted",
+                "completed"
+              ]
+            },
+            "receipt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "accepted",
+                    "turn_id"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "turn_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "delivery_state": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "completed"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "name": "outbox.flush",
+      "summary": "Повторить доставку сохранённых готовых DEV ответов без модели и инструментов.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "sent"
+          ],
+          "properties": {
+            "sent": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
         }
       }
     }

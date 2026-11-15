@@ -41,6 +41,8 @@ class Bridge:
         self.sent = set()
         self.chat_state = self.chat_admission = self.chat_started = self.chat_states = None
         self.input_receipt = None
+        self.before_delivery = None
+        self.durable_delivery = None
         if not self.worker_telegram_id.isascii():
             raise ValueError('invalid worker Telegram identity')
 
@@ -76,7 +78,7 @@ class Bridge:
     @asynccontextmanager
     async def _dispatch_scope(self):
         self.dispatch_inflight += 1
-        scope = {'turn_id': None}
+        scope = {'turn_id': None, 'handing_off': False}
         try:
             yield scope
         finally:
@@ -85,7 +87,7 @@ class Bridge:
                 for finished in list(self.early_ends & self.known_turns):
                     self.early_ends.remove(finished)
                     await self._close_turn(finished)
-                if scope['turn_id'] is None and not self.known_turns and self.on_turn_end is not None:
+                if scope['turn_id'] is None and not scope['handing_off'] and not self.known_turns and self.on_turn_end is not None:
                     await self.on_turn_end(None)
 
     async def dispatch(self, event):
@@ -126,9 +128,12 @@ class Bridge:
             return {'accepted': False, 'turn_id': None}
         if state:
             data['chat_generation'] = state['generation']
-        result = await peer.call('dispatch', {'event': data, 'owner': self.owner})
+        durable = await self.before_delivery(event) if callable(self.before_delivery) else None
+        scope['handing_off'] = bool(durable)
+        result = await peer.call('dispatch', {'event': data, 'owner': self.owner, **(durable or {})})
         if not isinstance(result, dict) or type(result.get('accepted')) is not bool:
             raise ConnectionError('Invalid dispatch receipt')
+        scope['handing_off'] = False
         if result['accepted'] and state and callable(self.chat_started):
             self.chat_started(route, state['generation'])
         turn_id = result.get('turn_id')
@@ -144,6 +149,8 @@ class Bridge:
                 asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(self._close_turn(turn_id)))
         if callable(self.input_receipt):
             await self.input_receipt(event, result)
+        if result.get('delivery_state') == 'completed' and turn_id in self.known_turns:
+            await self._close_turn(turn_id)
         return result
 
     async def _close_turn(self, turn_id):
@@ -174,7 +181,7 @@ class Bridge:
             raise RpcError(-32601, 'Interactive API unavailable')
         return await self.telegram_api(self.owner, method, payload, scope_id)
 
-    async def send(self, action, payload, scope_id=UNSCOPED):
+    async def send(self, action, payload, scope_id=UNSCOPED, delivery_id=None, input_delivery_id=None):
         """Доставить только в разрешённый исходный chat/thread и вернуть реальный результат."""
         if action not in _ACTIONS or not isinstance(payload, dict):
             raise RpcError(-32602, 'Unsupported action')
@@ -237,7 +244,12 @@ class Bridge:
                 raise RpcError(-32602, 'Artifact required')
         token = request_scope.set(scope_id)
         try:
-            result = await self.deliver(self.owner, action, payload)
+            if delivery_id is not None:
+                if not callable(self.durable_delivery):
+                    raise RpcError(-32602, 'Durable delivery unavailable')
+                result = await self.durable_delivery(self.owner, action, payload, delivery_id, input_delivery_id)
+            else:
+                result = await self.deliver(self.owner, action, payload)
         finally:
             request_scope.reset(token)
         if not isinstance(result, dict) or type(result.get('success')) is not bool:

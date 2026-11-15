@@ -70,6 +70,8 @@ class UpdateInbox:
                 db.execute('''CREATE TABLE IF NOT EXISTS release_inbox_auth (
                     inbox_seq INTEGER PRIMARY KEY, author_id TEXT NOT NULL,
                     role TEXT NOT NULL, generation INTEGER NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS release_input_delivery (
+                    inbox_seq INTEGER PRIMARY KEY, delivery_id TEXT NOT NULL, input_digest TEXT NOT NULL)''')
                 self._validate_v2_schema(db)
                 row = db.execute("SELECT * FROM release_schema_owner WHERE name='telegram-inbox'").fetchone()
                 if row is None:
@@ -343,7 +345,8 @@ class UpdateInbox:
         try:
             with db:
                 db.execute('BEGIN IMMEDIATE')
-                db.execute("UPDATE release_inbox SET state='unknown' WHERE state='handing_off'")
+                db.execute("""UPDATE release_inbox SET state='unknown' WHERE state='handing_off'
+                    AND NOT EXISTS (SELECT 1 FROM release_input_delivery d WHERE d.inbox_seq=release_inbox.seq)""")
                 db.execute("UPDATE release_inbox SET state='captured',operation_id=NULL WHERE state='held'")
         finally:
             db.close()
@@ -351,6 +354,66 @@ class UpdateInbox:
 
     def markunknown(self, profile, bot_id, update_id):
         return self._finish(profile,bot_id,update_id,'unknown',None)
+
+    def bind_delivery(self, profile, bot_id, update_ids):
+        """До worker RPC закрепить стабильные ID подготовленного native batch."""
+        from .delivery_journal import delivery_id
+        db = self._open(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                rows = [self._find(db, profile, bot_id, ident) for ident in update_ids]
+                if not rows or len({(r['chat'], r['thread']) for r in rows}) != 1:
+                    raise ValueError('DELIVERY_BATCH_ROUTE_CHANGED')
+                ident = delivery_id([profile['profileId'], str(bot_id), [r['update_id'] for r in rows]])
+                digest = delivery_id([[r['update_id'], r['digest']] for r in rows])
+                for row in rows:
+                    old = db.execute('SELECT delivery_id,input_digest FROM release_input_delivery WHERE inbox_seq=?', (row['seq'],)).fetchone()
+                    if old is not None and tuple(old) != (ident, digest):
+                        raise ValueError('DELIVERY_BATCH_CHANGED')
+                    db.execute('INSERT OR IGNORE INTO release_input_delivery VALUES(?,?,?)', (row['seq'], ident, digest))
+        finally:
+            db.close()
+        self._sync_journal_directories(profile)
+        return {'delivery_id': ident, 'input_digest': digest}
+
+    def delivery_for(self, profile, bot_id, update_id):
+        """Вернуть только привязку реально сохранённого входа текущего владельца."""
+        db = self._open(profile)
+        try:
+            row = self._find(db, profile, bot_id, update_id)
+            value = db.execute('SELECT delivery_id,input_digest FROM release_input_delivery WHERE inbox_seq=?', (row['seq'],)).fetchone()
+            return {'delivery_id': value[0], 'input_digest': value[1]} if value else None
+        finally:
+            db.close()
+
+    def delivery_source(self, profile, delivery_id):
+        """Прочитать provenance готового ответа после restart ingress; права не расширяются."""
+        db = self._open(profile)
+        try:
+            rows = db.execute('''SELECT i.* FROM release_inbox i JOIN release_input_delivery d ON d.inbox_seq=i.seq
+                WHERE d.delivery_id=? ORDER BY i.seq''', (delivery_id,)).fetchall()
+            if not rows or any((r['profile_id'], r['user_id'], r['uid']) != binding(profile) for r in rows):
+                raise PermissionError('DELIVERY_INPUT_OWNER_CHANGED')
+            if len({(r['chat'], r['thread'], r['chat_generation']) for r in rows}) != 1:
+                raise PermissionError('DELIVERY_INPUT_ROUTE_CHANGED')
+            return dict(rows[0])
+        finally:
+            db.close()
+
+    def not_received(self, profile, bot_id, update_id):
+        """Только после dispatch.status=not_received вернуть вход в ожидающую очередь."""
+        db = self._open(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                row = self._find(db, profile, bot_id, update_id)
+                if row['state'] not in ('captured', 'handing_off') or row['receipt'] is not None:
+                    raise ValueError('DELIVERY_INPUT_NOT_RETRYABLE')
+                db.execute("UPDATE release_inbox SET state='captured' WHERE seq=?", (row['seq'],))
+                db.execute('DELETE FROM release_input_delivery WHERE inbox_seq=?', (row['seq'],))
+        finally:
+            db.close()
 
     def _finish(self, profile, bot_id, update_id, state, receipt):
         db = self._open(profile)

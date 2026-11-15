@@ -989,21 +989,23 @@ index be158a8..28cc883 100644
      __slots__ = ("_current_claim", "adapter")
  
      def __init__(self, *, adapter, **kwargs):
-@@ -272,8 +274,12 @@ class TelegramApplication(Application):
+@@ -272,8 +274,14 @@ class TelegramApplication(Application):
          claim.owners -= 1
          if claim.owners:
              return
 +        disposition = getattr(self.adapter, '_brai_identity_disposition', None)
 +        if callable(disposition):
-+            disposition(claim.key, {'deferred': claim.deferred, 'accepted': claim.accepted,
++            allowed = disposition(claim.key, {'deferred': claim.deferred, 'accepted': claim.accepted,
 +                                    'completed': claim.completed, 'failed': claim.failed})
++            if allowed is False:
++                claim.deferred = True
          del self.adapter._inflight_update_ids[claim.key]
 -        if claim.accepted or (claim.completed and not claim.failed):
 +        if not claim.deferred and (claim.accepted or (claim.completed and not claim.failed)):
              _record_receipt(self.adapter, claim.key)
  
      async def process_error(self, update, error, job=None, coroutine=None):
-@@ -295,6 +301,11 @@ class TelegramApplication(Application):
+@@ -295,6 +303,11 @@ class TelegramApplication(Application):
          seen = self.adapter._seen_update_ids
          pending = self.adapter._inflight_update_ids
          if key in seen or key in pending:
@@ -1015,7 +1017,7 @@ index be158a8..28cc883 100644
              return
          claim = _Claim(key, asyncio.current_task())
          # Atomic on PTB's event loop: no await between lookup and claim. Dispatch and its
-@@ -302,6 +313,19 @@ class TelegramApplication(Application):
+@@ -302,6 +315,19 @@ class TelegramApplication(Application):
          pending[key] = claim
          token = self._current_claim.set(claim)
          try:

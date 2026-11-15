@@ -153,6 +153,20 @@ class TransportInbox:
         finally:
             db.close()
 
+    def not_received(self, bot_id, update_id, digest):
+        """Сверенный worker not_received допускает повтор только исходного payload."""
+        db = self._open()
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT state,digest FROM release_transport WHERE bot_id=? AND update_id=?',
+                                 (number(bot_id, 'BOT'), str(update_id))).fetchone()
+                if row is None or row['digest'] != digest or row['state'] not in ('captured', 'handing_off'):
+                    raise ValueError('TRANSPORT_RETRY_NOT_PROVEN')
+                db.execute("UPDATE release_transport SET state='captured' WHERE bot_id=? AND update_id=?", (str(bot_id), str(update_id)))
+        finally:
+            db.close()
+
     def blocked_for(self, uid):
         if type(uid) is not int or uid <= 0:
             raise ValueError('TRANSPORT_BINDING_INVALID')

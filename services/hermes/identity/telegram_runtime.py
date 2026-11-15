@@ -278,8 +278,15 @@ class Resolver:
                     await writer.wait_closed()
             self.mirror = Mirror(inbox, resolve_known, inventory=inventory, observe=observe,
                                  gate_store=ProfileGateStore(inbox), transport=TransportInbox(journal))
+            self.mirror.input_ready = self.input_ready
+            self.mirror.reconcile_delivery = self.reconcile_delivery
+        self.ready_profiles = set()
         self.bridges, self.turns = {}, {}
         self.ledger = ledger if ledger is not None else RouteLedger()
+        self.reply_outbox = None
+        if self.mirror is not None and self.mirror.restartable:
+            from .reply_outbox import ReplyOutbox
+            self.reply_outbox = ReplyOutbox(self.ledger.db, self._deliver_saved_reply)
         self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None
@@ -427,9 +434,19 @@ class Resolver:
                     bridge = self._bridge(profile)
                     peer = await bridge.connect()
                     await peer.call('health', {'require_tools': True}, timeout=240)
+                    self.ready_profiles.add(profile['uid'])
+                    if self.mirror is not None and self.mirror.restartable:
+                        turn = self.turns.get(profile['uid'])
+                        if turn is not None and turn.get('delivery'):
+                            await self.reconcile_delivery(profile, turn['delivery'])
+                        try:
+                            await peer.call('outbox.flush', {'owner': profile['userId']})
+                        except (ConnectionError, TimeoutError, RpcError):
+                            _logger.warning('DURABLE_REPLY_WAITING')
                 except (Exception, asyncio.CancelledError) as error:
                     if isinstance(error, asyncio.CancelledError):
                         raise
+                    self.ready_profiles.discard(profile['uid'])
         while True:
             try:
                 response = await broker_call('ingress.profiles', {})
@@ -437,6 +454,10 @@ class Resolver:
                 if not isinstance(profiles, list) or len(profiles) > 10000:
                     raise ValueError('Invalid active profiles')
                 await asyncio.gather(*(ready(profile) for profile in profiles))
+                if self.mirror is not None:
+                    await self.mirror.pump()
+                if self.reply_outbox is not None:
+                    await self.reply_outbox.flush()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -455,6 +476,15 @@ class Resolver:
         bridge = self._account_bridge(profile)
         if self.mirror is not None:
             bridge.input_receipt = self.mirror.accepted
+            if self.mirror.restartable:
+                async def before_delivery(event):
+                    binding = await self.mirror.before_delivery(event)
+                    turn = self.turns.get(profile['uid'])
+                    if turn is not None and binding:
+                        turn['delivery'] = binding
+                    return binding
+                bridge.before_delivery = before_delivery
+                bridge.durable_delivery = lambda owner, action, payload, ident, source: self.durable_reply(profile, owner, action, payload, ident, source)
         if self.journal is not None:
             bridge.chat_state = lambda route: self.journal.chat_state(profile, route)
             bridge.chat_admission = lambda route, mid: self.journal.chat_admission(profile, route, mid)
@@ -468,6 +498,72 @@ class Resolver:
                 telegram_api=lambda owner, method, payload, scope_id: self.telegram_api(binding, owner, method, payload, scope_id),
                 require_scope=True)
         return bridge
+
+    async def input_ready(self, profile, route):
+        """Ожидать реальную готовность и свободную тему без отклонения сообщения."""
+        if profile['uid'] not in self.ready_profiles:
+            return False
+        turn = self.turns.get(profile['uid'])
+        return turn is None or turn['route'] == route
+
+    async def reconcile_delivery(self, profile, binding):
+        """Сверить факт приёма worker после потерянного RPC receipt."""
+        peer = await self._bridge(profile).connect()
+        result = await peer.call('dispatch.status', {'owner': profile['userId'], **binding})
+        receipt = result.get('receipt') or {}
+        turn = self.turns.get(profile['uid'])
+        if turn is not None and receipt.get('turn_id'):
+            turn['workerTurnId'] = receipt['turn_id']
+            if result.get('state') == 'completed':
+                await self.end(profile, receipt['turn_id'])
+            else:
+                self._bridge(profile).known_turns.add(receipt['turn_id'])
+        elif turn is not None and result.get('state') == 'not_received' and turn.get('workerTurnId') is None:
+            await self.end(profile, None)
+        return result
+
+    async def durable_reply(self, profile, owner, action, payload, ident, source_id):
+        """Сохранить ответ только к реально допущенному исходному input этого worker."""
+        if owner != profile['userId'] or self.reply_outbox is None:
+            raise PermissionError('Reply owner mismatch')
+        source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id)
+        original = json.loads(source['payload']).get('message', {})
+        route = (source['chat'], str(original.get('message_thread_id') or ''))
+        if str(payload.get('chat_id')) != route[0]:
+            raise PermissionError('Reply input route changed')
+        supplied = payload.get('metadata') or {}
+        thread = supplied.get('thread_id') or supplied.get('message_thread_id') or supplied.get('direct_messages_topic_id')
+        if thread is not None and str(thread) != route[1]:
+            raise PermissionError('Reply input thread changed')
+        metadata = self.ledger.metadata(profile, route)
+        if metadata is None:
+            raise PermissionError('Reply input admission unavailable')
+        metadata = {**metadata, **({'_interim_send': True} if supplied.get('_interim_send') else {})}
+        values = {**payload, 'metadata': metadata}
+        body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
+        key = self.ledger.owner(profile)
+        self.reply_outbox.enqueue(ident, key, body)
+        previous = self.reply_outbox.result(ident)
+        if previous and previous.get('success') and previous.get('message_id'):
+            return previous
+        await self.reply_outbox.flush_owner(key)
+        return self.reply_outbox.result(ident) or {'success': False, 'retryable': True, 'error': 'Delivery pending'}
+
+    async def _deliver_saved_reply(self, body):
+        """Восстановить доставку готового ответа при актуальных Auth и поколении беседы."""
+        profile, payload = body['profile'], body['payload']
+        metadata = payload['metadata']
+        route = (str(payload['chat_id']), str(metadata.get('thread_id') or metadata.get('message_thread_id') or metadata.get('direct_messages_topic_id') or ''))
+        await self._account(profile, route[0])
+        self._chat_generation(profile, route, body['generation'])
+        self.authorize_delivery(profile, body['action'], payload)
+        def current():
+            self._chat_generation(profile, route, body['generation'])
+        current.generation = body['generation']
+        turn = self.turns.get(profile['uid'])
+        if turn is not None and turn['route'] == route and request_scope.get() == turn['id']:
+            return await self.deliver(profile, profile['userId'], body['action'], payload)
+        return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current)
 
     async def input_filtered(self, event):
         if self.mirror is not None:

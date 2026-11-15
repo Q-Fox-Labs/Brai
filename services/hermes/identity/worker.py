@@ -59,6 +59,12 @@ class Worker:
         self.peer_draining = False
         self.peer_released = asyncio.Event()
         self.peer_released.set()
+        self.delivery_journal = None
+        self.delivery_lock = asyncio.Lock()
+        self.output_lock = asyncio.Lock()
+        if os.environ.get('BRAI_IDENTITY_INSTANCE') == 'dev' and os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .delivery_journal import DeliveryJournal
+            self.delivery_journal = DeliveryJournal(Path(os.environ['HERMES_HOME']) / 'identity-delivery.sqlite3', user_id)
         from .release_native import NativeRelease
         self.release = NativeRelease(self)
 
@@ -115,6 +121,7 @@ class Worker:
             return call
 
         peer = Peer(reader, writer, {'health': check_health, 'dispatch': primary(self.dispatch),
+                    'dispatch.status': primary(self.dispatch_status), 'outbox.flush': primary(self.flush_outputs),
                     'cancel': primary(self.cancel), 'interactive': primary(self.interactive),
                     'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin), 'release.try': primary(self.release.try_hold),
                     'release.try_status': primary(self.release.try_status), 'release.reject_attempt': primary(self.release.reject_attempt),
@@ -199,6 +206,7 @@ class Worker:
         self.runner.config.platforms = {Platform.TELEGRAM: config}
         self.adapter = make_adapter(config, Platform.TELEGRAM, peer, self.publish_file)
         self.adapter.gateway_runner = self.runner
+        self.adapter._brai_delivery_journal = self.delivery_journal
         self.runner._is_user_authorized_for_source = lambda source, **kwargs: (
             source.platform == Platform.TELEGRAM and str(source.user_id) == self.telegram_id
             and not source.is_bot)
@@ -523,7 +531,55 @@ class Worker:
         finally:
             self.chat_interactive[route].discard(active)
 
-    async def dispatch(self, event, owner):
+    async def dispatch_status(self, owner, delivery_id, input_digest):
+        """Сверить прежний приём после разрыва RPC без повторного исполнения."""
+        if owner != self.user_id or self.delivery_journal is None:
+            raise RpcError(-32602, 'Durable delivery unavailable')
+        async with self.delivery_lock:
+            return self.delivery_journal.input_status(delivery_id, input_digest)
+
+    async def flush_outputs(self, owner):
+        """Повторить только доставку готовых ответов; native задание не запускается."""
+        if owner != self.user_id or self.delivery_journal is None or self.peer is None:
+            raise RpcError(-32602, 'Durable delivery unavailable')
+        sent = 0
+        async with self.output_lock:
+            for row in self.delivery_journal.pending_outputs():
+                value = await self.peer.call('send', {'action': row['action'], **row['payload'], 'delivery_id': row['id']})
+                if value.get('success') and value.get('message_id'):
+                    self.delivery_journal.output_state(row['id'], 'sent', value)
+                    sent += 1
+                elif value.get('retryable') is False:
+                    self.delivery_journal.output_state(row['id'], 'blocked', value)
+                else:
+                    break
+        return {'sent': sent}
+
+    async def dispatch(self, event, owner, delivery_id=None, input_digest=None):
+        """Закрепить фактический native приём до RPC receipt; повтор ID возвращает его состояние."""
+        if delivery_id is None and input_digest is None:
+            return await self._dispatch_native(event, owner)
+        if owner != self.user_id or self.delivery_journal is None:
+            raise RpcError(-32602, 'Durable delivery unavailable')
+        from .scope import input_delivery
+        async with self.delivery_lock:
+            previous = self.delivery_journal.input_status(delivery_id, input_digest)
+            if previous['state'] in ('accepted', 'completed'):
+                return {**previous['receipt'], 'delivery_state': previous['state']}
+            if previous['state'] != 'not_received':
+                raise RpcError(-32004, 'Input dispatch outcome requires reconciliation')
+            self.delivery_journal.begin_input(delivery_id, input_digest)
+            context = input_delivery.set(delivery_id)
+            try:
+                value = await self._dispatch_native(event, owner)
+                self.delivery_journal.accept_input(delivery_id, input_digest, value)
+                if value.get('turn_id') and value['turn_id'] not in self.active:
+                    self.delivery_journal.complete_turn(value['turn_id'])
+                return {**value, 'delivery_state': 'accepted'}
+            finally:
+                input_delivery.reset(context)
+
+    async def _dispatch_native(self, event, owner):
         """Принять только событие привязанного владельца, не доверяя его metadata."""
         from gateway.platforms.event import MessageEvent, MessageType
         from gateway.session import SessionSource
@@ -653,6 +709,8 @@ class Worker:
             replacement.add_done_callback(lambda next_done: self._turn_finished(token, next_done))
             return
         self.active.pop(token, None)
+        if self.delivery_journal is not None and not done.cancelled() and done.exception() is None:
+            self.delivery_journal.complete_turn(token)
         self.turn_scopes.pop(token, None)
         typing = self.typing.pop(token, None)
         if typing is not None:

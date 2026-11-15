@@ -126,6 +126,11 @@ class Mirror:
         self._capturing = False
         self.capture_lock = asyncio.Lock()
         self.bot_id = None
+        self.input_ready = self.reconcile_delivery = None
+        self.pump_lock = asyncio.Lock()
+        self.auto_inputs, self.terminal_inputs = set(), set()
+        self.input_routes = {}
+        self.service_updates = {}
         self.tracker = Tracker(self._authorize, self._stage, self._release_snapshot)
 
     def register_snapshot(self, key, snapshot):
@@ -136,12 +141,19 @@ class Mirror:
         self.snapshot_refs[key] = self.snapshot_refs.get(key, 0) + 1
 
     def _release_snapshot(self, key):
+        profile = self.snapshots.get(key, {}).get('profile', {})
+        uid = profile.get('uid')
+        if uid is not None and not self.tracker.counts.get(uid):
+            self.input_routes.pop(uid, None)
         count = self.snapshot_refs.get(key, 0)
         if count <= 0:
             raise ValueError('INGRESS_CAPTURE_UNAVAILABLE')
         if count == 1:
             self.snapshots.pop(key, None)
             self.snapshot_refs.pop(key, None)
+            self.auto_inputs.discard(key)
+            self.terminal_inputs.discard(key)
+            self.service_updates.pop(key, None)
         else:
             self.snapshot_refs[key] = count - 1
 
@@ -308,57 +320,28 @@ class Mirror:
                 self._start_recovery()
 
     async def _restart_inputs(self):
-        """DEV: вернуть непереданные входы в обычную очередь без profile gates."""
+        """DEV: восстановить captured и сверяемые передачи; legacy unknown сохранить."""
         import json
-        from telegram import Update
         if self.transport is None or self.app is None:
             raise ValueError('TRANSPORT_RECOVERY_UNAVAILABLE')
         inventory = await self.inventory()
         profiles = inventory.get('profiles') if isinstance(inventory, dict) else None
         if not isinstance(profiles, list):
             raise ValueError('INGRESS_HYDRATION_UNAVAILABLE')
+        by_id = {p['profileId']: p for p in profiles}
         for profile in profiles:
             await asyncio.to_thread(self.inbox.prepare_restart, profile)
-        pending = await asyncio.to_thread(self.transport.pending)
-        replay = []
-        for row in pending:
-            if row['state'] == 'handing_off':
-                await asyncio.to_thread(self.transport.transition, row['bot_id'], row['update_id'],
-                                        'handing_off', 'unknown')
+        for row in await asyncio.to_thread(self.transport.pending):
+            if row['state'] != 'handing_off':
                 continue
-            if row['state'] != 'captured':
-                continue
-            if str(self.app.bot.id) != row['bot_id']:
-                raise ValueError('TRANSPORT_BOT_CHANGED')
-            snapshot = json.loads(row['binding'])
-            update = Update.de_json(json.loads(row['payload']), self.app.bot)
-            if str(getattr(getattr(update, 'effective_user', None), 'id', '')) != row['actor_id']:
-                raise ValueError('TRANSPORT_BINDING_CHANGED')
-            if snapshot.get('state') == 'known':
-                original = snapshot['profile']
-                fresh = await self.resolve(original['telegramId'])
-                current = fresh.get('profile') if isinstance(fresh, dict) and fresh.get('state') == 'known' else None
-                if (not isinstance(current, dict) or not any(all(p.get(k) == original.get(k)
-                        for k in ('uid', 'profileId', 'userId')) for p in profiles)
-                        or any(current.get(k) != original.get(k) for k in
-                               ('uid','profileId','userId','telegramId','authorTelegramId','role','generation'))):
-                    await asyncio.to_thread(self.transport.transition, row['bot_id'], row['update_id'],
-                                            'captured', 'blocked')
-                    continue
-                receipt = await asyncio.to_thread(self.inbox.capture, current, update, self.app.bot.id)
-                if receipt['state'] != 'captured':
-                    continue
-            elif snapshot.get('state') != 'unregistered':
-                raise ValueError('TRANSPORT_STATE_INVALID')
-            self.register_snapshot(f"{row['bot_id']}:{row['update_id']}", snapshot)
-            replay.append(update)
+            original = json.loads(row['binding']).get('profile', {})
+            profile = by_id.get(original.get('profileId'))
+            binding = (await asyncio.to_thread(self.inbox.delivery_for, profile, row['bot_id'], row['update_id'])) if profile else None
+            if binding is None:
+                await asyncio.to_thread(self.transport.transition, row['bot_id'], row['update_id'], 'handing_off', 'unknown')
         self.bot_id = self.app.bot.id
         self.hydrated = True
-        # Только captured: неизвестные эффекты никогда не попадают в повтор.
-        for update in replay:
-            await self.app.update_queue.put(update)
-        import logging
-        logging.getLogger(__name__).info('DEV input admission ready: queued=%d', len(replay))
+        await self.pump()
 
     def _start_recovery(self):
         """Запустить отложенный replay один раз после снятия общего gate."""
@@ -495,10 +478,29 @@ class Mirror:
         profile = snapshot['profile']
         if profile['uid'] != uid:
             raise PermissionError('INGRESS_BINDING_CHANGED')
+        if self.restartable:
+            seen = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update.update_id)
+            if seen['state'] in ('accepted', 'handled'):
+                return True
         if operation is not None and _replay_binding.get() != (uid, operation):
             await asyncio.to_thread(self.inbox.disposition, profile, self.bot_id, update.update_id,
                                     'held', operation_id=operation)
             return True
+        if self.restartable:
+            from .durable_inputs import ordinary
+            if ordinary(update):
+                self.auto_inputs.add(key)
+                route = (str(update.effective_chat.id), str(getattr(update.effective_message, 'message_thread_id', None) or ''))
+                row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update.update_id)
+                if row['state'] != 'captured':
+                    return True
+                if self.input_routes.get(uid, route) != route or self.input_ready is not None and not await self.input_ready(profile, route):
+                    return True
+                self.input_routes[uid] = route
+                # Handing-off начинается только перед реальным worker RPC.
+                return False
+            if getattr(getattr(update, 'message', None), 'forum_topic_created', None):
+                self.service_updates[key] = update
         if self.transport is not None:
             await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'captured','handing_off')
         await asyncio.to_thread(self.inbox.claim_for_delivery, profile, self.bot_id, update.update_id,
@@ -506,7 +508,39 @@ class Mirror:
         return False
 
     def finish(self, key, result):
-        self.tracker.finish(key, result)
+        allowed = key not in self.auto_inputs or key in self.terminal_inputs
+        uid = self.tracker.tickets.get(key)
+        service = self.service_updates.get(key)
+        if service is not None and result.get('completed') and not result.get('failed'):
+            self.tracker.finish(key, result)
+            task = asyncio.create_task(self.handled(service))
+            self.recovery_tasks[key] = task
+            return False
+        if not allowed and key in self.tracker.tickets and uid is not None and uid != 'outside':
+            self.tracker._release(key, uid, {'deferred': True})
+        else:
+            self.tracker.finish(key, result)
+        if type(uid) is int and not self.tracker.counts.get(uid):
+            self.input_routes.pop(uid, None)
+        return allowed
+
+    async def pump(self):
+        """Повторить ожидающую доставку без нового пользовательского сообщения."""
+        if self.restartable:
+            from .durable_inputs import pump
+            await pump(self)
+
+    async def before_delivery(self, event):
+        """Связать исходные updates и durable ID перед единственной внешней передачей."""
+        ids = getattr(event, '_brai_release_updates', [])
+        if not ids or not all(f'{self.bot_id}:{ident}' in self.auto_inputs for ident in ids):
+            return None
+        profile = self.snapshot(f'{self.bot_id}:{ids[0]}')['profile']
+        result = await asyncio.to_thread(self.inbox.bind_delivery, profile, self.bot_id, ids)
+        for ident in ids:
+            await asyncio.to_thread(self.inbox.claim_for_delivery, profile, self.bot_id, ident)
+            await asyncio.to_thread(self.transport.transition, self.bot_id, ident, 'captured', 'handing_off')
+        return result
 
     async def handled(self, update):
         import asyncio
@@ -520,6 +554,11 @@ class Mirror:
             return
         if snapshot.get('state') != 'known':
             return
+        if self.restartable:
+            row = await asyncio.to_thread(self.inbox.observe, snapshot['profile'], self.bot_id, update.update_id)
+            if row['state'] == 'captured':
+                await asyncio.to_thread(self.inbox.claim_for_delivery, snapshot['profile'], self.bot_id, update.update_id)
+                await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'captured', 'handing_off')
         await asyncio.to_thread(self.inbox.markhandled, snapshot['profile'], self.bot_id, update.update_id)
         if self.transport is not None:
             await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'handing_off','handled')
@@ -527,6 +566,7 @@ class Mirror:
 
     async def accepted(self, event, receipt):
         import asyncio
+        receipt = {key: value for key, value in receipt.items() if key != 'delivery_state'}
         ids = getattr(event, '_brai_release_updates', None)
         if not isinstance(ids, list) or not ids:
             raise ValueError('INGRESS_UPDATE_ID_UNAVAILABLE')
@@ -536,6 +576,11 @@ class Mirror:
             if snapshot.get('state') != 'known':
                 raise ValueError('INGRESS_BINDING_UNAVAILABLE')
             profile = snapshot['profile']
+            if self.restartable and receipt.get('accepted') is not True:
+                row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update_id)
+                if row['state'] == 'captured':
+                    await asyncio.to_thread(self.inbox.claim_for_delivery, profile, self.bot_id, update_id)
+                    await asyncio.to_thread(self.transport.transition, self.bot_id, update_id, 'captured', 'handing_off')
             if receipt.get('accepted') is True:
                 await asyncio.to_thread(self.inbox.markaccepted, profile, self.bot_id, update_id, receipt)
                 terminal = 'accepted'
@@ -544,7 +589,9 @@ class Mirror:
                 terminal = 'handled'
             if self.transport is not None:
                 await asyncio.to_thread(self.transport.transition, self.bot_id, update_id, 'handing_off',terminal)
-            self.tracker.settle(key)
+            self.terminal_inputs.add(key)
+            if key in self.tracker.tickets:
+                self.tracker.settle(key)
 
     async def block_event(self, event):
         import asyncio
