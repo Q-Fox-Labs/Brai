@@ -334,7 +334,7 @@ class FailureNoticeTest(unittest.TestCase):
         scope = {'Any': Any, 'Optional': Optional, '_TRANSIENT_REASONS': {'rate_limit'},
                  '_provider_failure_cause': lambda reason: 'сервис ИИ временно ограничил доступ',
                  '_PROVIDER_FAILURE_ACTION': {}, '_DEFAULT_FAILURE_ACTION': ''}
-        extract('cron/scheduler_failure_copy.py', {'provider_failure_notice', 'generic_failure_notice'}, scope)
+        extract('cron/scheduler_failure_copy.py', {'provider_failure_notice', 'generic_failure_notice', 'blocked_config_notice'}, scope)
         notice = scope['provider_failure_notice']('Проверка', 'job', 'rate_limit',
             backup_provider_phrase='Резервный сервис не настроен.')
         self.assertIn('Проверка', notice)
@@ -342,6 +342,62 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertIn('по расписанию', notice)
         self.assertNotIn('hermes cron', notice)
         self.assertNotIn('RAW', scope['generic_failure_notice']('Проверка', 'job', 'RAW ERROR'))
+        self.assertIn('не настроен доступ к сервису ИИ', scope['blocked_config_notice'](
+            'Проверка', 'provider credential missing: test'))
+        self.assertIn('не настроен канал доставки', scope['blocked_config_notice'](
+            'Проверка', 'delivery platform is unavailable'))
+        hold_scope = {'Any': Any, 'Optional': Optional, '_window_end': lambda seconds: 'end',
+                      'safe_strftime': lambda date, fmt: '10:00 UTC'}
+        extract('cron/quota_hold.py', {'hold_notice'}, hold_scope)
+        hold = hold_scope['hold_notice']({'schedule': {'kind': 'cron'}}, 7200)
+        self.assertIn('2.0 ч', hold)
+        self.assertIn('10:00 UTC', hold)
+        self.assertIn('приостановлена', hold)
+
+    def test_startup_dependency_messages_are_russian(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        tree = ast.parse((Path(candidate) / 'hermes_cli/main_dep_hints.py').read_text())
+        functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+        scope = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])), '<candidate>', 'exec'), scope)
+        missing = scope['missing_optional_deps_message']('dashboard', 'packages', 'all')
+        blocked = scope['smart_app_control_block_message'](Exception('DLL load failed: _ssl'))
+        self.assertIn('отсутствуют необходимые компоненты', missing)
+        self.assertIn('безопасности Windows заблокировала', blocked)
+        self.assertIsNone(scope['smart_app_control_block_message'](Exception('other')))
+        self.assertNotIn('hermes pm', missing)
+
+    def test_fallback_notices_explain_the_cause_in_russian(self):
+        import os
+        from typing import Any
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        tree = ast.parse((root / 'hermes_cli/fallback_config.py').read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'pre_agent_fallback_notice')
+        scope = {'Any': Any}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        text = scope['pre_agent_fallback_notice']('основной', 'model-a', 'резервный', 'model-b')
+        self.assertIn('model-a', text)
+        self.assertIn('model-b', text)
+        self.assertIn('недоступен', text)
+        self.assertIn('резервную модель', text)
+        tree = ast.parse((root / 'agent/chat_completion_helpers.py').read_text())
+        class Reason:
+            def __getattr__(self, name):
+                return name
+        nodes = [n for n in tree.body if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == '_FALLBACK_REASON_LABELS' for t in n.targets)
+            or isinstance(n, ast.FunctionDef) and n.name == '_fallback_reason_text']
+        scope = {'FailoverReason': Reason()}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), scope)
+        self.assertEqual(scope['_fallback_reason_text']('rate_limit'), 'временное ограничение запросов')
+        self.assertEqual(scope['_fallback_reason_text']('auth'), 'ошибка авторизации')
+        self.assertEqual(scope['_fallback_reason_text']('unexpected'), 'ошибка сервиса')
 
     def test_nous_access_messages_keep_distinct_causes(self):
         import os

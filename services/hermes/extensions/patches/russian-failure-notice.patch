@@ -1524,171 +1524,6 @@ diff --git a/tools/delegate_tool_progress.py b/tools/delegate_tool_progress.py
 
 
  class DelegateEvent(str, enum.Enum):
-diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
---- a/cron/scheduler_failure_copy.py
-+++ b/cron/scheduler_failure_copy.py
-@@ -54,35 +54,18 @@
- # Reason -> what to do. Transient reasons get the backup-provider clause from the scheduler
- # (it knows whether a fallback chain is configured) instead of a fixed sentence.
- _PROVIDER_FAILURE_ACTION: dict[str, str] = {
--    "billing": (
--        "Top up or wait for the limit to reset, or pin another provider with "
--        "`hermes cron edit {job_id} --provider <name>`."
--    ),
--    "auth": (
--        "Sign in again with /login (or `{relogin}` in a terminal), or pin a "
--        "working provider with `hermes cron edit {job_id} --provider <name>`, then "
--        "`hermes cron run {job_id}` to retry."
--    ),
--    "model_not_found": "Pick another model with `hermes cron edit {job_id} --model <name>`.",
--    "upstream_blocked": (
--        "A firewall in front of the provider blocked the request (not your key): set a User-Agent "
--        "via `extra_headers` on the provider's custom_providers entry, or pin another provider with "
--        "`hermes cron edit {job_id} --provider <name>`."
--    ),
--    "context_overflow": "Shorten the job's prompt with `hermes cron edit {job_id} --prompt <text>`.",
-+    "billing": "Проверьте оплату и лимит использования сервиса ИИ.",
-+    "auth": "Проверьте авторизацию в сервисе ИИ.",
-+    "model_not_found": "Проверьте настройки модели для задачи.",
-+    "upstream_blocked": "Проверьте сетевой доступ к сервису ИИ.",
-+    "context_overflow": "Сократите запрос задачи.",
-+    "content_policy_blocked": "Попробуйте переформулировать запрос задачи.",
-+    "provider_policy_blocked": "Проверьте настройки и доступ аккаунта в сервисе ИИ.",
- }
- _PROVIDER_FAILURE_ACTION["auth_permanent"] = _PROVIDER_FAILURE_ACTION["auth"]
- _PROVIDER_FAILURE_ACTION["billing_unverified"] = _PROVIDER_FAILURE_ACTION["billing"]
- _PROVIDER_FAILURE_ACTION["payload_too_large"] = _PROVIDER_FAILURE_ACTION["context_overflow"]
--_PROVIDER_FAILURE_ACTION["content_policy_blocked"] = (
--    "Reword the job's prompt with `hermes cron edit {job_id} --prompt <text>`, or pick another "
--    "model with `hermes cron edit {job_id} --model <name>`."
--)
--_PROVIDER_FAILURE_ACTION["provider_policy_blocked"] = (
--    "Retrying won't help: check the account's status and data/privacy settings with the provider, "
--    "or pin another model with `hermes cron edit {job_id} --model <name>`."
--)
--_DEFAULT_FAILURE_ACTION = "Run it again with `hermes cron run {job_id}`, or edit it with `hermes cron edit {job_id}`."
-+_DEFAULT_FAILURE_ACTION = "Проверьте настройки задачи и попробуйте снова."
-
-
- def provider_failure_notice(
-@@ -94,55 +77,23 @@
-     if cause is None:
-         return None
-     if reason in _TRANSIENT_REASONS:
--        action = (
--            f"{backup_provider_phrase} It will run again at its next scheduled time; "
--            f"`hermes cron run {job_id}` tries now."
--        )
-+        action = f"{backup_provider_phrase} Задача запустится снова по расписанию."
-     else:
--        from agent.turn_failure_copy import relogin_command_hint
--
--        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION).format(
--            job_id=job_id, relogin=relogin_command_hint(provider))
--    return (
--        f"⚠️ Cron '{job_name}' failed: {cause}. {action} "
--        f"Run log: `hermes cron runs {job_id}`."
--    )
-+        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
-+    return f"⚠️ Задача «{job_name}» не выполнена: {cause}. {action}"
-
-
- def generic_failure_notice(job_name: str, job_id: str, cleaned_error: str) -> str:
--    """Unclassified failure: the cleaned error text plus where to look and what to do."""
--    return (
--        f"⚠️ Cron '{job_name}' failed: {cleaned_error}. "
--        f"See the full run with `hermes cron runs {job_id}` (output saved under "
--        f"{cron_output_dir_display(job_id)}); run it again with `hermes cron run {job_id}`, "
--        f"edit it with `hermes cron edit {job_id}`, or pause it with `hermes cron pause {job_id}`."
--    )
-+    return f"⚠️ Задача «{job_name}» завершилась с ошибкой. Подробности сохранены в журнале выполнения."
-
-
- def script_timeout_notice(job_name: str, job_id: str) -> str:
--    return (
--        f"⚠️ Cron '{job_name}' failed: its script timed out. No model was invoked. "
--        f"Check the script's output under {cron_output_dir_display(job_id)} or `hermes cron runs {job_id}`, "
--        f"then run it again with `hermes cron run {job_id}`."
--    )
-+    return f"⚠️ Задача «{job_name}» не выполнена: скрипт не завершился вовремя. Модель не запускалась. Проверьте журнал выполнения."
-
-
- def inactivity_notice(job_name: str, job_id: str) -> str:
--    return (
--        f"⚠️ Cron '{job_name}' failed: the job stalled — it stopped doing anything for too long "
--        f"and was cut off. Check what it was doing in the saved output under "
--        f"{cron_output_dir_display(job_id)} (`hermes cron runs {job_id}`), then run it again with "
--        f"`hermes cron run {job_id}`."
--    )
-+    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности. Проверьте журнал выполнения."
-
-
- def blocked_config_notice(job_name: str, reason: str) -> str:
--    """One-time notice when the pre-run configuration check refused to start the job."""
--    reason = reason.rstrip()
--    if reason and reason[-1] not in ".!?":
--        reason += "."
--    return (
--        f"⛔ Cron '{job_name}' did not run: {reason} Nothing was charged. Hermes will try again at "
--        "the next scheduled time and will not repeat this alert; check with "
--        "`hermes cron doctor`."
--    )
-+    return f"⛔ Задача «{job_name}» не запущена из-за ошибки настроек. Оплата не взималась. Повторю запуск по расписанию."
-diff --git a/cron/scheduler.py b/cron/scheduler.py
---- a/cron/scheduler.py
-+++ b/cron/scheduler.py
-@@ -112,22 +112,16 @@
-     config can't be read — never crash delivery.
-     """
-     if job is not None and _job_route_pinned(job):
--        return (
--            "This job is pinned to its own provider/model, so it does not fall back to "
--            f"`fallback_providers`; `hermes cron edit {job.get('id')} --unpin` lets it follow the "
--            "main model and its fallback chain."
--        )
-+        return "Для задачи закреплён отдельный сервис ИИ; резервные сервисы не использовались."
-     try:
-         cfg = load_config() or {}
-         chain = get_fallback_chain(cfg)
-     except Exception:
--        return "No backup provider succeeded either."
-+        return "Не удалось получить ответ и от резервных сервисов ИИ."
-     if chain:
--        return "No backup provider succeeded either."
--    return (
--        "No backup provider is configured — add one with `hermes fallback add`, "
--        "or set a cron-wide default via `cron.model` + `cron.model_provider` in config.yaml."
--    )
-+        return "Не удалось получить ответ и от резервных сервисов ИИ."
-+    return "Резервный сервис ИИ не настроен."
-+
-
-
- def _failure_streak_nudge(job: dict) -> str:
-@@ -153,9 +147,8 @@
-         return ""
-     job_ref = job.get("name") or job.get("id") or "this job"
-     return (
--        f"\nThis job has failed {streak} runs in a row — worth a review. "
--        f"Fix its prompt/config, or pause it with `hermes cron pause {job_ref}` "
--        "(resume/remove also available) to stop the noise."
-+        f"\nЗадача завершилась с ошибкой {streak} раз подряд. Стоит проверить её настройки."
-+
-     )
-
-
-@@ -314,9 +307,8 @@
-         if skew is not None:
-             boot_rev, disk_rev = skew
-             message += (
--                f" Likely cause: the gateway is running stale code (booted "
--                f"on {boot_rev}, disk is at {disk_rev}) — run "
--                "`hermes gateway restart` to fix it."
-+                " Возможная причина: служба работает со старой версией кода. "
-+                "Администратору нужно проверить и перезапустить её."
-             )
-
-     return message
 diff --git a/agent/turn_response_check.py b/agent/turn_response_check.py
 --- a/agent/turn_response_check.py
 +++ b/agent/turn_response_check.py
@@ -2488,128 +2323,6 @@ diff --git a/agent/turn_context.py b/agent/turn_context.py
          )
 
      # System prompt is cached per session for prefix caching.
-diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
---- a/agent/chat_completion_helpers.py
-+++ b/agent/chat_completion_helpers.py
-@@ -594,7 +594,7 @@
-         stale_timeout, model, f"{estimate_request_context_tokens(api_kwargs):,}")
-     try:
-         agent._buffer_diagnostic_status(
--            f"⚠️ No response from provider for {int(elapsed)}s (non-streaming, model: {model}). {hint or 'Aborting call.'}")
-+            f"⚠️ Сервис ИИ не отвечает уже {int(elapsed)} сек. (модель: {model}). Прерываю запрос.")
-     except Exception:
-         logger.debug("stale status buffering failed", exc_info=True)
-
-@@ -850,17 +850,17 @@
-         model = str(api_kwargs.get("model", ""))
-         progress = get_loading_progress().get(model)
-         if progress is not None:
--            return (f"⏳ loading {model} into memory — {progress['percent']}% "
--                "(responses start once the model is loaded)")
-+            return (f"⏳ Загружаю модель {model}: {progress['percent']}%. "
-+                "Ответ появится после загрузки.")
-         prefill = get_prefill_progress(model)
-         if prefill is None:
-             return None
-         processed = int(prefill["processed"])
-         total = estimate_request_context_tokens(api_kwargs)
-         if total and total >= processed:
--            return f"⚙ processing prompt — {max(0, min(100, round(processed / total * 100)))}%"
-+            return f"⚙ Обрабатываю запрос — {max(0, min(100, round(processed / total * 100)))}%"
-         # Counter past the estimate (estimator undercounted): no honest denominator, label-only.
--        return "⚙ processing prompt"
-+        return "⚙ Обрабатываю запрос"
-     except Exception:
-         return None
-
-@@ -2596,9 +2596,7 @@
-         # attempt (one lifecycle boundary).
-         from agent.bedrock_adapter import normalize_converse_response
-         self.agent._disable_streaming = True
--        self.agent._safe_print("\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream — "
--            "falling back to non-streaming InvokeModel.\n"
--            "   Grant that action to restore streaming output.\n", diagnostic=True)
-+        self.agent._safe_print("\n⚠ Не хватает прав AWS для потокового ответа Bedrock. Переключаюсь на обычный режим.\n", diagnostic=True)
-         logger.info("bedrock: converse_stream denied by IAM (%s) — "
-             "using non-streaming converse() for this session.", type(exc).__name__)
-         return normalize_converse_response(client.converse(**final_kwargs))
-@@ -2672,7 +2670,7 @@
-         logger.warning("Bedrock stream stale for %.0fs (threshold %.0fs) — no events "
-             "received. region=%s model=%s. Aborting call.", stale_elapsed, self.stale_timeout, self.region,
-             self._model())
--        agent._buffer_diagnostic_status(f"⚠️ No events from Bedrock for {int(stale_elapsed)}s (model: {self._model()}). Aborting...")
-+        agent._buffer_diagnostic_status(f"⚠️ Сервис Bedrock не отвечает уже {int(stale_elapsed)} сек. (модель: {self._model()}). Прерываю запрос.")
-         _bump_stale_streak(agent)
-         # Evict the region's cached client so the NEXT call gets a fresh pool.
-         # This does NOT abort the in-flight botocore EventStream (no external
-@@ -3582,8 +3580,7 @@
-             # buffered retry chatter is dropped on successful recovery. Fires at most once per
-             # session (streaming is off from here on).
-             self.agent._emit_warning(
--                "⚠️ Provider stream returned an empty keepalive frame — retrying this turn "
--                "without streaming (streaming stays off for this session).")
-+                "⚠️ Сервис прислал пустой ответ. Продолжаю без потоковой передачи в этом разговоре.")
-             return
-         from agent.anthropic_adapter import _is_stream_unavailable_error
-         if not _is_stream_unavailable_error(e):
-@@ -3597,18 +3594,14 @@
-                 return
-             self.agent._disable_streaming = True
-             self.agent._safe_print(
--                "\n⚠  Provider sent Anthropic stream events out of order. Switching to non-streaming.\n",
-+                "\n⚠ Сервис ИИ прислал данные ответа в неправильном порядке. Переключаюсь на обычный режим.\n",
-                 diagnostic=True,
-             )
-             return
-         # Remaining matches: stream rejected outright, or Bedrock IAM stream denial.
-         self.agent._disable_streaming = True
-         self.agent._safe_print(
--            "\n⚠  Streaming is not supported for this model/provider. Switching to non-streaming.\n"
--            "   To avoid this delay, set display.streaming: false in config.yaml\n"
--            if _is_stream_unsupported else
--            "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream. Switching to non-streaming.\n"
--            "   Grant that action to restore streaming output.\n",
-+            "\n⚠ Не хватает прав AWS для потокового ответа Bedrock. Переключаюсь на обычный режим.\n",
-             diagnostic=True,
-         )
-
-@@ -3672,7 +3665,7 @@
-             # Marker explains the re-streamed preamble (``_emit_stream_drop`` logs the WARNING);
-             # reset the streamed-text buffer so it isn't double-recorded; fresh accumulators.
-             if self.agent._warning_presentation_enabled():
--                self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n")
-+                self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Соединение прервалось во время подготовки действия. Подключаюсь снова…\n\n")
-             self._quiet(self.agent._reset_stream_delivery_tracking)
-             self.deltas_were_sent["yes"] = False
-             self.first_delta_fired["done"] = False
-@@ -3692,7 +3685,7 @@
-                 _what = ("Provider returned malformed streaming data after" if _is_stream_parse_err
-                          else "Provider returned an empty response stream after")
-                 self.agent._buffer_diagnostic_status(
--                    f"❌ {_what} {max_retries + 1} attempts. The provider may be experiencing issues — try again in a moment.")
-+                    f"❌ После {max_retries + 1} попыток сервис ИИ вернул {'некорректные данные' if _is_stream_parse_err else 'пустой ответ'}. Попробую продолжить позже.")
-             else:
-                 from agent.stream_diag import buffer_connect_exhausted_notice
-                 buffer_connect_exhausted_notice(self.agent, e, attempts=max_retries + 1, base_url=self.agent.base_url)
-@@ -3879,8 +3872,7 @@
-             elapsed, self._stream_stale_timeout, self.api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
-         )
-         self.agent._buffer_diagnostic_status(
--            f"⚠️ No response from provider for {int(elapsed)}s (model: {self.api_kwargs.get('model', 'unknown')}, "
--            f"context: ~{_est_ctx:,} tokens). Reconnecting...")
-+            f"⚠️ Сервис ИИ не отвечает уже {int(elapsed)} сек. (модель: {self.api_kwargs.get('model', 'unknown')}, контекст: около {_est_ctx:,} токенов). Переподключаюсь.")
-         # Captured BEFORE the cancel/abort: the pool sweep can miss a checked-out
-         # connection, so shut down the killed attempt's own socket too — still
-         # shutdown-only, never close (see the helper).
-@@ -3892,7 +3884,7 @@
-         self._count_stale_attempt()
-         # Reset the timer so we don't kill repeatedly while the worker unwinds.
-         self.last_chunk_time["t"] = time.time()
--        self.agent._emit_diagnostic_wait(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
-+        self.agent._emit_diagnostic_wait(f"⚠️ Нет ответа от сервиса {int(elapsed)} сек. Восстанавливаю соединение...")
-         self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
-
-     def _abort_for_interrupt(self, stale_elapsed: float) -> None:
 diff --git a/agent/agent_init.py b/agent/agent_init.py
 --- a/agent/agent_init.py
 +++ b/agent/agent_init.py
@@ -3802,3 +3515,569 @@ diff --git a/hermes_cli/nous_account.py b/hermes_cli/nous_account.py
 
  def reset_nous_portal_account_info_cache() -> None:
      """Clear the short-lived account-info cache used by tests."""
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -593,9 +593,9 @@
+         "model=%s context=~%s tokens. Killing connection.", "Inline n" if inline else "N", elapsed,
+         stale_timeout, model, f"{estimate_request_context_tokens(api_kwargs):,}")
+     try:
+         agent._buffer_diagnostic_status(
+-            f"⚠️ No response from provider for {int(elapsed)}s (non-streaming, model: {model}). {hint or 'Aborting call.'}")
++            f"⚠️ Сервис ИИ не отвечает уже {int(elapsed)} сек. (модель: {model}). Прерываю запрос.")
+     except Exception:
+         logger.debug("stale status buffering failed", exc_info=True)
+
+
+@@ -849,19 +849,19 @@
+             return None
+         model = str(api_kwargs.get("model", ""))
+         progress = get_loading_progress().get(model)
+         if progress is not None:
+-            return (f"⏳ loading {model} into memory — {progress['percent']}% "
+-                "(responses start once the model is loaded)")
++            return (f"⏳ Загружаю модель {model}: {progress['percent']}%. "
++                "Ответ появится после загрузки.")
+         prefill = get_prefill_progress(model)
+         if prefill is None:
+             return None
+         processed = int(prefill["processed"])
+         total = estimate_request_context_tokens(api_kwargs)
+         if total and total >= processed:
+-            return f"⚙ processing prompt — {max(0, min(100, round(processed / total * 100)))}%"
++            return f"⚙ Обрабатываю запрос — {max(0, min(100, round(processed / total * 100)))}%"
+         # Counter past the estimate (estimator undercounted): no honest denominator, label-only.
+-        return "⚙ processing prompt"
++        return "⚙ Обрабатываю запрос"
+     except Exception:
+         return None
+
+
+@@ -1797,39 +1797,39 @@
+     return None if has_token else "nous_token_missing"
+
+
+ _FALLBACK_REASON_LABELS = {
+-    FailoverReason.auth: "authentication failed",
+-    FailoverReason.auth_permanent: "authentication permanently failed",
+-    FailoverReason.billing: "billing or quota exhausted",
+-    FailoverReason.rate_limit: "rate limit",
+-    FailoverReason.upstream_rate_limit: "upstream model rate limit",
+-    FailoverReason.overloaded: "provider overloaded",
+-    FailoverReason.server_error: "provider server error",
+-    FailoverReason.timeout: "request timeout",
+-    FailoverReason.ssl_cert_verification: "TLS certificate verification failed",
+-    FailoverReason.context_overflow: "context window exceeded",
+-    FailoverReason.payload_too_large: "request payload too large",
+-    FailoverReason.image_too_large: "image payload too large",
+-    FailoverReason.model_not_found: "model not found",
+-    FailoverReason.provider_policy_blocked: "provider policy blocked the request",
+-    FailoverReason.content_policy_blocked: "content policy blocked the request",
+-    FailoverReason.format_error: "request format rejected",
+-    FailoverReason.role_alternation: "adjacent same-role messages rejected",
+-    FailoverReason.invalid_encrypted_content: "encrypted reasoning state rejected",
+-    FailoverReason.multimodal_tool_content_unsupported: "multimodal tool content unsupported",
+-    FailoverReason.thinking_signature: "thinking signature rejected",
+-    FailoverReason.long_context_tier: "long-context tier unavailable",
+-    FailoverReason.oauth_long_context_beta_forbidden: "OAuth long-context beta unavailable",
+-    FailoverReason.llama_cpp_grammar_pattern: "grammar pattern rejected",
+-    FailoverReason.unknown: "provider failure",
++    FailoverReason.auth: "ошибка авторизации",
++    FailoverReason.auth_permanent: "доступ отклонён",
++    FailoverReason.billing: "исчерпаны средства или лимит",
++    FailoverReason.rate_limit: "временное ограничение запросов",
++    FailoverReason.upstream_rate_limit: "модель временно ограничила запросы",
++    FailoverReason.overloaded: "сервис перегружен",
++    FailoverReason.server_error: "ошибка сервиса",
++    FailoverReason.timeout: "сервис не ответил вовремя",
++    FailoverReason.ssl_cert_verification: "не удалось проверить сертификат",
++    FailoverReason.context_overflow: "превышен размер контекста",
++    FailoverReason.payload_too_large: "слишком большой запрос",
++    FailoverReason.image_too_large: "слишком большое изображение",
++    FailoverReason.model_not_found: "модель не найдена",
++    FailoverReason.provider_policy_blocked: "сервис отклонил запрос по правилам аккаунта",
++    FailoverReason.content_policy_blocked: "запрос отклонён фильтром безопасности",
++    FailoverReason.format_error: "сервис отклонил формат запроса",
++    FailoverReason.role_alternation: "сервис отклонил порядок сообщений",
++    FailoverReason.invalid_encrypted_content: "сервис отклонил сохранённые рассуждения",
++    FailoverReason.multimodal_tool_content_unsupported: "сервис не поддерживает формат результата действия",
++    FailoverReason.thinking_signature: "сервис отклонил подпись рассуждений",
++    FailoverReason.long_context_tier: "расширенный контекст недоступен",
++    FailoverReason.oauth_long_context_beta_forbidden: "расширенный контекст недоступен по подписке",
++    FailoverReason.llama_cpp_grammar_pattern: "сервис отклонил схему действия",
++    FailoverReason.unknown: "ошибка сервиса",
+ }
+
+
+ def _fallback_reason_text(reason: "FailoverReason | None") -> str:
+     """Return a concise operator-facing explanation for a fallback switch."""
+     label = _FALLBACK_REASON_LABELS.get(reason)
+-    return label or str(getattr(reason, "value", None) or reason or "provider failure").replace("_", " ")
++    return label or "ошибка сервиса"
+
+
+ def _is_anthropic_wire_url(url: str) -> bool:
+     """Same Messages-only host match as determine_api_mode() / _detect_api_mode_for_url(): api.anthropic.com,
+@@ -2103,13 +2103,13 @@
+             fb_model = agent.model  # normalized by the binder
+             rewrite_prompt_model_identity(agent, fb_model, fb_provider)
+
+             notice = (
+-                f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
+-                f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}.")
++                f"⚠️ Модель {old_model} через {old_provider} недоступна "
++                f"({_fallback_reason_text(reason)}). Использую резервную модель {fb_model} через {fb_provider}.")
+             if cooldown_seconds is not None:
+                 remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
+-                notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
++                notice += f" Основную модель можно попробовать снова примерно через {remaining} сек.; её восстановление не гарантировано."
+             _buffer_fallback_notice(agent, notice)
+             # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
+             # provenance so the restore path only emits a recovery notice after a real fallback.
+             agent._provider_fallback_active = True
+@@ -2595,11 +2595,9 @@
+         # InvokeModel-only IAM policies cannot stream; fall back inside the same Relay
+         # attempt (one lifecycle boundary).
+         from agent.bedrock_adapter import normalize_converse_response
+         self.agent._disable_streaming = True
+-        self.agent._safe_print("\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream — "
+-            "falling back to non-streaming InvokeModel.\n"
+-            "   Grant that action to restore streaming output.\n", diagnostic=True)
++        self.agent._safe_print("\n⚠ Не хватает прав AWS для потокового ответа Bedrock. Переключаюсь на обычный режим.\n", diagnostic=True)
+         logger.info("bedrock: converse_stream denied by IAM (%s) — "
+             "using non-streaming converse() for this session.", type(exc).__name__)
+         return normalize_converse_response(client.converse(**final_kwargs))
+
+@@ -2671,9 +2669,9 @@
+         agent = self.agent
+         logger.warning("Bedrock stream stale for %.0fs (threshold %.0fs) — no events "
+             "received. region=%s model=%s. Aborting call.", stale_elapsed, self.stale_timeout, self.region,
+             self._model())
+-        agent._buffer_diagnostic_status(f"⚠️ No events from Bedrock for {int(stale_elapsed)}s (model: {self._model()}). Aborting...")
++        agent._buffer_diagnostic_status(f"⚠️ Сервис Bedrock не отвечает уже {int(stale_elapsed)} сек. (модель: {self._model()}). Прерываю запрос.")
+         _bump_stale_streak(agent)
+         # Evict the region's cached client so the NEXT call gets a fresh pool.
+         # This does NOT abort the in-flight botocore EventStream (no external
+         # cancellation exists); the daemon worker keeps reading until its
+@@ -3581,10 +3579,9 @@
+             # Durable channel, not _buffer_status: this recovery is expected to SUCCEED, and
+             # buffered retry chatter is dropped on successful recovery. Fires at most once per
+             # session (streaming is off from here on).
+             self.agent._emit_warning(
+-                "⚠️ Provider stream returned an empty keepalive frame — retrying this turn "
+-                "without streaming (streaming stays off for this session).")
++                "⚠️ Сервис прислал пустой ответ. Продолжаю без потоковой передачи в этом разговоре.")
+             return
+         from agent.anthropic_adapter import _is_stream_unavailable_error
+         if not _is_stream_unavailable_error(e):
+             return
+@@ -3596,20 +3593,16 @@
+             if self.agent.api_mode != "anthropic_messages" or self.agent.provider == "bedrock":
+                 return
+             self.agent._disable_streaming = True
+             self.agent._safe_print(
+-                "\n⚠  Provider sent Anthropic stream events out of order. Switching to non-streaming.\n",
++                "\n⚠ Сервис ИИ прислал данные ответа в неправильном порядке. Переключаюсь на обычный режим.\n",
+                 diagnostic=True,
+             )
+             return
+         # Remaining matches: stream rejected outright, or Bedrock IAM stream denial.
+         self.agent._disable_streaming = True
+         self.agent._safe_print(
+-            "\n⚠  Streaming is not supported for this model/provider. Switching to non-streaming.\n"
+-            "   To avoid this delay, set display.streaming: false in config.yaml\n"
+-            if _is_stream_unsupported else
+-            "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream. Switching to non-streaming.\n"
+-            "   Grant that action to restore streaming output.\n",
++            "\n⚠ Не хватает прав AWS для потокового ответа Bedrock. Переключаюсь на обычный режим.\n",
+             diagnostic=True,
+         )
+
+     def _handle_stream_error(self, e: Exception, attempt: int, max_retries: int) -> bool:
+@@ -3671,9 +3664,9 @@
+                 return False
+             # Marker explains the re-streamed preamble (``_emit_stream_drop`` logs the WARNING);
+             # reset the streamed-text buffer so it isn't double-recorded; fresh accumulators.
+             if self.agent._warning_presentation_enabled():
+-                self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n")
++                self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Соединение прервалось во время подготовки действия. Подключаюсь снова…\n\n")
+             self._quiet(self.agent._reset_stream_delivery_tracking)
+             self.deltas_were_sent["yes"] = False
+             self.first_delta_fired["done"] = False
+             self._retry_after_drop(e, attempt, max_retries, mid_tool_call=True, reason="stream_mid_tool_retry_cleanup")
+@@ -3691,9 +3684,9 @@
+             if _is_stream_parse_err or _is_empty_stream:
+                 _what = ("Provider returned malformed streaming data after" if _is_stream_parse_err
+                          else "Provider returned an empty response stream after")
+                 self.agent._buffer_diagnostic_status(
+-                    f"❌ {_what} {max_retries + 1} attempts. The provider may be experiencing issues — try again in a moment.")
++                    f"❌ После {max_retries + 1} попыток сервис ИИ вернул {'некорректные данные' if _is_stream_parse_err else 'пустой ответ'}. Попробую продолжить позже.")
+             else:
+                 from agent.stream_diag import buffer_connect_exhausted_notice
+                 buffer_connect_exhausted_notice(self.agent, e, attempts=max_retries + 1, base_url=self.agent.base_url)
+         else:
+@@ -3878,10 +3871,9 @@
+             "Stream stale for %.0fs (threshold %.0fs) — no chunks received. model=%s context=~%s tokens. Killing connection.",
+             elapsed, self._stream_stale_timeout, self.api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
+         )
+         self.agent._buffer_diagnostic_status(
+-            f"⚠️ No response from provider for {int(elapsed)}s (model: {self.api_kwargs.get('model', 'unknown')}, "
+-            f"context: ~{_est_ctx:,} tokens). Reconnecting...")
++            f"⚠️ Сервис ИИ не отвечает уже {int(elapsed)} сек. (модель: {self.api_kwargs.get('model', 'unknown')}, контекст: около {_est_ctx:,} токенов). Переподключаюсь.")
+         # Captured BEFORE the cancel/abort: the pool sweep can miss a checked-out
+         # connection, so shut down the killed attempt's own socket too — still
+         # shutdown-only, never close (see the helper).
+         _killed_response = self._attempt_stream_response
+@@ -3891,9 +3883,9 @@
+         self._shutdown_stale_attempt_socket(_killed_response)
+         self._count_stale_attempt()
+         # Reset the timer so we don't kill repeatedly while the worker unwinds.
+         self.last_chunk_time["t"] = time.time()
+-        self.agent._emit_diagnostic_wait(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
++        self.agent._emit_diagnostic_wait(f"⚠️ Нет ответа от сервиса {int(elapsed)} сек. Восстанавливаю соединение...")
+         self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
+
+     def _abort_for_interrupt(self, stale_elapsed: float) -> None:
+         """/stop seen by the monitor: mark cancelled, abort the request-local
+diff --git a/hermes_cli/fallback_config.py b/hermes_cli/fallback_config.py
+--- a/hermes_cli/fallback_config.py
++++ b/hermes_cli/fallback_config.py
+@@ -90,11 +90,11 @@
+ ) -> str:
+     """User-visible one-shot line for a provider switch made during credential resolution, before
+     any AIAgent exists (#74349). Shared by the messaging gateway, the TUI/Desktop gateway and cron
+     so the three pre-agent fallback paths cannot drift in wording."""
+-    primary_desc = "/".join(str(p).strip() for p in (primary_provider, primary_model) if p) or "primary"
+-    fallback_desc = "/".join(str(p).strip() for p in (fallback_provider, fallback_model) if p) or "fallback"
+-    return f"⚠️ Provider fallback: {primary_desc} unavailable; using {fallback_desc} for this response."
++    primary_desc = "/".join(str(p).strip() for p in (primary_provider, primary_model) if p) or "основной сервис"
++    fallback_desc = "/".join(str(p).strip() for p in (fallback_provider, fallback_model) if p) or "резервный сервис"
++    return f"⚠️ {primary_desc} недоступен. Для этого ответа использую резервную модель {fallback_desc}."
+
+
+
+ def _iter_fallback_entries(raw: Any) -> list[dict[str, Any]]:
+diff --git a/cron/quota_hold.py b/cron/quota_hold.py
+--- a/cron/quota_hold.py
++++ b/cron/quota_hold.py
+@@ -156,8 +156,8 @@
+         return ""
+     window_end = _window_end(hold_seconds)
+     hours = float(hold_seconds) / 3600.0
+     return (
+-        f"\nThe provider's usage window is closed for about {hours:.1f}h. This job is held "
+-        f"through {safe_strftime(window_end, '%Y-%m-%d %H:%M %Z')} and resumes at the first safe "
+-        "opportunity afterwards; no further alerts are sent while the provider is unavailable."
++        f"\nДоступ к сервису ИИ ограничен примерно на {hours:.1f} ч. Задача приостановлена до "
++        f"{safe_strftime(window_end, '%Y-%m-%d %H:%M %Z')} и продолжится при первой возможности. "
++        "Пока сервис недоступен, повторные уведомления отправляться не будут."
+     )
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -111,24 +111,18 @@
+     failed too" vs "none configured" (most installs). Fails open to "the backups failed too" if
+     config can't be read — never crash delivery.
+     """
+     if job is not None and _job_route_pinned(job):
+-        return (
+-            "This job is pinned to its own provider/model, so it does not fall back to "
+-            f"`fallback_providers`; `hermes cron edit {job.get('id')} --unpin` lets it follow the "
+-            "main model and its fallback chain."
+-        )
++        return "Для задачи закреплён отдельный сервис ИИ; резервные сервисы не использовались."
+     try:
+         cfg = load_config() or {}
+         chain = get_fallback_chain(cfg)
+     except Exception:
+-        return "No backup provider succeeded either."
++        return "Не удалось получить ответ и от резервных сервисов ИИ."
+     if chain:
+-        return "No backup provider succeeded either."
+-    return (
+-        "No backup provider is configured — add one with `hermes fallback add`, "
+-        "or set a cron-wide default via `cron.model` + `cron.model_provider` in config.yaml."
+-    )
++        return "Не удалось получить ответ и от резервных сервисов ИИ."
++    return "Резервный сервис ИИ не настроен."
++
+
+
+ def _failure_streak_nudge(job: dict) -> str:
+     """Review nudge when a recurring job keeps failing, else "". The failure message is delivered
+@@ -152,11 +146,10 @@
+     if streak < threshold:
+         return ""
+     job_ref = job.get("name") or job.get("id") or "this job"
+     return (
+-        f"\nThis job has failed {streak} runs in a row — worth a review. "
+-        f"Fix its prompt/config, or pause it with `hermes cron pause {job_ref}` "
+-        "(resume/remove also available) to stop the noise."
++        f"\nЗадача завершилась с ошибкой {streak} раз подряд. Стоит проверить её настройки."
++
+     )
+
+
+ def _detect_gateway_code_skew() -> tuple[str, str] | None:
+@@ -313,11 +306,10 @@
+             skew = None  # delivery must never die on a diagnostics probe
+         if skew is not None:
+             boot_rev, disk_rev = skew
+             message += (
+-                f" Likely cause: the gateway is running stale code (booted "
+-                f"on {boot_rev}, disk is at {disk_rev}) — run "
+-                "`hermes gateway restart` to fix it."
++                " Возможная причина: служба работает со старой версией кода. "
++                "Администратору нужно проверить и перезапустить её."
+             )
+
+     return message
+
+@@ -3994,20 +3986,18 @@
+     def __init__(self, job: dict, cause: Exception) -> None:
+         self.job = job
+         self.cause = cause
+         super().__init__(
+-            f"Cron job '{job['id']}' was saved, but its first scheduler "
+-            f"registration failed ({type(cause).__name__}). Do not create a "
+-            "duplicate. Pause/resume or update the job to retry registration."
++            f"Задача «{job['id']}» сохранена, но её не удалось зарегистрировать во внешнем планировщике. "
++            "Повторно создавать задачу не нужно. Проверьте настройки планировщика."
+         )
+
+     def user_message(self) -> str:
+         """Human-facing variant for chat/CLI surfaces (no exception class name)."""
+         label = self.job.get("name") or self.job["id"]
+         return (
+-            f"Saved cron job '{label}', but couldn't register it with the "
+-            "external scheduler yet. The job is kept — don't re-create it; "
+-            "pause/resume or edit it (e.g. via /cron) to retry registration."
++            f"Задача «{label}» сохранена, но зарегистрировать её во внешнем планировщике пока не удалось. "
++            "Повторно создавать задачу не нужно. Проверьте настройки планировщика."
+         )
+
+     def to_dict(self) -> dict:
+         """Return the public partial-failure contract without provider details."""
+diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
+--- a/cron/scheduler_failure_copy.py
++++ b/cron/scheduler_failure_copy.py
+@@ -53,37 +53,20 @@
+
+ # Reason -> what to do. Transient reasons get the backup-provider clause from the scheduler
+ # (it knows whether a fallback chain is configured) instead of a fixed sentence.
+ _PROVIDER_FAILURE_ACTION: dict[str, str] = {
+-    "billing": (
+-        "Top up or wait for the limit to reset, or pin another provider with "
+-        "`hermes cron edit {job_id} --provider <name>`."
+-    ),
+-    "auth": (
+-        "Sign in again with /login (or `{relogin}` in a terminal), or pin a "
+-        "working provider with `hermes cron edit {job_id} --provider <name>`, then "
+-        "`hermes cron run {job_id}` to retry."
+-    ),
+-    "model_not_found": "Pick another model with `hermes cron edit {job_id} --model <name>`.",
+-    "upstream_blocked": (
+-        "A firewall in front of the provider blocked the request (not your key): set a User-Agent "
+-        "via `extra_headers` on the provider's custom_providers entry, or pin another provider with "
+-        "`hermes cron edit {job_id} --provider <name>`."
+-    ),
+-    "context_overflow": "Shorten the job's prompt with `hermes cron edit {job_id} --prompt <text>`.",
++    "billing": "Проверьте оплату и лимит использования сервиса ИИ.",
++    "auth": "Проверьте авторизацию в сервисе ИИ.",
++    "model_not_found": "Проверьте настройки модели для задачи.",
++    "upstream_blocked": "Проверьте сетевой доступ к сервису ИИ.",
++    "context_overflow": "Сократите запрос задачи.",
++    "content_policy_blocked": "Попробуйте переформулировать запрос задачи.",
++    "provider_policy_blocked": "Проверьте настройки и доступ аккаунта в сервисе ИИ.",
+ }
+ _PROVIDER_FAILURE_ACTION["auth_permanent"] = _PROVIDER_FAILURE_ACTION["auth"]
+ _PROVIDER_FAILURE_ACTION["billing_unverified"] = _PROVIDER_FAILURE_ACTION["billing"]
+ _PROVIDER_FAILURE_ACTION["payload_too_large"] = _PROVIDER_FAILURE_ACTION["context_overflow"]
+-_PROVIDER_FAILURE_ACTION["content_policy_blocked"] = (
+-    "Reword the job's prompt with `hermes cron edit {job_id} --prompt <text>`, or pick another "
+-    "model with `hermes cron edit {job_id} --model <name>`."
+-)
+-_PROVIDER_FAILURE_ACTION["provider_policy_blocked"] = (
+-    "Retrying won't help: check the account's status and data/privacy settings with the provider, "
+-    "or pin another model with `hermes cron edit {job_id} --model <name>`."
+-)
+-_DEFAULT_FAILURE_ACTION = "Run it again with `hermes cron run {job_id}`, or edit it with `hermes cron edit {job_id}`."
++_DEFAULT_FAILURE_ACTION = "Проверьте настройки задачи и попробуйте снова."
+
+
+ def provider_failure_notice(
+     job_name: str, job_id: str, reason: str, *, backup_provider_phrase: str, provider: Any = None,
+@@ -93,56 +76,35 @@
+     cause = _provider_failure_cause(reason)
+     if cause is None:
+         return None
+     if reason in _TRANSIENT_REASONS:
+-        action = (
+-            f"{backup_provider_phrase} It will run again at its next scheduled time; "
+-            f"`hermes cron run {job_id}` tries now."
+-        )
++        action = f"{backup_provider_phrase} Задача запустится снова по расписанию."
+     else:
+-        from agent.turn_failure_copy import relogin_command_hint
+-
+-        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION).format(
+-            job_id=job_id, relogin=relogin_command_hint(provider))
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: {cause}. {action} "
+-        f"Run log: `hermes cron runs {job_id}`."
+-    )
++        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
++    return f"⚠️ Задача «{job_name}» не выполнена: {cause}. {action}"
+
+
+ def generic_failure_notice(job_name: str, job_id: str, cleaned_error: str) -> str:
+-    """Unclassified failure: the cleaned error text plus where to look and what to do."""
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: {cleaned_error}. "
+-        f"See the full run with `hermes cron runs {job_id}` (output saved under "
+-        f"{cron_output_dir_display(job_id)}); run it again with `hermes cron run {job_id}`, "
+-        f"edit it with `hermes cron edit {job_id}`, or pause it with `hermes cron pause {job_id}`."
+-    )
++    return f"⚠️ Задача «{job_name}» завершилась с ошибкой. Подробности сохранены в журнале выполнения."
+
+
+ def script_timeout_notice(job_name: str, job_id: str) -> str:
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: its script timed out. No model was invoked. "
+-        f"Check the script's output under {cron_output_dir_display(job_id)} or `hermes cron runs {job_id}`, "
+-        f"then run it again with `hermes cron run {job_id}`."
+-    )
++    return f"⚠️ Задача «{job_name}» не выполнена: скрипт не завершился вовремя. Модель не запускалась. Проверьте журнал выполнения."
+
+
+ def inactivity_notice(job_name: str, job_id: str) -> str:
+-    return (
+-        f"⚠️ Cron '{job_name}' failed: the job stalled — it stopped doing anything for too long "
+-        f"and was cut off. Check what it was doing in the saved output under "
+-        f"{cron_output_dir_display(job_id)} (`hermes cron runs {job_id}`), then run it again with "
+-        f"`hermes cron run {job_id}`."
+-    )
++    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности. Проверьте журнал выполнения."
+
+
+ def blocked_config_notice(job_name: str, reason: str) -> str:
+-    """One-time notice when the pre-run configuration check refused to start the job."""
+-    reason = reason.rstrip()
+-    if reason and reason[-1] not in ".!?":
+-        reason += "."
+-    return (
+-        f"⛔ Cron '{job_name}' did not run: {reason} Nothing was charged. Hermes will try again at "
+-        "the next scheduled time and will not repeat this alert; check with "
+-        "`hermes cron doctor`."
+-    )
++    text = str(reason or "").lower()
++    if "provider credential" in text:
++        detail = "не настроен доступ к сервису ИИ"
++    elif "mcp server" in text:
++        detail = "не удалось подключить необходимые инструменты"
++    elif "delivery platform" in text:
++        detail = "не настроен канал доставки результата"
++    elif "attached skill" in text:
++        detail = "не готов необходимый навык"
++    else:
++        detail = "обнаружена ошибка настроек"
++    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась. Повторю запуск по расписанию."
+diff --git a/hermes_cli/status.py b/hermes_cli/status.py
+--- a/hermes_cli/status.py
++++ b/hermes_cli/status.py
+@@ -99,9 +99,9 @@
+     state = get_state()
+     if state is None:
+         return None
+     reason = state.get("reason")
+-    return f"⏸️  PAUSED (global emergency stop{f' — reason: {reason}' if reason else ''}; `hermes resume` to lift)"
++    return f"⏸️ Работа приостановлена аварийной остановкой{f' — причина: {reason}' if reason else ''}."
+
+
+ # --- Data tables driving the per-section renderers -------------------------
+
+diff --git a/hermes_cli/main_dep_hints.py b/hermes_cli/main_dep_hints.py
+--- a/hermes_cli/main_dep_hints.py
++++ b/hermes_cli/main_dep_hints.py
+@@ -1,44 +1,16 @@
+ """Repair guidance for an unavailable declared dependency group."""
+
+
+ def missing_optional_deps_message(surface: str, what: str, extra: str) -> str:
+-    return (
+-        f"The {surface} can't start: {what} are missing from this install.\n"
+-        "Run `hermes pm install` to prepare the declared dependencies.\n"
+-        "If an installed dependency is damaged, run `hermes pm repair`, then restart Hermes."
+-    )
++    return ("Не удалось запустить интерфейс: отсутствуют необходимые компоненты веб-сервера. "
++            "Обратитесь к администратору для восстановления установки.")
+
+
+ def smart_app_control_block_message(error: BaseException) -> "str | None":
+-    """Guidance for Windows Smart App Control / Application Control blocking the embedded
+-    Python runtime's ``_ssl`` module, or ``None`` when *error* is not that case.
+-
+-    fastapi/uvicorn import ``ssl``; when the policy blocks the ``_ssl`` DLL, the import
+-    fails with the signature ``DLL load failed ... _ssl`` — and the generic
+-    missing-deps repair loop above can never fix it, so users looped on repair
+-    (#63796). The desktop's embedded runtime is the usual victim; the CLI and the
+-    gateway run on the system Python and stay unaffected.
+-    """
+     message = str(error)
+     if "DLL load failed" not in message or "_ssl" not in message:
+         return None
+-    return "\n".join([
+-        "✗ The embedded Python runtime is blocked by Windows security policy.",
+-        "",
+-        "Root cause: Python's SSL module (_ssl) could not be loaded:",
+-        f"  {message}",
+-        "",
+-        "This happens when Windows Smart App Control or an Application Control",
+-        "policy blocks the embedded Python runtime that ships with Hermes Desktop.",
+-        "A repair / reinstall loop cannot fix this — the packages are not missing,",
+-        "the runtime's DLL is being blocked.",
+-        "",
+-        "Recovery options:",
+-        "  1. Use a trusted system Python installation instead of the embedded",
+-        "     runtime (if your organization allows it).",
+-        "  2. Ask your IT administrator for an exemption for the Hermes Desktop",
+-        "     application (Smart App Control / Application Control).",
+-        "  3. Use the CLI or gateway instead (they use your system Python).",
+-        "",
+-        "See https://aka.ms/smartappcontrol for Windows Smart App Control details.",
+-    ])
++    return ("❌ Политика безопасности Windows заблокировала встроенный компонент Python для защищённых соединений. "
++            "Переустановка пакетов не устранит блокировку. Обратитесь к администратору, "
++            "чтобы проверить настройки Windows Smart App Control или использовать доверенную установку Python. "
++            "Справка: https://aka.ms/smartappcontrol")
+diff --git a/hermes_cli/update_cmd_config.py b/hermes_cli/update_cmd_config.py
+--- a/hermes_cli/update_cmd_config.py
++++ b/hermes_cli/update_cmd_config.py
+@@ -74,21 +74,20 @@
+     model.default / moa:) rewritten by Desktop repair cycles — for the active profile (from
+     *pre_update_snapshot_id*) and every sibling profile (against ITS OWN snapshot)."""
+     def _cron_line(r):
+         return (
+-            f"cron/jobs.json lost jobs during this update — restored {r['job_count']} job(s) "
+-            f"from pre-update snapshot {r['snapshot_id']}.")
++            f"При обновлении из cron/jobs.json исчезли задачи. Восстановлено задач: {r['job_count']} "
++            f"из снимка до обновления {r['snapshot_id']}.")
+
+     def _prompt_line(r):
+         return (
+-            f"cron/jobs.json had agent-job prompt(s) replaced by the job name during this "
+-            f"update — restored {r['prompts']} prompt(s) from pre-update snapshot "
+-            f"{r['snapshot_id']}.")
++            f"При обновлении запросы задач в cron/jobs.json были заменены их названиями. "
++            f"Восстановлено запросов: {r['prompts']} из снимка {r['snapshot_id']}.")
+
+     def _cfg_line(r):
+         return (
+-            f"config.yaml user model settings were rewritten during this update — restored "
+-            f"{', '.join(r['keys'])} from pre-update snapshot {r['snapshot_id']}.")
++            f"При обновлении были изменены пользовательские настройки модели в config.yaml. Восстановлены "
++            f"{', '.join(r['keys'])} из снимка {r['snapshot_id']}.")
+
+     with _best_effort("Cron jobs auto-restore check failed: %s"):
+         # Safety net: config-version migrations have been observed to leave cron/jobs.json valid-but-empty,
+         # silently dropping every scheduled job (issue #34600). The desktop scheduler can also overwrite
