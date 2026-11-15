@@ -394,6 +394,25 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.transport.observe(123, 1)['state'], 'captured')
         self.assertIsNone(self.inbox.delivery_for(PROFILE, 123, 1))
 
+    async def test_bound_callback_failure_requeues_only_after_worker_not_received(self):
+        self.handing_off()
+        self.inbox.markblocked(PROFILE, 123, 1)
+        self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'unknown'})
+        await self.mirror.pump()
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'blocked')
+        self.mirror.reconcile_delivery.return_value = {'state': 'not_received'}
+        await self.mirror.pump()
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
+        self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
+
+    async def test_unbound_blocked_input_cannot_be_reset_as_not_received(self):
+        self.capture()
+        self.inbox.markblocked(PROFILE, 123, 1)
+        with self.assertRaisesRegex(ValueError, 'DELIVERY_INPUT_NOT_RETRYABLE'):
+            self.inbox.not_received(PROFILE, 123, 1)
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'blocked')
+
     async def test_crash_between_profile_and_transport_claim_is_recoverable(self):
         self.capture()
         self.inbox.bind_delivery(PROFILE, 123, [1])

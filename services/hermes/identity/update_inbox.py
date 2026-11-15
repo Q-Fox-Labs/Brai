@@ -408,7 +408,11 @@ class UpdateInbox:
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 row = self._find(db, profile, bot_id, update_id)
-                if row['state'] not in ('captured', 'handing_off') or row['receipt'] is not None:
+                linked = db.execute('SELECT 1 FROM release_input_delivery WHERE inbox_seq=?', (row['seq'],)).fetchone()
+                # The caller proved dispatch.status=not_received on the current worker.
+                # A failed callback may have fenced an already bound, never received input.
+                if (row['state'] not in ('captured', 'handing_off', 'blocked') or row['receipt'] is not None
+                        or row['state'] == 'blocked' and linked is None):
                     raise ValueError('DELIVERY_INPUT_NOT_RETRYABLE')
                 db.execute("UPDATE release_inbox SET state='captured' WHERE seq=?", (row['seq'],))
                 db.execute('DELETE FROM release_input_delivery WHERE inbox_seq=?', (row['seq'],))
