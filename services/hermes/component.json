@@ -296,6 +296,7 @@
       "services/hermes/identity/tests/test_worker_notifications.py",
       "services/hermes/identity/tests/test_worker_system.py",
       "services/hermes/identity/tests/test_lifecycle.py",
+      "services/hermes/identity/tests/test_watchdog_native.py",
       "services/hermes/identity/tests/test_worker_permissions.py",
       "services/hermes/identity/tests/test_telegram_runtime.py",
       "services/hermes/identity/tests/test_login.py",

@@ -64,7 +64,10 @@ class RuntimeReadsTest(unittest.TestCase):
                 version = copied.stat()
                 self.assertEqual(self.read(copied), copied)
                 self.assertEqual(self.read(original), copied)
-                self.assertEqual(copied.stat(), version)
+                # AIDEV-NOTE: Чтение вправе обновить atime; inode и bytes копии неизменны.
+                after = copied.stat()
+                for field in ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+                    self.assertEqual(getattr(after, field), getattr(version, field))
         self.assertEqual(self.backend.calls, [])
         with self.store.db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM publications').fetchone()[0], 0)

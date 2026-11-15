@@ -4,10 +4,17 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from pathlib import Path
 import signal
 import uuid
+
+logger = logging.getLogger(__name__)
+
+
+class LifecycleLeaseLost(PermissionError):
+    """Auth отозвал право продолжать эту операцию подготовки."""
 
 
 async def terminate(child):
@@ -43,7 +50,7 @@ class LifecycleRunner:
             reply = await self.control.call('identity.lifecycle-renew', {
                 'operationId': operation['id'], 'leaseToken': operation['leaseToken']}, timeout=12)
             if reply.get('accepted') is not True:
-                raise PermissionError('Lifecycle lease lost')
+                raise LifecycleLeaseLost('Lifecycle lease lost')
 
     async def execute(self, operation):
         """Ограничить длительность и передать user только через stdin root entrypoint."""
@@ -61,10 +68,12 @@ class LifecycleRunner:
                                         return_when=asyncio.FIRST_COMPLETED)
             if renewal in done:
                 await renewal
-                raise PermissionError('Lifecycle lease lost')
+                raise LifecycleLeaseLost('Lifecycle lease lost')
             if work not in done:
                 raise TimeoutError('Lifecycle timeout')
             output, _ = await work
+            if child.returncode != 0:
+                return False
             if len(output) > 4096:
                 raise ValueError('Invalid lifecycle receipt')
             receipt = json.loads(output)
@@ -74,8 +83,8 @@ class LifecycleRunner:
             renewed = await self.control.call('identity.lifecycle-renew', {
                 'operationId': operation['id'], 'leaseToken': operation['leaseToken']}, timeout=12)
             if renewed.get('accepted') is not True:
-                raise PermissionError('Lifecycle lease lost')
-            return child.returncode == 0
+                raise LifecycleLeaseLost('Lifecycle lease lost')
+            return True
         finally:
             renewal.cancel()
             await asyncio.gather(renewal, return_exceptions=True)
@@ -93,14 +102,23 @@ class LifecycleRunner:
             error_code = None if success else 'PROFILE_FAILED'
         except asyncio.CancelledError:
             raise
-        except PermissionError:
+        except LifecycleLeaseLost:
             # Отменённая операция освобождает собственный lease после остановки child.
             await self.control.call('identity.lifecycle-complete', {
                 'operationId': operation['id'], 'leaseToken': operation['leaseToken'],
-                'success': False, 'errorCode': 'PROFILE_FAILED'}, timeout=12)
+                'success': False, 'errorCode': 'PROFILE_LEASE_LOST'}, timeout=12)
             return True
+        except TimeoutError:
+            success, error_code = False, 'PROFILE_TIMEOUT'
+        except ValueError:
+            success, error_code = False, 'PROFILE_RECEIPT_INVALID'
+        except OSError:
+            success, error_code = False, 'PROFILE_START_FAILED'
         except Exception:
             success, error_code = False, 'PROFILE_FAILED'
+        if not success:
+            # AIDEV-NOTE: Сообщение исключения и stdout могут содержать секреты.
+            logger.error('Profile lifecycle failed: operation=%s code=%s', operation['id'], error_code)
         await self.control.call('identity.lifecycle-complete', {
             'operationId': operation['id'], 'leaseToken': operation['leaseToken'],
             'success': success, **({'errorCode': error_code} if error_code else {})}, timeout=12)

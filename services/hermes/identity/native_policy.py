@@ -19,6 +19,20 @@ _execution_state = ContextVar('brai_native_invocation', default=None)
 _tool_invocation = ContextVar('brai_native_tool', default=None)
 
 
+def worker_loop_tick_socket_path(home=None, pid=None):
+    """Короткий AF_UNIX путь в существующем PrivateTmp личного worker."""
+    pid = int(pid if pid is not None else os.getpid())
+    return Path('/tmp/brai-loop-tick') / f'gateway.loop-tick.{pid}.sock'
+
+
+def install_worker_watchdog():
+    """Настроить native reader до импорта GatewayRunner в этом процессе."""
+    if os.environ.get('BRAI_IDENTITY_MODE') != 'worker':
+        return
+    from gateway import shutdown_watchdog
+    shutdown_watchdog.get_loop_tick_socket_path = worker_loop_tick_socket_path
+
+
 def guest_mode():
     """Вернуть режим, подтверждённый Auth при запуске этого процесса."""
     return _guest
@@ -260,6 +274,7 @@ def install(*, cold_start=False):
     _role = state['role']
     _guest = _role == 'guest'
     _suspended = _guest or state.get('backgroundsSuspended') is True
+    install_worker_watchdog()
     if _guest or state.get('staged') is True:
         product = Path(__file__).resolve().parents[1]
         restrict_exclusive_plugins(product)
