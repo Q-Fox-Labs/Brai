@@ -151,7 +151,6 @@ async def run(config, fixture, native, receipt):
             args = fixture.worker_unit_args(unit, uid, 0, home, software, runtime, root / 'broker.sock',
                 root / 'model.sock', receipt['paths']['python'], lock, launcher,
                 dependency_paths={'venv': receipt['paths']['venv'], 'site-packages': receipt['paths']['sitePackages']})
-            args.insert(args.index('/usr/bin/env'), '--setenv=BRAI_IDENTITY_INSTANCE=dev')
             args.insert(args.index('/usr/bin/env'), '--property=BindReadOnlyPaths=' + str(stable_instructions) + ':/opt/brai-profile/system-instructions')
             process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, env={'PATH': '/usr/bin:/bin'}, start_new_session=True)

@@ -126,6 +126,16 @@ class WorkerReceiptsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second['accepted'])
         self.assertEqual(self.worker._dispatch_native.await_count, 2)
 
+    async def test_trusted_rpc_enables_delivery_for_existing_worker_unit_without_instance_env(self):
+        self.worker.delivery_journal = None
+        self.worker.adapter = NS()
+        self.worker.peer = NS(call=AsyncMock())
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': self.tmp.name}):
+            os.environ.pop('BRAI_IDENTITY_INSTANCE', None)
+            self.assertEqual(await self.worker.flush_outputs('owner'), {'sent': 0})
+        self.assertIsNotNone(self.worker.delivery_journal)
+        self.assertIs(self.worker.adapter._brai_delivery_journal, self.worker.delivery_journal)
+
 
 class PumpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -283,6 +293,16 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'not_received'})
         await self.mirror.pump()
         self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
+
+    async def test_crash_after_binding_before_claim_allows_rebatch_with_later_message(self):
+        self.capture(1)
+        self.inbox.bind_delivery(PROFILE, 123, [1])
+        self.capture(2)
+        self.mirror.reconcile_delivery = AsyncMock(return_value={'state': 'not_received'})
+        await self.mirror.pump()
+        self.assertEqual(self.mirror.app.update_queue.qsize(), 2)
+        rebound = self.inbox.bind_delivery(PROFILE, 123, [1, 2])
+        self.assertEqual(self.inbox.delivery_for(PROFILE, 123, 1), rebound)
 
     async def test_crash_after_profile_receipt_before_transport_receipt(self):
         self.handing_off()

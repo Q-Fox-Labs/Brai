@@ -62,9 +62,6 @@ class Worker:
         self.delivery_journal = None
         self.delivery_lock = asyncio.Lock()
         self.output_lock = asyncio.Lock()
-        if os.environ.get('BRAI_IDENTITY_INSTANCE') == 'dev' and os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
-            from .delivery_journal import DeliveryJournal
-            self.delivery_journal = DeliveryJournal(Path(os.environ['HERMES_HOME']) / 'identity-delivery.sqlite3', user_id)
         from .release_native import NativeRelease
         self.release = NativeRelease(self)
 
@@ -533,10 +530,22 @@ class Worker:
 
     async def dispatch_status(self, owner, delivery_id, input_digest):
         """Сверить прежний приём после разрыва RPC без повторного исполнения."""
-        if owner != self.user_id or self.delivery_journal is None:
+        if owner != self.user_id:
             raise RpcError(-32602, 'Durable delivery unavailable')
+        self._enable_delivery()
         async with self.delivery_lock:
             return self._delivery_status(delivery_id, input_digest)
+
+    def _enable_delivery(self):
+        """Trusted DEV ingress включает протокол без изменения прежних личных unit-файлов."""
+        if self.delivery_journal is None:
+            if (os.environ.get('BRAI_IDENTITY_MODE') != 'worker'
+                    or os.environ.get('BRAI_IDENTITY_INSTANCE') not in (None, '', 'dev')):
+                raise RpcError(-32602, 'Durable delivery unavailable')
+            from .delivery_journal import DeliveryJournal
+            self.delivery_journal = DeliveryJournal(Path(os.environ['HERMES_HOME']) / 'identity-delivery.sqlite3', self.user_id)
+            if self.adapter is not None:
+                self.adapter._brai_delivery_journal = self.delivery_journal
 
     def _delivery_status(self, ident, digest):
         """Не держать ingress навечно за ходом прежнего процесса; неизвестное действие не повторять."""
@@ -550,8 +559,9 @@ class Worker:
 
     async def flush_outputs(self, owner):
         """Повторить только доставку готовых ответов; native задание не запускается."""
-        if owner != self.user_id or self.delivery_journal is None or self.peer is None:
+        if owner != self.user_id or self.peer is None:
             raise RpcError(-32602, 'Durable delivery unavailable')
+        self._enable_delivery()
         sent = 0
         async with self.output_lock:
             for row in self.delivery_journal.pending_outputs():
@@ -569,8 +579,9 @@ class Worker:
         """Закрепить фактический native приём до RPC receipt; повтор ID возвращает его состояние."""
         if delivery_id is None and input_digest is None:
             return await self._dispatch_native(event, owner)
-        if owner != self.user_id or self.delivery_journal is None:
+        if owner != self.user_id:
             raise RpcError(-32602, 'Durable delivery unavailable')
+        self._enable_delivery()
         from .scope import input_delivery
         async with self.delivery_lock:
             previous = self._delivery_status(delivery_id, input_digest)

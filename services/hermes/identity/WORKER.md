@@ -148,6 +148,12 @@ Root вызывает `release.begin`, `release.status`, `release.commit` и `re
 
 ## Автоматическая доставка в DEV
 
+Протокол включает доверенный DEV ingress через основной authenticated RPC
+`outbox.flush`/`dispatch.status`/`dispatch` с delivery ID. Прежние личные
+unit-файлы менять не нужно: worker открывает свой журнал по этому запросу и
+подключает его к уже работающему адаптеру. Legacy/PROD ingress этих вызовов
+не делает; его прежние dispatch сохраняют поведение.
+
 Обычный текст, голос и поддержанные вложения остаются `captured`, пока worker
 недоступен или занят другой темой. Завершение frontend handler не выдаёт native
 receipt о выполнении. Существующий supervisor после готовности worker повторно
