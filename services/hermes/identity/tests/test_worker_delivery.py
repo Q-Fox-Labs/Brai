@@ -400,6 +400,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         # Исполняется точное полное тело метода из поставляемого native delta.
         from types import MethodType
         import textwrap
+        import re
         lines = (Path(__file__).parents[1] / 'native.patch').read_text().splitlines()
         start = next(i for i, line in enumerate(lines)
                      if line[:1] in ('+', ' ') and line[1:].startswith('    async def send_typing('))
@@ -413,13 +414,13 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             if body and value.startswith('    ') and value.lstrip().startswith(('async def ', 'def ')):
                 break
             body.append(value)
-        scope = {'normalize_telegram_chat_id': int, 'logger': runtime._logger}
+        scope = {'normalize_telegram_chat_id': int, 'logger': runtime._logger, 're': re}
         exec('from __future__ import annotations\n' + textwrap.dedent('\n'.join(body)), scope)
         return MethodType(scope['send_typing'], adapter)
 
     async def test_typing_reaches_native_bot_api_in_original_topic(self):
         from unittest.mock import Mock
-        bot = NS(send_chat_action=AsyncMock())
+        bot = NS(send_chat_action=AsyncMock(return_value=True))
         adapter = NS(_bot=bot, _typing_in_cooldown=lambda chat: False,
             _message_thread_id_for_typing=lambda thread: int(thread) if thread else None,
             _metadata_thread_id=lambda metadata: metadata.get('thread_id'),
@@ -433,9 +434,16 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             return await resolver.deliver(self.profile, owner, action, payload)
         worker = self.adapter(deliver)
         with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
-            result = await worker.send_typing('123', metadata={'thread_id': '77'})
+            with self.assertLogs(runtime._logger, level='INFO') as captured:
+                result = await worker.send_typing('123', metadata={'thread_id': '77'})
         self.assertIsNone(result)
         bot.send_chat_action.assert_awaited_once_with(chat_id=123, action='typing', message_thread_id=77)
+        import re
+        trace = re.search(r'telegram_typing_route trace=([0-9a-f]{32}) source_thread=77', '\n'.join(captured.output))
+        self.assertIsNotNone(trace)
+        self.assertIn(f'telegram_typing_request trace={trace[1]} thread_id=77', '\n'.join(captured.output))
+        self.assertIn(f'telegram_typing_result trace={trace[1]} thread_id=77 status=accepted', '\n'.join(captured.output))
+        self.assertNotIn('chat_id=123', '\n'.join(captured.output))
 
     async def test_native_typing_failure_never_falls_back_to_general_chat(self):
         from unittest.mock import Mock
@@ -452,6 +460,50 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         adapter._record_typing_cooldown.assert_called_once()
         self.assertIn('reason=message thread not found', logs.output[0])
         self.assertNotIn('secret-token', logs.output[0])
+
+    async def test_typing_diagnostics_expose_different_source_and_target_topics(self):
+        from unittest.mock import Mock
+        bot = NS(send_chat_action=AsyncMock(return_value=True))
+        adapter = NS(_bot=bot, _typing_in_cooldown=lambda chat: False,
+            _message_thread_id_for_typing=lambda thread: int(thread),
+            _metadata_thread_id=lambda metadata: metadata['thread_id'],
+            _telegram_typing_cooldown_until={}, _is_transient_typing_error=lambda error: False,
+            _record_typing_cooldown=Mock())
+        adapter.send_typing = self.patched_typing(adapter)
+        resolver = runtime.Resolver(adapter)
+        resolver.turns[101] = {'id': 'turn', 'route': ('123', '77'), 'metadata': {'thread_id': '78'}}
+        async def deliver(owner, action, payload):
+            return await resolver.deliver(self.profile, owner, action, payload)
+        worker = self.adapter(deliver)
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
+            with self.assertLogs(runtime._logger, level='INFO') as captured:
+                await worker.send_typing('123', metadata={'thread_id': '77'})
+        logs = '\n'.join(captured.output)
+        import re
+        trace = re.search(r'telegram_typing_route trace=([0-9a-f]{32}) source_thread=77', logs)
+        self.assertIsNotNone(trace)
+        self.assertIn(f'telegram_typing_request trace={trace[1]} thread_id=78', logs)
+        bot.send_chat_action.assert_awaited_once_with(chat_id=123, action='typing', message_thread_id=78)
+
+    async def test_typing_diagnostics_report_unconfirmed_and_cooldown(self):
+        from unittest.mock import Mock
+        bot = NS(send_chat_action=AsyncMock(return_value=False))
+        adapter = NS(_bot=bot, _typing_in_cooldown=lambda chat: False,
+            _message_thread_id_for_typing=lambda thread: int(thread),
+            _metadata_thread_id=lambda metadata: metadata['thread_id'],
+            _telegram_typing_cooldown_until={}, _is_transient_typing_error=lambda error: False,
+            _record_typing_cooldown=Mock())
+        send_typing = self.patched_typing(adapter)
+        with self.assertLogs(runtime._logger, level='INFO') as captured:
+            await send_typing('123', {'thread_id': '77', '_brai_typing_trace': 'private-token\ninjected'})
+        logs = '\n'.join(captured.output)
+        self.assertIn('trace=none thread_id=77 status=unconfirmed', logs)
+        self.assertNotIn('private-token', logs)
+        adapter._typing_in_cooldown = lambda chat: True
+        with self.assertLogs(runtime._logger, level='INFO') as captured:
+            await send_typing('123', {'thread_id': '77', '_brai_typing_trace': 'a' * 32})
+        self.assertIn('trace=' + 'a' * 32 + ' status=cooldown', captured.output[0])
+        bot.send_chat_action.assert_awaited_once()
 
     async def test_typing_survives_native_pause_and_stops_on_cancel(self):
         ticks = []

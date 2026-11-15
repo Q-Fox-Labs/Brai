@@ -758,6 +758,12 @@ class Resolver:
                     stream.close()
         if action == 'send_image':
             raise PermissionError('Publish local media first')
+        if action == 'send_typing':
+            # Коррелировать доверенный вход с фактическим Bot API без текста и chat ID.
+            trace_id = uuid.uuid4().hex
+            metadata = {**metadata, '_brai_typing_trace': trace_id}
+            source_thread = route[1] if route[1].isascii() and route[1].isdecimal() else 'none'
+            _logger.info('telegram_typing_route trace=%s source_thread=%s', trace_id, source_thread)
         values = {**payload, 'metadata': metadata}
         method = getattr(self.adapter, action, None)
         if not callable(method):

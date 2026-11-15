@@ -42,7 +42,7 @@
              self._register_handlers(self._app)
              await self._initialize_app_with_retries(builder)
              await self._app.start()
-@@ -5566,34 +5585,26 @@
+@@ -5566,34 +5585,35 @@
          slot_until[str(normalize_telegram_chat_id(chat_id))] = (
              asyncio.get_running_loop().time() + max(0.0, budget))
 
@@ -76,13 +76,22 @@
 -
 +    async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
 +        """Send typing only to the originating conversation; never drop its topic."""
-+        if not self._bot or self._typing_in_cooldown(chat_id):
++        trace = (metadata or {}).get("_brai_typing_trace")
++        trace = trace if isinstance(trace, str) and re.fullmatch(r"[0-9a-f]{32}", trace) else "none"
++        if not self._bot:
++            logger.info("telegram_typing_result trace=%s status=unavailable", trace)
++            return
++        if self._typing_in_cooldown(chat_id):
++            logger.info("telegram_typing_result trace=%s status=cooldown", trace)
 +            return
 +        message_thread_id: Optional[int] = None
 +        try:
 +            message_thread_id = self._message_thread_id_for_typing(self._metadata_thread_id(metadata))
-+            await self._bot.send_chat_action(chat_id=normalize_telegram_chat_id(chat_id),
-+                                             action="typing", message_thread_id=message_thread_id)
++            logger.info("telegram_typing_request trace=%s thread_id=%s", trace, message_thread_id)
++            accepted = await self._bot.send_chat_action(chat_id=normalize_telegram_chat_id(chat_id),
++                                                        action="typing", message_thread_id=message_thread_id)
++            logger.info("telegram_typing_result trace=%s thread_id=%s status=%s", trace,
++                        message_thread_id, "accepted" if accepted is True else "unconfirmed")
 +            self._telegram_typing_cooldown_until.pop(str(chat_id), None)
 +        except Exception as error:
 +            if self._is_transient_typing_error(error):
@@ -91,8 +100,8 @@
 +            reason = next((value for value in ("message thread not found", "topic closed",
 +                "chat not found", "not enough rights", "bot was blocked", "timed out")
 +                if value in str(error).lower()), "unclassified")
-+            logger.warning("telegram_typing_failed error=%s thread_id=%s reason=%s",
-+                           type(error).__name__, message_thread_id, reason)
++            logger.warning("telegram_typing_failed trace=%s error=%s thread_id=%s reason=%s",
++                           trace, type(error).__name__, message_thread_id, reason)
 +
      async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
          """Get information about a Telegram chat."""
