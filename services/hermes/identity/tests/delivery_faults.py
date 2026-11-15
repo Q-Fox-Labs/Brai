@@ -150,14 +150,32 @@ async def run(config, fixture, native, receipt):
             return unit, process
 
         async def kill_worker(unit, process):
-            killed = await asyncio.to_thread(subprocess.run,
-                ['/usr/bin/systemctl', 'kill', '--kill-whom=all', '--signal=SIGKILL', unit],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
-            if killed.returncode:
-                proof['killFailure'] = {'rc': killed.returncode, 'diagnostic': killed.stderr.decode('utf-8', 'replace')}
-            fixture.require(killed.returncode == 0, 'FAULT_KILL_FAILED')
+            status = await asyncio.to_thread(subprocess.check_output,
+                ['/usr/bin/systemctl', 'show', unit, '--property=MainPID', '--value'])
+            pid = int(status.strip())
+            fixture.require(pid > 1 and Path('/proc', str(pid)).stat().st_uid == uid, 'FAULT_TARGET_CHANGED')
+            pidfd = os.pidfd_open(pid)
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            finally:
+                os.close(pidfd)
             await process.wait()
-            fixture.require(process.returncode != 0, 'FAULT_NOT_OBSERVED')
+            proof.setdefault('signals', []).append({'signal': 'SIGKILL', 'uid': uid, 'pid': pid,
+                                                    'unitExit': process.returncode})
+
+        async def stop_owned(unit, process):
+            try:
+                await fixture.stop_unit(unit, process)
+            except ValueError:
+                # --collect can remove a transient unit between show and stop.
+                # Accept only independently verified terminal state and empty own cgroup.
+                response = await asyncio.to_thread(subprocess.run, ['/usr/bin/systemctl', 'show', unit,
+                    '--property=LoadState,ActiveState,MainPID,ControlGroup'], stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, check=False)
+                state = fixture.parse_unit_state(response)
+                fixture.require(state['ActiveState'] in ('inactive', 'failed') and state['MainPID'] == '0', 'CLEANUP_UNIT_SURVIVED')
+                fixture.require(not fixture.cgroup_pids(state['ControlGroup'], unit), 'CLEANUP_CGROUP_SURVIVED')
+                await process.wait()
 
         with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth):
             resolver = create()
@@ -249,6 +267,7 @@ async def run(config, fixture, native, receipt):
                           'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN'}:
             proof['code'] = str(error)
         proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
+        proof['controllerUid'] = os.geteuid()
         if consumer is not None and consumer.done() and not consumer.cancelled():
             proof['consumerError'] = type(consumer.exception()).__name__ if consumer.exception() else None
     finally:
@@ -262,8 +281,12 @@ async def run(config, fixture, native, receipt):
                 if bridge.task is not None: bridge.task.cancel()
             await asyncio.gather(*(b.task for b in resolver.bridges.values() if b.task), return_exceptions=True)
             resolver.ledger.close()
+        cleanup_errors = []
         for unit, process in workers:
-            await fixture.stop_unit(unit, process)
+            try:
+                await stop_owned(unit, process)
+            except Exception as error:
+                cleanup_errors.append({'unit': unit, 'type': type(error).__name__, 'code': fixture.safe_error_code(error)})
         for server in servers:
             server.close()
             server.abort_clients()
@@ -273,6 +296,9 @@ async def run(config, fixture, native, receipt):
         logs = await asyncio.gather(*log_tasks, return_exceptions=True)
         proof['workerExceptions'] = [row for raw in logs if isinstance(raw, bytes)
                                      for row in fixture.worker_exception_diagnostics(raw)]
-        fixture.remove_owned_root(root, identity)
-        proof['cleaned'] = True
+        if cleanup_errors:
+            proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
+        else:
+            fixture.remove_owned_root(root, identity)
+            proof['cleaned'] = True
     return proof
