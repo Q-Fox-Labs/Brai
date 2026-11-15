@@ -675,6 +675,7 @@ class BatchOwnership:
         return any(key in self.input_keys(event) for event in events)
 
     def input_keys(self, event):
+        """Читать текущие IDs общего события: native batching дополняет его после запуска timer."""
         return tuple(f'{self.adapter._bot.id}:{ident}' for ident in getattr(event, '_brai_release_updates', []))
 
     @staticmethod
