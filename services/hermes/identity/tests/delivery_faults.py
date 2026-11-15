@@ -96,6 +96,7 @@ async def run(config, fixture, native, receipt):
         batch_owner = None
         batch_popped, batch_send = asyncio.Event(), asyncio.Event()
         batch_tasks = []
+        batch_dispatches = []
         class TelegramPort:
             _bot = bot
             async def send(self, **payload):
@@ -149,6 +150,7 @@ async def run(config, fixture, native, receipt):
                 combined = adapter._pending_text_batches.pop(key)
                 batch_popped.set()
                 await batch_send.wait()
+                batch_dispatches.append(list(combined._brai_release_updates))
                 dispatches.extend(combined._brai_release_updates)
                 await resolver._bridge(profile).dispatch(combined)
                 consumed.extend(combined._brai_release_updates)
@@ -342,12 +344,16 @@ async def run(config, fixture, native, receipt):
             await asyncio.gather(*batch_tasks, return_exceptions=True)
             for ident in (7, 8):
                 fixture.require(resolver.mirror.inbox.observe(profile, 123, ident)['state'] == 'accepted', 'MERGED_INPUT_NOT_ACCEPTED')
-            fixture.require(len(model.requests) == requests_before + 1, 'MERGED_INPUT_RERAN_MODEL')
+            fixture.require(batch_dispatches == [[7, 8]], 'MERGED_INPUT_REDISPATCHED')
+            binding = resolver.mirror.inbox.delivery_for(profile, 123, 7)
+            fixture.require(binding is not None and binding == resolver.mirror.inbox.delivery_for(profile, 123, 8), 'MERGED_BINDING_SPLIT')
+            fixture.require(len(model.requests) > requests_before, 'MERGED_MODEL_NOT_CALLED')
             fixture.require(resolver.journal.chat_state(profile, ('123', '13'))['paused'], 'PAUSE_LOST_ON_RESTART')
             proof['scenarios'].append('ingress-and-worker-restart-two-messages-one-native-turn')
             fixture.require(len(deliveries) == 6 and all('SYNTHETIC_OK' in p.get('content', '') for p in deliveries), 'REPLIES_UNPROVEN')
             proof.update(state='verified', delivered=len(deliveries), uniqueInputs=len(set(consumed)),
-                         processKills=3, mergedInputs=2, mergedModelRequests=1, modelRequests=len(model.requests), manualQueueResets=0)
+                         processKills=3, mergedInputs=2, mergedNativeTurns=len(batch_dispatches),
+                         mergedModelRequests=len(model.requests)-requests_before, modelRequests=len(model.requests), manualQueueResets=0)
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
         proof['syntheticReplyAttempts'] = locals().get('reply_attempts', [])
@@ -355,7 +361,7 @@ async def run(config, fixture, native, receipt):
                           'EARLY_ACK', 'INPUT_NOT_ACCEPTED', 'LOST_ACK_REEXECUTED', 'OUTBOX_RERAN_MODEL',
                           'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN',
                           'SAVED_REPLY_DUPLICATED', 'MERGED_ADMISSION_LOST', 'MERGED_INPUT_NOT_ACCEPTED',
-                          'MERGED_INPUT_RERAN_MODEL', 'PAUSE_LOST_ON_RESTART'}:
+                          'MERGED_INPUT_REDISPATCHED', 'MERGED_BINDING_SPLIT', 'MERGED_MODEL_NOT_CALLED', 'PAUSE_LOST_ON_RESTART'}:
             proof['code'] = str(error)
         proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
         proof['controllerUid'] = os.geteuid()
