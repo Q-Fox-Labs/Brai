@@ -1,3 +1,17 @@
+--- a/gateway/shutdown_watchdog.py
++++ b/gateway/shutdown_watchdog.py
+@@ -200,6 +200,11 @@
+     (#90502).
+     """
+     pid = int(pid if pid is not None else os.getpid())
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        # AIDEV-NOTE: У worker уже включён PrivateTmp; UUID HOME превышает
++        # размер sockaddr_un с PID. Сокет остаётся внутри его namespace.
++        return Path("/tmp/brai-loop-tick") / f"gateway.loop-tick.{pid}.sock"
++
+     return _home(home) / "state" / f"gateway.loop-tick.{pid}.sock"
+
+
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
 @@ -2881,6 +2881,13 @@

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.lifecycle import LifecycleRunner
@@ -51,12 +52,43 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(control.calls[-1][1]['success'])
         self.assertFalse(await runner.once())
 
+    async def test_invalid_receipt_is_distinct_from_command_failure(self):
+        control = Control()
+        runner = LifecycleRunner(control, [sys.executable, '-c', 'print("invalid receipt")'])
+        await runner.once()
+        self.assertEqual(control.calls[-1][1]['errorCode'], 'PROFILE_RECEIPT_INVALID')
+        self.assertFalse(control.calls[-1][1]['success'])
+
+    async def test_timeout_reports_safe_code_without_exception_text(self):
+        control = Control()
+        runner = LifecycleRunner(control, [sys.executable])
+        with patch.object(runner, 'execute', new=AsyncMock(side_effect=TimeoutError('private token'))), \
+                self.assertLogs('identity.lifecycle', level='ERROR') as captured:
+            await runner.once()
+        self.assertEqual(control.calls[-1][1]['errorCode'], 'PROFILE_TIMEOUT')
+        self.assertNotIn('private token', '\n'.join(captured.output))
+
+    async def test_missing_entrypoint_has_distinct_failure(self):
+        control = Control()
+        runner = LifecycleRunner(control, ['/nonexistent/brai-lifecycle-test'])
+        await runner.once()
+        self.assertEqual(control.calls[-1][1]['errorCode'], 'PROFILE_START_FAILED')
+
+    async def test_nonzero_command_output_is_not_interpreted_as_a_receipt(self):
+        control = Control()
+        runner = LifecycleRunner(control, [sys.executable, '-c', 'print("private output"); raise SystemExit(2)'])
+        with self.assertLogs('identity.lifecycle', level='ERROR') as captured:
+            await runner.once()
+        self.assertEqual(control.calls[-1][1]['errorCode'], 'PROFILE_FAILED')
+        self.assertNotIn('private output', '\n'.join(captured.output))
+
     async def test_lost_lease_terminates_subprocess_and_never_activates(self):
         control = Control(renew=False)
         runner = LifecycleRunner(control, [sys.executable, '-c', 'import time; time.sleep(120)'],
                                  renew_interval=0.02)
         await asyncio.wait_for(runner.once(), 3)
         self.assertFalse(any(params.get('success') for _, params in control.calls))
+        self.assertEqual(control.calls[-1][1]['errorCode'], 'PROFILE_LEASE_LOST')
 
     async def test_shutdown_cancels_own_work_without_success(self):
         control = Control()
