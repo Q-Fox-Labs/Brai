@@ -567,3 +567,551 @@ new file mode 100644
 +    if delivered_partial:
 +        lines.insert(0, delivered_partial)
 +    return '\n\n'.join(lines)
+diff --git a/gateway/delivery_ledger.py b/gateway/delivery_ledger.py
+--- a/gateway/delivery_ledger.py
++++ b/gateway/delivery_ledger.py
+@@ -38,16 +38,16 @@
+ # Visible prefixes for redeliveries that might duplicate an already-received message (crash mid-send /
+ # post-rejection retry) — honest at-least-once. Runtime recovery uses a distinct marker: no restart
+ # occurred, but a network rejection's acknowledgement can still have been lost independently.
+-RECOVERED_MARKER = "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+-RECONNECTED_MARKER = ("♻️ Recovered reply — the messaging platform reconnected after the original "
+-                      "delivery failed, so this may be a duplicate:\n\n")
++RECOVERED_MARKER = "♻️ Во время доставки ответ прервался из-за перезапуска. Отправляю его снова; возможно, вы уже получили этот ответ.\n\n"
++RECONNECTED_MARKER = ("♻️ Соединение восстановлено после сбоя доставки. Отправляю ответ снова; "
++                      "возможно, вы уже его получили.\n\n")
+ # A reply refused by flood control may have gone out as several requests (the adapter chunks long replies,
+ # and MarkdownV2 escaping alone can push a reply that fits one message into two), and the platform may have
+ # accepted the first chunk(s) before refusing the rest; the send result does not say which landed. The raw
+ # length of the stored text says nothing about that, so every flood redelivery carries a marker, and neither
+ # of the markers above tells the truth here (no restart, no reconnect): the rate limit gets its own.
+-FLOOD_MARKER = ("♻️ Recovered reply — the messaging platform's rate limit refused the original, so part of "
+-                "it may already have arrived above:\n\n")
++FLOOD_MARKER = ("♻️ Доставка ответа была ограничена. Отправляю его снова; "
++                "возможно, часть ответа уже пришла выше.\n\n")
+
+ # Errors whose send contract proves the platform never saw the request: retried as soon as the adapter
+ # is back, no backoff. Every other rejection is retried too (#91653: a 5xx or a transient parse error
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -85,6 +85,22 @@
+     "request entity too large", "prompt is too long",
+     "payload too large", "input is too long",
+ )
++
++def _brai_activity_description(activity, current_tool=None):
++    """Объяснить служебный статус без передачи внутренних подписей в чат."""
++    if current_tool:
++        return "выполняю действие"
++    desc = str(activity or "").lower()
++    if "compress" in desc:
++        return "сокращаю историю разговора"
++    if "load" in desc and "model" in desc:
++        return "загружаю модель"
++    if "tool" in desc:
++        return "выполняю действие"
++    if any(word in desc for word in ("wait", "stream", "api", "provider", "model")):
++        return "ожидаю ответ модели"
++    return "продолжаю работу"
++
+
+ def _unexpected_silence_reply() -> str:
+     """Reply when the model returned only a silence marker for a message that needed an answer."""
+@@ -3591,7 +3607,7 @@
+         else:
+             _diag_lines.append(t(
+                 "gateway.progress.timeout_last_activity",
+-                activity=_last_desc, seconds=f"{_secs_ago:.0f}", progress=_iter_progress))
++                activity=_brai_activity_description(_last_desc), seconds=f"{_secs_ago:.0f}", progress=_iter_progress))
+         _diag_lines.append(t("gateway.progress.timeout_hint"))
+         return {
+             "final_response": "\n".join(_diag_lines),
+@@ -4285,7 +4301,7 @@
+                         _parts.append(format_iteration_progress(_a["api_call_count"], _a["max_iterations"]))
+                     _action = _a.get("current_tool") or _a.get("last_activity_desc")
+                     if _action:
+-                        _parts.append(str(_action))
++                        _parts.append(_brai_activity_description(_action, _a.get("current_tool")))
+                     if _parts:
+                         _status_detail = " — " + ", ".join(_parts)
+             _heartbeat_text = (
+diff --git a/gateway/session_stall.py b/gateway/session_stall.py
+--- a/gateway/session_stall.py
++++ b/gateway/session_stall.py
+@@ -40,8 +40,8 @@
+     See #72016.
+     """
+     mins = max(1, int(idle_seconds // 60))
+-    return (f"⚠️ I seem to be stuck (no activity for {mins} min). Send /stop to cancel the current "
+-            "task, or /new to start a fresh conversation.")
++    return (f"⚠️ Похоже, работа остановилась: нет активности {mins} мин. "
++            "Можно остановить текущую задачу или начать новый разговор.")
+
+
+ def _finite_float(value: Any) -> Optional[float]:
+diff --git a/agent/chat_completion_wait_notice.py b/agent/chat_completion_wait_notice.py
+--- a/agent/chat_completion_wait_notice.py
++++ b/agent/chat_completion_wait_notice.py
+@@ -19,25 +19,22 @@
+
+
+ _PHASE_TEXT = {
+-    # Codex Responses (non-stream request path)
+-    "first_event": "{n}s waiting for the first provider event",
+-    "reconnect": "{n}s waiting for the first provider event after reconnect",
+-    "pre_progress": "provider stream open; {n}s without substantive model progress",
+-    "post_event": "provider stream active; {n}s without stream events",
+-    # Chat-completions streaming path
+-    "first_chunk": "{n}s waiting for the first stream chunk",
+-    "post_chunk": "stream open; {n}s without stream output",
++    "first_event": "ожидаю первый ответ модели",
++    "reconnect": "ожидаю ответ модели после восстановления соединения",
++    "pre_progress": "ожидаю продолжение ответа модели",
++    "post_event": "ожидаю продолжение ответа модели",
++    "first_chunk": "ожидаю первый ответ модели",
++    "post_chunk": "ожидаю продолжение ответа модели",
+ }
+
+
+ def wait_notice_text(model: str, silence_secs: float, phase: str,
+                      watchdog: Optional[tuple[str, float]] = None) -> str:
+-    """One neutral status line. ``watchdog`` is ``(label, seconds_until_it_fires)``."""
+-    lead = "still waiting on" if _near_deadline(watchdog) else "waiting on"
+-    text = f"⏳ {lead} {model} — " + _PHASE_TEXT[phase].format(n=int(silence_secs))
++    """Показать ожидание модели без внутренних технических меток."""
++    text = f"⏳ {_PHASE_TEXT.get(phase, 'ожидаю ответ модели')} — {int(silence_secs)} сек."
+     if watchdog is not None:
+-        label, remaining = watchdog
+-        text += f" (auto-reconnect: {label} watchdog in {max(0, int(remaining))}s)"
++        _, remaining = watchdog
++        text += f" При отсутствии ответа повторно подключусь примерно через {max(0, int(remaining))} сек."
+     return text
+
+
+diff --git a/agent/turn_failure_copy.py b/agent/turn_failure_copy.py
+--- a/agent/turn_failure_copy.py
++++ b/agent/turn_failure_copy.py
+@@ -37,11 +37,11 @@
+ # (``gateway/run_turn.py::_hmwa_close_failed_turn``) say the same thing.
+
+ FAILED_TURN_NOTICE = (
+-    "Your request was not processed. Send it again if you still want me to carry it out."
++    "Запрос не был обработан. Отправьте его ещё раз, если он по-прежнему нужен."
+ )
+ PARTIAL_FAILED_TURN_NOTICE = (
+-    "This turn did not complete. Some actions may already have run; verify their effects "
+-    "before resending."
++    "Работа не завершена. Некоторые действия могли уже выполниться; проверьте их результат "
++    "перед повтором."
+ )
+ # ``messages.display_kind`` of that row: display-only (stripped before every provider request),
+ # so renderers show a Hermes notice and room pollers never read it as the model's reply.
+@@ -53,6 +53,8 @@
+     (exact notice text, so a real reply quoting it stays a reply); read-side only."""
+     if role == "assistant" and isinstance(content, str) and content.strip() in (
+         FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE,
++        "Your request was not processed. Send it again if you still want me to carry it out.",
++        "This turn did not complete. Some actions may already have run; verify their effects before resending.",
+     ):
+         return FAILED_TURN_DISPLAY_KIND
+     return None
+diff --git a/agent/turn_facade_lease.py b/agent/turn_facade_lease.py
+--- a/agent/turn_facade_lease.py
++++ b/agent/turn_facade_lease.py
+@@ -335,10 +335,9 @@
+         nonlocal reload_needed, announced
+         reload_needed = announced = True
+         agent._emit_status(
+-            "⏳ Another Hermes process is using this session; "
+-            "waiting for it to finish before starting your turn..."
++            "⏳ Этот разговор сейчас занят. Дождусь завершения предыдущей работы и продолжу..."
+             if elapsed < 1.0 else
+-            f"⏳ Still waiting for the other Hermes process on this session ({int(elapsed)}s)..."
++            f"⏳ Разговор всё ещё занят. Жду {int(elapsed)} сек..."
+         )
+
+     authority_floor = time.time()  # every acquisition attempt stamps its expiry after this instant
+@@ -372,7 +371,7 @@
+         # raising ends the turn.
+         if reload_needed and durable is not False:
+             if announced:
+-                agent._emit_status("Session is free; loading the latest transcript...")
++                agent._emit_status("Разговор освободился. Загружаю его историю...")
+             # The holder may have compressed/rotated the session while we waited: reload only
+             # AFTER admission; an immediate acquisition skips this (needless prompt-cache miss).
+             latest_session_id = db.resolve_resume_session_id(session_id)
+@@ -447,8 +446,7 @@
+         )
+         result = {
+             "final_response": (
+-                "Stopped waiting for another Hermes process on this session. "
+-                "Your message was not processed."
++                "Ожидание завершено. Ваше сообщение не было обработано."
+             ),
+             **base,
+             "interrupted": True,
+@@ -467,8 +465,8 @@
+         return result
+     # Fail closed like gateway TurnLeaseTimeoutError: surface a resend notice, not a bare TimeoutError.
+     timeout_msg = (
+-        "⏳ Another Hermes process kept this session busy too long. Your message was not "
+-        "processed - wait for the other process to finish, then send it again."
++        "⏳ Разговор слишком долго оставался занят. Сообщение не было обработано. "
++        "Дождитесь завершения предыдущей работы и отправьте сообщение ещё раз."
+     )
+     logger.error("session turn lease wait timed out for %s", session_id)
+     try:
+diff --git a/agent/credits_tracker.py b/agent/credits_tracker.py
+--- a/agent/credits_tracker.py
++++ b/agent/credits_tracker.py
+@@ -197,7 +197,7 @@
+             level = current_band[1]  # type: ignore[index]  (current_band set when target_band set)
+             lim = state.subscription_limit_micros or 0
+             used_usd = f"{max(0, min(lim, lim - state.subscription_micros)) / 1_000_000:.2f}" if lim else "?"
+-            text = f"{'⚠' if level == 'warn' else '•'} You've used ${used_usd} of your ${state.subscription_limit_usd or '?'} cap"
++            text = f"{'⚠' if level == 'warn' else '•'} Использовано ${used_usd} из лимита ${state.subscription_limit_usd or '?'}"
+             to_show.append(_sticky_notice(text, level, CREDITS_USAGE_KEY))
+             active.add(CREDITS_USAGE_KEY)
+         latch["usage_band"] = target_band
+@@ -210,7 +210,7 @@
+         state.denominator_kind == "subscription_cap" and uf is not None and uf >= 1.0 and state.purchased_micros > 0
+     )
+     if grant_cond and "credits.grant_spent" not in active and latch.get("seen_grant_unspent", False):
+-        to_show.append(_sticky_notice(f"• Grant spent · ${state.purchased_usd} top-up left", "info", "credits.grant_spent"))
++        to_show.append(_sticky_notice(f"• Лимит тарифа исчерпан. Осталось на дополнительном балансе: ${state.purchased_usd}", "info", "credits.grant_spent"))
+         active.add("credits.grant_spent")
+         latch["seen_grant_unspent"] = False
+     elif "credits.grant_spent" in active and not grant_cond:
+@@ -221,14 +221,14 @@
+     depleted_cond = not state.paid_access
+     show_depleted = depleted_cond and not model_is_free
+     if show_depleted and "credits.depleted" not in active:
+-        to_show.append(_sticky_notice("✕ Credit access paused · run /topup to top up", "error", "credits.depleted"))
++        to_show.append(_sticky_notice("✕ Доступ к платным возможностям приостановлен. Проверьте баланс подключения.", "error", "credits.depleted"))
+         active.add("credits.depleted")
+     elif "credits.depleted" in active and not show_depleted:
+         to_clear.append("credits.depleted")
+         active.discard("credits.depleted")
+         if not depleted_cond:  # genuine recovery only — a free-model switch while depleted is NOT "restored"
+             to_show.append(AgentNotice(
+-                text="✓ Credit access restored", level="success", kind="ttl",
++                text="✓ Доступ восстановлен", level="success", kind="ttl",
+                 ttl_ms=CREDITS_RESTORED_TTL_MS, key="credits.restored", id="credits.restored",
+             ))
+     return (to_show, to_clear)
+diff --git a/agent/turn_liveness.py b/agent/turn_liveness.py
+--- a/agent/turn_liveness.py
++++ b/agent/turn_liveness.py
+@@ -220,9 +220,8 @@
+             getattr(self._agent, "_last_activity_desc", None),
+         )
+         self._emit_warning(
+-            "⚠️ This turn stopped making progress "
+-            f"({int(snapshot.idle_seconds)}s without activity); "
+-            "attempting recovery so the session can continue.",
++            f"⚠️ Работа остановилась: нет активности {int(snapshot.idle_seconds)} сек. "
++            "Пытаюсь восстановить её.",
+             "Failed to emit turn liveness warning",
+         )
+
+@@ -242,9 +241,7 @@
+             snapshot.idle_seconds,
+         )
+         self._emit_warning(
+-            "⚠️ Turn aborted by the liveness watchdog "
+-            f"({int(snapshot.idle_seconds)}s without activity); "
+-            "lease renewal stopped so the session can be reclaimed. "
+-            "You can retry your message.",
++            f"⚠️ Работа прервана после {int(snapshot.idle_seconds)} сек. без активности. "
++            "Некоторые действия могли выполниться; проверьте результат перед повтором.",
+             "Failed to emit committed-abort warning",
+         )
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -3582,8 +3582,7 @@
+             # buffered retry chatter is dropped on successful recovery. Fires at most once per
+             # session (streaming is off from here on).
+             self.agent._emit_warning(
+-                "⚠️ Provider stream returned an empty keepalive frame — retrying this turn "
+-                "without streaming (streaming stays off for this session).")
++                "⚠️ Сервис прислал пустой ответ. Продолжаю без потоковой передачи в этом разговоре.")
+             return
+         from agent.anthropic_adapter import _is_stream_unavailable_error
+         if not _is_stream_unavailable_error(e):
+diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
+--- a/agent/conversation_compression.py
++++ b/agent/conversation_compression.py
+@@ -2761,8 +2761,7 @@
+         agent._last_compression_lock_warning_sid = lease.sid
+         with contextlib.suppress(Exception):
+             agent._emit_warning(
+-                "⚠ Skipping concurrent compression — another path is already compressing this session. Will retry "
+-                "after it finishes."
++                "⚠ История разговора уже сокращается. Продолжу после завершения."
+             )
+     _existing_sp = _existing_system_prompt(agent, system_message)
+     with contextlib.suppress(Exception):
+@@ -3224,8 +3223,8 @@
+             agent.context_compressor._last_compress_refused_would_grow = True
+         with contextlib.suppress(Exception):
+             agent._emit_warning(
+-                "⚠️ Compression refused: the generated summary would have GROWN the conversation instead of "
+-                "shrinking it. No messages were dropped — conversation continues unchanged."
++                "⚠️ Не удалось сократить историю: результат оказался больше исходного. "
++                "Сообщения сохранены, разговор продолжается без изменений."
+             )
+         _existing_sp = _existing_system_prompt(agent, system_message)
+         _emit_aborted_attempt_telemetry(agent, attempt_started_at, "would_grow")
+@@ -3381,7 +3380,7 @@
+     if summary_error:
+         if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
+             agent._last_compression_summary_warning = summary_error
+-            agent._emit_warning(f"⚠ Compression summary failed: {summary_error}. Inserted a fallback context marker.")
++            agent._emit_warning("⚠️ Не удалось составить краткую историю разговора. Использована резервная отметка контекста.")
+     else:
+         # Aux model may have errored and been recovered on main; tell the user their
+         # auxiliary.compression.model is broken even though compression succeeded.
+@@ -3396,8 +3395,7 @@
+                 _aux_fail_model, _aux_fail_err or "unknown error",
+             )
+             agent._emit_warning(
+-                f"ℹ Configured compression model '{_aux_fail_model}' failed, so Hermes summarised "
+-                "with your main model instead. Check auxiliary.compression.model in your config."
++                "ℹ Не удалось использовать модель для сокращения истории. Использована основная модель."
+             )
+
+
+@@ -3529,9 +3527,7 @@
+         if getattr(agent, "_last_compression_summary_warning", None) != _err:
+             agent._last_compression_summary_warning = _err
+             agent._emit_warning(
+-                f"⚠ Compression aborted: {_err}. "
+-                "No messages were dropped — conversation continues unchanged. "
+-                "Run /compress to retry, or /new to start a fresh session."
++                "⚠️ Не удалось сократить историю. Сообщения сохранены, разговор продолжается без изменений."
+             )
+         _emit_aborted_attempt_telemetry(
+             agent, attempt_started_at, _summary_error and "summary_generation_aborted"
+@@ -3566,7 +3562,7 @@
+         )
+         with contextlib.suppress(Exception):
+             agent._emit_warning(
+-                "⚠ Compression returned an empty transcript. No session split was performed; conversation continues unchanged."
++                "⚠️ При сокращении получилась пустая история. Сообщения сохранены, разговор продолжается без изменений."
+             )
+         return True
+
+@@ -4360,7 +4356,7 @@
+         agent._codex_session = None
+     if failed:
+         with contextlib.suppress(Exception):
+-            agent._emit_warning(f"⚠ Codex app-server compaction failed: {result.error}")
++            agent._emit_warning("⚠️ Не удалось сократить историю разговора.")
+         # The transcript is returned unchanged, so the session is still over
+         # threshold. Without a brake the next turn retries immediately.
+         _record_codex_compaction_failure(agent, str(getattr(result, "error", None) or "compaction interrupted"))
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -850,17 +850,17 @@
+         model = str(api_kwargs.get("model", ""))
+         progress = get_loading_progress().get(model)
+         if progress is not None:
+-            return (f"⏳ loading {model} into memory — {progress['percent']}% "
+-                "(responses start once the model is loaded)")
++            return (f"⏳ Загружаю модель {model}: {progress['percent']}%. "
++                "Ответ появится после загрузки.")
+         prefill = get_prefill_progress(model)
+         if prefill is None:
+             return None
+         processed = int(prefill["processed"])
+         total = estimate_request_context_tokens(api_kwargs)
+         if total and total >= processed:
+-            return f"⚙ processing prompt — {max(0, min(100, round(processed / total * 100)))}%"
++            return f"⚙ Обрабатываю запрос — {max(0, min(100, round(processed / total * 100)))}%"
+         # Counter past the estimate (estimator undercounted): no honest denominator, label-only.
+-        return "⚙ processing prompt"
++        return "⚙ Обрабатываю запрос"
+     except Exception:
+         return None
+
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -2805,11 +2805,9 @@
+             if key not in _empty_heal_user_notified:
+                 _empty_heal_user_notified.add(key)
+                 _empty_heal_pending_notice[key] = (
+-                    "⚠️ Your session transcript required repeated repair "
+-                    f"({total_events} heal passes so far). Replies keep "
+-                    "working, but a corrupted turn is stuck in this "
+-                    "session's history — run /debug share or `hermes "
+-                    "doctor` to capture diagnostics, or /new to start a clean session."
++                    f"⚠️ Историю разговора пришлось исправлять несколько раз ({total_events}). "
++                    "Ответы продолжают работать, но в истории осталась повреждённая запись. "
++                    "Обратитесь к администратору или начните новый разговор."
+                 )
+     if escalate:
+         _ra().logger.error(
+diff --git a/gateway/config.py b/gateway/config.py
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -164,7 +164,7 @@
+ # silent toward that sender for gateway.pairing.DECLINE_DEDUPE_SECONDS (#88028).
+ UNAUTHORIZED_DM_BEHAVIORS = {"pair", "ignore", "decline"}
+ DEFAULT_UNAUTHORIZED_DM_DECLINE_MESSAGE = (
+-    "Hi! I'm a personal assistant and can only chat with my owner, so I can't help you directly. Sorry!"
++    "Здравствуйте! Я личный помощник и могу общаться только со своим владельцем."
+ )
+
+
+diff --git a/gateway/delivery.py b/gateway/delivery.py
+--- a/gateway/delivery.py
++++ b/gateway/delivery.py
+@@ -253,7 +253,7 @@
+         # The footer needs a valid path: if the best-effort save failed, retry
+         # (a failure now is a real delivery problem and propagates).
+         saved_path = saved_path or self._save_full_output(content, job_id)
+-        footer = f"\n\n... [truncated, full output saved to {saved_path}]"
++        footer = f"\n\n... [ответ сокращён, полный текст сохранён в {saved_path}]"
+         logger.info("Cron output truncated (%d chars) — full output: %s", len(content), saved_path)
+         return content[:max(0, MAX_PLATFORM_OUTPUT - len(footer))] + footer
+
+diff --git a/gateway/hosted_room_discussion.py b/gateway/hosted_room_discussion.py
+--- a/gateway/hosted_room_discussion.py
++++ b/gateway/hosted_room_discussion.py
+@@ -29,7 +29,7 @@
+ MAX_DISCUSSION_DELTA_LINES = 24
+ MAX_USER_TEXT_BYTES = 64 * 1024
+ MAX_MEMBER_TEXT_BYTES = 64 * 1024
+-_TRUNCATED_REPLY_NOTICE = "\n\n[Reply truncated. Ask the Bot to share the full result as a file.]"
++_TRUNCATED_REPLY_NOTICE = "\n\n[Ответ сокращён. Попросите бота прислать полный результат файлом.]"
+
+ Payload = Mapping[str, Any]
+ DecisionStatus = Literal["idle", "task", "settled", "bounded"]
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1177,6 +1177,10 @@
+         def present():
+             try:
+                 line = render_notice_line(notice)
++                if diagnostic:
++                    from gateway.run import _prepare_gateway_status_message
++                    from gateway.warning_notifications import DiagnosticText
++                    line = _prepare_gateway_status_message(self._ctx.source.platform, "warn", DiagnosticText(line))
+             except Exception:
+                 logger.debug("render_notice_line failed", exc_info=True)
+                 return
+diff --git a/gateway/run.py b/gateway/run.py
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -88,6 +88,9 @@
+     r"|auto-lowered\s+(?:this\s+)?session'?s?\s+threshold"
+     r"|configured\s+auxiliary\s+compression\s+provider\s+.+\s+unavailable"
+     r"|skipping\s+concurrent\s+compression"
++    r"|История разговора уже сокращается"
++    r"|Не удалось составить краткую историю разговора"
++    r"|Не удалось использовать модель для сокращения истории"
+     rf"|{re.escape(COMPACTION_STATUS)}"
+     rf"|{re.escape(COMPACTION_HEARTBEAT_STATUS)}"
+     r"|resumed\s+after\s+\d+s\s+idle\s+[—-]\s+compacting"
+@@ -740,4 +743,39 @@
+         return None
+     if _looks_like_gateway_provider_error(text):
+         return _gateway_provider_error_reply(text)
++    from gateway.warning_notifications import DiagnosticText
++    if ((isinstance(message, DiagnosticText) or event_type in {"warn", "lifecycle"}) and not re.search(r"[А-Яа-яЁё]", str(message))
++            and re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", text)):
++        # AIDEV-NOTE: это служебные события движка, не текст собеседника или ответ модели.
++        # Исходная диагностика сохраняется в журнале после удаления секретов.
++        logger.warning("Gateway diagnostic: %s", text)
++        lowered = text.lower()
++        if "empty" in lowered and ("response" in lowered or "content" in lowered):
++            return "⚠️ Модель вернула пустой ответ. Продолжение работы не гарантировано."
++        if "authentication" in lowered or "not entitled" in lowered:
++            return "⚠️ Не удалось получить доступ к модели. Проверьте подключение."
++        if "unverified" in lowered:
++            return "⚠️ Сервис модели отклонил запрос; причина отказа не подтверждена."
++        if "safety" in lowered or "content filter" in lowered:
++            return "⚠️ Сервис модели отклонил запрос по своим правилам."
++        if "rate limit" in lowered or "rate limited" in lowered:
++            return "⏳ Сервис модели временно ограничил запросы."
++        if "billing" in lowered or "credits exhausted" in lowered:
++            return "⚠️ Сервис модели сообщил об ограничении оплаты или баланса."
++        if "estimated cost" in lowered:
++            amount = re.search(r"\$[0-9]+(?:\.[0-9]+)?", text)
++            return (f"ℹ️ Примерная стоимость попыток без ответа: {amount.group(0)}."
++                    if amount else "ℹ️ Попытки без ответа могли потребовать оплаты.")
++        if "fallback" in lowered:
++            return "⚠️ При обращении к модели использовалось резервное подключение или была попытка переключиться на него."
++        if "compression" in lowered or "compressed" in lowered or "compacting" in lowered:
++            return "⚠️ Возникла проблема при сокращении истории разговора. Подробности сохранены в журнале."
++        if "no response" in lowered or "no events" in lowered or "without activity" in lowered:
++            return "⚠️ Не удалось вовремя получить ответ модели. Подробности сохранены в журнале."
++        return "ℹ️ Служебное уведомление о работе модели. Подробности сохранены в журнале."
++    # AIDEV-NOTE: внутренние маркеры сжатия остаются на английском для классификатора.
++    if event_type == "compacted":
++        return "✓ История разговора сокращена. Продолжаю работу."
++    if _COMPRESSION_PROGRESS_STATUS_RE.search(text):
++        return "🗜️ Сокращаю историю разговора, чтобы продолжить работу."
+     return text
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -659,35 +659,35 @@
+     native_stream_placeholder: "💬 Жду вашего выбора..."
+     skip_hint: 'Ответьте «skip», чтобы пропустить этот вопрос.'
+   errors:
+-    rate_limited: "⏱️ Сервис ИИ-модели ограничивает частоту запросов. Подождите немного, затем используйте /retry."
+-    auth_failed: "⚠️ Не удалось войти в сервис ИИ-модели. Используйте /login, чтобы войти заново, или попросите того, кто запускает этого бота, выполнить `hermes doctor` на хосте."
+-    bad_request: "⚠️ Сервис ИИ-модели отклонил этот запрос. Попробуйте переформулировать сообщение или используйте /model, чтобы сменить модель."
+-    connection_interrupted: "⚠️ Соединение с сервисом ИИ-модели прервалось во время запроса — обычно это временно. Используйте /retry, чтобы повторить; если повторяется, выполните `hermes doctor` на хосте."
+-    unreachable: "⚠️ Сервис ИИ-модели сейчас недоступен — настроенная конечная точка модели не запущена или недостижима. Подождите немного и используйте /retry; если не помогает, выполните `hermes doctor` на хосте."
+-    connection_unknown: "⚠️ Hermes не смог связаться с сервисом ИИ-модели (SDK не сообщил подробностей). Используйте /retry, чтобы повторить; если не помогает, выполните `hermes doctor` на хосте."
+-    context_overflow: "⚠️ Этот разговор стал слишком длинным, чтобы прочитать его целиком. Используйте /compress, чтобы сократить историю, или /new, чтобы начать новый разговор."
+-    usage_limit_resets: "⏱️ Достигнут лимит использования сервиса ИИ-модели; он сбросится через {window}. После этого используйте /retry или /model, чтобы сменить модель."
+-    provider_kept_failing: "⚠️ Сервис ИИ-модели раз за разом отвечал ошибкой. Используйте /retry, чтобы повторить, или /model, чтобы сменить модель. Подробности — в журнале шлюза (`hermes logs`)."
++    rate_limited: "⏱️ Сервис ИИ временно ограничил запросы. Подождите немного и напишите «продолжай»."
++    auth_failed: "⚠️ Не удалось войти в сервис ИИ. Проверьте подключение или обратитесь к администратору."
++    bad_request: "⚠️ Сервис ИИ отклонил запрос. Попробуйте переформулировать сообщение или выбрать другую модель."
++    connection_interrupted: "⚠️ Соединение с сервисом ИИ прервалось. Попробуйте позже и напишите «продолжай»."
++    unreachable: "⚠️ Сервис ИИ сейчас недоступен. Попробуйте позже и напишите «продолжай»; если ошибка повторится, обратитесь к администратору."
++    connection_unknown: "⚠️ Не удалось связаться с сервисом ИИ; причина неизвестна. Попробуйте позже и напишите «продолжай»."
++    context_overflow: "⚠️ Разговор стал слишком длинным. Попросите сократить историю или начните новый разговор."
++    usage_limit_resets: "⏱️ Достигнут лимит использования сервиса ИИ; он обновится через {window}. После этого напишите «продолжай»."
++    provider_kept_failing: "⚠️ Сервис ИИ несколько раз ответил с ошибкой. Попробуйте позже и напишите «продолжай»."
+     session_storage_unavailable_disk: "⚠️ Хранилище сеансов было временно недоступно, поэтому этот ход остановлен, чтобы защитить историю разговора. Проверьте свободное место на диске, затем отправьте сообщение ещё раз."
+     session_storage_unavailable: "⚠️ Хранилище сеансов было временно недоступно, поэтому этот ход остановлен, чтобы защитить историю разговора. Ваше сообщение уже должно быть сохранено — отправьте его ещё раз чуть позже."
+-    generic_failed: "⚠️ Что-то пошло не так, и я не смог завершить этот ответ. Используйте /retry, чтобы повторить, или /new, чтобы начать новый разговор. Технические подробности — в журнале шлюза (`hermes logs`)."
++    generic_failed: "⚠️ Не удалось завершить ответ. Попробуйте позже и напишите «продолжай»."
+     interrupted_before_start: "⚠️ Ваше сообщение было прервано до начала обработки (вероятно, недавним /stop). Отправьте его ещё раз."
+     processing_incomplete: "обработка не завершена"
+-    stopped_before_finishing: "⚠️ Мне пришлось остановиться, не закончив{reason}. Используйте /retry, чтобы повторить, или /compress, если разговор стал очень длинным."
++    stopped_before_finishing: "⚠️ Работа не завершена{reason}. Попробуйте позже и напишите «продолжай»."
+     no_response: "⚠️ Обработка завершилась, но ответ не был сформирован. Возможно, это временная ошибка — попробуйте отправить сообщение ещё раз."
+     previous_turn_cleanup: "⚠️ Ваше сообщение не было обработано (предыдущий ход ещё завершался). Отправьте его ещё раз."
+-    unexpected_silence: "⚠️ Модель вернула только маркер молчания на сообщение, требовавшее ответа. Попробуйте ещё раз или переформулируйте."
++    unexpected_silence: "⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение."
+     empty_response_model_label: "Модель"
+-    hint_auth: " Ваш вход в сервис ИИ-модели истёк или указан неверный API-ключ. Используйте /login здесь или выполните `{relogin}` на хосте."
+-    hint_quota: " Баланс или квота в сервисе ИИ-модели исчерпаны. Пополните их на сайте сервиса или используйте /model, чтобы сменить модель."
+-    hint_overloaded: " Сервис ИИ-модели временно перегружен. Подождите немного, затем используйте /retry."
++    hint_auth: " Не удалось войти в сервис ИИ. Проверьте подключение или обратитесь к администратору."
++    hint_quota: " Сервис ИИ сообщил об ограничении баланса или тарифа. Проверьте условия подключения."
++    hint_overloaded: " Сервис ИИ временно перегружен. Подождите немного и напишите «продолжай»."
+     hint_rate_limited: " Частота ваших запросов ограничена. Подождите немного и попробуйте снова."
+     hint_usage_limit_resets: " Достигнут лимит использования вашего тарифа. Он сбросится примерно через {hours} ч."
+     hint_usage_limit: " Достигнут лимит использования вашего тарифа. Дождитесь его сброса."
+     hint_rejected: " Сервис ИИ-модели отклонил запрос."
+-    generic_failed_with_hint: "⚠️ Что-то пошло не так, и я не смог завершить этот ответ.{hint}\nИспользуйте /retry, чтобы повторить, или /new, чтобы начать новый разговор. Технические подробности — в журнале шлюза (`hermes logs`)."
+-    history_unavailable: "⚠️ История этого сеанса временно недоступна, поэтому сообщение не было обработано. Попросите оператора проверить state.db, а затем отправьте сообщение снова, когда всё восстановится. Используйте /reset только если действительно хотите начать новый разговор."
+-    no_credentials: "⚠️ Мне не удалось подключиться к сервису ИИ-модели, поэтому сообщение не было обработано. Используйте /login, чтобы войти заново, или /model, чтобы выбрать другую модель. Если ошибка повторяется, выполните `hermes doctor` на хосте."
++    generic_failed_with_hint: "⚠️ Не удалось завершить ответ.{hint}\nПопробуйте позже и напишите «продолжай»."
++    history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
++    no_credentials: "⚠️ Не удалось подключиться к сервису ИИ, поэтому сообщение не было обработано. Проверьте подключение или обратитесь к администратору."
+   skills:
+     disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
+     not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"

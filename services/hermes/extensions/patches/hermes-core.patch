@@ -28729,7 +28729,7 @@ index 00000000..77f4cce5
 +  "⚠️ I had to stop before finishing{reason}. Use /retry to try again, or /compress if this conversation has grown very long.": "⚠️ Мне пришлось остановиться, не закончив{reason}. Используйте /retry, чтобы повторить, или /compress, если разговор стал очень длинным.",
 +  "⚠️ Processing completed but no response was generated. This may be a transient error — try sending your message again.": "⚠️ Обработка завершилась, но ответ не был сформирован. Возможно, это временная ошибка — попробуйте отправить сообщение ещё раз.",
 +  "⚠️ Your message wasn't processed (the previous turn was still being cleaned up). Please send it again.": "⚠️ Ваше сообщение не было обработано (предыдущий ход ещё завершался). Отправьте его ещё раз.",
-+  "⚠️ The model returned only a silence marker for a message that needed a reply. Try again or rephrase.": "⚠️ Модель вернула только маркер молчания на сообщение, требовавшее ответа. Попробуйте ещё раз или переформулируйте.",
++  "⚠️ The model returned only a silence marker for a message that needed a reply. Try again or rephrase.": "⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение.",
 +  "The model": "Модель",
 +  " Your sign-in to the AI model service has expired or the API key is wrong. Use /login here, or run `{relogin}` on the host.": " Ваш вход в сервис ИИ-модели истёк или указан неверный API-ключ. Используйте /login здесь или выполните `{relogin}` на хосте.",
 +  " Your AI model service balance or quota is used up. Top it up on the service's website, or use /model to switch models.": " Баланс или квота в сервисе ИИ-модели исчерпаны. Пополните их на сайте сервиса или используйте /model, чтобы сменить модель.",

@@ -70,6 +70,133 @@ class FailureNoticeTest(unittest.TestCase):
                 self.assertNotIn('Исходное сообщение', text)
                 self.assertNotIn(self.notice._UNKNOWN, text)
 
+    def test_native_service_messages_are_russian_and_keep_old_history(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        def extract(path, names, scope=None):
+            from typing import Any, Optional
+            tree = ast.parse((root / path).read_text())
+            nodes = [node for node in tree.body if
+                     (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names) or
+                     (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in node.targets))]
+            namespace = {'Optional': Optional, 'Any': Any, **(scope or {})}
+            exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), '<candidate>', 'exec'), namespace)
+            return types.SimpleNamespace(**namespace)
+        delivery_ledger = extract('gateway/delivery_ledger.py', {'RECOVERED_MARKER', 'RECONNECTED_MARKER', 'FLOOD_MARKER', '_claimed_row'})
+        session_stall = extract('gateway/session_stall.py', {'format_session_stall_notification'})
+        chat_completion_wait_notice = extract('agent/chat_completion_wait_notice.py', {'_PHASE_TEXT', 'wait_notice_text'})
+        turn_failure_copy = extract('agent/turn_failure_copy.py', {'FAILED_TURN_NOTICE', 'PARTIAL_FAILED_TURN_NOTICE',
+            'FAILED_TURN_DISPLAY_KIND', 'untyped_failed_turn_display_kind'})
+        for marker in (delivery_ledger.RECOVERED_MARKER, delivery_ledger.RECONNECTED_MARKER,
+                       delivery_ledger.FLOOD_MARKER):
+            self.assertRegex(marker, '[А-Яа-я]')
+            self.assertNotIn('Recovered reply', marker)
+        self.assertIn('возможно', delivery_ledger.RECOVERED_MARKER)
+        self.assertIn('часть ответа', delivery_ledger.FLOOD_MARKER)
+        row = delivery_ledger._claimed_row('id', 'session', 'telegram', 'chat', None, 'ответ', 0, None,
+                                           needs_marker=True, runtime=True)
+        self.assertEqual(row['marker'], delivery_ledger.RECONNECTED_MARKER)
+        self.assertIn('нет активности 3 мин', session_stall.format_session_stall_notification(180))
+        self.assertNotIn('/stop', session_stall.format_session_stall_notification(180))
+        for phase in chat_completion_wait_notice._PHASE_TEXT:
+            text = chat_completion_wait_notice.wait_notice_text('model', 90, phase, ('TTFB', 12))
+            self.assertIn('ожидаю', text)
+            self.assertNotIn('TTFB', text)
+            self.assertIn('12 сек.', text)
+        for old in ('Your request was not processed. Send it again if you still want me to carry it out.',
+                    'This turn did not complete. Some actions may already have run; verify their effects before resending.'):
+            self.assertEqual(turn_failure_copy.untyped_failed_turn_display_kind('assistant', old), 'failed_turn')
+        self.assertIn('не завершена', turn_failure_copy.PARTIAL_FAILED_TURN_NOTICE)
+        tree = ast.parse((root / 'gateway/run_turn.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_brai_activity_description')
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), namespace)
+        describe = namespace['_brai_activity_description']
+        self.assertEqual(describe('waiting for non-streaming API response'), 'ожидаю ответ модели')
+        self.assertEqual(describe('unrecognised internal state'), 'продолжаю работу')
+        self.assertEqual(describe('ignored', 'browser'), 'выполняю действие')
+
+    def test_gateway_russian_catalog_covers_all_english_keys(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for catalog integration')
+        import yaml
+        directory = Path(candidate) / 'locales'
+        english = yaml.safe_load((directory / 'en.yaml').read_text())['gateway']
+        russian = yaml.safe_load((directory / 'ru.yaml').read_text())['gateway']
+        self.assertIn('Не удалось получить ответ', russian['errors']['unexpected_silence'])
+        for value in russian['errors'].values():
+            if isinstance(value, str):
+                for command in ('/retry', '/model', '/new', '/compress', '/login'):
+                    self.assertNotIn(command, value)
+        def check(en, ru, path='gateway'):
+            for key, value in en.items():
+                self.assertIn(key, ru, f'{path}.{key}')
+                if isinstance(value, dict):
+                    self.assertIsInstance(ru[key], dict)
+                    check(value, ru[key], f'{path}.{key}')
+        check(english, russian)
+
+    def test_literal_agent_status_messages_have_no_english_prose(self):
+        import os
+        import re
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        offenders = []
+        for path in (Path(candidate) / 'agent').glob('*.py'):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in {'_emit_warning', '_emit_status', '_emit_wait_notice', '_emit_startup_warning'}
+                        and node.args and isinstance(node.args[0], (ast.Constant, ast.JoinedStr))):
+                    continue
+                value = node.args[0]
+                parts = [value] if isinstance(value, ast.Constant) else value.values
+                text = ''.join(part.value for part in parts if isinstance(part, ast.Constant) and isinstance(part.value, str))
+                if re.search(r'[A-Za-z]{3,}\s+[A-Za-z]{3,}', text):
+                    offenders.append(f'{path.name}:{node.lineno}')
+        self.assertEqual(offenders, [])
+
+    def test_diagnostic_status_is_localized_without_rewriting_normal_text(self):
+        import os
+        import re
+        from typing import Any, Optional
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        tree = ast.parse((Path(candidate) / 'gateway/run.py').read_text())
+        method = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == '_prepare_gateway_status_message')
+        class DiagnosticText(str):
+            pass
+        scope = {'Any': Any, 'Optional': Optional, 're': re, 'logger': logging.getLogger('notice-test'),
+                 '_gateway_surface_passes_raw_text': lambda platform: platform == 'api_server',
+                 '_redact_gateway_user_facing_secrets': lambda text: text.replace('SECRET', '[скрыто]'),
+                 '_TELEGRAM_NOISY_STATUS_RE': re.compile(r'never-matches'),
+                 '_COMPRESSION_PROGRESS_STATUS_RE': re.compile(r'Compacting context'),
+                 '_gateway_compression_progress_notices_enabled': lambda: True,
+                 '_looks_like_gateway_provider_error': lambda text: False}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        prepare = scope['_prepare_gateway_status_message']
+        module = types.SimpleNamespace(DiagnosticText=DiagnosticText)
+        with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING') as logs:
+            self.assertIn('пустой ответ', prepare('telegram', 'warn', DiagnosticText('Empty response from model SECRET')))
+            self.assertIn('причина отказа не подтверждена', prepare('telegram', 'warn', DiagnosticText('Billing unverified by provider')))
+            self.assertIn('причина отказа не подтверждена', prepare('telegram', 'warn', DiagnosticText('Billing unverified; possible content filter rejection')))
+            self.assertIn('$0.42', prepare('telegram', 'warn', DiagnosticText('Estimated cost of these attempts: ~$0.42')))
+            self.assertIn('Подробности сохранены в журнале', prepare('telegram', 'warn', DiagnosticText('A new unexpected diagnostic')))
+            self.assertIn('пустой ответ', prepare('telegram', 'warn', 'Empty response from model'))
+            self.assertIn('Служебное уведомление', prepare('telegram', 'lifecycle', 'A new runtime status'))
+        self.assertNotIn('SECRET', ' '.join(logs.output))
+        self.assertEqual(prepare('telegram', 'interim', 'Hello, world'), 'Hello, world')
+        self.assertEqual(prepare('api_server', 'warn', DiagnosticText('Original diagnostic')), 'Original diagnostic')
+        with patch.dict('sys.modules', {'gateway.warning_notifications': module}):
+            self.assertEqual(prepare('telegram', 'warn', DiagnosticText('Ошибка сервиса OpenAI API')), 'Ошибка сервиса OpenAI API')
+
     def test_error_messages_keep_visible_formatting(self):
         for code in self.notice._COPY:
             with self.subTest(code=code):
@@ -479,6 +606,76 @@ class FailureNoticeTest(unittest.TestCase):
             self.assertEqual(func('original', types.SimpleNamespace(platform='other'), result=result), 'original')
 
 class DeliveryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_recovered_reply_is_russian_at_delivery_boundary(self):
+        import asyncio
+        import contextlib
+        import os
+        from unittest.mock import AsyncMock
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for delivery integration')
+        root = Path(candidate)
+        ledger = ast.parse((root / 'gateway/delivery_ledger.py').read_text())
+        marker = next(node.value.value for node in ledger.body if isinstance(node, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == 'RECOVERED_MARKER' for t in node.targets))
+        tree = ast.parse((root / 'gateway/run_startup.py').read_text())
+        method = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == '_redeliver_claimed_obligations')
+        scope = {'asyncio': asyncio, 'logging': logging, 'logger': logging.getLogger('notice-test'),
+                 '_log_suppressed': lambda *args, **kwargs: contextlib.nullcontext()}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        adapter = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(success=True)))
+        runner = types.SimpleNamespace(_obligation_adapter=AsyncMock(return_value=adapter),
+                                       _arm_flood_timers_for_waiting_rows=AsyncMock())
+        row = {'content': 'Ответ пользователя', 'needs_marker': True, 'chat_id': '1', 'thread_id': None,
+               'obligation_id': 'id', 'platform': 'telegram', 'attempts': 1}
+        ledger_module = types.SimpleNamespace(RECOVERED_MARKER=marker, mark_delivered=lambda value: None,
+                                               mark_failed=lambda *args: None)
+        with patch.dict('sys.modules', {'gateway.delivery_ledger': ledger_module}):
+            self.assertEqual(await scope['_redeliver_claimed_obligations'](runner, [row]), 1)
+        content = adapter.send.await_args.kwargs['content']
+        self.assertIn('возможно, вы уже получили этот ответ', content)
+        self.assertTrue(content.endswith('Ответ пользователя'))
+        self.assertNotIn('Recovered reply', content)
+
+    async def test_long_running_heartbeat_does_not_expose_internal_english(self):
+        import asyncio
+        import contextlib
+        import os
+        from unittest.mock import AsyncMock
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for delivery integration')
+        tree = ast.parse((Path(candidate) / 'gateway/run_turn.py').read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_brai_activity_description')
+        method = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == '_run_agent_notify_long_running')
+        method.returns = None
+        for arg in method.args.args:
+            arg.annotation = None
+        scope = {'asyncio': asyncio, 'time': types.SimpleNamespace(time=lambda: 180),
+                 'suppress': contextlib.suppress, 'logger': logging.getLogger('notice-test'),
+                 'format_iteration_progress': lambda *args: 'этап 1',
+                 't': lambda key, **kw: f"⏳ Работаю — {kw['minutes']} мин{kw['detail']}"}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[helper, method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        adapter = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(success=True, message_id='1')))
+        calls = iter([True, True, False])
+        runner = types.SimpleNamespace(_delivery_adapter_for=lambda source: adapter,
+            _should_emit_long_running_notification=lambda *args: next(calls),
+            _agent_activity_summary=lambda agent: {'api_call_count': 1, 'max_iterations': 2,
+                'last_activity_desc': 'waiting for non-streaming API response'})
+        disp = types.SimpleNamespace(_display_surface_mode=lambda *args, **kwargs: 'raw',
+            resolve_display_setting=lambda *args: False, user_config={}, platform_key='telegram')
+        ctx = types.SimpleNamespace(source=types.SimpleNamespace(chat_id='1', platform='telegram'),
+            session_key='s', agent_holder=[object()], _status_thread_metadata={}, _cleanup_progress=False)
+        fake_run = types.SimpleNamespace(_float_env=lambda *args: 0.001, _interim_metadata=lambda x: x,
+                                         _non_conversational_metadata=lambda x, **kwargs: x)
+        with patch.dict('sys.modules', {'gateway.run': fake_run}):
+            await scope['_run_agent_notify_long_running'](runner, disp, ctx, [None])
+        text = adapter.send.await_args.args[1]
+        self.assertIn('ожидаю ответ модели', text)
+        self.assertNotIn('waiting for', text)
+
     async def test_failure_is_translated_before_voice_and_final_delivery(self):
         import contextlib
         from unittest.mock import AsyncMock
