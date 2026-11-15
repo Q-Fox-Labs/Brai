@@ -235,6 +235,72 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         await self.mirror.pump()
         self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
 
+    def batch(self):
+        from identity.ordinary_admission import BatchOwnership
+        adapter = NS(_bot=self.bot, _pending_text_batches={}, _pending_photo_batches={},
+                     _media_group_events={}, _held_inbound_events=[])
+        return BatchOwnership(adapter, self.mirror)
+
+    async def test_delayed_batch_keeps_snapshot_after_native_postflight(self):
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        await self.mirror.classify('123:1', item)
+        batch = self.batch()
+        event = NS(_brai_release_updates=[1])
+        batch.tag(event, 1)
+        proceed = asyncio.Event()
+        async def delayed():
+            await proceed.wait()
+            await self.mirror.before_delivery(event)
+            await self.mirror.accepted(event, RECEIPT)
+        task = asyncio.create_task(delayed())
+        batch.track(task, event)
+        self.assertFalse(self.mirror.finish('123:1', {'completed': True}))
+        await self.mirror.pump()
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        proceed.set()
+        await task
+        await asyncio.sleep(0)
+        self.assertEqual(self.transport.observe(123, 1)['state'], 'accepted')
+        self.assertEqual(self.mirror.snapshots, {})
+        self.assertEqual(self.mirror.pending_snapshots, set())
+
+    async def test_cancelled_batch_without_receipt_requeues_automatically(self):
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        await self.mirror.classify('123:1', item)
+        batch = self.batch()
+        event = NS(_brai_release_updates=[1])
+        batch.tag(event, 1)
+        task = asyncio.create_task(asyncio.Event().wait())
+        batch.track(task, event)
+        self.mirror.finish('123:1', {'completed': True})
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await self.mirror.pump()
+        self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
+
+    async def test_held_redispatch_retains_snapshot_until_callback_finishes(self):
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        await self.mirror.classify('123:1', item)
+        batch = self.batch()
+        event = NS(_brai_release_updates=[1])
+        batch.tag(event, 1)
+        batch.adapter._held_inbound_events.append(event)
+        self.mirror.finish('123:1', {'completed': True})
+        batch.take_held([event])
+        batch.adapter._held_inbound_events.clear()
+        await self.mirror.before_delivery(event)
+        await self.mirror.accepted(event, RECEIPT)
+        batch.finish_held(event)
+        self.assertEqual(self.transport.observe(123, 1)['state'], 'accepted')
+        self.assertEqual(self.mirror.snapshots, {})
+
     async def test_accepted_route_is_released_for_next_topic(self):
         item = self.capture()
         self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
