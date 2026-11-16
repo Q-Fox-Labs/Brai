@@ -8567,3 +8567,116 @@ diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
          return f"{out}\n{err}"
 -    return err if err else (out or "(no output)")
 +    return err if err else (out or ("Нет результата." if get_language() == "ru" else "(no output)"))
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -539,6 +539,74 @@
+         print(line)
+
+
++def _kanban_event_ru(event) -> str:
++    """Понятно показать событие, сохранив пользовательские значения и номера задач."""
++    from agent.i18n import _russian_gateway_error
++    names = {
++        "archive_worker_termination": "Остановка исполнителя при архивации", "archived": "Задача архивирована",
++        "assigned": "Назначен исполнитель", "attached": "Добавлено вложение", "attachment_removed": "Вложение удалено",
++        "blocked": "Задача заблокирована", "changes_requested": "Запрошена доработка",
++        "claim_extended": "Время работы исполнителя продлено", "claim_rejected": "Задачу не удалось взять в работу",
++        "claimed": "Задача взята в работу", "commented": "Добавлен комментарий", "completed": "Задача завершена",
++        "completion_blocked_empty_result": "Завершение остановлено: результат не указан",
++        "completion_blocked_hallucination": "Завершение остановлено: указаны несуществующие задачи",
++        "created": "Задача создана", "decomposed": "Задача разбита на подзадачи", "dependency_wait": "Ожидание связанных задач",
++        "descendant_invalidated": "Дочернюю задачу нужно проверить", "edited": "Задача изменена",
++        "gave_up": "Попытки выполнения закончились", "heartbeat": "Исполнитель продолжает работу",
++        "linked": "Добавлена связь задач", "pr_acceptance": "Проверка запроса изменений",
++        "promoted": "Задача готова к работе", "promoted_manual": "Задача вручную подготовлена к работе",
++        "reclaim_deferred": "Освобождение задачи отложено", "reclaimed": "Задача освобождена",
++        "reconciled": "Состояние задачи сверено", "reprioritized": "Приоритет изменён",
++        "respawn_guarded": "Повторный запуск исполнителя отложен", "review_reopened": "Проверка открыта повторно",
++        "review_requested": "Запрошена проверка", "scheduled": "Задача отложена", "skipped_nonspawnable": "Исполнителя не удалось запустить",
++        "spawned": "Исполнитель запущен", "specified": "Задача уточнена", "stale": "Исполнитель перестал отвечать",
++        "status": "Состояние изменено", "suspected_hallucinated_references": "Возможные ссылки на несуществующие задачи",
++        "terminal_worker_reaped": "Завершённый исполнитель остановлен", "timed_out": "Время работы истекло",
++        "tip_scratch_workspace": "Сведения о рабочей папке", "unblocked": "Задача возобновлена", "unlinked": "Связь задач удалена",
++        "worker_registered": "Исполнитель зарегистрирован", "workspace_cleanup_deferred_shared": "Очистка общей рабочей папки отложена",
++        "spawn_failed": "Не удалось запустить исполнителя", "crashed": "Работа исполнителя прервалась",
++    }
++    fields = {
++        "actor": "инициатор", "ancestor": "предыдущая задача", "assignee": "исполнитель", "author": "автор",
++        "branch_name": "ветка", "by": "инициатор", "child": "дочерняя задача", "child_ids": "подзадачи",
++        "claim_expires_now": "новый срок работы", "claim_expires_was": "прежний срок работы", "claim_lock": "блокировка",
++        "classified_in_place": "классифицировано на месте", "creator_task_id": "создавшая задача", "demoted": "переведено в ожидание",
++        "error": "причина ошибки", "expires": "срок", "fields": "изменённые поля", "filename": "имя файла",
++        "from": "предыдущее состояние", "from_decompose_of": "исходная задача", "goal_mode": "работа над целью",
++        "implementer": "исполнитель", "kind": "тип", "last_heartbeat_at": "последняя активность", "len": "длина",
++        "lock": "блокировка", "message": "сообщение", "model_override": "модель", "parent": "родительская задача",
++        "parents": "родительские задачи", "path": "путь", "phantom_cards": "несуществующие задачи", "phantom_refs": "несуществующие ссылки",
++        "pid": "номер процесса", "previous_status": "предыдущее состояние", "priority": "приоритет", "project_id": "проект",
++        "provider_override": "сервис модели", "reason": "причина", "result_len": "длина результата", "result_preview": "фрагмент результата",
++        "resume_status": "состояние после возобновления", "reviewer": "проверяющий", "root_assignee": "основной исполнитель",
++        "run_id": "номер попытки", "size": "размер", "skills": "навыки", "source": "источник", "source_status": "исходное состояние",
++        "started_at": "время начала", "status": "состояние", "summary": "сводка", "summary_preview": "фрагмент сводки",
++        "tenant": "организация", "verified_cards": "проверенные задачи", "worker_pid": "номер процесса исполнителя",
++        "worker_started_at": "время запуска исполнителя", "workspace_kind": "тип рабочей папки", "workspace_path": "рабочая папка",
++    }
++    values = {"parents_not_done": "предыдущие задачи не завершены", "scratch": "временная папка",
++              "worktree": "отдельная рабочая копия", "dir": "папка", "true": "да", "false": "нет"}
++    def value_text(key, value):
++        if key == "error" and value:
++            return _russian_gateway_error(str(value))
++        if isinstance(value, list):
++            return ", ".join(value_text(key, item) for item in value)
++        if isinstance(value, bool):
++            return "да" if value else "нет"
++        if value is None:
++            return "не указано"
++        text = str(value)
++        if key in {"status", "previous_status", "resume_status", "source_status", "from"}:
++            text = _status_name(text)
++        return values.get(text, text)
++    label = names.get(event.kind, "Событие задачи")
++    run = f" [попытка {event.run_id}]" if event.run_id else ""
++    payload = event.payload if isinstance(event.payload, dict) else {}
++    details = "; ".join(f"{fields.get(str(key), 'дополнительные сведения')}: {value_text(key, value)}"
++                        for key, value in payload.items())
++    return f"  [{_fmt_ts(event.created_at)}]{run} {label}" + (f" — {details}" if details else "")
++
++
+ def _cmd_show(args: argparse.Namespace) -> int:
+     rsk, rc = _run_state_kwargs(args, "show")
+     if rc:
+@@ -630,9 +698,12 @@
+         _print_section(f"{'Комментарии' if russian else 'Comments'} ({len(comments)}):",
+                        (f"  [{_fmt_ts(c.created_at)}] {c.author}: {c.body}" for c in comments))
+     if events:
+-        _print_section(f"{'События' if russian else 'Events'} ({len(events)}):", (
+-            f"  [{_fmt_ts(e.created_at)}]{f' [run {e.run_id}]' if e.run_id else ''} {e.kind}"
+-            f"{f' {e.payload}' if e.payload else ''}" for e in events[-20:]))
++        if russian:
++            _print_section(f"События ({len(events)}):", (_kanban_event_ru(e) for e in events[-20:]))
++        else:
++            _print_section(f"Events ({len(events)}):", (
++                f"  [{_fmt_ts(e.created_at)}]{f' [run {e.run_id}]' if e.run_id else ''} {e.kind}"
++                f"{f' {e.payload}' if e.payload else ''}" for e in events[-20:]))
+     if runs:
+         print()
+         print(_ui(f"Runs ({len(runs)}):"))
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -584,8 +584,13 @@
+         "tenant": "организация", "verified_cards": "проверенные задачи", "worker_pid": "номер процесса исполнителя",
+         "worker_started_at": "время запуска исполнителя", "workspace_kind": "тип рабочей папки", "workspace_path": "рабочая папка",
+     }
+-    values = {"parents_not_done": "предыдущие задачи не завершены", "scratch": "временная папка",
+-              "worktree": "отдельная рабочая копия", "dir": "папка", "true": "да", "false": "нет"}
++    values = {"parents_not_done": "предыдущие задачи не завершены", "parent_not_done": "предыдущая задача не завершена",
++              "ancestor_reopened": "предыдущая задача открыта заново", "parent_reopened": "родительская задача открыта заново",
++              "initial_status": "начальное состояние", "orphaned_running": "исполнитель больше не отслеживается",
++              "pid_alive": "процесс ещё работает", "completion_summary": "сводка результата",
++              "kanban.default_assignee": "исполнитель по умолчанию", "kanban_swarm_v1": "группа исполнителей",
++              "title": "название", "body": "описание", "priority": "приоритет", "assignee": "исполнитель",
++              "scratch": "временная папка", "worktree": "отдельная рабочая копия", "dir": "папка", "true": "да", "false": "нет"}
+     def value_text(key, value):
+         if key == "error" and value:
+             return _russian_gateway_error(str(value))

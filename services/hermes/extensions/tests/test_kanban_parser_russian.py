@@ -131,6 +131,23 @@ class KanbanParserRussianTests(unittest.TestCase):
         self.assertNotIn('English', result)
         self.assertNotIn('secret', result)
 
+    def test_task_event_preserves_values_and_explains_failure(self):
+        tree = ast.parse((self.root / 'hermes_cli/kanban.py').read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_kanban_event_ru')
+        scope = {'_fmt_ts': lambda ts: 'дата', '_status_name': lambda value: {'running': 'в работе'}.get(value, value)}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), 'kanban.py', 'exec'), scope)
+        event = SimpleNamespace(kind='blocked', created_at=1, run_id=2,
+                                payload={'status': 'running', 'assignee': 'Мария', 'error': 'HTTP 403 forbidden'})
+        i18n = SimpleNamespace(_russian_gateway_error=lambda text: 'доступ отклонён')
+        with patch.dict(sys.modules, {'agent.i18n': i18n}):
+            result = scope['_kanban_event_ru'](event)
+        self.assertIn('попытка 2', result)
+        self.assertIn('Задача заблокирована', result)
+        self.assertIn('состояние: в работе', result)
+        self.assertIn('исполнитель: Мария', result)
+        self.assertIn('причина ошибки: доступ отклонён', result)
+        self.assertNotIn('forbidden', result)
+
     def test_explicit_english_keeps_original_help(self):
         run, _ = self._runner('en')
         self.assertIn('Task title', run('create -h'))
