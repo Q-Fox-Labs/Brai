@@ -1,11 +1,13 @@
 # ABOUTME: Проверяет файловую границу Hermes с настоящими временными файлами и SQLite.
 # ABOUTME: Моделирует Artifacts/Bot API без сети, включая перезапуск и неизвестный результат отправки.
 import asyncio
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import mimetypes
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 import tempfile
 from types import SimpleNamespace, ModuleType
@@ -69,6 +71,45 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_schema_creation_rolls_back_on_error_without_weakening_durability(self):
+        original = FileStore.db
+        @contextmanager
+        def failing_schema(store):
+            with original(store) as db:
+                self.assertEqual(db.execute('PRAGMA synchronous').fetchone()[0], 2)
+                db.set_authorizer(lambda action, table, *args:
+                    sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_CREATE_TABLE and table == 'deliveries'
+                    else sqlite3.SQLITE_OK)
+                yield db
+        root = self.root / 'failed-schema'
+        with patch.object(FileStore, 'db', failing_schema), self.assertRaises(sqlite3.DatabaseError):
+            FileStore(root, self.cache, 'owner', self.backend)
+        with sqlite3.connect(root / 'files.sqlite') as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertEqual(tables, {'legacy_recovery_review'})
+        recovered = FileStore(root, self.cache, 'owner', self.backend)
+        with recovered.db() as db:
+            self.assertEqual(db.execute('SELECT owner FROM settings').fetchone()[0], 'owner')
+            self.assertEqual(db.execute('PRAGMA synchronous').fetchone()[0], 2)
+
+    def test_concurrent_schema_initialization_keeps_one_owner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        root = self.root / 'concurrent-schema'
+        def initialize(owner):
+            try:
+                FileStore(root, self.cache, owner, self.backend)
+                return owner, None
+            except FileError as error:
+                return owner, str(error)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(initialize, ['first-owner', 'second-owner']))
+        winners = [owner for owner, error in results if error is None]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual([error for _, error in results if error], ['OWNER_MISMATCH'])
+        with sqlite3.connect(root / 'files.sqlite') as db:
+            self.assertEqual([row[0] for row in db.execute('SELECT owner FROM settings')], winners)
+            self.assertEqual(db.execute('PRAGMA synchronous').fetchone()[0], 2)
 
     def test_children_do_not_repeat_parent_admission(self):
         from concurrent.futures import ThreadPoolExecutor

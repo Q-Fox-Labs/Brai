@@ -603,7 +603,7 @@ class Worker:
             finally:
                 input_delivery.reset(context)
 
-    async def _dispatch_native(self, event, owner):
+    async def _dispatch_native(self, event, owner, *, _cancel_control=False):
         """Принять только событие привязанного владельца, не доверяя его metadata."""
         from gateway.platforms.event import MessageEvent, MessageType
         from gateway.session import SessionSource
@@ -626,6 +626,16 @@ class Worker:
         fields['user_id'] = self.telegram_id
         self.adapter.bind_source(source)
         message = MessageEvent(source=source, message_type=MessageType(event.get('message_type', 'text')), **fields)
+        from gateway.platforms import base as native_base
+        coerce = getattr(native_base, 'coerce_plaintext_gateway_command', None)
+        if callable(coerce):
+            coerce(message)
+        from .ordinary_admission import command_name
+        command = getattr(message, 'get_command', None)
+        if not _cancel_control and (command() if callable(command) else command_name(message.text)) is not None:
+            # Вход потреблён политикой, без native задачи. Durable transport не
+            # должен повторять отказ как временную занятость исполнителя.
+            return {'accepted': True, 'turn_id': None}
         inputs = event.get('identity_inputs', [])
         if not isinstance(inputs, list) or len(inputs) > 10:
             raise RpcError(-32602, 'Invalid input files')
@@ -861,9 +871,9 @@ class Worker:
             task.add_done_callback(lambda done: self._turn_finished(turn_id, done))
         if task.done() or self.adapter._session_tasks.get(key) is not task:
             return {'state': 'not_running'}
-        await self.dispatch({'text': '/stop', 'source': source, 'message_type': 'command',
+        await self._dispatch_native({'text': '/stop', 'source': source, 'message_type': 'command',
                              'message_id': 'cancel:' + turn_id,
-                             'delivery_scope': self.turn_scopes.get(turn_id)}, owner)
+                             'delivery_scope': self.turn_scopes.get(turn_id)}, owner, _cancel_control=True)
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except asyncio.TimeoutError:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -163,7 +164,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         mirror=NS(snapshot=lambda key:snapshot,inbox=NS(markblocked=blocked))
         adapter=NS(_bot=NS(id=123))
         resolver=NS(mirror=mirror)
-        update=NS(update_id=7,effective_message=NS(sender_chat=None,business_connection_id=None,text='/unlink'),
+        update=NS(update_id=7,effective_message=NS(sender_chat=None,business_connection_id=None,text='/start link_' + 'a' * 43),
                   effective_user=NS(id=123,is_bot=False),effective_chat=NS(id=123,type='private'))
         with patch.dict(runtime._resolvers,{id(adapter):resolver}), \
                 patch.object(runtime,'broker_call',AsyncMock(return_value={'state':'known','profile':after})) as broker, \
@@ -229,7 +230,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_control_replies_keep_the_source_private_topic(self):
         cases = [('/start link_' + 'a' * 43, {'user': {'id': 'owner'}}),
                  ('/start link_' + 'a' * 43, {}),
-                 ('/start link_short', {}), ('/unlink', {})]
+                 ('/start link_short', {})]
         for text, response in cases:
             with self.subTest(command=text[:12], accepted=bool(response)):
                 update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
@@ -291,14 +292,14 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.kwargs['metadata']['message_thread_id'] for call in adapter.send.await_args_list], [73, 73, 74])
         runtime._notices.clear()
 
-    async def test_raw_unlink_only_explains_agent_workflow_without_revoking(self):
+    async def test_raw_unlink_is_ignored_without_revoking(self):
         update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/unlink'),
                     effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
         adapter = NS(send=AsyncMock(return_value={'success': True}))
         with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
             self.assertFalse(await runtime.admit_update(update, adapter))
         broker.assert_not_awaited()
-        self.assertIn('подтверждение', adapter.send.await_args.args[1])
+        adapter.send.assert_not_awaited()
 
     async def test_full_human_answer_is_forwarded_without_parsing_or_normalization(self):
         for text in ["Подтверждаю отвязку Telegram-аккаунта 123",
@@ -464,10 +465,81 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(method, 'identity.invite-redeem')
                     return {}
                 with patch.object(runtime, 'broker_call', AsyncMock(side_effect=broker)) as call, \
-                        patch.object(runtime, '_notice', AsyncMock()) as notice:
+                        patch.object(runtime, '_control_reply', AsyncMock()) as notice:
                     self.assertFalse(await runtime.admit_update(update, adapter))
                     self.assertEqual([c.args[0] for c in call.await_args_list], expected_calls)
                     notice.assert_awaited_once()
+
+    async def test_disabled_commands_do_not_resolve_profile_or_dispatch(self):
+        for text in ['/help', '/commands', '/cancel', '/unlink', '/startnot', '/start_any', '/HELP args', '/help@brai_bot',
+                     '/new@bot/anything', '/new@', '/start@bot/anything', '@file:/tmp/x\n/new']:
+            with self.subTest(text=text):
+                adapter = NS(send=AsyncMock())
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+                with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+                    self.assertFalse(await runtime.admit_update(update, adapter))
+                    broker.assert_not_awaited()
+                    adapter.send.assert_not_awaited()
+
+    async def test_two_new_start_messages_each_reply_in_original_topic_without_worker(self):
+        adapter = NS(send=AsyncMock(return_value={'success': True, 'message_id': '700'}))
+        with patch.dict(runtime._resolvers, {}, clear=True), \
+                patch.dict(runtime._notices, {('123', '9'): time.monotonic()}), \
+                patch.object(runtime, 'broker_call', AsyncMock(return_value=profile())) as broker:
+            for ident in [10, 11]:
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                    text='/start', message_id=ident, message_thread_id=9),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+                self.assertFalse(await runtime.admit_update(update, adapter))
+        self.assertEqual(adapter.send.await_count, 2)
+        for call in adapter.send.await_args_list:
+            self.assertEqual(call.kwargs['metadata']['message_thread_id'], 9)
+            self.assertTrue(call.args[1])
+        self.assertTrue(all(c.args[0] == 'identity.resolve' for c in broker.await_args_list))
+
+    async def test_normal_text_and_absolute_paths_remain_admitted(self):
+        with patch.dict(runtime._resolvers, {}, clear=True), \
+                patch.object(runtime, 'broker_call', AsyncMock(return_value=profile())):
+            for text in ['Помоги с файлом', '/home/user/document.txt', '/tmp/a.pdf']:
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+                self.assertTrue(await runtime.admit_update(update, NS()))
+
+    async def test_command_menus_are_deleted_in_all_native_scopes_and_not_recreated(self):
+        scopes = NS(BotCommandScopeDefault=lambda: NS(type='default'),
+            BotCommandScopeAllPrivateChats=lambda: NS(type='all_private_chats'),
+            BotCommandScopeAllGroupChats=lambda: NS(type='all_group_chats'),
+            BotCommandScopeChat=lambda chat: NS(type='chat', chat_id=chat))
+        bot = NS(delete_my_commands=AsyncMock(return_value=True),
+                 get_my_commands=AsyncMock(return_value=()), set_my_commands=AsyncMock())
+        resolver = runtime.Resolver(NS(_bot=bot))
+        self.addCleanup(resolver.ledger.close)
+        resolver._known_forum_chats = lambda: {123, -100456}
+        with patch.dict(sys.modules, {'telegram': scopes}):
+            await resolver.hide_command_menu()
+            self.assertEqual(bot.delete_my_commands.await_count, 5)
+            self.assertEqual(bot.get_my_commands.await_count, 5)
+            await resolver.hide_forum_command_menu(NS(chat=NS(id=123, is_forum=True)))
+            self.assertEqual(bot.delete_my_commands.await_count, 5)
+            await resolver.hide_forum_command_menu(NS(chat=NS(id=789, is_forum=False)))
+            self.assertEqual(bot.delete_my_commands.await_count, 5)
+            await resolver.hide_forum_command_menu(NS(chat=NS(id=-100789, is_forum=True)))
+            self.assertEqual(bot.delete_my_commands.await_count, 6)
+            await resolver.hide_command_menu()
+            self.assertEqual(bot.delete_my_commands.await_count, 6)
+        bot.set_my_commands.assert_not_awaited()
+        self.assertTrue(all(c.kwargs['language_code'] == '' for c in bot.delete_my_commands.await_args_list))
+
+    async def test_forum_menu_failure_does_not_drop_regular_message(self):
+        scopes = NS(BotCommandScopeChat=lambda chat: NS(type='chat', chat_id=chat))
+        bot = NS(delete_my_commands=AsyncMock(side_effect=TimeoutError), get_my_commands=AsyncMock())
+        resolver = runtime.Resolver(NS(_bot=bot))
+        self.addCleanup(resolver.ledger.close)
+        with patch.dict(sys.modules, {'telegram': scopes}), self.assertLogs(runtime.__name__, level='WARNING'):
+            await resolver.hide_forum_command_menu(NS(chat=NS(id=-100789, is_forum=True)))
+        self.assertFalse(resolver.cleared_command_menus)
+        bot.get_my_commands.assert_not_awaited()
 
     async def test_uid_rebinding_to_other_owner_fails_closed(self):
         resolver = runtime.Resolver(NS())

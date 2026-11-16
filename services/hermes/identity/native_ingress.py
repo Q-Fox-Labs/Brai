@@ -367,6 +367,9 @@ def register(ctx, *, build_resolver=None, admit_update=None):
                      '_brai_identity_rehold_held': batch.rehold,
                      '_brai_identity_preserve_held': batch.preserve_held,
                      '_brai_identity_can_redispatch': batch.can_redispatch}
+            if callable(getattr(resolver, 'hide_command_menu', None)):
+                hooks['_register_command_menu'] = resolver.hide_command_menu
+                hooks['_ensure_forum_commands'] = resolver.hide_forum_command_menu
             originals = {name: (hasattr(adapter, name), getattr(adapter, name, None)) for name in hooks}
             for name, value in hooks.items():
                 setattr(adapter, name, value)

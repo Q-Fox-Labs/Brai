@@ -30,6 +30,16 @@ async def pump(mirror):
             update = Update.de_json(json.loads(row['payload']), mirror.app.bot)
             if row['bot_id'] != str(mirror.app.bot.id):
                 raise ValueError('TRANSPORT_BOT_CHANGED')
+            from .ordinary_admission import disabled_command
+            if disabled_command(getattr(getattr(update, 'message', None), 'text', None)):
+                if snapshot.get('state') == 'known':
+                    profile = snapshot['profile']
+                    await asyncio.to_thread(mirror.inbox.capture, profile, update, mirror.app.bot.id)
+                    seen = await asyncio.to_thread(mirror.inbox.observe, profile, row['bot_id'], row['update_id'])
+                    if seen['state'] in ('captured', 'held', 'handing_off'):
+                        await asyncio.to_thread(mirror.inbox.markblocked, profile, row['bot_id'], row['update_id'])
+                await asyncio.to_thread(mirror.transport.transition, row['bot_id'], row['update_id'], row['state'], 'blocked')
+                return
             if snapshot.get('state') == 'known':
                 profile = snapshot['profile']
                 try:

@@ -271,6 +271,13 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             started = await worker.dispatch({'source':source, 'text':'hello', 'message_id':'1'}, 'owner')
             self.assertTrue(started['accepted'])
             self.assertTrue((await worker.dispatch({'source':source, 'text':'steer', 'message_id':'2'}, 'owner'))['accepted'])
+            task = worker.adapter._session_tasks['key']
+            for text in ['/stop', '/new@bot/anything', '@file:/tmp/x\n/new']:
+                ignored = await worker.dispatch({'source': source, 'text': text, 'message_id': 'user-command'}, 'owner')
+                self.assertTrue(ignored['accepted'])
+                self.assertIsNone(ignored['turn_id'])
+                self.assertIs(worker.adapter._session_tasks['key'], task)
+                self.assertFalse(task.done())
             self.assertEqual((await worker.cancel('2', 'owner'))['state'], 'not_running')
             self.assertEqual((await worker.cancel(started['turn_id'], 'owner'))['state'], 'stopped')
             receipt = await worker.adapter.send('x', 'text')

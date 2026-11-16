@@ -2,7 +2,7 @@
 # ABOUTME: Авторизует update до media и не помещает коды входа в историю.
 """Только транспорт Telegram; пользовательский агент исполняется в другом UID."""
 import asyncio
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import hashlib
@@ -15,6 +15,7 @@ import socket
 import struct
 import time
 import uuid
+import sqlite3
 
 from .ingress import Bridge, serve_chat_control
 from .ipc import RpcError
@@ -22,6 +23,7 @@ from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
+from .ordinary_admission import start_command, disabled_command
 
 MAX_FRAME = 2 * 1024 * 1024
 _resolvers = {}
@@ -116,6 +118,9 @@ async def admit_update(update, adapter):
     telegram = str(getattr(user, 'id', ''))
     if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
         return False
+    if disabled_command(getattr(message, 'text', None)):
+        return False
+    starting = start_command(getattr(message, 'text', None))
     resolver = _resolvers.get(id(adapter))
     mirror = getattr(resolver, 'mirror', None)
     snapshot = mirror.snapshot(f'{adapter._bot.id}:{update.update_id}') if mirror is not None else None
@@ -175,9 +180,6 @@ async def admit_update(update, adapter):
             text = 'Результат привязки не подтверждён. Напишите обычное сообщение, чтобы проверить доступ.'
         await _control_reply(adapter, telegram, message, text)
         return False
-    if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
-        await _control_reply(adapter, telegram, message, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
-        return False
     try:
         if snapshot is not None and snapshot.get('state') == 'unregistered':
             # После проверки исходный outsider проходит только onboarding.
@@ -197,6 +199,12 @@ async def admit_update(update, adapter):
                 route = (str(chat.id), str(getattr(message, 'message_thread_id', None) or ''))
                 if route[1] == '1':
                     route = (route[0], '')
+                if starting:
+                    state = resolver.journal.chat_state(profile, route)
+                    text = ('Бот на связи. Ответы в этом диалоге сейчас приостановлены.' if state['paused']
+                            else 'Здравствуйте! Я Brai. Напишите, с чем помочь — можно прислать текст, фото, голосовое сообщение или файл.')
+                    await _control_reply(adapter, telegram, message, text)
+                    return False
                 if not resolver.journal.chat_admission(profile, route, str(message.message_id)):
                     return False
             except Exception:
@@ -204,6 +212,9 @@ async def admit_update(update, adapter):
                     snapshot['state'] = 'processing_failed'
                 _logger.warning('BRAI_TELEGRAM_JOURNAL_WRITE_FAILED')
                 return False
+        if starting:
+            await _control_reply(adapter, telegram, message, 'Здравствуйте! Я Brai. Напишите, с чем помочь.')
+            return False
         return True
     except Exception:
         if snapshot is not None and snapshot.get('state') != 'unregistered':
@@ -215,14 +226,15 @@ async def admit_update(update, adapter):
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
-            await _notice(adapter, telegram, message, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
+            await _control_reply(adapter, telegram, message, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
         except Exception:
             if snapshot is not None:
                 snapshot['state'] = 'outcome_unknown'
-            await _notice(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
+            await _control_reply(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False
     if str(getattr(chat, 'id', '')) == telegram:
-        await _notice(adapter, telegram, message, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
+        reply = _control_reply if starting else _notice
+        await reply(adapter, telegram, message, 'Здравствуйте! Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
 
 def _receipt(value):
@@ -279,7 +291,6 @@ class Resolver:
             self.mirror = Mirror(inbox, resolve_known, inventory=inventory, observe=observe,
                                  gate_store=ProfileGateStore(inbox), transport=TransportInbox(journal))
             self.mirror.input_ready = self.input_ready
-            self.mirror.command_ready = self.command_ready
             self.mirror.reconcile_delivery = self.reconcile_delivery
         self.ready_profiles = set()
         self.bridges, self.turns = {}, {}
@@ -295,8 +306,55 @@ class Resolver:
         self.release_gate = None
         self.release_workers = {}
         self.control_locks = {}
+        self.command_menu_lock = asyncio.Lock()
+        self.cleared_command_menus = set()
         self.closed = False
         self.retired = False
+
+    def _known_forum_chats(self):
+        """Нативный adapter ранее создавал Chat scope только для тем."""
+        if self.journal is None:
+            return set()
+        chats = set()
+        for path in self.journal.root.glob('*/telegram.sqlite3'):
+            with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages' AND type='table'").fetchone():
+                    chats.update(str(row[0]) for row in db.execute("SELECT DISTINCT chat FROM messages WHERE thread<>'' OR chat LIKE '-%'"))
+        return {int(chat) for chat in chats if re.fullmatch(r'-?[1-9][0-9]*', chat)}
+
+    async def _clear_command_scope(self, scope, key):
+        if key in self.cleared_command_menus:
+            return
+        bot = self.adapter._bot
+        if await bot.delete_my_commands(scope=scope, language_code='') is not True:
+            raise RuntimeError('Telegram command menu removal unconfirmed')
+        if await bot.get_my_commands(scope=scope, language_code=''):
+            raise RuntimeError('Telegram command menu remains populated')
+        self.cleared_command_menus.add(key)
+        _logger.info('telegram_command_menu_removed scope=%s', scope.type)
+
+    async def hide_command_menu(self):
+        """Заменить native menu writer удалением всех его прежних scope."""
+        from telegram import BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeChat
+        async with self.command_menu_lock:
+            for scope in (BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()):
+                await self._clear_command_scope(scope, scope.type)
+            for chat in sorted(await asyncio.to_thread(self._known_forum_chats)):
+                await self._clear_command_scope(BotCommandScopeChat(chat), ('chat', chat))
+
+    async def hide_forum_command_menu(self, message):
+        """Новые темы не должны возвращать список команд в Telegram."""
+        from telegram import BotCommandScopeChat
+        chat = getattr(message, 'chat', None)
+        if not chat or not getattr(chat, 'is_forum', False):
+            return
+        try:
+            ident = int(chat.id)
+            async with self.command_menu_lock:
+                await self._clear_command_scope(BotCommandScopeChat(ident), ('chat', ident))
+        except Exception as error:
+            # Как у native menu writer: сбой интерфейса не теряет обычный input.
+            _logger.warning('telegram_command_menu_cleanup_unconfirmed error=%s', type(error).__name__)
 
     def retire(self):
         """Исключить старый resolver из синхронной перезагрузки plugin."""
@@ -506,14 +564,6 @@ class Resolver:
             return False
         turn = self.turns.get(profile['uid'])
         return turn is None or turn['route'] == route
-
-    async def command_ready(self, profile):
-        """Завершить worker handshake до необратимого command handing_off."""
-        try:
-            await self._bridge(profile).connect()
-            return True
-        except (ConnectionError, TimeoutError, OSError, RpcError):
-            return False
 
     async def reconcile_delivery(self, profile, binding):
         """Сверить факт приёма worker после потерянного RPC receipt."""

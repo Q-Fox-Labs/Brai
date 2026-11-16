@@ -6,11 +6,26 @@ from contextvars import ContextVar
 
 _replay_binding = ContextVar('brai_release_replay_binding', default=None)
 
-def transport_command(text):
-    """Эти команды admit_update завершает в ingress, не передавая worker."""
-    raw = text.strip()
-    return bool(re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw)
-                or re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL))
+def command_name(text):
+    """Канонизация pinned MessageEvent: refs, bot suffix и абсолютные пути."""
+    if not isinstance(text, str):
+        return None
+    raw = re.sub(r'^(?:@(?:image|file|url):[^\n]+\n?)+', '', text.lstrip(), flags=re.IGNORECASE).lstrip()
+    if not raw.startswith('/'):
+        return None
+    name = raw.split(maxsplit=1)[0][1:].lower().split('@', 1)[0]
+    return None if '/' in name else name
+
+
+def start_command(text):
+    return (isinstance(text, str) and command_name(text) == 'start'
+            and re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?(?:\s.*)?', text.strip(), flags=re.IGNORECASE | re.DOTALL) is not None)
+
+
+def disabled_command(text):
+    name = command_name(text)
+    return name is not None and not start_command(text)
+
 
 class Tracker:
     def __init__(self, authorize, stage=None, on_release=None):
@@ -137,7 +152,6 @@ class Mirror:
         self.capture_lock = asyncio.Lock()
         self.bot_id = None
         self.input_ready = self.reconcile_delivery = None
-        self.command_ready = None
         self.pump_lock = asyncio.Lock()
         self.auto_inputs, self.terminal_inputs = set(), set()
         self.input_routes = {}
@@ -419,6 +433,9 @@ class Mirror:
                                 or getattr(message, 'business_connection_id', None)))):
                         staged.append((update, {'state':'outside'}))
                         continue
+                    if disabled_command(getattr(message, 'text', None)):
+                        staged.append((update, {'state': 'outside'}))
+                        continue
                     resolved = await self.resolve(str(actor))
                     if not isinstance(resolved, dict) or resolved.get('state') not in ('known','unregistered','forbidden'):
                         raise ValueError('INGRESS_IDENTITY_UNAVAILABLE')
@@ -526,15 +543,6 @@ class Mirror:
                 self.input_routes[uid] = route
                 # Handing-off начинается только перед реальным worker RPC.
                 return False
-            text = getattr(getattr(update, 'message', None), 'text', None)
-            if (isinstance(text, str) and text.lstrip().startswith('/')
-                    and not transport_command(text) and self.command_ready is not None):
-                self.auto_inputs.add(key)
-                if not await self.command_ready(profile):
-                    # Startup не является передачей команды. Как у обычного
-                    # отложенного input, освободить callback, сохранив captured.
-                    return True
-                self.auto_inputs.discard(key)
             if getattr(getattr(update, 'message', None), 'forum_topic_created', None):
                 self.service_updates[key] = update
         if self.transport is not None:

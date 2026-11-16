@@ -182,35 +182,54 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
         self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 1)
 
-    async def test_command_startup_failure_stays_captured_and_requeues_once_ready(self):
-        for ident, command in enumerate(('/commands', '/start'), 10):
-            with self.subTest(command=command):
-                raw = update(ident).to_dict()
-                raw['message']['text'] = command
-                item = Update.de_json(raw, self.bot)
-                self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
-                self.inbox.capture(PROFILE, item, 123)
-                key = f'123:{ident}'
-                self.mirror.register_snapshot(key, {'state': 'known', 'profile': PROFILE})
-                self.mirror.command_ready = AsyncMock(return_value=False)
-                ticket = self.mirror.enter(key, item)
-                self.assertTrue(await self.mirror.classify(ticket, item))
-                self.mirror.finish(ticket, {'deferred': True})
-                self.assertEqual(self.inbox.observe(PROFILE, 123, ident)['state'], 'captured')
-                self.assertEqual(self.transport.observe(123, ident)['state'], 'captured')
-                self.assertNotIn(key, self.mirror.snapshots)
-                self.mirror.command_ready.return_value = True
-                await self.mirror.pump()
-                queued = self.mirror.app.update_queue.get_nowait()
-                self.assertEqual(queued.message.text, command)
-                ticket = self.mirror.enter(key, queued)
-                self.assertFalse(await self.mirror.classify(ticket, queued))
-                self.assertNotIn(key, self.mirror.auto_inputs)
-                self.assertEqual(self.inbox.observe(PROFILE, 123, ident)['state'], 'handing_off')
-                await self.mirror.accepted(NS(_brai_release_updates=[ident]), {'accepted': False, 'turn_id': None})
-                self.mirror.finish(ticket, {'completed': True})
-                await self.mirror.pump()
-                self.assertTrue(self.mirror.app.update_queue.empty())
+    async def test_disabled_command_is_ignored_before_identity_resolution(self):
+        item = update(40, '/help')
+        await self.mirror.capture([item], 123)
+        self.resolve.assert_not_awaited()
+        self.assertEqual(self.transport.observe(123, 40)['state'], 'ignored')
+        self.assertEqual(self.mirror.snapshot('123:40')['state'], 'outside')
+        ticket = self.mirror.enter('123:40', item)
+        self.assertFalse(await self.mirror.classify(ticket, item))
+        self.mirror.finish(ticket, {'completed': True})
+        self.assertFalse(self.mirror.tracker.tickets)
+
+    async def test_start_remains_admitted_for_ingress_reply(self):
+        item = update(41, '/start')
+        await self.mirror.capture([item], 123)
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 41)['state'], 'captured')
+        ticket = self.mirror.enter('123:41', item)
+        self.assertFalse(await self.mirror.classify(ticket, item))
+        await self.mirror.handled(item)
+        self.mirror.finish(ticket, {'completed': True})
+        self.assertEqual(self.transport.observe(123, 41)['state'], 'handled')
+
+    async def test_saved_disabled_command_is_blocked_without_replay_and_text_still_runs(self):
+        item = update(42, '/help')
+        self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+        self.inbox.capture(PROFILE, item, 123)
+        self.mirror.reconcile_delivery = AsyncMock()
+        await self.mirror.pump()
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 42)['state'], 'blocked')
+        self.assertEqual(self.transport.observe(123, 42)['state'], 'blocked')
+        self.mirror.reconcile_delivery.assert_not_awaited()
+        self.resolve.assert_not_awaited()
+        self.capture(43)
+        await self.mirror.pump()
+        self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 43)
+
+    async def test_disabled_command_keeps_unknown_profile_history_but_stops_global_replay(self):
+        item = update(44, '/new')
+        self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+        self.inbox.capture(PROFILE, item, 123)
+        self.inbox.claim_for_delivery(PROFILE, 123, 44)
+        self.inbox.markunknown(PROFILE, 123, 44)
+        await self.mirror.pump()
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 44)['state'], 'unknown')
+        self.assertEqual(self.transport.observe(123, 44)['state'], 'blocked')
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        self.resolve.assert_not_awaited()
+
 
     async def test_ingress_restart_preserves_fifo_raw_messages(self):
         for ident in (3, 1, 2): self.capture(ident)
@@ -218,48 +237,8 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         await self.mirror.pump()
         self.assertEqual([self.mirror.app.update_queue.get_nowait().update_id for _ in range(3)], [3, 1, 2])
 
-    async def test_cancelled_command_handshake_releases_captured_input(self):
-        raw = update(9).to_dict()
-        raw['message']['text'] = '/commands'
-        item = Update.de_json(raw, self.bot)
-        self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
-        self.inbox.capture(PROFILE, item, 123)
-        self.mirror.register_snapshot('123:9', {'state': 'known', 'profile': PROFILE})
-        entered = asyncio.Event()
-        async def starting(profile):
-            entered.set()
-            await asyncio.Event().wait()
-        self.mirror.command_ready = starting
-        ticket = self.mirror.enter('123:9', item)
-        task = asyncio.create_task(self.mirror.classify(ticket, item))
-        await entered.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        self.mirror.finish(ticket, {'failed': True})
-        self.assertNotIn(ticket, self.mirror.tracker.tickets)
-        self.assertNotIn(ticket, self.mirror.snapshots)
-        self.assertEqual(self.inbox.observe(PROFILE, 123, 9)['state'], 'captured')
-        self.assertEqual(self.transport.observe(123, 9)['state'], 'captured')
-        await self.mirror.pump()
-        self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 9)
 
-    async def test_transport_account_commands_do_not_wait_for_worker(self):
-        for ident, command in enumerate(('/unlink', '/start link_' + 'a' * 43), 20):
-            raw = update(ident).to_dict()
-            raw['message']['text'] = command
-            item = Update.de_json(raw, self.bot)
-            self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
-            self.inbox.capture(PROFILE, item, 123)
-            key = f'123:{ident}'
-            self.mirror.register_snapshot(key, {'state': 'known', 'profile': PROFILE})
-            self.mirror.command_ready = AsyncMock(return_value=False)
-            ticket = self.mirror.enter(key, item)
-            self.assertFalse(await self.mirror.classify(ticket, item))
-            self.mirror.command_ready.assert_not_awaited()
-            await self.mirror.handled(item)
-            self.mirror.finish(ticket, {'completed': True})
-            self.assertEqual(self.inbox.observe(PROFILE, 123, ident)['state'], 'handled')
+
 
     async def test_voice_and_media_keep_original_file_ids_while_agent_is_offline(self):
         media = [('voice', {'file_id': 'voice-file', 'file_unique_id': 'voice-unique', 'duration': 1}),

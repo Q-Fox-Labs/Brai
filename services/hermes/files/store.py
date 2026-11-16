@@ -80,6 +80,7 @@ class FileStore:
                         logging.getLogger(__name__).warning('BRAI_FILES_LEGACY_REVIEW_REQUIRED count=%d', count)
             db.commit()
             db.executescript("""
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS settings (owner TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS items (
                   identity TEXT PRIMARY KEY, group_key TEXT NOT NULL, source TEXT NOT NULL,
