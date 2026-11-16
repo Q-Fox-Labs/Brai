@@ -645,6 +645,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             await self.broker.call(WORKER_UID, "tools.list", {"uid": OTHER_UID})
 
         for method, params in (
+            ("ingress.input-ready", {}),
             ("authorize", {"uid": WORKER_UID}),
             ("identity.resolve", {"telegramId": "111222"}),
             ("identity.invite-redeem", {"telegramId": "111222", "code": "synthetic"}),

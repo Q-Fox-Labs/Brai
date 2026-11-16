@@ -170,6 +170,64 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.transport.transition(123, ident, 'captured', 'handing_off')
         return binding
 
+    async def test_release_admission_keeps_original_input_captured_until_owner_accepts(self):
+        """Непринятый пакет не получает input; после допуска возвращается исходный Update."""
+        from identity import telegram_runtime as runtime
+        from identity.broker import Broker
+        from unittest.mock import Mock
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        resolver.mirror = self.mirror
+        resolver.ready_profiles.add(PROFILE['uid'])
+        self.mirror.input_ready = resolver.input_ready
+        gateway = NS(input_ready=Mock(return_value=False))
+        broker = Broker({'ingressUid': 995}, NS())
+        async def rpc(method, params):
+            return await broker.call(995, method, params)
+        self.capture()
+        with patch.object(broker, 'dev_gateway', return_value=gateway), patch.object(runtime, 'broker_call', rpc):
+            await self.mirror.pump()
+            self.assertTrue(self.mirror.app.update_queue.empty())
+            self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
+            gateway.input_ready.return_value = True
+            await self.mirror.pump()
+            await self.mirror.pump()
+            self.assertEqual(self.mirror.app.update_queue.qsize(), 1)
+            self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 1)
+
+    async def test_release_start_during_native_batch_keeps_original_inbox_unclaimed(self):
+        """Закрытие допуска после classify не создаёт bind/claim перед RPC."""
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        await self.mirror.classify('123:1', item)
+        self.mirror.input_ready.return_value = False
+        result = await self.mirror.before_delivery(NS(_brai_release_updates=[1]))
+        self.assertEqual(result, {'deferred': True})
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
+        self.assertIsNone(self.inbox.delivery_for(PROFILE, 123, 1))
+        self.assertEqual(self.transport.observe(123, 1)['state'], 'captured')
+
+    async def test_deferred_batch_does_not_call_worker_or_publish_receipt(self):
+        """Отложенный batch не создаёт worker receipt и не вызывает worker."""
+        from identity.ingress import Bridge
+        item = self.capture()
+        self.mirror.register_snapshot('123:1', {'state': 'known', 'profile': PROFILE})
+        self.mirror.enter('123:1', item)
+        await self.mirror.classify('123:1', item)
+        self.mirror.input_ready.return_value = False
+        bridge = Bridge('owner', '42', 101, '/unused', AsyncMock(), AsyncMock(return_value={}))
+        bridge.before_delivery = self.mirror.before_delivery
+        bridge.input_receipt = AsyncMock()
+        source = NS(chat_id='42', thread_id=None, to_dict=lambda: {'user_id': '42'})
+        event = NS(message_id='1', _brai_release_updates=[1])
+        peer = NS(call=AsyncMock())
+        result = await bridge._dispatch(event, source, peer, {'handing_off': False, 'turn_id': None})
+        self.assertEqual(result, {'accepted': False, 'turn_id': None})
+        peer.call.assert_not_awaited()
+        bridge.input_receipt.assert_not_awaited()
+        self.assertEqual(self.inbox.observe(PROFILE, 123, 1)['state'], 'captured')
+
     async def test_worker_absence_then_ready_requeues_without_new_input(self):
         self.capture()
         self.mirror.input_ready.return_value = False

@@ -146,6 +146,8 @@ class Bridge:
         if state:
             data['chat_generation'] = state['generation']
         durable = await self.before_delivery(event) if callable(self.before_delivery) else None
+        if durable == {'deferred': True}:
+            return {'accepted': False, 'turn_id': None}
         scope['handing_off'] = bool(durable)
         result = await peer.call('dispatch', {'event': data, 'owner': self.owner, **(durable or {})})
         if not isinstance(result, dict) or type(result.get('accepted')) is not bool:
