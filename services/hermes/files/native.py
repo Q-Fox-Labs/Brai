@@ -519,6 +519,9 @@ async def steer_active_input(runner, event, session_key):
         ids = getattr(turn, '_brai_input_ids', set())
         ids.add(_steer_identity(event.source, event.message_id))
         turn._brai_input_ids = ids
+        # AIDEV-NOTE: Worker подтверждает durable input по этому флагу. Без него
+        # уже переданный steer объявлялся непринятым и повторялся supervisor.
+        event._gateway_accepted = True
         if reserved is not None:
             reserved[2].set()
     return True

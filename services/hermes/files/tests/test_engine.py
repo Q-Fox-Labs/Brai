@@ -388,6 +388,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             with patch.dict(sys.modules,ports):
                 if primary:self.assertTrue(await scope[name](runner,event,'session'))
                 else:self.assertEqual(await scope[name](runner,event,event.source,'session'),(True,None))
+                self.assertTrue(event._gateway_accepted)
                 guidance=SimpleNamespace(source=event.source,message_id='later',text='Уточнение маршрута',
                     media_urls=[],media_types=[],metadata={},internal=False)
                 self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
@@ -684,6 +685,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         event=SimpleNamespace(source=source,message_id='later',text='Новое условие',
             media_urls=[],media_types=[],metadata={},internal=False)
         self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        self.assertTrue(event._gateway_accepted)
         self.assertIsNone(agent._pending_steer)
         with patch.dict(sys.modules,{'brai_files':native}):native.bind_steer_turn(agent,runner,ctx)
         self.assertIn('Новое условие',agent._pending_steer)
@@ -694,6 +696,37 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules,ports):
             scope['_inject_steer_after_newest_tool_result'](agent,messages,agent._pending_steer)
         self.assertIn('Новое условие',messages[-1]['content'])
+        native.clear_steer_turn(turn)
+
+    async def test_durable_steer_receipt_prevents_repeated_input(self):
+        """Реальный worker и SQLite возвращают квитанцию без повторного steer."""
+        from identity.worker import Worker
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        event=SimpleNamespace(source=source,message_id='later',text='Уточнение',
+            media_urls=[],media_types=[],metadata={},internal=False,_gateway_accepted=False)
+        worker=Worker.__new__(Worker)
+        worker.user_id='owner';worker.active={'turn':object()}
+        worker.delivery_lock=asyncio.Lock()
+        worker.delivery_journal=DeliveryJournal(self.root/'delivery.sqlite3','owner')
+        calls=[]
+        async def dispatch(event,owner):
+            calls.append(event.message_id)
+            await native.steer_active_input(runner,event,'session')
+            # Такой receipt возвращает _dispatch_native после busy handler.
+            return {'accepted':event._gateway_accepted,'turn_id':'turn'}
+        worker._dispatch_native=dispatch
+        ident,digest=delivery_id('input'),delivery_id('bytes')
+        with patch.dict(sys.modules,{'brai_files':native}):
+            first=await worker.dispatch(event,'owner',ident,digest)
+            self.assertTrue(first['accepted'])
+            pending=agent._pending_steer
+            second=await worker.dispatch(event,'owner',ident,digest)
+        self.assertEqual(second,first)
+        self.assertEqual(calls,['later'])
+        self.assertIs(agent._pending_steer,pending)
+        self.assertEqual(worker.delivery_journal.input_status(ident,digest)['state'],'accepted')
         native.clear_steer_turn(turn)
 
     def test_late_steer_defers_actual_final_response_without_persisting_a_draft(self):
