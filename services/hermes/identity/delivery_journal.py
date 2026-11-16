@@ -69,6 +69,11 @@ class DeliveryJournal:
             raise ValueError('DELIVERY_INPUT_CONFLICT')
         return {'state': row[1], 'receipt': json.loads(row[2]) if row[2] else None}
 
+    def input_boundary(self):
+        """Вернуть последний начатый input до native приёма; смена phase не меняет границу."""
+        with self.open() as db:
+            return db.execute('SELECT rowid,id,digest FROM input_deliveries ORDER BY rowid DESC LIMIT 1').fetchone()
+
     def begin_input(self, ident, digest):
         """До native handler закрепить попытку; dispatching после crash не переисполняется."""
         self.identity(ident, digest)

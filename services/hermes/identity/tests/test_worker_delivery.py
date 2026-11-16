@@ -133,6 +133,114 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         finally:
             input_delivery.reset(token)
 
+    async def test_consecutive_identical_output_reuses_receipt_but_new_input_allows_repeat(self):
+        """Побайтный дубль отсечён; новый steer с прежним task context разрешает повтор."""
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+        peer=NS(call=AsyncMock(side_effect=[{'success':True,'message_id':str(i)} for i in range(4)]))
+        adapter=make_adapter(NS(typing_indicator=True),'telegram',peer,AsyncMock())
+        journal=DeliveryJournal(self.root/'output-guard.sqlite3','owner')
+        adapter._brai_delivery_journal=journal
+        ident,digest=delivery_id('first'),delivery_id('first-bytes')
+        journal.begin_input(ident,digest)
+        token=input_delivery.set(ident)
+        try:
+            first=await adapter.send('123','Точный текст',metadata={'thread_id':'77'})
+            duplicate=await adapter.send('123','Точный текст',metadata={'thread_id':'77'})
+            self.assertEqual(duplicate.message_id,first.message_id)
+            self.assertEqual(peer.call.await_count,1)
+            # Другой ответ между совпадениями означает A→B→A, а не соседний дубль.
+            await adapter.send('123','Другой текст',metadata={'thread_id':'77'})
+            await adapter.send('123','Точный текст',metadata={'thread_id':'77'})
+            self.assertEqual(peer.call.await_count,3)
+            # Модельная task сохраняет первый input ID, но новая реальная просьба уже начата.
+            journal.begin_input(delivery_id('new-steer'),delivery_id('repeat-request'))
+            repeated=await adapter.send('123','Точный текст',metadata={'thread_id':'77'})
+            self.assertTrue(repeated.success)
+            self.assertEqual(peer.call.await_count,4)
+        finally:input_delivery.reset(token)
+
+    async def test_identical_pending_file_is_not_resent_and_new_request_can_send_it(self):
+        """Неизвестная отправка файла не становится успехом или новой сетевой попыткой."""
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+        peer=NS(call=AsyncMock(side_effect=[ConnectionError('offline'),{'success':True,'message_id':'file'}]))
+        adapter=make_adapter(NS(typing_indicator=True),'telegram',peer,AsyncMock())
+        journal=DeliveryJournal(self.root/'file-guard.sqlite3','owner')
+        adapter._brai_delivery_journal=journal
+        ident=delivery_id('input');journal.begin_input(ident,delivery_id('bytes'))
+        token=input_delivery.set(ident)
+        payload={'chat_id':'123','artifact':{'artifactId':'same-file'},'caption':'Подпись',
+                 'metadata':{'thread_id':'77'}}
+        try:
+            first=await adapter._action('send_document',payload)
+            duplicate=await adapter._action('send_document',payload)
+            self.assertFalse(first.success);self.assertFalse(duplicate.success)
+            self.assertEqual(duplicate.error_kind,'delivery_pending')
+            self.assertEqual(peer.call.await_count,1)
+            self.assertEqual(len(journal.pending_outputs()),1)
+            journal.begin_input(delivery_id('another-input'),delivery_id('please-repeat'))
+            repeated=await adapter._action('send_document',payload)
+            self.assertTrue(repeated.success)
+            self.assertEqual(peer.call.await_count,2)
+        finally:input_delivery.reset(token)
+
+    async def test_edit_delete_and_pause_generation_invalidate_equal_output_guard(self):
+        """Изменённая/удалённая реплика и смена прав не получают старую успешную квитанцию."""
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+        peer=NS(call=AsyncMock(side_effect=[
+            {'success':True,'message_id':'1'}, {'success':True,'message_id':'1'},
+            {'success':True,'message_id':'2'}, True, {'success':True,'message_id':'3'},
+            {'success':True,'message_id':'4'}, {'success':False,'retryable':False,'error':'Forbidden'}]))
+        adapter=make_adapter(NS(typing_indicator=True),'telegram',peer,AsyncMock())
+        journal=DeliveryJournal(self.root/'invalidation.sqlite3','owner')
+        adapter._brai_delivery_journal=journal
+        state={'generation':0,'paused':False}
+        adapter.gateway_runner=NS(_brai_return_notice_state=lambda *args:dict(state))
+        ident=delivery_id('input');journal.begin_input(ident,delivery_id('bytes'))
+        token=input_delivery.set(ident)
+        try:
+            await adapter.send('123','A',metadata={'thread_id':'77'})
+            await adapter.edit_message('123','1','B',metadata={'thread_id':'77'})
+            result=await adapter.send('123','A',metadata={'thread_id':'77'})
+            self.assertEqual(result.message_id,'2')
+            with patch('identity.telegram_proxy.telegram_payload',side_effect=lambda value:value):
+                await adapter._bot._call('delete_message',{'chat_id':'123','message_id':'2'})
+            result=await adapter.send('123','A',metadata={'thread_id':'77'})
+            self.assertEqual(result.message_id,'3')
+            state['generation']=1
+            result=await adapter.send('123','A',metadata={'thread_id':'77'})
+            self.assertEqual(result.message_id,'4')
+            state['paused']=True
+            denied=await adapter.send('123','A',metadata={'thread_id':'77'})
+            repeated=await adapter.send('123','A',metadata={'thread_id':'77'})
+            self.assertFalse(denied.success);self.assertFalse(repeated.success)
+            self.assertEqual(peer.call.await_count,7)
+        finally:input_delivery.reset(token)
+
+    async def test_reused_question_receipt_still_confirms_pending_delivery(self):
+        """Reuse реальной квитанции сохраняет штатную связь вопроса с его доставкой."""
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+        peer=NS(call=AsyncMock(return_value={'success':True,'message_id':'1'}))
+        adapter=make_adapter(NS(typing_indicator=True),'telegram',peer,AsyncMock())
+        journal=DeliveryJournal(self.root/'question-guard.sqlite3','owner')
+        adapter._brai_delivery_journal=journal
+        adapter.gateway_runner=NS()
+        adapter._delivery_source.set(('123','77',object()))
+        delivered=Mock();port=ModuleType('tools.approval_conversation')
+        port.pending_delivery=lambda *args:(NS(delivered=delivered),'question')
+        ident=delivery_id('input');journal.begin_input(ident,delivery_id('bytes'))
+        token=input_delivery.set(ident)
+        try:
+            with patch.dict(sys.modules,{'tools.approval_conversation':port}):
+                await adapter.send('123','Подтвердить?',metadata={'thread_id':'77'})
+                await adapter.send('123','Подтвердить?',metadata={'thread_id':'77'})
+            self.assertEqual(peer.call.await_count,1)
+            self.assertEqual(delivered.call_args_list,[(('question','1'),),(('question','1'),)])
+        finally:input_delivery.reset(token)
+
     async def test_saved_reply_stops_native_retry_and_plain_text_fallback(self):
         from identity.adapter import make_adapter
         adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)
@@ -158,7 +266,8 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         from identity.scope import input_delivery
         peer = NS(call=AsyncMock())
         adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, AsyncMock())
-        adapter._brai_delivery_journal = NS(queue_output=Mock(side_effect=ValueError('Cannot persist')))
+        adapter._brai_delivery_journal = NS(input_boundary=lambda:None,
+            queue_output=Mock(side_effect=ValueError('Cannot persist')))
         token = input_delivery.set(delivery_id('input'))
         try:
             result = await adapter.send('123', 'Reply', metadata={'thread_id': '77'})

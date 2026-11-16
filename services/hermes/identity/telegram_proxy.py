@@ -40,12 +40,16 @@ def telegram_payload(value):
 
 class BotProxy:
     """PTB shortcuts используют только явные UI методы этого IPC-порта."""
-    def __init__(self, peer):
+    def __init__(self, peer, on_content_action=None):
         self._peer = peer
+        self._on_content_action = on_content_action
 
     async def _call(self, method, payload, *, message=False):
         if method not in TELEGRAM_API_METHODS:
             raise PermissionError('Telegram method denied')
+        if self._on_content_action is not None and method in {
+                'send_message', 'edit_message_text', 'edit_message_reply_markup', 'delete_message'}:
+            self._on_content_action()
         result = await self._peer.call('telegram_api', {
             'method': method, 'payload': telegram_payload(payload),
             'scope_id': delivery_scope.get()})

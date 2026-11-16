@@ -22,7 +22,8 @@ def make_adapter(config, platform, peer, publish_file):
 
         def __init__(self, config):
             super().__init__(config)
-            self._bot = BotProxy(peer)
+            self._brai_last_outputs = {}
+            self._bot = BotProxy(peer, on_content_action=self._brai_last_outputs.clear)
             self._interactive_actor = ContextVar('brai_identity_interactive_actor', default=None)
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
@@ -92,7 +93,8 @@ def make_adapter(config, platform, peer, publish_file):
 
         async def connect(self, *, is_reconnect=False):
             """Пометить IPC adapter готовым без HTTP, token и polling."""
-            self._bot = BotProxy(peer)
+            self._brai_last_outputs.clear()
+            self._bot = BotProxy(peer, on_content_action=self._brai_last_outputs.clear)
             self._mark_connected()
             return True
 
@@ -126,23 +128,53 @@ def make_adapter(config, platform, peer, publish_file):
                 pending = pending_delivery(getattr(self, 'gateway_runner', None), source[2], payload.get('content'))
             ident = None
             saved = False
+            reused = False
             try:
                 wire = {'payload': payload, 'scope_id': delivery_scope.get()}
+                route = (str(payload.get('chat_id')), str(thread or ''))
+                value = None
                 journal = getattr(self, '_brai_delivery_journal', None)
                 persistent = (journal is not None and input_delivery.get() is not None
                     and name in {'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation'})
                 if persistent:
-                    from .delivery_journal import delivery_id
+                    from .delivery_journal import canonical, delivery_id
                     ident = delivery_id(['output', uuid.uuid4().hex])
                     wire['input_delivery_id'] = input_delivery.get()
-                    journal.queue_output(ident, name, wire)
+                    # AIDEV-NOTE: Старый model task сохраняет свой input ContextVar даже
+                    # после нового steer. Общая граница уже меняется ДО native dispatch,
+                    # поэтому новая просьба повторить текст/файл не будет подавлена.
+                    boundary = journal.input_boundary()
+                    state_reader = getattr(getattr(self, 'gateway_runner', None), '_brai_return_notice_state', None)
+                    state = state_reader(*route) if callable(state_reader) else None
+                    signature = (boundary, canonical(state), name, canonical(wire).encode('utf-8'))
+                    previous = self._brai_last_outputs.get(route)
+                    if boundary is not None and previous is not None and previous[0] == signature:
+                        existing = journal.output(previous[1])
+                        if existing is not None:
+                            receipt = existing['receipt'] or {}
+                            if (existing['state'] == 'sent' and receipt.get('success') is True
+                                    and receipt.get('message_id')) or (
+                                    existing['state'] == 'blocked' and receipt.get('success') is False):
+                                value = receipt
+                            else:
+                                value = {'success': False, 'retryable': False,
+                                    'error': 'Identical reply already queued', 'error_kind': 'delivery_pending'}
+                            ident, reused = existing['id'], True
+                            logging.getLogger(__name__).info('identity_duplicate_output_suppressed action=%s state=%s', name, existing['state'])
+                    if not reused:
+                        journal.queue_output(ident, name, wire)
+                        self._brai_last_outputs[route] = (signature, ident)
                     saved = True
-                value = await peer.call('send', {'action': name, **wire, **({'delivery_id': ident} if ident else {})})
+                elif name != 'send_typing':
+                    # Edit/delete/draft либо иной content разрывает соседство ответов.
+                    self._brai_last_outputs.pop(route, None)
+                if value is None:
+                    value = await peer.call('send', {'action': name, **wire, **({'delivery_id': ident} if ident else {})})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
                     raise ValueError('invalid send result')
-                if ident and value.get('success') and value.get('message_id'):
+                if ident and not reused and value.get('success') and value.get('message_id'):
                     journal.output_state(ident, 'sent', value)
-                elif ident and value.get('retryable') is False:
+                elif ident and not reused and value.get('retryable') is False:
                     journal.output_state(ident, 'blocked', value)
                 if ident and not value.get('success') and value.get('retryable') is not False:
                     # Durable outbox owns the retry. Native must not create a second
