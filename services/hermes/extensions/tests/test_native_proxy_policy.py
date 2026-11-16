@@ -27,7 +27,7 @@ class NativeProxyPolicyTests(unittest.TestCase):
             dest=cls.root/name;dest.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(Path(ENGINE)/name,dest)
         subprocess.run(['git','apply','--include=agent/model_metadata.py','--include=agent/codex_responses_adapter.py',
-                        '--include=hermes_constants.py',str(ROOT/'identity/native.patch')],cwd=cls.root,check=True,capture_output=True)
+                        '--include=hermes_constants.py','--include=agent/chat_completion_helpers.py',str(ROOT/'identity/native.patch')],cwd=cls.root,check=True,capture_output=True)
         cls.nodes={}
         for name in names:
             for node in ast.parse((cls.root/name).read_text()).body:
@@ -52,10 +52,12 @@ class NativeProxyPolicyTests(unittest.TestCase):
 
     def test_relay_gets_official_codex_watchdogs_without_new_timeout_values(self):
         utils,classify,local,namespace=self.policies()
-        namespace.update(_is_openai_codex_backend=lambda agent:classify(agent).is_codex_backend,
-            estimate_request_context_tokens=lambda kwargs:99096,_high_effort_silence_floor=lambda agent:0,
+        namespace.update(estimate_request_context_tokens=lambda kwargs:99096,_high_effort_silence_floor=lambda agent:0,
             env_float=lambda name,default:default,_NonStreamWatchdogs=types.SimpleNamespace,
             _local_stream_stale_timeout_default=lambda:300,logger=Mock(),os=os)
+        self.compile_function('_is_openai_codex_backend',namespace)
+        route=types.ModuleType('agent.codex_responses_adapter');route.classify_responses_route=classify
+        agent_module=types.ModuleType('agent');agent_module.__path__=[]
         self.compile_function('openai_codex_stale_timeout_floor',namespace)
         self.compile_function('_bound_openai_codex_stale_timeout',namespace)
         # Read the upstream constant; the overlay supplies no new resource limit.
@@ -65,7 +67,7 @@ class NativeProxyPolicyTests(unittest.TestCase):
         namespace['is_local_endpoint']=local
         watchdogs=self.compile_function('_resolve_nonstream_watchdogs',namespace)
         def agent(provider,url):return types.SimpleNamespace(provider=provider,base_url=url,api_mode='codex_responses',_compute_non_stream_stale_timeout=lambda kwargs:30)
-        with patch.dict(sys.modules,{'utils':utils}),patch.dict(os.environ,{'BRAI_IDENTITY_MODE':'worker'}):
+        with patch.dict(sys.modules,{'utils':utils,'agent':agent_module,'agent.codex_responses_adapter':route}),patch.dict(os.environ,{'BRAI_IDENTITY_MODE':'worker'}):
             relay=agent('custom','http://127.0.0.1:18080/model/v1')
             official=agent('openai-codex','https://chatgpt.com/backend-api/codex')
             self.assertEqual(vars(watchdogs(relay,{})),vars(watchdogs(official,{})))
@@ -75,6 +77,7 @@ class NativeProxyPolicyTests(unittest.TestCase):
         utils,classify,local,_=self.policies()
         with patch.dict(sys.modules,{'utils':utils}),patch.dict(os.environ,{'BRAI_IDENTITY_MODE':'worker'}):
             self.assertTrue(local('http://127.0.0.1:18081/model/v1'))
+            self.assertFalse(local(None))
             self.assertFalse(classify(types.SimpleNamespace(provider='custom',base_url='http://127.0.0.1:18080/model/v1',api_mode='chat_completions')).is_codex_backend)
         with patch.dict(sys.modules,{'utils':utils}),patch.dict(os.environ,{'BRAI_IDENTITY_MODE':''}):
             self.assertTrue(local('http://127.0.0.1:18080/model/v1'))

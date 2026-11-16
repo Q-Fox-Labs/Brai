@@ -1318,7 +1318,7 @@ index e9819bc..800c70d 100644
 +++ b/hermes_constants.py
 @@ -878,2 +878,6 @@
 -    if get_managed_system(home) is not None:
-+    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and isinstance(path, (str, os.PathLike)):
 +        from identity.permissions import secure_profile_parent
 +        if secure_profile_parent(Path(path)):
 +            return
@@ -1326,22 +1326,21 @@ index e9819bc..800c70d 100644
          return
 --- a/agent/model_metadata.py
 +++ b/agent/model_metadata.py
-@@ -679,2 +679,5 @@
+@@ -679,2 +679,6 @@
 -    try:
 +    import os
-+    if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and base_url.rstrip("/") == "http://127.0.0.1:18080/model/v1":
++    if (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and isinstance(base_url, str)
++            and base_url.rstrip("/") == "http://127.0.0.1:18080/model/v1"):
 +        return False  # Локальный relay ведёт к hosted provider, а не к локальной модели.
 +    try:
          parsed = _parse_base_url(base_url)
---- a/agent/codex_responses_adapter.py
-+++ b/agent/codex_responses_adapter.py
-@@ -695,3 +695,7 @@
--    return ResponsesRouteFlags(
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -427,2 +427,7 @@
+     from agent.codex_responses_adapter import classify_responses_route
 +    import os
-+    brai_codex = (os.environ.get("BRAI_IDENTITY_MODE") == "worker"
-+                  and base_url.rstrip("/") == "http://127.0.0.1:18080/model/v1"
-+                  and getattr(agent, "api_mode", None) == "codex_responses")
-+    return ResponsesRouteFlags(
--        is_codex_backend=provider == "openai-codex" or (_host_is("chatgpt.com") and "/backend-api/codex" in lower),
-+        is_codex_backend=brai_codex or provider == "openai-codex" or (_host_is("chatgpt.com") and "/backend-api/codex" in lower),
-         is_xai_responses=provider in {"xai", "xai-oauth"} or hostname == "api.x.ai",
++    if (os.environ.get("BRAI_IDENTITY_MODE") == "worker"
++            and str(getattr(agent, "base_url", "") or "").rstrip("/") == "http://127.0.0.1:18080/model/v1"
++            and getattr(agent, "api_mode", None) == "codex_responses"):
++        return True
+     return classify_responses_route(agent).is_codex_backend
