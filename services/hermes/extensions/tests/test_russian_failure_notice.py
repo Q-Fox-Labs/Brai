@@ -70,6 +70,13 @@ class FailureNoticeTest(unittest.TestCase):
                 self.assertNotIn('Исходное сообщение', text)
                 self.assertNotIn(self.notice._UNKNOWN, text)
 
+    def test_typed_interrupted_request_keeps_cause_instead_of_unknown(self):
+        for code in ('stream_drop', 'timeout'):
+            text = self.render('unknown', result={'brai_failure_kind': code,
+                               'brai_original_error': 'TurnRequestBudgetExhausted: partial_emitted'})
+            self.assertIn(f'Код: `{code}`', text)
+            self.assertNotIn(self.notice._UNKNOWN, text)
+
     def test_native_service_messages_are_russian_and_keep_old_history(self):
         import os
         candidate = os.environ.get('HERMES_TEST_CANDIDATE')

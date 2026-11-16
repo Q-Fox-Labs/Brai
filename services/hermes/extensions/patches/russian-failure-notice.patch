@@ -331,7 +331,7 @@ new file mode 100644
 +    layer = surface.get('layer', 'unknown')
 +    if layer not in {'provider', 'endpoint', 'streaming', 'auth', 'billing', 'gateway', 'disk'}:
 +        layer = 'unknown'
-+    if result.get('brai_failure_kind') in {'invalid_tool_call', 'truncated_tool_call', 'server_context_rejection', 'output_cap_exceeded'}:
++    if result.get('brai_failure_kind') in {'invalid_tool_call', 'truncated_tool_call', 'server_context_rejection', 'output_cap_exceeded', 'stream_drop', 'timeout'}:
 +        code = result['brai_failure_kind']
 +    elif result.get('brai_session_reset'):
 +        code = 'context_reset'

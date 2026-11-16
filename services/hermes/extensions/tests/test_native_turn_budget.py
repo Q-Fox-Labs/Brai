@@ -115,6 +115,35 @@ class PortableTurnBudgetTests(unittest.TestCase):
         self.assertFalse(attempt.emitted)
         self.assertTrue(self.state.start({'api_request_id': 'api:1'}).is_retry)
 
+    def test_analysis_text_does_not_block_stream_recovery(self):
+        attempt = self.state.start({'api_request_id': 'api:analysis', 'api_mode': 'codex_responses'})
+        attempt.observe({'type': 'response.output_item.added', 'output_index': 0, 'item': {
+            'id': 'analysis', 'type': 'message', 'phase': 'analysis'}})
+        attempt.observe({'type': 'response.output_text.delta', 'item_id': 'analysis',
+                         'output_index': 0, 'delta': 'PRIVATE_FIXTURE_REASONING'})
+        attempt.finish(failed=True)
+        self.assertFalse(attempt.emitted)
+        self.assertTrue(self.state.start({'api_request_id': 'api:analysis'}).is_retry)
+        self.assertEqual(self.state.spent, 1)
+
+    def test_unfinished_commentary_does_not_block_stream_recovery(self):
+        attempt = self.state.start({'api_request_id': 'api:commentary'})
+        attempt.observe({'type': 'response.output_item.added', 'item': {
+            'id': 'commentary', 'type': 'message', 'phase': 'commentary'}})
+        attempt.observe({'type': 'response.output_text.delta', 'delta': 'buffered'})
+        attempt.finish(failed=True)
+        self.assertFalse(attempt.emitted)
+        self.assertTrue(self.state.start({'api_request_id': 'api:commentary'}).is_retry)
+
+    def test_final_phase_still_blocks_replay_after_visible_delta(self):
+        attempt = self.state.start({'api_request_id': 'api:final'})
+        attempt.observe({'type': 'response.output_item.added', 'item': {
+            'id': 'final', 'type': 'message', 'phase': 'final_answer'}})
+        attempt.observe({'type': 'response.output_text.delta', 'delta': 'visible'})
+        attempt.finish(failed=True)
+        with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+            self.state.start({'api_request_id': 'api:final'})
+
     def test_original_deadline_is_retained(self):
         with patch.object(self.budget.time, "monotonic", return_value=0):
             first = self.state.start({"api_request_id": "1"})
@@ -378,6 +407,25 @@ class NativeTurnBudgetTests(unittest.TestCase):
             _call_guarded=lambda fn, label, args=(): fn(*args) if fn else None,
             logger=logging.getLogger("native-fixture"),
         )
+
+    def test_native_analysis_then_disconnect_retries_without_public_text(self):
+        delivered, reasoning = [], []
+        def interrupted():
+            yield {'type': 'response.output_item.added', 'item': {
+                'id': 'private', 'type': 'message', 'phase': 'analysis'}}
+            yield {'type': 'response.output_text.delta', 'delta': 'private reasoning'}
+            raise ConnectionError('synthetic silent stream')
+        factory = Mock(side_effect=[interrupted(), iter([{'type': 'response.completed'}])])
+        with self.assertRaises(ConnectionError):
+            self.assembler()._consume_codex_event_stream(
+                self.budget.physical_callback(factory, self.metadata(), streaming=True)({}),
+                model='fixture', on_text_delta=delivered.append, on_reasoning_delta=reasoning.append)
+        self.assembler()._consume_codex_event_stream(
+            self.budget.physical_callback(factory, self.metadata(), streaming=True)({}), model='fixture')
+        self.assertEqual(delivered, [])
+        self.assertEqual(reasoning, ['private reasoning'])
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(self.state.spent, 1)
 
     def test_native_assembler_rejects_missing_terminal_even_after_text(self):
         assembler = self.assembler()
@@ -777,6 +825,48 @@ class NativeTurnBudgetTests(unittest.TestCase):
         self.assertNotEqual(result["final_response"], result["error"])
         self.assertEqual(result["brai_delivered_partial"], "visible")
         downstream.assert_not_called()
+
+    def test_confirmed_finish_goes_to_native_finalizer_without_second_api_call(self):
+        from test_confirmed_final import finished_messages
+        messages, answer = finished_messages()
+        tree = ast.parse((self.engine / "agent/conversation_loop.py").read_text())
+        owner = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == "_run_conversation_turn")
+        loop_index = next(i for i, node in enumerate(owner.body) if isinstance(node, ast.While))
+        wrapper = ast.FunctionDef(name="boundary", args=ast.arguments(
+            posonlyargs=[], args=[ast.arg(arg="agent"), ast.arg(arg="s")],
+            kwonlyargs=[], kw_defaults=[], defaults=[]), body=owner.body[loop_index:], decorator_list=[])
+        state = types.SimpleNamespace(api_call_count=0, turn_id="turn", _compression_timeout_exhausted=False,
+            messages=messages[:1], current_turn_user_idx=0, failed=False, final_response=None,
+            assistant_message=types.SimpleNamespace(tool_calls=True))
+        api_calls = []
+        def api(agent, state):
+            api_calls.append(1)
+            if len(api_calls) > 1:
+                raise AssertionError("a confirmed finish must not need another provider response")
+        def phase(function, agent, state):
+            if function == "tool_round":
+                state.messages.extend(messages[1:])
+                return types.SimpleNamespace(action="continue")
+            return types.SimpleNamespace(action="fallthrough")
+        def finalize(agent, *, final_response, failed, messages):
+            return {"final_response": final_response, "failed": failed, "messages": messages}
+        names = {name: name for name in ("begin_iteration", "prepare_iteration", "assemble_api_request",
+            "run_preflight_gate", "announce_api_call", "apply_retry_restarts", "normalize_model_response",
+            "finish_text_response", "handle_outer_loop_error")}
+        namespace = {**names, "inspect": inspect, "time": __import__("time"),
+            "_prelude_action": "fallthrough", "_run_phase": phase, "_run_api_retry_loop": api,
+            "finalize_turn": finalize, "TurnRetryState": types.SimpleNamespace,
+            "run_tool_round": "tool_round", "confirmed_dialogues_final": self.budget.confirmed_dialogues_final}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])),
+                     "agent/conversation_loop.py", "exec"), namespace)
+        agent = types.SimpleNamespace(max_iterations=10, iteration_budget=types.SimpleNamespace(remaining=10),
+                                      _budget_grace_call=False, _api_max_retries=3)
+        result = namespace["boundary"](agent, state)
+        self.assertEqual(len(api_calls), 1)
+        self.assertEqual(result["final_response"], answer)
+        self.assertFalse(result["failed"])
+        self.assertEqual(state._turn_exit_reason, "text_response(confirmed_dialogues_final)")
 
     @contextlib.contextmanager
     def native_policy_modules(self):

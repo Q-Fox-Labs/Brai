@@ -63,11 +63,11 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
  from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
  from hermes_cli.observability.shared_metrics_efficiency import record_cache_break, record_prompt_rebuild
  from agent.turn_retry_state import TurnRetryState
-+from agent.brai_turn_budget import turn_budget, TurnRequestBudgetExhausted
++from agent.brai_turn_budget import turn_budget, TurnRequestBudgetExhausted, confirmed_dialogues_final
  from agent.turn_scripted_prelude import Prelude, play_prelude
  # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
  # skewed phase mid-turn.
-@@ -1517,6 +1518,16 @@
+@@ -1517,6 +1518,17 @@
          except InterruptedError:
              if _run_phase(handle_api_interrupt, agent, s).action == "break":
                  return None
@@ -76,6 +76,7 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
 +            from agent.turn_recovery import settle_delivered_partial, _with_delivered_partial
 +            s.thinking_spinner = stop_thinking_spinner(agent, s.thinking_spinner)
 +            s._request_budget_error = str(api_error)
++            s._request_budget_reason = api_error.reason
 +            s._request_budget_delivered = settle_delivered_partial(agent, s.messages, s.current_turn_user_idx)
 +            s.final_response, _ = _with_delivered_partial(
 +                s._request_budget_error, s._request_budget_error, s._request_budget_delivered)
@@ -93,12 +94,30 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
  
          _rs = _run_phase(apply_retry_restarts, agent, s)
          if _rs.action == "break":
-@@ -1699,6 +1712,10 @@
+@@ -1683,5 +1696,13 @@
+             if _v.action == "break":
+                 break
++            if s.assistant_message.tool_calls:
++                ready = confirmed_dialogues_final(s.messages, s.current_turn_user_idx)
++                if ready is not None:
++                    # Квитанция finish уже закрепила точные байты финала. Следующий
++                    # inference не нужен; обычный finalizer и transport сохраняются.
++                    s.final_response, s.failed = ready, False
++                    s._turn_exit_reason = "text_response(confirmed_dialogues_final)"
++                    break
+             if _v.action == "continue":
+                 continue
+         except Exception as e:
+@@ -1699,6 +1712,14 @@
          name: getattr(s, name)
          for name in inspect.signature(finalize_turn).parameters if name != "agent"
      })
 +    if getattr(s, "_request_budget_error", None):
 +        result.update(error=s._request_budget_error, completed=False, failed=True, partial=True)
++        reason = getattr(s, "_request_budget_reason", "retry_budget")
++        result["brai_original_error"] = "TurnRequestBudgetExhausted: " + reason
++        if reason in {"partial_emitted", "deadline"}:
++            result["brai_failure_kind"] = "stream_drop" if reason == "partial_emitted" else "timeout"
 +        if s._request_budget_delivered:
 +            result["brai_delivered_partial"] = s._request_budget_delivered
      if s._compression_timeout_exhausted:
@@ -272,7 +291,7 @@ diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,393 @@
 +# ABOUTME: Ограничивает дополнительные физические запросы одним пользовательским ходом.
 +# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
 +"""Общий бюджет Hermes: две дополнительные попытки, включая сжатие истории."""
@@ -283,6 +302,7 @@ new file mode 100644
 +from functools import wraps
 +from threading import RLock
 +import json
++import hashlib
 +import logging
 +import math
 +import os
@@ -299,6 +319,7 @@ new file mode 100644
 +
 +    def __init__(self, message, *, reason="retry_budget", request_id="", budget=None):
 +        super().__init__(message)
++        self.reason = reason
 +        budget = budget or _current.get()
 +        logger.warning(
 +            "Hermes request budget exhausted turn_id=%s request_id=%s stage=exhausted "
@@ -367,15 +388,18 @@ new file mode 100644
 +        self.events = 0
 +        self.terminal = False
 +        self.stage = "connect"
++        self.message_phase = None
++        self.last_event = "none"
 +
 +    def record(self, stage):
 +        """Записать переход стадии и время от исходного запроса."""
 +        self.stage = stage
 +        logger.info("Hermes physical request turn_id=%s request_id=%s attempt=%d extra=%d "
-+                    "stage=%s elapsed=%.3f events=%d",
++                    "stage=%s elapsed=%.3f events=%d last_event=%s phase=%s visible=%s",
 +                    self.budget.turn_id, self.request_id or "unavailable",
 +                    self.number, self.budget.spent, stage,
-+                    time.monotonic() - self.origin, self.events)
++                    time.monotonic() - self.origin, self.events, self.last_event,
++                    self.message_phase or "none", self.emitted)
 +
 +    def observe(self, event):
 +        """Отличить событие, прогресс и подтверждённое завершение Responses."""
@@ -383,11 +407,22 @@ new file mode 100644
 +            self.events += 1
 +            kind = _field(event, "type", "")
 +            delta = _field(event, "delta", "")
++            self.last_event = kind if kind in {
++                "response.created", "response.in_progress", "response.output_item.added",
++                "response.output_item.done", "response.output_text.delta", "response.text.delta",
++                "response.refusal.delta", "response.reasoning_summary_text.delta",
++                "response.reasoning_text.delta", "response.function_call_arguments.delta",
++                "response.completed", "response.failed", "response.incomplete", "error",
++            } else "other"
 +            if self.events == 1:
 +                self.record("first_event")
++            if kind == "response.output_item.added":
++                item = _field(event, "item", {})
++                phase = _field(item, "phase") if _field(item, "type") == "message" else None
++                self.message_phase = phase if phase in ("analysis", "commentary", "final_answer", "final") else None
 +            visible = self.lane == "primary"
 +            if visible and kind in {"response.output_text.delta", "response.text.delta",
-+                        "response.refusal.delta"} and delta:
++                        "response.refusal.delta"} and delta and self.message_phase not in {"analysis", "commentary"}:
 +                self.emitted = True
 +            if visible and kind == "response.output_item.done":
 +                item = _field(event, "item", {})
@@ -509,6 +544,66 @@ new file mode 100644
 +        attempt.finish()
 +        return result
 +    return invoke
++
++
++def confirmed_dialogues_final(messages, current_turn_user_idx):
++    """Вернуть точный финал после одиночного finish с проверенной квитанцией.
++
++    Только последняя завершённая tool-операция текущего native хода может
++    закончить генерацию. Произвольный текст инструмента, старый финал,
++    параллельный batch, pending и несовпадение SHA не дают такого права.
++    Доставкой по-прежнему владеют native finalizer и adapter.
++    """
++    if (type(current_turn_user_idx) is not int or current_turn_user_idx < 0
++            or current_turn_user_idx >= len(messages) - 2):
++        return None
++    request, reply = messages[-2:]
++    if (any(row.get("role") == "user" for row in messages[current_turn_user_idx + 1:])
++            or request.get("role") != "assistant" or reply.get("role") != "tool"
++            or reply.get("tool_name", "mcp__brai__dialogues_exchange") != "mcp__brai__dialogues_exchange"):
++        return None
++    try:
++        calls = request.get("tool_calls")
++        if not isinstance(calls, list) or len(calls) != 1:
++            return None
++        call = calls[0]
++        if reply.get("tool_call_id") != call.get("id") or not call.get("id"):
++            return None
++        fn = call["function"]
++        args = json.loads(fn["arguments"]) if isinstance(fn["arguments"], str) else fn["arguments"]
++        if fn["name"] == "tool_call":
++            nested = args.get("calls")
++            if not isinstance(nested, list) or len(nested) != 1:
++                return None
++            call = nested[0]
++            if call.get("name") != "mcp__brai__dialogues_exchange":
++                return None
++            args = call["arguments"]
++        elif fn["name"] != "mcp__brai__dialogues_exchange":
++            return None
++        if args.get("action") != "finish":
++            return None
++        submitted = args["arguments"]
++        final = submitted["final"]
++        text = final["text"]
++        if not isinstance(text, str) or not text.strip():
++            return None
++        raw = reply["content"]
++        prefix = '<untrusted_tool_result source="mcp__brai__dialogues_exchange">'
++        if raw.startswith(prefix):
++            raw = raw[raw.index("\n{") + 1:raw.rindex("\n</untrusted_tool_result>")]
++        receipt = json.loads(raw)
++        receipt = receipt.get("structuredContent", receipt.get("result", receipt))
++        if (not isinstance(receipt, dict) or receipt.get("status") != "completed"
++                or any(receipt.get(k) != submitted.get(k) or not submitted.get(k)
++                       for k in ("request_id", "dialogue_id", "turn_id"))
++                or receipt.get("final", {}).get("id") != final.get("id")
++                or not final.get("id")
++                or receipt["final"].get("sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()):
++            return None
++        return text
++    except (KeyError, TypeError, ValueError, AttributeError):
++        return None
 +
 +
 +def transport_timeout_policy():
