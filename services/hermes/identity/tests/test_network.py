@@ -528,6 +528,33 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(egress.Rejected):
                 await egress._resolve_provider({"provider": {"type": "codex-cli"}})
 
+    async def test_model_cancel_closes_silent_upstream_through_both_relays(self):
+        disconnected = asyncio.Event()
+        async def silent_provider(reader, writer):
+            try:
+                head = await reader.readuntil(b'\r\n\r\n')
+                length = next(int(line.split(b':', 1)[1]) for line in head.split(b'\r\n')
+                              if line.lower().startswith(b'content-length:'))
+                await reader.readexactly(length)
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: first\n\n')
+                await writer.drain()
+                await reader.read()
+                disconnected.set()
+            finally:
+                writer.close()
+        self.remote.close()
+        await self.remote.wait_closed()
+        self.remote = await asyncio.start_server(silent_provider, '127.0.0.1', 0)
+        self.remote_port = self.remote.sockets[0].getsockname()[1]
+        body = b'{"model":"fixture"}'
+        reader, writer = await self.request(
+            b'POST /model/v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: '
+            + str(len(body)).encode() + b'\r\n\r\n' + body)
+        await asyncio.wait_for(reader.readuntil(b'data: first\n\n'), 2)
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.wait_for(disconnected.wait(), 2)
+
     async def test_sse_stream_and_disconnect(self):
         reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
         first = await asyncio.wait_for(reader.readuntil(b"data: first\n\n"), 2)

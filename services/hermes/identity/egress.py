@@ -158,8 +158,10 @@ async def _read_request(reader):
     return method, target, headers, body
 
 
-async def _pipe(reader, writer):
+async def _pipe(reader, writer, state=None):
     while True:
+        if state is not None:
+            state['stage'] = 'upstream_read'
         data = await asyncio.wait_for(reader.read(65536), IDLE_TIMEOUT)
         if not data:
             try:
@@ -167,8 +169,47 @@ async def _pipe(reader, writer):
             except (OSError, RuntimeError, AttributeError):
                 pass
             return
+        if state is not None:
+            state['bytes'] += len(data)
+            state['last_byte'] = time.monotonic()
+            state['stage'] = 'downstream_write'
         writer.write(data)
         await asyncio.wait_for(writer.drain(), DRAIN_TIMEOUT)
+
+
+async def _model_response(reader, source, writer):
+    """Прекратить upstream при отмене личного одноразового model-запроса.
+
+    Внутренний HTTP-клиент посылает полный Content-Length и сохраняет вход
+    открытым до окончания ответа. EOF здесь означает отмену; CONNECT и
+    публичный HTTP сохраняют отдельную семантику half-close.
+    """
+    started = time.monotonic()
+    state = {'stage': 'upstream_read', 'bytes': 0, 'last_byte': started}
+    reason = 'cancelled'
+    response = asyncio.create_task(_pipe(source, writer, state))
+    disconnected = asyncio.create_task(reader.read(1))
+    try:
+        done, _ = await asyncio.wait((response, disconnected), return_when=asyncio.FIRST_COMPLETED)
+        if response in done:
+            await response
+            reason = 'eof'
+        else:
+            await disconnected
+            reason = 'client_cancel'
+    except asyncio.TimeoutError:
+        reason = 'timeout'
+        raise
+    except OSError:
+        reason = 'io_error'
+        raise
+    finally:
+        LOGGER.info('Hermes model transport stage=%s reason=%s elapsed=%.3f bytes=%d idle=%.3f',
+                    state['stage'], reason, time.monotonic() - started,
+                    state['bytes'], time.monotonic() - state['last_byte'])
+        response.cancel()
+        disconnected.cancel()
+        await asyncio.gather(response, disconnected, return_exceptions=True)
 
 
 async def _duplex(a_reader, a_writer, b_reader, b_writer):
@@ -726,7 +767,10 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
         upstream.write(head + b"\r\n" + body)
         await asyncio.wait_for(upstream.drain(), CONNECT_TIMEOUT)
         response_started = True
-        await _pipe(source, writer)
+        if model_target is not None:
+            await _model_response(reader, source, writer)
+        else:
+            await _pipe(source, writer)
     except Rejected as error:
         if not response_started:
             writer.write(f"HTTP/1.1 {error.status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".encode())
