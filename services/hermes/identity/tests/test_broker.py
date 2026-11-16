@@ -683,6 +683,20 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(status, {"suppressFinal": True, "needsAccountConsent": False})
 
+    async def test_login_propagates_verified_role_refusal_without_suppressing_reply(self):
+        await self.broker.call(INGRESS_UID, 'ingress.admit', {
+            'telegramId':'111222', 'chatId':'111222', 'privateChat':True, 'turnId':'role-denied',
+        })
+        original = self.control.call
+        async def control(method, params, timeout=35):
+            if method == 'login.send':
+                return {'status':'denied', 'reason':'web-role-unavailable'}
+            return await original(method, params, timeout)
+        self.control.call = control
+        result = await self.broker.call(WORKER_UID, 'login.send', {})
+        self.assertEqual(result, {'status':'failed', 'reason':'web-role-unavailable', 'suppressFinal':False})
+        self.assertFalse(self.broker.turns[WORKER_UID]['suppressFinal'])
+
     def _publish_fixture(self, filename="file.bin"):
         root = Path(tempfile.mkdtemp(prefix="broker-publish-", dir=TEMP_ROOT))
         home = root / "home"

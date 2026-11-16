@@ -54,6 +54,9 @@ test("aliases share admin lifecycle and unlink invalidates pending web login",as
   assert.equal(viaAlias.body.operation.state,"succeeded");
   assert.equal((await owner.query("SELECT count(*) FROM brai_identity")).rows[0].count,beforeCount);
 
+  // Проверка веб-сессии использует Creator с двумя привязанными аккаунтами.
+  await owner.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[user.id]);
+
   const cfg={identityMode:"telegram",origin,trustedOrigins:[origin],secret};
   const engine=createAuth(cfg,app);
   const login=code=>engine.handler(new Request(origin+"/api/auth/brai/telegram-redeem",{method:"POST",headers:{origin,"content-type":"application/json","x-forwarded-for":"192.0.2.89"},body:JSON.stringify({code})}));
@@ -72,6 +75,7 @@ test("aliases share admin lifecycle and unlink invalidates pending web login",as
   const context=await engine.$context,createSession=context.internalAdapter.createSession.bind(context.internalAdapter);
   context.internalAdapter.createSession=async(...args)=>{
    context.internalAdapter.createSession=createSession;
+   await owner.query("UPDATE brai_identity SET role='user' WHERE user_id=$1",[user.id]);
    assert.equal(await unlinkTelegram(app,second,second),true);
    return createSession(...args);
   };

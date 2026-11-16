@@ -780,6 +780,15 @@ class Broker:
                         except Exception:
                             result = {'status': 'unknown'}
                         status = result.get('status') if isinstance(result, dict) else None
+                        if status == 'denied':
+                            try:
+                                current_profile = await self.authorize(peer_uid)
+                                if (current_profile.get('userId') == profile.get('userId') and
+                                        current_profile.get('profileId') == profile.get('profileId') and
+                                        current_profile.get('role') != 'creator'):
+                                    receipt['reason'] = 'web-role-unavailable'
+                            except Exception:
+                                pass
                         outcome = status if status in ('sent', 'failed', 'unknown') else (
                             'failed' if status in ('denied', 'unavailable') else 'unknown')
                         self.delivery_state().finish(receipt['requestId'], outcome)
@@ -787,7 +796,7 @@ class Broker:
                 current = self.turns.get(peer_uid) is turn
                 if current:
                     turn['suppressFinal'] = receipt['outcome'] == 'sent'
-                return {'status': receipt['outcome'],
+                return {'status': receipt['outcome'], **({'reason': receipt['reason']} if receipt.get('reason') else {}),
                         'suppressFinal': current and receipt['outcome'] == 'sent'}
         raise PermissionError('Method unavailable')
 

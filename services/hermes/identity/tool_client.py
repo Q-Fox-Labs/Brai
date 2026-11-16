@@ -165,6 +165,8 @@ def handle(method, params):
             if arguments:
                 raise ValueError('Login does not accept arguments')
             response = broker_call('login.send', {})
+            if isinstance(response, dict) and response.get('reason') == 'web-role-unavailable':
+                return {'isError': True, 'content': [{'type': 'text', 'text': 'Доступ к веб-версии для вашего типа учётной записи сейчас недоступен.'}]}
             if not isinstance(response, dict) or response.get('status') != 'sent' or response.get('suppressFinal') is not True:
                 return {'isError': True, 'content': [{'type': 'text', 'text': 'Не удалось подтвердить отправку кода входа.'}]}
             return {'content': [{'type': 'text', 'text': 'Код отправлен отдельным сообщением. Не отправляй дополнительный ответ.'}]}

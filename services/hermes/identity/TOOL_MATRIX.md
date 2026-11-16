@@ -82,7 +82,7 @@
 
 | Имя | creator | admin | user | guest |
 | --- | --- | --- | --- | --- |
-| `brai_login` | Да | Да | Да | Нет |
+| `brai_login` | Код | Отказ по роли | Отказ по роли | Нет |
 | `brai_telegram_link_account` | Да | Да | Да | Нет |
 | `brai_telegram_unlink_account` | Да | Да | Да | Нет |
 | `publish_file` | Да | Да | Да | Нет |

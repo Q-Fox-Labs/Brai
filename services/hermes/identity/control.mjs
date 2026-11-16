@@ -349,7 +349,8 @@ export class Control {
       if (!profile || profile.status !== 'active' || !text(profile.userId) || !text(profile.profileId)) return { status: 'denied' };
       const resolved = await this.authCall('telegram-resolve', { telegramId: String(telegramId) });
       const user = resolved?.user;
-      if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || (!preparedProfile(profile, user) || user.role === 'guest') || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
+      if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || !preparedProfile(profile, user) || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
+      if (user.role !== 'creator') return { status: 'denied' };
       const issued = await this.authCall('telegram-code-issue', { telegramId: String(telegramId), requestId });
       if (!/^[0-9A-HJKMNP-TV-Z]{12}$/.test(issued?.code ?? '') || issued.origin !== this.origin || !issued.expiresAt) return { status: 'unavailable' };
       const message = `Для входа откройте ${this.origin} и введите код: ${issued.code}. Код действует 120 секунд.`;

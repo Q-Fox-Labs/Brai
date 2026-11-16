@@ -61,13 +61,13 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  }
  await client.query("UPDATE brai_user_operation SET state='cancelled',updated_at=now() WHERE user_id=$1 AND state IN ('pending','running')",[user.id]);
  const generation=(await client.query('UPDATE brai_identity SET lifecycle_generation=lifecycle_generation+1 WHERE user_id=$1 RETURNING lifecycle_generation',[user.id])).rows[0].lifecycle_generation;
- if(noop||preserveManagement){
+ if(noop){
   await client.query('UPDATE "session" SET brai_generation=$2 WHERE "userId"=$1 AND brai_generation=$2-1',[user.id,generation]);
  }
  if(!noop){
   const nextStatus=preserveManagement?'active':kind==='stop'?'blocked':'provisioning';
   await client.query("UPDATE brai_identity SET role=$2,status=$3,profile_id=COALESCE(profile_id,$4) WHERE user_id=$1",[user.id,nextRole,nextStatus,randomUUID()]);
-  if(!preserveManagement)await client.query('DELETE FROM "session" WHERE "userId"=$1',[user.id]);
+  await client.query('DELETE FROM "session" WHERE "userId"=$1',[user.id]);
   await client.query('DELETE FROM brai_login_code WHERE user_id=$1',[user.id]);
   // AIDEV-NOTE: Код email-входа тоже не должен ожить после guest → user.
   await client.query(`DELETE FROM verification WHERE identifier IN
