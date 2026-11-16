@@ -1,6 +1,6 @@
 ---
 name: memos-memory
-description: "Use when discussing or administering MemOS memory."
+description: "Использовать для работы с памятью MemOS и её настройки."
 version: 1.0.0
 author: Сергей Брайт, Hermes Agent
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: instaloader
-description: "Use when Instagram links or account digests are requested."
+description: "Использовать для работы со ссылками Instagram и подборками публикаций аккаунта."
 version: 0.1.0
 author: Сергей Брайт, Hermes Agent
 license: MIT

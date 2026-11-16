@@ -1,6 +1,6 @@
 ---
 name: brai-task-workflows
-description: Use when planning or continuing tasks in Brai.
+description: Использовать при планировании и продолжении поручений в Brai.
 version: 0.3.0
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: silero-local-voice
-description: "Use when asked for voice replies or Silero voice changes."
+description: "Использовать для голосовых ответов и настройки голоса Silero."
 version: 1.1.0
 author: Hermes Agent
 license: MIT

@@ -116,6 +116,8 @@ class FailureNoticeTest(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), namespace)
         describe = namespace['_brai_activity_description']
         self.assertEqual(describe('waiting for non-streaming API response'), 'ожидаю ответ модели')
+        self.assertEqual(describe('receiving stream response'), 'ожидаю ответ модели')
+        self.assertEqual(describe('context compression in progress'), 'сокращаю историю разговора')
         self.assertEqual(describe('unrecognised internal state'), 'продолжаю работу')
         self.assertEqual(describe('ignored', 'browser'), 'выполняю действие')
 
@@ -140,6 +142,26 @@ class FailureNoticeTest(unittest.TestCase):
                     self.assertIsInstance(ru[key], dict)
                     check(value, ru[key], f'{path}.{key}')
         check(english, russian)
+
+    def test_gateway_catalog_has_no_untranslated_english_sentences(self):
+        import os
+        import re
+        import yaml
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for catalog integration')
+        catalog = yaml.safe_load((Path(candidate) / 'locales/ru.yaml').read_text())['gateway']
+
+        def check(value, path):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    check(child, f'{path}.{key}')
+            elif isinstance(value, str):
+                literal = re.sub(r'\{[^{}]*\}', '', value)
+                english_sentence = re.search(r'\b[A-Za-z]{3,}\s+[A-Za-z]{3,}\b', literal)
+                self.assertFalse(english_sentence and not re.search(r'[А-Яа-яЁё]', literal), path)
+                self.assertNotRegex(literal, '[\u3400-\u9fff]', path)
+        check(catalog, 'gateway')
 
     def test_literal_agent_status_messages_have_no_english_prose(self):
         import os
@@ -488,6 +510,12 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertEqual(prepare('api_server', 'warn', DiagnosticText('Original diagnostic')), 'Original diagnostic')
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}):
             self.assertEqual(prepare('telegram', 'warn', DiagnosticText('Ошибка сервиса OpenAI API')), 'Ошибка сервиса OpenAI API')
+        with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING'):
+            mixed = '⚠ Compression aborted: Бюджет повторов исчерпан. No messages were dropped.'
+            localized = prepare('telegram', 'warn', DiagnosticText(mixed))
+            self.assertIn('сокращении истории', localized)
+            self.assertNotIn('Compression', localized)
+            self.assertNotIn('No messages', localized)
 
     def test_error_messages_keep_visible_formatting(self):
         for code in self.notice._COPY:
@@ -913,7 +941,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         tree = ast.parse((root / 'gateway/run_startup.py').read_text())
         method = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
                       and node.name == '_redeliver_claimed_obligations')
-        scope = {'asyncio': asyncio, 'logging': logging, 'logger': logging.getLogger('notice-test'),
+        scope = {'asyncio': asyncio, 'os': os, 'logging': logging, 'logger': logging.getLogger('notice-test'),
                  '_log_suppressed': lambda *args, **kwargs: contextlib.nullcontext()}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), '<candidate>', 'exec'), scope)
         adapter = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(success=True)))
