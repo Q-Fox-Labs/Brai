@@ -151,7 +151,7 @@ test('production factory restores catalog and transcription with private scope a
 });
 
 
-test('provisioning discovers Dialogues metadata without authorizing data and active runtime rechecks the service',async()=>{
+test('provisioning and active profiles retain Dialogues metadata while data calls still use the authorized port',async()=>{
  const f=fixture(),listed=[],called=[],closed=[];
  f.records['/cfg/1'].dialogues={enabled:true,url:'http://dialogues.test/mcp',token:'fixture',userId:'u1',profileId:'p1'};
  const adapters=createRuntimeAdapters({runtimeProfiles:f.profiles},{
@@ -171,10 +171,11 @@ test('provisioning discovers Dialogues metadata without authorizing data and act
   assert.deepEqual(called,[]);
   await assert.rejects(adapters.perUserRuntime({...pending,userId:'u2'}),/CONFIG_NOT_READY/);
   const active=await adapters.perUserRuntime(f.profile('1001'));
-  assert.equal(listed.includes('dialogues'),true);
-  assert.equal((await active.listTools()).some(t=>t.name.startsWith('dialogues_')),false);
-  await assert.rejects(active.callTool('dialogues_context_ack',{}),{code:'UPSTREAM_UNAVAILABLE'});
-  assert.deepEqual(called,[]);
+  assert.equal(listed.includes('dialogues'),false);
+  assert.equal((await active.listTools()).filter(t=>t.name.startsWith('dialogues_')).length,2);
+  const failure=await active.callTool('dialogues_context_ack',{request_id:'r',consumer_id:'c',context_instance_id:'i',delivery_id:'d'});
+  assert.equal(failure.isError,true);
+  assert.equal(called.length,1);
   assert.equal(closed.length,1);
  }finally{await adapters.close();await f.adapters.close();}
 });

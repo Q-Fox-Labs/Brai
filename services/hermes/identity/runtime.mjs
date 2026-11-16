@@ -129,8 +129,8 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
       ...ports,
       async list(name){
        if(name==='history')return history.list();
-       // Публичные схемы нужны до active; чтение данных по-прежнему требует active Auth.
-       if(name==='dialogues'&&phase==='provisioning')return structuredClone(dialoguesTools);
+       // AIDEV-NOTE: Каталог доступен при отказе listener; данные требуют active Auth.
+       if(name==='dialogues')return structuredClone(dialoguesTools);
        if(name==='transcription'&&transcription)return transcription.list();
        return ports.list(name);
       },

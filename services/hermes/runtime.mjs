@@ -93,6 +93,8 @@ export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeo
         return method === 'listTools' ? await selected.listTools({}, options)
           : await selected.callTool(args, undefined, options);
       } catch (error) {
+        // AIDEV-NOTE: Неуспешный handshake не мог отправить прикладной tools/call.
+        if (!selected) error.applied = false;
         const disconnected = selected && disconnectedClients.has(selected);
         if (selected && (typeof error.code !== 'string' || uncertain(error))) {
           if (current === selected) current = undefined;
@@ -325,8 +327,8 @@ export async function createBraiTools(config, ports) {
             try{return await ports.mcp(upstream.endpoint,name,args,signal);}
             catch(error){
               const forbidden=error.code===401||error.code===403;
-              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:{code:'OUTCOME_UNKNOWN'};
-              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':'Сначала проверьте состояние и прежний request_id; не повторяйте запись вслепую'})}]};
+              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
+              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую'})}]};
             }
           }
           return await ports.mcp(upstream.endpoint, name, args, signal);
