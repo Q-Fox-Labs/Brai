@@ -28,6 +28,22 @@ class ReplyOutbox:
         row = self.db.execute('SELECT state,receipt FROM reply_outbox WHERE id=?', (ident,)).fetchone()
         return json.loads(row[1]) if row and row[1] else None
 
+    def retry_blocked(self, ident, owner, body, receipt):
+        """Адресно вернуть ошибочно запрещённую отправку после операторской проверки.
+
+        Сверяет неизменные ID, owner, тело и прежнюю квитанцию. Pending/sent
+        повторно не открывает; актуальные права проверяет обычный deliver.
+        """
+        row = self.db.execute('SELECT owner,body,state,receipt FROM reply_outbox WHERE id=?', (ident,)).fetchone()
+        if row is None or row[:2] != (owner, canonical(body)):
+            raise ValueError('OUTBOX_RETRY_CONFLICT')
+        if row[2] in ('pending', 'sending', 'sent'):
+            return False
+        if row[2] != 'blocked' or json.loads(row[3]) != receipt:
+            raise ValueError('OUTBOX_RETRY_CONFLICT')
+        return self.db.execute("UPDATE reply_outbox SET state='pending' WHERE id=? AND state='blocked' AND receipt=?",
+                               (ident, row[3])).rowcount == 1
+
     async def flush_owner(self, owner):
         """Отправить сохранённые ответы по порядку; один отказ не блокирует других владельцев."""
         async with self.locks.setdefault(owner, asyncio.Lock()):
@@ -37,7 +53,7 @@ class ReplyOutbox:
                 try:
                     result = await self.deliver(json.loads(raw))
                 except PermissionError:
-                    result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden'}
+                    result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
                 except asyncio.CancelledError:
                     raise
                 except Exception:

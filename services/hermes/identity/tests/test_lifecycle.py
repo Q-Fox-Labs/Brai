@@ -132,6 +132,8 @@ class BootstrapAndInviteTests(unittest.IsolatedAsyncioTestCase):
                     self.state = next(self.states, self.state)
                     return {'user': {'id': 'u', 'profileId': 'p', 'telegramId': '123',
                                      'status': self.state}}
+                if method == 'authorize' and self.state == 'active':
+                    return {'userId': 'u', 'profileId': 'p', 'role': 'user', 'generation': 0}
                 raise PermissionError('Tools require active Auth')
         port = Port()
         broker = Broker({'ingressUid': 995, 'registryPath': '/unused',

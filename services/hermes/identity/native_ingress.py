@@ -318,7 +318,13 @@ def register(ctx, *, build_resolver=None, admit_update=None):
                 if not done.cancelled() and done.exception() is None:
                     closing_scheduled.discard(marker)
             task.add_done_callback(settled)
-        if loop.is_running():
+        try:
+            same_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            same_loop = False
+        if same_loop:
+            start()
+        elif loop.is_running():
             loop.call_soon_threadsafe(start)
 
     def factory(app, adapter):
@@ -425,10 +431,25 @@ def register(ctx, *, build_resolver=None, admit_update=None):
             gate.restore()
             raise
         adapter._brai_identity_ingress_ready = True
-        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original, gate, hooks, originals if hooks else {}))
+        original_disconnect = getattr(adapter, 'disconnect', None)
+        async def disconnect(*args, **kwargs):
+            result = await original_disconnect(*args, **kwargs)
+            # Native уничтожает неудачно подключённый adapter без unload plugin.
+            # Новый primary допускается только после закрытия прежнего resolver.
+            owns_adapter = any(item[0] is adapter and item[-1] is disconnect for item in installed)
+            if owns_adapter:
+                close()
+                if closing:
+                    await asyncio.gather(*closing)
+            return result
+        if callable(original_disconnect):
+            adapter.disconnect = disconnect
+        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original, gate, hooks, originals if hooks else {}, original_disconnect, disconnect))
 
     def close():
-        for adapter, original, forward, app, handler, loop, interactive_original, gate, hooks, originals in reversed(installed):
+        for adapter, original, forward, app, handler, loop, interactive_original, gate, hooks, originals, original_disconnect, disconnect in reversed(installed):
+            if getattr(adapter, 'disconnect', None) is disconnect:
+                adapter.disconnect = original_disconnect
             for name, value in hooks.items():
                 if getattr(adapter, name, None) is value:
                     existed, prior = originals[name]

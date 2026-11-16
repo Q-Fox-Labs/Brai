@@ -24,6 +24,7 @@ async def eventually(check, label, watch=None):
 async def run(config, fixture, native, receipt):
     """Root fixture с sealed candidate и штатными Worker, Resolver, Mirror и SQLite."""
     from telegram import Bot, Update, User
+    from identity.ordinary_admission import BatchOwnership
     from identity.chat_journal import IdentityJournal
     from identity.routes import RouteLedger
     from identity import telegram_runtime
@@ -85,6 +86,17 @@ async def run(config, fixture, native, receipt):
         bot = Bot('123:fixture'); bot._bot_user = User(123, 'fixture', True)
         deliveries, consumed, dispatches = [], [], []
         fail_send = False
+        reply_attempts = []
+        original_reply = telegram_runtime.Resolver.durable_reply
+        async def traced_reply(instance, owner_profile, owner, action, payload, ident, source_id):
+            reply_attempts.append({'id': ident, 'input': source_id, 'action': action,
+                                   'content': payload.get('content'), 'stage': stage})
+            return await original_reply(instance, owner_profile, owner, action, payload, ident, source_id)
+        batch_mode = False
+        batch_owner = None
+        batch_popped, batch_send = asyncio.Event(), asyncio.Event()
+        batch_tasks = []
+        batch_dispatches = []
         class TelegramPort:
             _bot = bot
             async def send(self, **payload):
@@ -120,6 +132,32 @@ async def run(config, fixture, native, receipt):
                 'message_thread_id': thread, 'chat': {'id': 123, 'type': 'private'},
                 'from': {'id': 123, 'is_bot': False, 'first_name': 'Fixture'},
                 'text': 'Reply with SYNTHETIC_OK.'}}, bot)
+        async def consume_batch(event, ident):
+            adapter = batch_owner.adapter
+            key = 'restart-topic'
+            previous = dict(adapter._pending_text_batch_tasks)
+            existing = adapter._pending_text_batches.get(key)
+            batch_owner.tag(event, ident)
+            if existing is None:
+                adapter._pending_text_batches[key] = event
+            else:
+                existing.text += '\n' + event.text
+                previous[key].cancel()
+            async def flush():
+                # Native debounce rearms a task and mutates the SAME MessageEvent.
+                # Force pop before dispatch so the lifetime regression is observable.
+                await batch_ready.wait()
+                combined = adapter._pending_text_batches.pop(key)
+                batch_popped.set()
+                await batch_send.wait()
+                batch_dispatches.append(list(combined._brai_release_updates))
+                dispatches.extend(combined._brai_release_updates)
+                await resolver._bridge(profile).dispatch(combined)
+                consumed.extend(combined._brai_release_updates)
+            task = asyncio.create_task(flush()); batch_tasks.append(task)
+            adapter._pending_text_batch_tasks[key] = task
+            batch_owner.text(event, previous, 'after')
+
         async def consume():
             while True:
                 raw = await resolver.mirror.app.update_queue.get()
@@ -134,11 +172,16 @@ async def run(config, fixture, native, receipt):
                                message_type=MessageType.TEXT, _brai_release_updates=[raw.update_id])
                     try:
                         dispatches.append(raw.update_id)
-                        await resolver._bridge(profile).dispatch(event)
+                        if batch_mode:
+                            await consume_batch(event, raw.update_id)
+                        else:
+                            await resolver._bridge(profile).dispatch(event)
                     except (ConnectionError, OSError):
                         pass
                     consumed.append(raw.update_id)
                 resolver.mirror.finish(key, {'completed': True, 'deferred': deferred})
+                if batch_mode and raw.update_id == 8:
+                    batch_ready.set()
 
         async def launch():
             nonlocal broker
@@ -186,7 +229,7 @@ async def run(config, fixture, native, receipt):
                 fixture.require(not fixture.cgroup_pids(state['ControlGroup'], unit), 'CLEANUP_CGROUP_SURVIVED')
                 await process.wait()
 
-        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth):
+        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth), patch.object(telegram_runtime.Resolver, 'durable_reply', traced_reply):
             resolver = create()
             await resolver.mirror.hydrate()
             supervisor = asyncio.create_task(resolver._supervise())
@@ -254,6 +297,9 @@ async def run(config, fixture, native, receipt):
             fail_send = False
             unit, process = await launch()
             await eventually(lambda: len(deliveries) >= 5, 'saved-reply-delivered')
+            peer = await resolver._bridge(profile).connect()
+            await peer.call('outbox.flush', {'owner': profile['userId']})
+            fixture.require(len(deliveries) == 5, 'SAVED_REPLY_DUPLICATED')
             fixture.require(len(model.requests) == requests_before, 'OUTBOX_RERAN_MODEL')
             proof['scenarios'].append('reply-transport-failure-worker-sigkill-saved-bytes-retry')
 
@@ -266,14 +312,56 @@ async def run(config, fixture, native, receipt):
             fixture.require(6 not in dispatches, 'PAUSED_INPUT_EXECUTED')
             proof['scenarios'].append('pause-preserved')
             fixture.require(not consumer.done() and not supervisor.done(), 'AUTOMATIC_PROCESSOR_DIED')
-            fixture.require(len(deliveries) == 5 and all('SYNTHETIC_OK' in p.get('content', '') for p in deliveries), 'REPLIES_UNPROVEN')
+            stage = 'ingress-restart-and-merged-batch'
+            await kill_worker(unit, process)
+            for task in (consumer, supervisor):
+                task.cancel()
+            await asyncio.gather(consumer, supervisor, return_exceptions=True)
+            for bridge in resolver.bridges.values():
+                if bridge.peer is not None: bridge.peer.writer.close()
+                if bridge.task is not None: bridge.task.cancel()
+            await asyncio.gather(*(b.task for b in resolver.bridges.values() if b.task), return_exceptions=True)
+            for ident in (7, 8):
+                await resolver.mirror.capture([item(ident, 14)], 123)
+            resolver.ledger.close()
+            resolver = create()
+            await resolver.mirror.hydrate()
+            batch_mode = True
+            batch_ready = asyncio.Event()
+            adapter = NS(_bot=bot, _pending_text_batches={}, _pending_text_batch_tasks={},
+                         _pending_photo_batches={}, _media_group_events={}, _held_inbound_events=[],
+                         _text_batch_key=lambda event: 'restart-topic')
+            batch_owner = BatchOwnership(adapter, resolver.mirror)
+            supervisor = asyncio.create_task(resolver._supervise())
+            consumer = asyncio.create_task(consume())
+            requests_before = len(model.requests)
+            unit, process = await launch()
+            await eventually(batch_popped.is_set, 'merged-pop', watch=process)
+            fixture.require(all(f'123:{ident}' in resolver.mirror.snapshots for ident in (7, 8)), 'MERGED_ADMISSION_LOST')
+            batch_send.set()
+            await eventually(lambda: len(deliveries) >= 6, 'merged-delivery', watch=process)
+            await eventually(lambda: not resolver.turns, 'merged-idle')
+            await asyncio.gather(*batch_tasks, return_exceptions=True)
+            for ident in (7, 8):
+                fixture.require(resolver.mirror.inbox.observe(profile, 123, ident)['state'] == 'accepted', 'MERGED_INPUT_NOT_ACCEPTED')
+            fixture.require(batch_dispatches == [[7, 8]], 'MERGED_INPUT_REDISPATCHED')
+            binding = resolver.mirror.inbox.delivery_for(profile, 123, 7)
+            fixture.require(binding is not None and binding == resolver.mirror.inbox.delivery_for(profile, 123, 8), 'MERGED_BINDING_SPLIT')
+            fixture.require(len(model.requests) > requests_before, 'MERGED_MODEL_NOT_CALLED')
+            fixture.require(resolver.journal.chat_state(profile, ('123', '13'))['paused'], 'PAUSE_LOST_ON_RESTART')
+            proof['scenarios'].append('ingress-and-worker-restart-two-messages-one-native-turn')
+            fixture.require(len(deliveries) == 6 and all('SYNTHETIC_OK' in p.get('content', '') for p in deliveries), 'REPLIES_UNPROVEN')
             proof.update(state='verified', delivered=len(deliveries), uniqueInputs=len(set(consumed)),
-                         processKills=2, modelRequests=len(model.requests), manualQueueResets=0)
+                         processKills=3, mergedInputs=2, mergedNativeTurns=len(batch_dispatches),
+                         mergedModelRequests=len(model.requests)-requests_before, modelRequests=len(model.requests), manualQueueResets=0)
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
+        proof['syntheticReplyAttempts'] = locals().get('reply_attempts', [])
         if str(error) in {'FAULT_KILL_FAILED', 'FAULT_NOT_OBSERVED', 'TOPIC_ORDER_CHANGED', 'WORKER_EXITED',
                           'EARLY_ACK', 'INPUT_NOT_ACCEPTED', 'LOST_ACK_REEXECUTED', 'OUTBOX_RERAN_MODEL',
-                          'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN'}:
+                          'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN',
+                          'SAVED_REPLY_DUPLICATED', 'MERGED_ADMISSION_LOST', 'MERGED_INPUT_NOT_ACCEPTED',
+                          'MERGED_INPUT_REDISPATCHED', 'MERGED_BINDING_SPLIT', 'MERGED_MODEL_NOT_CALLED', 'PAUSE_LOST_ON_RESTART'}:
             proof['code'] = str(error)
         proof['workerExitCodes'] = [process.returncode for _unit, process in workers]
         proof['controllerUid'] = os.geteuid()
@@ -282,7 +370,7 @@ async def run(config, fixture, native, receipt):
         if consumer is not None and consumer.done() and not consumer.cancelled():
             proof['consumerError'] = type(consumer.exception()).__name__ if consumer.exception() else None
     finally:
-        for task in (consumer, supervisor):
+        for task in (consumer, supervisor, *locals().get('batch_tasks', [])):
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)

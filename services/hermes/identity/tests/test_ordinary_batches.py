@@ -35,7 +35,7 @@ class PatchedFixture(unittest.IsolatedAsyncioTestCase):
         subprocess.run(['patch','-p1','--batch'],cwd=root,input=section,text=True,check=True,stdout=subprocess.DEVNULL)
         self.adapter_path=root/'plugins/platforms/telegram/adapter.py'
         self.held_path=root/'plugins/platforms/telegram/telegram_held_inbound.py'
-        self.mirror=NS(tracker=Tracker(lambda event:None),block_event=AsyncMock())
+        self.mirror=NS(tracker=Tracker(lambda event:None),block_event=AsyncMock(),release_pending_snapshots=lambda:None)
         self.pending={};self.held=[]
         self.adapter=NS(_bot=NS(id=123),_pending_text_batches=self.pending,
                         _pending_photo_batches={},_media_group_events={},_held_inbound_events=self.held)

@@ -135,6 +135,7 @@ class ToolClientTest(unittest.TestCase):
 class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
     async def test_register_factory_wires_and_unloads(self):
         from types import SimpleNamespace, ModuleType
+        from unittest.mock import AsyncMock
         from identity import native_ingress
         class Context:
             def register_telegram_handler(self, callback):
@@ -158,7 +159,8 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             return None
         async def admit_update(update, adapter):
             return True
-        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=admit, _is_user_authorized_for_source=lambda source, **kw: False), handle_message=original, _drop_pending_on_cold_boot=True)
+        original_disconnect = AsyncMock()
+        adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_hm_admit_event=admit, _is_user_authorized_for_source=lambda source, **kw: False), handle_message=original, _drop_pending_on_cold_boot=True, disconnect=original_disconnect)
         telegram, ext = ModuleType('telegram'), ModuleType('telegram.ext')
         telegram.Update = type('Update', (), {})
         ext.TypeHandler, ext.ApplicationHandlerStop = Handler, type('ApplicationHandlerStop', (Exception,), {})
@@ -177,6 +179,23 @@ class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError,'Previous ingress resolver still active'):
                 ctx.factory(app, adapter)
             self.assertIs(adapter._brai_identity_dispatch,current)
+            # Failed connect is disposed by native without unloading the plugin.
+            first_disconnect = adapter.disconnect
+            shutdown = asyncio.create_task(first_disconnect())
+            await asyncio.sleep(0)
+            self.assertFalse(adapter._brai_identity_ingress_ready)
+            with self.assertRaisesRegex(RuntimeError,'Previous ingress resolver still active'):
+                ctx.factory(app,adapter)
+            closing.set()
+            await shutdown
+            original_disconnect.assert_awaited_once()
+            self.assertIs(adapter.disconnect,original_disconnect)
+            ctx.factory(app,adapter)
+            replacement = adapter._brai_identity_dispatch
+            await first_disconnect()
+            self.assertTrue(adapter._brai_identity_ingress_ready)
+            self.assertIs(adapter._brai_identity_dispatch,replacement)
+            closing.clear()
             ctx.close()
             self.assertFalse(adapter._brai_identity_ingress_ready)
             self.assertIsNone(adapter._brai_identity_dispatch)

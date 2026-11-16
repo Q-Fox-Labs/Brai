@@ -26,6 +26,17 @@ def make_adapter(config, platform, peer, publish_file):
             self._interactive_actor = ContextVar('brai_identity_interactive_actor', default=None)
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
+        def _send_retry_is_final(self, result):
+            """Outbox владеет повтором сохранённого ответа; запрет прав не лечится fallback."""
+            return (getattr(result, 'error_kind', None) in {'delivery_pending', 'forbidden'}
+                    or super()._send_retry_is_final(result))
+
+        async def _record_delivery_obligation(self, *args, **kwargs):
+            """Один владелец ответа: современный IPC input сохраняет worker/ingress outbox."""
+            if getattr(self, '_brai_delivery_journal', None) is not None and input_delivery.get() is not None:
+                return None
+            return await super()._record_delivery_obligation(*args, **kwargs)
+
         def is_interactive_actor(self, user_id):
             """Допустить actual actor только внутри подтверждённого Root callback."""
             return self._interactive_actor.get() == str(user_id)

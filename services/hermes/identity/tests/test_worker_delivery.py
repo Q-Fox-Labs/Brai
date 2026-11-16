@@ -42,6 +42,8 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                 self.config, self.platform = config, platform
                 # Закреплённый native Base вызывает этот hook в конструкторе.
                 native.install_adapter(self)
+            def _send_retry_is_final(self, result):
+                return False
         self.base.BasePlatformAdapter = Base
         self.base.SendResult = NS
         self.engine = os.environ.get('HERMES_TEST_ENGINE')
@@ -53,6 +55,10 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         class TelegramAdapter(Base):
             def __init__(self, config):
                 super().__init__(config, 'telegram')
+            def _send_retry_is_final(self, result):
+                return getattr(result, 'error_kind', None) == 'forbidden'
+            async def _record_delivery_obligation(self, *args, **kwargs):
+                return 'native-obligation'
             def _mark_connected(self):
                 self._running = True
             def _mark_disconnected(self):
@@ -104,6 +110,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         result = await worker.send('123', 'Brai онлайн', metadata={'thread_id':'77'})
         self.assertFalse(result.success)
         self.assertEqual(result.error_kind, 'forbidden')
+        self.assertTrue(worker._send_retry_is_final(result))
         self.assertFalse(result.retryable)
         self.assertEqual(calls, ['send'])
 
@@ -120,10 +127,31 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.success)
             self.assertFalse(result.retryable)
             self.assertEqual(result.error_kind, 'delivery_pending')
+            self.assertTrue(adapter._send_retry_is_final(result))
             self.assertEqual(store.pending_outputs()[0]['state'], 'pending')
             self.assertEqual(peer.call.await_count, 1)
         finally:
             input_delivery.reset(token)
+
+    async def test_saved_reply_stops_native_retry_and_plain_text_fallback(self):
+        from identity.adapter import make_adapter
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)
+        self.assertTrue(adapter._send_retry_is_final(NS(error_kind='delivery_pending')))
+        self.assertTrue(adapter._send_retry_is_final(NS(error_kind='forbidden')))
+        self.assertFalse(adapter._send_retry_is_final(NS(error_kind='formatting')))
+
+    async def test_durable_input_has_one_delivery_owner_without_disabling_legacy(self):
+        from identity.scope import input_delivery
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)
+        self.assertEqual(await adapter._record_delivery_obligation(), 'native-obligation')
+        adapter._brai_delivery_journal = NS()
+        self.assertEqual(await adapter._record_delivery_obligation(), 'native-obligation')
+        token = input_delivery.set('root-admitted-input')
+        try:
+            self.assertIsNone(await adapter._record_delivery_obligation())
+        finally:
+            input_delivery.reset(token)
+        self.assertEqual(await adapter._record_delivery_obligation(), 'native-obligation')
 
     async def test_failed_persistence_does_not_claim_saved_reply_or_call_network(self):
         from identity.delivery_journal import delivery_id

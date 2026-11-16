@@ -103,6 +103,8 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.control.calls.append((method, dict(params), timeout))
             if method == 'identity.invite-redeem':
                 return {'user': {**user, 'status': 'provisioning'}}
+            if method == 'authorize':
+                return {'userId': user['id'], 'profileId': user['profileId'], 'role': 'user', 'generation': 0}
             self.assertEqual(method, 'identity.resolve')
             polls += 1
             return {'user': {**user, 'status': 'active' if polls > 100 else 'provisioning'}}

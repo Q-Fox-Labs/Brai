@@ -122,6 +122,8 @@ class Mirror:
         self.deferred_recovery = None
         self.snapshots = {}
         self.snapshot_refs = {}
+        self.pending_snapshots = set()
+        self.pending_input = lambda key: False
         self.pending = False
         self._capturing = False
         self.capture_lock = asyncio.Lock()
@@ -149,6 +151,12 @@ class Mirror:
         if count <= 0:
             raise ValueError('INGRESS_CAPTURE_UNAVAILABLE')
         if count == 1:
+            # Native postflight can precede a text/media batch or held redispatch.
+            # Its last reference belongs to that callback until it has finished.
+            if key not in self.terminal_inputs and self.pending_input(key):
+                self.pending_snapshots.add(key)
+                return
+            self.pending_snapshots.discard(key)
             self.snapshots.pop(key, None)
             self.snapshot_refs.pop(key, None)
             self.auto_inputs.discard(key)
@@ -156,6 +164,13 @@ class Mirror:
             self.service_updates.pop(key, None)
         else:
             self.snapshot_refs[key] = count - 1
+
+    def release_pending_snapshots(self):
+        for key in tuple(self.pending_snapshots):
+            if not self.pending_input(key):
+                self.pending_snapshots.remove(key)
+                self._release_snapshot(key)
+        self.tracker.changed.set()
 
     async def hydrate_held(self):
         """Восстановить journal и gates, отложив replay до открытия общего входа."""
@@ -644,9 +659,25 @@ class BatchOwnership:
         self.adapter = adapter
         self.mirror = mirror
         self.tasks = {}
+        self.task_inputs = {}
+        mirror.pending_input = self.has_input
         self.detached = {}
         self.unknown = {}
         self.poisoned = False
+
+    def has_input(self, key):
+        """Удерживать вход и после снятия batch с timer, пока его native dispatch не завершён."""
+        if any(not task.done() and key in self.input_keys(event) for task, event in self.task_inputs.items()):
+            return True
+        events = [event for event, _ in self.detached.values()]
+        for name in ('_pending_text_batches', '_pending_photo_batches', '_media_group_events'):
+            events.extend(getattr(self.adapter, name, {}).values())
+        events.extend(getattr(self.adapter, '_held_inbound_events', []))
+        return any(key in self.input_keys(event) for event in events)
+
+    def input_keys(self, event):
+        """Читать текущие IDs общего события: native batching дополняет его после запуска timer."""
+        return tuple(f'{self.adapter._bot.id}:{ident}' for ident in getattr(event, '_brai_release_updates', []))
 
     @staticmethod
     def binding(event):
@@ -689,8 +720,11 @@ class BatchOwnership:
             if task in self.tasks:
                 raise ValueError('INGRESS_BATCH_TASK_DUPLICATE')
             self.tasks[task] = value
+            self.task_inputs[task] = event
             def finished(done):
                 self.tasks.pop(done, None)
+                self.task_inputs.pop(done, None)
+                self.mirror.release_pending_snapshots()
                 self.mirror.tracker.changed.set()
             task.add_done_callback(finished)
             self.mirror.tracker.changed.set()
@@ -713,7 +747,7 @@ class BatchOwnership:
                 task = self.adapter._pending_text_batch_tasks.get(key)
                 if task is None or previous.get(key) is task:
                     raise ValueError('INGRESS_BATCH_TASK_UNAVAILABLE')
-                self.track(task, event)
+                self.track(task, existing)
             else:
                 raise ValueError('INGRESS_BATCH_STAGE_INVALID')
         except Exception:
@@ -739,6 +773,7 @@ class BatchOwnership:
             self.poisoned = True
             raise ValueError('INGRESS_HELD_NOT_OWNED')
         del self.detached[id(event)]
+        self.mirror.release_pending_snapshots()
         self.mirror.tracker.changed.set()
 
     def rehold(self, events, reason):

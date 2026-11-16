@@ -280,19 +280,10 @@ class Broker:
 
     async def resolve(self, telegram_id):
         """Найти только действующую связь Telegram → системный профиль."""
-        if not isinstance(telegram_id, str) or not telegram_id.isascii() or not telegram_id.isdecimal():
-            raise ValueError('Invalid Telegram identity')
-        resolved = await self.control.call('identity.resolve', {'telegramId': telegram_id})
-        user = resolved.get('user')
-        if not isinstance(user, dict) or user.get('status') != 'active':
+        resolved = await self.resolve_known(telegram_id)
+        if resolved.get('state') != 'known':
             raise PermissionError('Invitation required')
-        matches = [(uid, p) for uid, p in self.profiles().items()
-                   if p['userId'] == user.get('id') and p['profileId'] == user.get('profileId')
-                   and str(p['telegramId']) == str(user.get('telegramId')) and p['status'] == 'active']
-        if len(matches) != 1:
-            raise PermissionError('Profile unavailable')
-        uid, profile = matches[0]
-        return {'uid': uid, **profile, 'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}
+        return resolved['profile']
 
     async def resolve_known(self, telegram_id):
         """Различить достоверное отсутствие Auth от отказа или сбоя до Telegram ack."""
