@@ -15,7 +15,7 @@ export function sourceReader(registry:SourceRegistration[]){
   if(!Number.isSafeInteger(first)||!Number.isSafeInteger(last)||first<1||last<first||last-first>=200)throw new VF("INVALID_ARGUMENT");
   // AIDEV-NOTE: Доверие действует только для операторского repository в этом вызове, включая другой UID worker.
   const args=["--no-replace-objects","-c","safe.directory="+entry.repository,"-C",entry.repository];
-  const env={PATH:"/usr/bin:/bin",GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_GLOBAL:"/dev/null",GIT_NO_REPLACE_OBJECTS:"1",GIT_OPTIONAL_LOCKS:"0",HOME:"/nonexistent"};
+  const env={PATH:"/usr/bin:/bin",GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_GLOBAL:"/dev/null",GIT_NO_REPLACE_OBJECTS:"1",GIT_NO_LAZY_FETCH:"1",GIT_OPTIONAL_LOCKS:"0",HOME:"/nonexistent"};
   try{
    const tree=await run("/usr/bin/git",[...args,"ls-tree","-z",source.commit,"--",path],{env,timeout:3000,maxBuffer:2048});
    const record=tree.stdout.split("\0").filter(Boolean);if(record.length!==1||!record[0].startsWith("100644 blob ")&&!record[0].startsWith("100755 blob "))throw new VF("SOURCE_FORBIDDEN");
