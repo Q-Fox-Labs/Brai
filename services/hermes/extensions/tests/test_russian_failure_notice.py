@@ -599,6 +599,26 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertIn('стороннего сервиса ИИ', self.render('timeout', result={'brai_connection_kind':'external'}))
         self.assertIn('или в соединении', self.render('timeout', result={'brai_connection_kind':'external'}))
 
+    def test_composed_formatter_keeps_typed_stream_failure(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        path = Path(candidate) / 'gateway/russian_failure_notice.py'
+        spec = importlib.util.spec_from_file_location('candidate_russian_failure_notice', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for code in ('stream_drop', 'timeout'):
+            with self.subTest(code=code):
+                text = module.explain_failure(
+                    '', surface={'code': 'unknown', 'layer': 'streaming'}, diagnostic='',
+                    logger=self.log, redact=lambda value: value,
+                    result={'brai_failure_kind': code, 'brai_connection_kind': 'external'})
+                self.assertIn(f'Код: `{code}`', text)
+                self.assertIn('продолжай', text)
+                self.assertNotIn('/retry', text)
+                self.assertNotIn(module._UNKNOWN, text)
+
     def test_error_meaning_and_unverified_billing(self):
         self.assertIn('Сервер, который обрабатывает запросы к модели', self.render('overloaded'))
         self.assertIn('отклонил данные для подключения', self.render('auth'))
