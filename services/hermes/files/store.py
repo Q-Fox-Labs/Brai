@@ -79,8 +79,7 @@ class FileStore:
                     if count:
                         logging.getLogger(__name__).warning('BRAI_FILES_LEGACY_REVIEW_REQUIRED count=%d', count)
             db.commit()
-            db.executescript("""
-                BEGIN IMMEDIATE;
+            schema = """
                 CREATE TABLE IF NOT EXISTS settings (owner TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS items (
                   identity TEXT PRIMARY KEY, group_key TEXT NOT NULL, source TEXT NOT NULL,
@@ -99,7 +98,18 @@ class FileStore:
                 CREATE TABLE IF NOT EXISTS cleanup_scopes (operation TEXT NOT NULL, scope TEXT NOT NULL, PRIMARY KEY(operation,scope));
                 CREATE TABLE IF NOT EXISTS workspace_bindings (operation TEXT PRIMARY KEY, workspace TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS conversation_workspaces (workspace TEXT PRIMARY KEY);
-            """)
+            """
+            # Декларации схемы не меняются; граница транзакции задаётся отдельно.
+            # executescript() здесь нельзя: он неявно завершает текущий BEGIN.
+            db.execute("BEGIN IMMEDIATE")
+            statement = ""
+            for character in schema:
+                statement += character
+                if character == ";" and sqlite3.complete_statement(statement):
+                    db.execute(statement)
+                    statement = ""
+            if statement.strip():
+                raise FileError("SCHEMA_INIT_INCOMPLETE")
             owners = [row[0] for row in db.execute("SELECT owner FROM settings")]
             if owners and owners != [owner]:
                 raise FileError("OWNER_MISMATCH")
