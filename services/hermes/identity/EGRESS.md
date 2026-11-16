@@ -52,3 +52,11 @@ CLI перед готовностью читает защищённые файл
 Личный native image provider использует `/image/images/generations` и `/image/images/edits` локального relay. Egress принимает только форму закреплённого native GPT Image 2 provider; исходные изображения передаются встроенными data URL, произвольные адреса не принимаются. Подписочный credential и account разрешаются существующим доверенным helper и добавляются перед отправкой только в `https://chatgpt.com/backend-api/codex/images/…`. Статический API не служит запасным маршрутом. Общие пределы HTTP и проверка Auth действуют также здесь.
 
 GIF идут отдельным POST `/gif/v1/images/generations`. Допустим только принятый запрос Flare 2.6: GIF, девять кадров по 200 мс, low quality/complexity, один результат. Prompt ограничен 16 КиБ UTF-8. Необязательный root-only `gifProvider.credentialsFile` указывает на защищённый JSON `{"apiKey":"…"}`; файл и каталог недоступны личным процессам. При отсутствии маршрута или недоступном credential запрос отклоняется без смены provider. Подписка диалога и обычных изображений сохраняется.
+
+В personal worker адрес relay не делает модель локальной: route с
+`api_mode=codex_responses` получает штатные признаки hosted Codex. Native
+watchdogs используют ту же политику контекста и первого содержательного
+прогресса, что прямой подписочный маршрут. Отдельных новых сроков ожидания
+для relay нет. Защита HOME сохраняет точный операторский ingress ACL при
+`apply_secure_dir_policy`, как и при `secure_parent_dir`; остальные личные
+каталоги сохраняют обычную закрытую политику.

@@ -1,6 +1,7 @@
 // ABOUTME: Подключает Hermes к готовым MCP и фиксированным NATS API Brai.
 // ABOUTME: Восстанавливает безопасные чтения; записи не повторяет и human полномочий модели не выдаёт.
 import { randomUUID } from 'node:crypto';
+import dialoguesTools from './identity/dialogues-tools.json' with { type: 'json' };
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -93,6 +94,8 @@ export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeo
         return method === 'listTools' ? await selected.listTools({}, options)
           : await selected.callTool(args, undefined, options);
       } catch (error) {
+        // AIDEV-NOTE: Неуспешный handshake не мог отправить прикладной tools/call.
+        if (!selected) error.applied = false;
         const disconnected = selected && disconnectedClients.has(selected);
         if (selected && (typeof error.code !== 'string' || uncertain(error))) {
           if (current === selected) current = undefined;
@@ -223,7 +226,8 @@ export async function createBraiTools(config, ports) {
     if (discovered.has(endpoint)) return;
     if (!discovering.has(endpoint)) discovering.set(endpoint, (async () => {
       let listed;
-      try { listed = await ports.list(endpoint); }
+      // AIDEV-NOTE: Общий каталог нужен и standalone, и identity при offline listener.
+      try { listed = endpoint === 'dialogues' ? structuredClone(dialoguesTools) : await ports.list(endpoint); }
       catch {
         if (!unavailable.has(endpoint)) console.error(JSON.stringify({ event: 'hermes_endpoint_discovery_unavailable', endpoint }));
         unavailable.add(endpoint); return;
@@ -325,8 +329,8 @@ export async function createBraiTools(config, ports) {
             try{return await ports.mcp(upstream.endpoint,name,args,signal);}
             catch(error){
               const forbidden=error.code===401||error.code===403;
-              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:{code:'OUTCOME_UNKNOWN'};
-              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':'Сначала проверьте состояние и прежний request_id; не повторяйте запись вслепую'})}]};
+              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
+              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую'})}]};
             }
           }
           return await ports.mcp(upstream.endpoint, name, args, signal);
