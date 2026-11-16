@@ -63,7 +63,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
       if(!matches(cfg.token)&&!operator){res.writeHead(401).end();return;}
       if(cfg.personal){
         if(!operator&&(req.headers['x-brai-user-id']!==cfg.personal.userId||req.headers['x-brai-profile-id']!==cfg.personal.profileId)){res.writeHead(403).end();return;}
-        try{await cfg.personal.authorize();}catch{res.writeHead(403).end();return;}
+        try{await cfg.personal.authorize();}catch(error){res.writeHead(error instanceof Error&&error.message==='PERSONAL_AUTH_UNAVAILABLE'?503:403).end();return;}
       }
       let body:unknown;
       if(req.method==="POST") {

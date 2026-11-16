@@ -1,0 +1,42 @@
+# ABOUTME: Описывает прямую проверку права на личные Диалоги.
+# ABOUTME: Subject связан с principal установщиком и ограничен NATS ACL.
+asyncapi: '3.1.0'
+info:
+  title: Dialogues account access
+  version: '1.0.0'
+  description: >-
+    Endpoint существующего brai_auth v2.0.0, queue brai_auth. Core NATS request-reply.
+    AUTH_DIALOGUES_BINDINGS_FILE содержит массив {subject,userId,profileId}.
+    Subject имеет суффикс из 64 hex-символов; знание subject не заменяет NATS ACL.
+    Клиент имеет publish только своего subject и subscribe своего inbox.
+    Timeout клиента 3s; проверка не меняет данные и допускает повтор.
+    Transport errors Nats-Service-Error/Nats-Service-Error-Code: 400 INVALID_ARGUMENT,
+    503 AUTH_BUSY/AUTH_UNAVAILABLE. allowed=false — действительный запрет.
+channels:
+  access:
+    address: brai.auth.v2.dialogues-access.{binding}
+    parameters:
+      binding:
+        description: Закреплённый оператором идентификатор endpoint из 64 hex-символов.
+    messages:
+      request:
+        payload:
+          type: object
+          additionalProperties: false
+      response:
+        payload:
+          type: object
+          additionalProperties: false
+          required: [allowed, userId, profileId]
+          properties:
+            allowed: {type: boolean}
+            userId: {type: string}
+            profileId: {type: string}
+operations:
+  authorize:
+    action: receive
+    channel: {$ref: '#/channels/access'}
+    messages: [{$ref: '#/channels/access/messages/request'}]
+    reply:
+      channel: {$ref: '#/channels/access'}
+      messages: [{$ref: '#/channels/access/messages/response'}]

@@ -1,6 +1,6 @@
 // ABOUTME: Читает явную конфигурацию автономного сервиса авторизации.
 // ABOUTME: Не содержит адресов экземпляра и не выводит секреты.
-export interface Config { databaseURL:string; secret:string; origin:string; trustedOrigins:string[]; identityMode?:"email"|"telegram"; ssoHubOrigin?:string; ssoPreviewOrigins?:string[]; emailFrom:string; resendKey:string; natsServers:string[]; natsUser?:string; natsPassword?:string; natsCredsFile?:string; natsCAFile?:string; }
+export interface Config { dialoguesBindingsFile?:string; databaseURL:string; secret:string; origin:string; trustedOrigins:string[]; identityMode?:"email"|"telegram"; ssoHubOrigin?:string; ssoPreviewOrigins?:string[]; emailFrom:string; resendKey:string; natsServers:string[]; natsUser?:string; natsPassword?:string; natsCredsFile?:string; natsCAFile?:string; }
 /** Проверяет необходимые входы запуска; бросает ошибку с именем отсутствующего параметра. */
 export function config(env:NodeJS.ProcessEnv=process.env, mode:"runtime"|"migration"="runtime"):Config {
  const required=(key:string)=>{const value=env[key];if(!value)throw new Error(`Missing ${key}`);return value;};
@@ -14,5 +14,5 @@ export function config(env:NodeJS.ProcessEnv=process.env, mode:"runtime"|"migrat
  if((ssoHubOrigin===undefined)!==(rawPreviews===undefined))throw new Error("AUTH_SSO_HUB_ORIGIN and AUTH_SSO_PREVIEW_ORIGINS must be configured together");
  const ssoPreviewOrigins=rawPreviews?.split(",").map(value=>validateOrigin(value.trim(),"AUTH_SSO_PREVIEW_ORIGINS"));
  if(ssoHubOrigin!==undefined&&(validateOrigin(ssoHubOrigin,"AUTH_SSO_HUB_ORIGIN")!==origin||!ssoHubOrigin.startsWith("https://")||!ssoPreviewOrigins?.length||ssoPreviewOrigins.some(value=>!value.startsWith("https://")||value===origin||!trustedOrigins.includes(value))))throw new Error("Invalid AUTH_SSO configuration");
- return {identityMode,ssoHubOrigin,ssoPreviewOrigins,databaseURL:required("AUTH_DATABASE_URL"),secret,origin,trustedOrigins,emailFrom:identityMode==="email"?required("AUTH_EMAIL_FROM"):"",resendKey:mode==="runtime"&&identityMode==="email"?required("RESEND_API_KEY"):"",natsServers:mode==="runtime"?(env.NATS_SERVERS??required("NATS_URL")).split(","):[],natsUser:env.NATS_USER,natsPassword:env.NATS_PASSWORD,natsCredsFile:env.NATS_CREDS_FILE,natsCAFile:env.NATS_CA_FILE};
+ return {dialoguesBindingsFile:env.AUTH_DIALOGUES_BINDINGS_FILE,identityMode,ssoHubOrigin,ssoPreviewOrigins,databaseURL:required("AUTH_DATABASE_URL"),secret,origin,trustedOrigins,emailFrom:identityMode==="email"?required("AUTH_EMAIL_FROM"):"",resendKey:mode==="runtime"&&identityMode==="email"?required("RESEND_API_KEY"):"",natsServers:mode==="runtime"?(env.NATS_SERVERS??required("NATS_URL")).split(","):[],natsUser:env.NATS_USER,natsPassword:env.NATS_PASSWORD,natsCredsFile:env.NATS_CREDS_FILE,natsCAFile:env.NATS_CA_FILE};
 }

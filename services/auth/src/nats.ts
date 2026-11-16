@@ -6,6 +6,7 @@ import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import { bridge,subjects,type Operation } from "./bridge.js";
 import { captureEmailGrant, confirmEmailSession, permitsWebSession, responseCookies, withEmailGrant, permitsEmailCode } from "./web-access.js";
+import {dialoguesBindings,dialoguesAccess} from './dialogues-access.js';
 import { sessionIdentity,v2,v2Subjects } from "./v2.js";
 /** Подключается только с явно настроенными NATS credentials и собственным inbox. */
 export function connectNats(cfg:Config){return connect({servers:cfg.natsServers,user:cfg.natsUser,pass:cfg.natsPassword,authenticator:cfg.natsCredsFile?credsAuthenticator(readFileSync(cfg.natsCredsFile)):undefined,tls:cfg.natsCAFile?{caFile:cfg.natsCAFile}:undefined,inboxPrefix:"_INBOX.brai_auth",maxReconnectAttempts:-1,timeout:5000,name:"brai_auth"});}
@@ -13,6 +14,18 @@ export function connectNats(cfg:Config){return connect({servers:cfg.natsServers,
 export async function runNats(nc:NatsConnection,cfg:Config,handler:(request:Request)=>Promise<Response>,pool:Pool){
  const service=await nc.services.add({name:"brai_auth",version:"2.0.0",description:"Brai authentication",queue:"brai_auth"});
  const pending=new Set<Promise<void>>();
+ const bindings=cfg.dialoguesBindingsFile?dialoguesBindings(JSON.parse(readFileSync(cfg.dialoguesBindingsFile,'utf8'))):[];
+ for(const binding of bindings)service.addEndpoint('dialogues_'+binding.subject.split('.').at(-1),{subject:binding.subject,queue:'brai_auth',handler:(error,msg)=>{
+  if(error)return;
+  if(pending.size>=16){msg.respondError(503,'AUTH_BUSY');return;}
+  const work=(async()=>{
+   let input:unknown;
+   try{if(msg.data.length>32768)throw new Error();input=JSON.parse(new TextDecoder().decode(msg.data));}
+   catch{msg.respondError(400,'INVALID_ARGUMENT');return;}
+   try{msg.respond(Buffer.from(JSON.stringify(await dialoguesAccess(pool,binding,input))));}
+   catch(error){const invalid=error instanceof Error&&error.message==='Invalid request';msg.respondError(invalid?400:503,invalid?'INVALID_ARGUMENT':'AUTH_UNAVAILABLE');}
+  })();pending.add(work);void work.finally(()=>pending.delete(work));
+ }});
  for(const [name,subject] of Object.entries({...subjects,...v2Subjects}))service.addEndpoint(name.replaceAll("-","_"),{subject,queue:"brai_auth",handler:(error,msg)=>{
   if(error)return;
   if(pending.size>=16){msg.respondError(503,"AUTH_BUSY");return;}
