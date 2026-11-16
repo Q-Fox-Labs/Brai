@@ -1,5 +1,5 @@
 // ABOUTME: Проверяет prepared recipes через настоящий Temporal, runner, PostgreSQL и приватный Codex.
-// ABOUTME: Все владельцы, Auth replies и часы reviewer fixture синтетические; рабочие системы не используются.
+// ABOUTME: Scope синтетический; внешний runner, его сервис и DATA остаются у операторского владельца.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -24,7 +24,9 @@ import {createVerificationEngine} from '../../dist/verification-engine.js';
 import {verificationProcess} from '../../dist/verification-process.js';
 import {deliverVerification} from '../../dist/verification-worker.js';
 import {codexExecutor} from '../../dist/verification-models.js';
+import {verificationFlowConfig,verificationFlowPolicyInput} from './verification-flow-config.mjs';
 
+const flowConfig=verificationFlowConfig(process.env);
 const required=name=>{const value=process.env[name];assert.ok(value,`${name} is required`);return value;};
 const loopbackURL=(value,protocol,path)=>{const url=new URL(value);assert.equal(url.hostname,'127.0.0.1');if(protocol)assert.equal(url.protocol,protocol);if(path)assert.equal(url.pathname,path);return url;};
 const fixture=readPrivate(required('BUG_HUNT_FLOW_DB_CONFIG'));
@@ -40,30 +42,38 @@ const temporalAddress=required('BUG_HUNT_TEST_TEMPORAL_ADDRESS');assert.match(te
 const namespace=required('BUG_HUNT_TEST_TEMPORAL_NAMESPACE');assert.match(namespace,/^bug-hunt-test-[a-z0-9-]+$/);
 
 test('real prepared recipes, independent reviewer, Temporal and isolated originals',async t=>{
- const root=await mkdtemp(join(tmpdir(),'bug-hunt-real-flow-')),socket=join(root,'runner.sock');
+ const {externalWorker,runnerSocket:externalRunnerSocket,installationId,ownerId,taskQueue}=flowConfig;
+ const root=await mkdtemp(join(tmpdir(),'bug-hunt-real-flow-')),socket=externalRunnerSocket??join(root,'runner.sock');
  const owner=new Pool({connectionString:fixture.ownerURL,max:1}),app=new Pool({connectionString:fixture.appURL,max:6});
- const run=randomUUID(),installationId='flow-'+run,p={ownerId:'synthetic-'+run,actorId:'fixture',source:'codex',reviewer:false};
- const policy=verificationPolicy({enabled:true,revision:'flow-real-recipes',externalAllowedOwners:[p.ownerId],executor:'codex_app_server',budgets:{dailyCalls:40,ownerDailyCalls:40,dailyTokens:500000}});
- const taskQueue='bug-hunt-fixture-'+run,handles=[];let server,nc,subscription,control,native,worker,workerRun,execution;
+ const p={ownerId,actorId:'fixture',source:'codex',reviewer:false};
+ const policy=verificationPolicy(verificationFlowPolicyInput(flowConfig));
+ const handles=[];let server,nc,subscription,control,native,worker,workerRun,execution;
  try{
   await migrate(owner,'bug_hunt_owner','bug_hunt_app');
   const originals=createStore(app,{installationId,cursorKey:'synthetic-originals-cursor-key-at-least32',maxReports:100,reportsPerMinute:100,maxDatabaseBytes:1073741824});
   const store=createVerificationStore(app,{installationId,cursorKey:'synthetic-verification-cursor-key-atleast32',policy:()=>policy,maxDatabaseBytes:1073741824});
-  const node=await realpath(process.execPath),nodeRoot=dirname(dirname(node));
-  const runnerConfig={socket,stateRoot:join(root,'runs'),node,nodeRoot,dependenciesRoot:deps,dependencies_sha256:await treeDigest(deps,2147483648),node_sha256:await fileDigest(node),recipes:registry.runnerRecipes};
-  server=await startRunnerServer(runnerConfig,event=>{if(event.exit_code!==0)console.log(JSON.stringify({synthetic_runner_exit_code:event.exit_code}));});
+  if(externalRunnerSocket===undefined){
+   const node=await realpath(process.execPath),nodeRoot=dirname(dirname(node));
+   const runnerConfig={socket,stateRoot:join(root,'runs'),node,nodeRoot,dependenciesRoot:deps,dependencies_sha256:await treeDigest(deps,2147483648),node_sha256:await fileDigest(node),recipes:registry.runnerRecipes};
+   server=await startRunnerServer(runnerConfig,event=>{if(event.exit_code!==0)console.log(JSON.stringify({synthetic_runner_exit_code:event.exit_code}));});
+  }
   nc=await connect({servers:natsURL.href,...(process.env.NATS_USER?{user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD}: {})});
   const codec=StringCodec();subscription=nc.subscribe('brai.auth.v2.identity-get',{callback:(_error,msg)=>{
    try{const input=JSON.parse(codec.decode(msg.data));msg.respond(codec.encode(JSON.stringify({user:{id:input.userId,status:input.userId===p.ownerId?'active':'blocked'}})));}catch{msg.respond(codec.encode('{}'));}
   }});await nc.flush();
-  const engine=createVerificationEngine({stopping:()=>execution?.stopping??false,store,sources:sourceReader(registry.sources),runner:runnerClient(socket),recipes:registry.recipes,
-   activeOwner:async id=>{try{await activeIdentity(async(subject,input)=>JSON.parse(codec.decode((await nc.request(subject,codec.encode(JSON.stringify(input)),{timeout:2000})).data)),id);return true;}catch{return false;}},
-   executor:(_r,dispatch)=>codexExecutor(profile,dispatch)});
-  execution=verificationProcess(engine);
-  control=await Connection.connect({address:temporalAddress});native=await NativeConnection.connect({address:temporalAddress});
+  if(!externalWorker){
+   const engine=createVerificationEngine({stopping:()=>execution?.stopping??false,store,sources:sourceReader(registry.sources),runner:runnerClient(socket),recipes:registry.recipes,
+    activeOwner:async id=>{try{await activeIdentity(async(subject,input)=>JSON.parse(codec.decode((await nc.request(subject,codec.encode(JSON.stringify(input)),{timeout:2000})).data)),id);return true;}catch{return false;}},
+    executor:(_r,dispatch)=>codexExecutor(profile,dispatch)});
+   execution=verificationProcess(engine);
+  }
+  control=await Connection.connect({address:temporalAddress});
+  if(!externalWorker)native=await NativeConnection.connect({address:temporalAddress});
   const client=new Client({connection:control,namespace});
-  worker=await Worker.create({connection:native,namespace,taskQueue,workflowBundle:{codePath:fileURLToPath(new URL('../../dist/verification-workflow-bundle.cjs',import.meta.url))},activities:{advance:id=>execution.advance(id)},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2});
-  workerRun=worker.run();
+  if(!externalWorker){
+   worker=await Worker.create({connection:native,namespace,taskQueue,workflowBundle:{codePath:fileURLToPath(new URL('../../dist/verification-workflow-bundle.cjs',import.meta.url))},activities:{advance:id=>execution.advance(id)},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2});
+   workerRun=worker.run();
+  }
   const recipe=ref=>{const found=registry.recipes.filter(x=>x.ref===ref);assert.equal(found.length,1,ref);return found[0];};
   const baseline=recipe('reviewer-baseline'),fixed=recipe('reviewer-fixed');
   assert.ok(!registry.recipes.some(item=>item.source_commit==='0'.repeat(40)));

@@ -140,7 +140,9 @@
       "services/bug-hunt/tests/verification-runner-binding.test.mjs",
       "services/bug-hunt/tests/verification-sources.test.mjs",
       "services/bug-hunt/tests/verification-node-loader.test.mjs",
-      "services/bug-hunt/tests/verification-close.test.mjs"
+      "services/bug-hunt/tests/verification-close.test.mjs",
+      "services/bug-hunt/tests/integration/verification-flow-config.mjs",
+      "services/bug-hunt/tests/verification-flow-config.test.mjs"
     ]
   },
   "dependencies": [

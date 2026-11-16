@@ -62,11 +62,13 @@ Helper работает как `provider.uid:provider.gid`, `extra_groups=[]`.
 этот каталог при рестарте, обновлении или rollback.
 
 Для production Root заранее создаёт и слушает AF_UNIX/SOCK_STREAM socket
-Root:workerGid 0660 в каталоге Root:workerGid 0710 и передаёт listener через
+Root:workerGid 0660 в каталоге Root:workerGid 0751 и передаёт listener через
 `--listen-fd`. Helper проверяет тип, listening и точное `getsockname`, снимает
 наследование FD; проверка pathname permissions и его уборка принадлежат Root.
 Worker не добавляется в provider group и не видит owner mounts. Соединение
 допускается только при Linux `SO_PEERCRED.uid == peerUid`, без исключения для UID 0.
+Execute для остальных UID позволяет runner пройти к своему подкаталогу; читать
+список общего каталога и подключаться к credential-сокету он не может.
 
 Без `--listen-fd` доступен private self-bind: родитель socket принадлежит helper
 UID/GID с режимом 0700; socket создаётся 0600 и только если pathname отсутствует.
