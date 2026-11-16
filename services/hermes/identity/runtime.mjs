@@ -7,7 +7,6 @@ import { resolve } from 'node:path';
 import { validateConfig } from '../config.mjs';
 import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { createBraiTools, connectPorts } from '../runtime.mjs';
-import dialoguesTools from './dialogues-tools.json' with { type: 'json' };
 import { createHistoryCatalog } from './history.mjs';
 import { createBugHuntCatalog } from './bug-hunt.mjs';
 import { createOwnerTranscription } from './transcription.mjs';
@@ -129,8 +128,6 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
       ...ports,
       async list(name){
        if(name==='history')return history.list();
-       // AIDEV-NOTE: Каталог доступен при отказе listener; данные требуют active Auth.
-       if(name==='dialogues')return structuredClone(dialoguesTools);
        if(name==='transcription'&&transcription)return transcription.list();
        return ports.list(name);
       },

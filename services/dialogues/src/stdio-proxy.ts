@@ -41,7 +41,11 @@ try {
  server.setRequestHandler(CallToolRequestSchema,async req=>{
   let current: Client;
   try { current = await connect(); }
-  catch { return {isError:true,content:[{type:'text',text:JSON.stringify({code:'DIALOGUES_UNAVAILABLE',applied:false,next_action:'Предупреди пользователя и продолжай работу. Повтори обращение после восстановления сервиса.'})}]}; }
+  catch (error) {
+   const forbidden = error instanceof StreamableHTTPError && (error.code === 401 || error.code === 403);
+   return {isError:true,content:[{type:'text',text:JSON.stringify({code:forbidden?'FORBIDDEN':'DIALOGUES_UNAVAILABLE',applied:false,
+    next_action:forbidden?'Доступ к Диалогам отклонён. Проверьте авторизацию; ожидание восстановления сервиса не исправит доступ.':'Предупреди пользователя и продолжай работу. Повтори обращение после восстановления сервиса.'})}]};
+  }
   const stale = (e:unknown) => e instanceof StreamableHTTPError && e.code === 404;
   // AIDEV-NOTE: HTTP 404 listener гарантирует отказ до выполнения операции.
   return callWithRecovery(req.params.name,async()=>{

@@ -27,3 +27,19 @@ test('offline startup retains tools; the next call reconnects without restarting
   assert(!recovered.content[0].text.includes('DIALOGUES_UNAVAILABLE'));
  }finally{await client.close();await server?.close();await rm(dir,{recursive:true,force:true});}
 });
+
+for (const status of [401,403]) test(`stdio reports HTTP ${status} as access refusal before dispatch`,async()=>{
+ const {createServer}=await import('node:http');
+ const listener=createServer((_req,res)=>res.writeHead(status).end());
+ await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));
+ const dir=await mkdtemp(join(tmpdir(),'dialogues-auth-'));
+ await writeFile(join(dir,'token'),'a'.repeat(40));
+ const client=new Client({name:'auth-test',version:'1'});
+ try{
+  await client.connect(new StdioClientTransport({command:process.execPath,args:[new URL('../dist/stdio-proxy.js',import.meta.url).pathname],env:{DIALOGUES_MCP_URL:`http://127.0.0.1:${listener.address().port}/mcp`,DIALOGUES_MCP_TOKEN_FILE:join(dir,'token')},stderr:'pipe'}));
+  const result=await client.callTool({name:'dialogues_exchange',arguments:{}});
+  const diagnostic=JSON.parse(result.content[0].text);
+  assert.equal(diagnostic.code,'FORBIDDEN');assert.equal(diagnostic.applied,false);
+  assert.equal((await client.listTools()).tools.length,2);
+ }finally{await client.close();listener.closeAllConnections();await new Promise(resolve=>listener.close(resolve));await rm(dir,{recursive:true,force:true});}
+});
