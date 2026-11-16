@@ -3,6 +3,7 @@
 import {WebSocket} from 'ws';
 import {randomUUID} from 'node:crypto';
 import {DialoguesFault,summaryText} from './domain.js';
+export type LunaSocket={readyState:number;on(event:string,listener:(...args:any[])=>void):any;once(event:string,listener:(...args:any[])=>void):any;send(value:string,callback?:(error?:Error)=>void):void;terminate():void};
 export type Execution={native_thread_id?:string|null;native_turn_id?:string|null;native_launch_id?:string|null;execution_state?:string;result?:string;compressions?:Execution[];compression_v2?:{prompt_version:string;sources:string[];executions:Execution[]}};
 type Save=(state:Execution)=>Promise<void>;
 const fault=(code:string)=>new DialoguesFault(code);
@@ -19,8 +20,8 @@ export function isolatedThreadConfig(config:any){
  return overrides;
 }
 /** Создаёт выделенное соединение, не отвечает на чужие server requests. */
-export function createLuna(socketUrl:string,cwd:string){
- let socket:WebSocket|undefined,sequence=0,connection:Promise<void>|undefined,effort:string|undefined,ready=false;
+export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<LunaSocket>){
+ let socket:LunaSocket|undefined,sequence=0,connection:Promise<void>|undefined,effort:string|undefined,ready=false;
  const pending=new Map<number,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout}>();
  const ownThreads=new Set<string>();let config:any;
  let busy=false;
@@ -33,8 +34,8 @@ export function createLuna(socketUrl:string,cwd:string){
  async function connect(){
   if(socket?.readyState===WebSocket.OPEN&&ready)return;if(connection)return connection;
   connection=(async()=>{
-   if(!/^ws\+unix:\/.+:\/$/.test(socketUrl))throw fault('INVALID_NATIVE_SOCKET');
-   socket=new WebSocket(socketUrl,{maxPayload:4*1024*1024});const ws=socket;
+   if(!openSocket&&!/^ws\+unix:\/.+:\/$/.test(socketUrl))throw fault('INVALID_NATIVE_SOCKET');
+   socket=openSocket?await openSocket():new WebSocket(socketUrl,{maxPayload:4*1024*1024});const ws=socket;
    ws.on('message',raw=>{try{const p=JSON.parse(raw.toString());
     if(p.method){
      if(p.id!==undefined&&ownThreads.has(p.params?.threadId)){

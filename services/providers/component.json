@@ -46,7 +46,11 @@
       "services/providers/src/postgres.ts",
       "services/providers/src/schema.ts",
       "services/providers/src/v1-schema.ts",
-      "services/providers/litellm.yaml"
+      "services/providers/litellm.yaml",
+      "services/providers/codex-auth/helper.py",
+      "services/providers/codex-auth/client.py",
+      "services/providers/codex-auth/openrpc.json",
+      "services/providers/codex-auth/README.md"
     ],
     "checks": [
       "services/providers/tests/artifacts.test.mjs",
@@ -61,7 +65,8 @@
       "services/providers/tests/observation.test.mjs",
       "services/providers/tests/operations.test.mjs",
       "services/providers/tests/postgres.test.mjs",
-      "services/providers/tests/v0.test.mjs"
+      "services/providers/tests/v0.test.mjs",
+      "services/providers/codex-auth/test_credentials.py"
     ]
   },
   "dependencies": [
@@ -91,7 +96,8 @@
       "services/providers/litellm.yaml",
       "services/providers/migrations",
       "services/providers/package.json",
-      "services/providers/schemas"
+      "services/providers/schemas",
+      "services/providers/codex-auth"
     ],
     "entrypoints": [
       "services/providers/dist/main.js",

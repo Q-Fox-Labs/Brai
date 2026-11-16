@@ -53,7 +53,9 @@
       "services/auth/contracts/service-data-scope.d.mts",
       "services/auth/contracts/PERSONAL_DATA.md",
       "services/auth/src/lifecycle.ts",
-      "services/auth/src/web-access.ts"
+      "services/auth/src/web-access.ts",
+      "services/auth/src/dialogues-access.ts",
+      "services/auth/dialogues-access.asyncapi.yaml"
     ],
     "checks": [
       "services/auth/tests/bridge.test.mjs",
@@ -75,7 +77,8 @@
       "services/auth/tests/email.roles.sol.test.mjs",
       "services/auth/tests/integration/00-roles-regression.test.mjs",
       "services/auth/tests/integration/roles-revocation.test.mjs",
-      "services/auth/tests/integration/email-role-generation.test.mjs"
+      "services/auth/tests/integration/email-role-generation.test.mjs",
+      "services/auth/tests/dialogues-access.test.mjs"
     ]
   },
   "dependencies": [],

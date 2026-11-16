@@ -111,5 +111,5 @@ identity broker. Нужны `DIALOGUES_NATS_SERVERS`, `DIALOGUES_NATS_CREDS_FILE
 В этом режиме свёртка использует `DIALOGUES_CODEX_SOCKET_URL` и
 `DIALOGUES_SUMMARY_CWD`; socket должен принадлежать отдельному исполнителю
 Диалогов. Наличие этих входов не доказывает независимость установленного runtime:
-самостоятельный запуск исполнителя и операторский переход ещё требуют реализации
-и живой приёмки без Hermes.
+самостоятельный native доступен через DIALOGUES_SUBSCRIPTION_CONFIG_FILE.
+Операторский переход и приёмка полного installed runtime проверяются отдельно.
