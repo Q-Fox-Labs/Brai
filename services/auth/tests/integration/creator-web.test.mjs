@@ -40,7 +40,7 @@ async function session(user) {
 async function oldCode(user, code) {
  await owner.query("INSERT INTO brai_login_code(user_id,digest,expires_at) VALUES($1,$2,now()+interval '2 minutes')",[user.id,createHmac('sha256',secret).update('code:'+code).digest('hex')]);
 }
-after(async()=>{if(ids.length)await owner.query('DELETE FROM "user" WHERE id=ANY($1::text[])',[ids]);await Promise.all([owner.end(),app.end()]);});
+after(async()=>{if(ids.length){await owner.query('DELETE FROM brai_identity_audit WHERE target_id=ANY($1::text[])',[ids]);await owner.query('DELETE FROM "user" WHERE id=ANY($1::text[])',[ids]);}await Promise.all([owner.end(),app.end()]);});
 
 test('только Creator получает код; прежние коды и сессии остальных отзываются',async()=>{
  await run(process.execPath,[fileURLToPath(new URL('../../dist/migrate.js',import.meta.url))],{env:{...process.env,AUTH_DATABASE_URL:ownerURL,AUTH_OWNER_ROLE:'auth_owner',AUTH_APP_ROLE:'auth_app',AUTH_SECRET:secret,AUTH_ORIGIN:'https://fixture.example',AUTH_IDENTITY_MODE:'telegram'}});
@@ -51,6 +51,12 @@ test('только Creator получает код; прежние коды и �
  for(const [item,code] of [[admin,'123456789ABC'],[user,'123456789ABD'],[guest,'123456789ABE']])await oldCode(item,code);
  assert.equal(await consumeCode(app,secret,'123456789ABC','fixture'),null);
  const creatorSession=await session(creator);
+ // Принятый старый Auth сохранял сессию Admin при повышении до Creator.
+ const promoted=await seed('admin'), oldAdminSession=await session(promoted);
+ await owner.query("UPDATE brai_identity SET role='creator', lifecycle_generation=1 WHERE user_id=$1",[promoted.id]);
+ await owner.query(`UPDATE "session" SET brai_generation=1,"createdAt"=now()+interval '1 second' WHERE id=$1`,[oldAdminSession]);
+ await owner.query("INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,generation) VALUES($1,'operator',$2,'role-set','admin','creator',1)",[randomUUID(),promoted.id]);
+
  const origin='https://fixture.example', preview='https://preview.fixture.example';
  const cfg={identityMode:'telegram',origin,trustedOrigins:[origin,preview],ssoHubOrigin:origin,ssoPreviewOrigins:[preview],secret};
  const auth=createAuth(cfg,app);
@@ -67,8 +73,15 @@ test('только Creator получает код; прежние коды и �
  const revokedSessions=await Promise.all([admin,user,guest,legacy].map(session));
  for(const item of [creator,admin,user,guest,legacy])await owner.query('INSERT INTO verification(id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'5 minutes\',now(),now())',[randomUUID(),'sign-in-otp-'+item.email,'synthetic']);
  await revokeNonCreatorWebAccess(app);
+ const newCreatorSession=await session(promoted);
  await revokeNonCreatorWebAccess(app);
  assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=$1',[creatorSession])).rows[0].n,1);
+ assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=$1',[oldAdminSession])).rows[0].n,0);
+ assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=$1',[newCreatorSession])).rows[0].n,1);
+ // Следующее повышение после отката должно иметь собственную отметку.
+ await owner.query("INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,generation) VALUES($1,'operator',$2,'role-set','admin','creator',2)",[randomUUID(),promoted.id]);
+ await revokeNonCreatorWebAccess(app);
+ assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=$1',[newCreatorSession])).rows[0].n,0);
  assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=ANY($1::text[])',[revokedSessions])).rows[0].n,0);
  assert.equal((await owner.query('SELECT count(*)::int AS n FROM brai_login_code WHERE user_id=ANY($1::text[])',[[admin.id,user.id,guest.id]])).rows[0].n,0);
  assert.equal((await owner.query('SELECT count(*)::int AS n FROM verification WHERE identifier=ANY($1::text[])',[[creator,admin,user,guest,legacy].map(x=>'sign-in-otp-'+x.email)])).rows[0].n,1);
@@ -84,4 +97,7 @@ test('только Creator получает код; прежние коды и �
  assert.equal((await adminAction(app,secret,manager.id,'role-set',{userId:creator.id,role:'creator',requestId:randomUUID()})).status,200);
  assert.equal(await consumeCode(app,secret,pending.code,'fixture'),null);
  assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=$1',[creatorSession])).rows[0].n,0);
+ const currentSession=await session(creator);
+ await revokeNonCreatorWebAccess(app);
+ assert.equal((await owner.query('SELECT count(*)::int AS n FROM "session" WHERE id=$1',[currentSession])).rows[0].n,1);
 });

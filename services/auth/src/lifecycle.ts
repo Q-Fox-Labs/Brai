@@ -76,7 +76,13 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  }
  const activate=roleChange?user.status==='active':body.status!=='provisioning';
  await client.query("INSERT INTO brai_user_operation(id,request_id,fingerprint,user_id,generation,kind,state,activate_on_success,required_policy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",[randomUUID(),requestId,fingerprint,user.id,generation,kind,noop?'succeeded':'pending',activate,roleChange||nextRole==='guest'?1:0]);
- await client.query('INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,request_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),actor,user.id,action,roleChange?user.role:null,roleChange?nextRole:null,requestId,generation]);
+ const auditId=randomUUID();
+ await client.query('INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,request_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[auditId,actor,user.id,action,roleChange?user.role:null,roleChange?nextRole:null,requestId,generation]);
+ // Эта версия уже отозвала входы в той же транзакции; повторный старт не
+ // должен отзывать новые сессии после завершённого повышения.
+ if(roleChange&&!noop&&user.role!=='creator'&&nextRole==='creator')
+  await client.query(`INSERT INTO brai_identity_audit(id,actor_id,target_id,action)
+   VALUES($1,'operator',$2,'creator-web-cutover')`,['creator-web-cutover-v1:'+auditId,user.id]);
  return response(user.id);
 }
 

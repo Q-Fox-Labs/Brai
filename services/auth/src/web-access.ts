@@ -91,6 +91,15 @@ export async function revokeNonCreatorWebAccess(pool:Pool){
  try{
   await client.query('BEGIN');await lifecycleLock(client);
   await client.query('DELETE FROM "session" s WHERE NOT EXISTS (SELECT 1 FROM brai_identity i WHERE i.user_id=s."userId" AND i.role=\'creator\' AND i.status=\'active\')');
+  // Старый Auth сохранял сессии при повышении до Creator. Отмечаем каждое
+  // такое событие отдельно, чтобы повтор после отката тоже отзывал старый вход.
+  await client.query(`WITH promotions AS (
+   INSERT INTO brai_identity_audit(id,actor_id,target_id,action)
+   SELECT 'creator-web-cutover-v1:' || a.id,'operator',a.target_id,'creator-web-cutover'
+   FROM brai_identity_audit a WHERE a.action='role-set'
+    AND a.old_role IS NOT NULL AND a.old_role<>'creator' AND a.new_role='creator'
+   ON CONFLICT(id) DO NOTHING RETURNING target_id
+  ) DELETE FROM "session" s WHERE s."userId" IN (SELECT target_id FROM promotions)`);
   await client.query("DELETE FROM brai_login_code c WHERE NOT EXISTS (SELECT 1 FROM brai_identity i WHERE i.user_id=c.user_id AND i.role='creator' AND i.status='active')");
   await client.query(`DELETE FROM verification v WHERE v.identifier LIKE 'sign-in-otp-%' AND NOT EXISTS
    (SELECT 1 FROM "user" u JOIN brai_identity i ON i.user_id=u.id WHERE v.identifier='sign-in-otp-' || lower(u.email) AND i.role='creator' AND i.status='active')`);
