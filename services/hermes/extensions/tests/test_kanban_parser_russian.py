@@ -148,6 +148,31 @@ class KanbanParserRussianTests(unittest.TestCase):
         self.assertIn('причина ошибки: доступ отклонён', result)
         self.assertNotIn('forbidden', result)
 
+    def test_run_history_explains_provider_errors(self):
+        from io import StringIO
+        tree = ast.parse((self.root / 'hermes_cli/kanban.py').read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_cmd_runs')
+        run = SimpleNamespace(ended_at=120, started_at=100, outcome='crashed', status='done',
+                              profile='main', summary=None, error='English provider error SECRET')
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+        scope = {'argparse': argparse, '_run_state_kwargs': lambda args, command: ({}, 0),
+                 'kbc': SimpleNamespace(connect_closing=lambda: Connection()),
+                 'kb': SimpleNamespace(list_runs=lambda connection, task, **kw: [run]),
+                 '_json_out': lambda args, value: False, '_obj_dict': lambda run, fields: {},
+                 '_RUNS_RUN_FIELDS': (), '_ui': lambda text: text,
+                 '_fmt_ts': lambda ts: 'дата', '_status_name': lambda status: 'прервана',
+                 'time': SimpleNamespace(time=lambda: 120)}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), 'kanban.py', 'exec'), scope)
+        i18n = SimpleNamespace(get_language=lambda: 'ru', _russian_gateway_error=lambda text: 'доступ отклонён')
+        output = StringIO()
+        with patch.dict(sys.modules, {'agent.i18n': i18n}), contextlib.redirect_stdout(output):
+            scope['_cmd_runs'](SimpleNamespace(task_id='t_12'))
+        self.assertIn('прервана', output.getvalue())
+        self.assertIn('Причина: доступ отклонён', output.getvalue())
+        self.assertNotIn('SECRET', output.getvalue())
+
     def test_explicit_english_keeps_original_help(self):
         run, _ = self._runner('en')
         self.assertIn('Task title', run('create -h'))

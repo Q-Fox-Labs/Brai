@@ -8680,3 +8680,44 @@ diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
      def value_text(key, value):
          if key == "error" and value:
              return _russian_gateway_error(str(value))
+diff --git a/hermes_cli/kanban_output.py b/hermes_cli/kanban_output.py
+--- a/hermes_cli/kanban_output.py
++++ b/hermes_cli/kanban_output.py
+@@ -58,3 +58,5 @@
+             "done": "выполнена", "archived": "в архиве", "active": "выполняется",
+-            "success": "успешно", "succeeded": "успешно", "failed": "ошибка",
++            "success": "успешно", "succeeded": "успешно", "completed": "выполнена", "failed": "ошибка",
++            "crashed": "прервана", "spawn_failed": "не запущена", "timed_out": "время истекло",
++            "reclaimed": "освобождена", "gave_up": "попытки закончились", "(running)": "в работе",
+             "cancelled": "отменена", "canceled": "отменена"}.get(status, status)
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -725,3 +725,7 @@
+             if r.error:
+-                print(f"        ! {r.error.splitlines()[0][:160]}")
++                if russian:
++                    from agent.i18n import _russian_gateway_error
++                    print(f"        ! Причина: {_russian_gateway_error(str(r.error))}")
++                else:
++                    print(f"        ! {r.error.splitlines()[0][:160]}")
+     return 0
+@@ -1415,2 +1419,4 @@
+         return 0
++    from agent.i18n import get_language
++    russian = get_language() == "ru"
+     print(_ui(f"{'#':3s}  {'OUTCOME':12s}  {'PROFILE':16s}  {'ELAPSED':>8s}  STARTED"))
+@@ -1422,2 +1428,4 @@
+         outcome = r.outcome or ("(running)" if not r.ended_at else r.status)
++        if russian:
++            outcome = _status_name(outcome)
+         print(f"{i:3d}  {outcome:12s}  {(r.profile or '-'):16s}  {el:>8s}  {_fmt_ts(r.started_at)}")
+@@ -1426,3 +1434,7 @@
+         if r.error:
+-            print(f"     ✖ {r.error[:100]}")
++            if russian:
++                from agent.i18n import _russian_gateway_error
++                print(f"     ✖ Причина: {_russian_gateway_error(str(r.error))}")
++            else:
++                print(f"     ✖ {r.error[:100]}")
+     return 0
