@@ -1313,3 +1313,15 @@
      "DO NOT USE FOR (use these instead):\n"
      "- Mechanical multi-step work with no reasoning needed -> execute_code\n"
      "- A single tool call -> call the tool directly\n"
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3284,5 +3284,9 @@
+         # consumer via ``streaming_tts_consumer_holder[0]``. Gates: voice input, auto-TTS enabled for this
+         # chat, adapter supports streaming, and a usable streaming TTS provider configured. See #60671.
++        # Telegram озвучивает только принятый итог; commentary не должна
++        # помечать голосовой финал уже отправленным.
++        if str(getattr(source.platform, "value", source.platform)) == "telegram":
++            return
+         _stts_adapter = self._delivery_adapter_for(source)
+         _is_voice_input = (
+             message_type is not None

@@ -331,6 +331,15 @@ def _steer_identity(source, message_id):
             str(source.thread_id or ''), str(source.user_id or ''), str(message_id))
 
 
+def _steer_revision(event):
+    """Сравнить последнюю редакцию без временных путей скачанных файлов."""
+    refs = (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])
+    if getattr(event, 'media_urls', None) and not refs:
+        # До публикации идентичность файла проверяет существующий FileStore.
+        return None
+    return canonical([event.text or '', [ref.get('file', ref)['artifactId'] for ref in refs]])
+
+
 def _steer_lock(turn):
     import threading
     if not hasattr(turn, '_brai_steer_lock'):
@@ -405,10 +414,20 @@ def bind_steer_turn(agent, runner, ctx):
         agent._brai_steer_closed = False
         agent._brai_steer_turn = turn
         agent._brai_steer_generation = turn._brai_steer_generation
+        # Токены ещё не принятого финала не должны попадать в общий stream ledger.
+        # Завершённые промежуточные сообщения сохраняют свой отдельный callback.
+        agent.stream_delta_callback = None
         turn._brai_steer_agent = agent
         ids = getattr(turn, '_brai_input_ids', set())
         ids.add(_steer_identity(ctx.source, ctx.inbound_message_id))
         turn._brai_input_ids = ids
+        revisions = getattr(turn, '_brai_steer_revisions', {})
+        initial = getattr(turn, 'event', None) or getattr(turn, '_brai_adapter_event', None)
+        if initial is not None:
+            revision = _steer_revision(initial)
+            if revision is not None:
+                revisions.setdefault(_steer_identity(initial.source, initial.message_id), revision)
+        turn._brai_steer_revisions = revisions
         pending, turn._brai_pending_steers = getattr(turn, '_brai_pending_steers', []), []
         for payload in pending:
             if not agent.steer(payload):
@@ -440,6 +459,7 @@ def clear_steer_turn(turn):
         turn._brai_steer_events = []
         turn._brai_pending_steers = []
         turn._brai_input_ids = set()
+        turn._brai_steer_revisions = {}
         turn._brai_steer_agent = None
         turn._brai_adapter_admission = None
         turn._brai_adapter_event = None
@@ -465,6 +485,16 @@ async def steer_active_input(runner, event, session_key):
     if reserved is not None and (reserved[0] is not turn or reserved[1] is not generation):
         release_event(event)
         return True  # Завершённый/остановленный ход не передаёт свой отложенный вход новому.
+    identity, revision = _steer_identity(event.source, event.message_id), _steer_revision(event)
+    with _steer_lock(turn):
+        if revision is not None and getattr(turn, '_brai_steer_revisions', {}).get(identity) == revision:
+            # Независимая защита от replay с потерянной/изменённой transport-квитанцией.
+            event._gateway_accepted = True
+            if reserved is not None:
+                reserved[2].set()
+            if not any(item is event for item in getattr(turn, '_brai_steer_events', [])):
+                release_event(event)
+            return True
     if not getattr(event, '_bot_loop_admitted', False):
         if not runner._admit_bot_message_for_source(event.source):
             finish_steer_preparation(event)
@@ -472,6 +502,7 @@ async def steer_active_input(runner, event, session_key):
             return True
         event._bot_loop_admitted = True
     if not await accept_event(event):
+        event._gateway_accepted = True
         release_event(event)
         if reserved is not None:
             reserved[2].set()
@@ -519,6 +550,10 @@ async def steer_active_input(runner, event, session_key):
         ids = getattr(turn, '_brai_input_ids', set())
         ids.add(_steer_identity(event.source, event.message_id))
         turn._brai_input_ids = ids
+        if revision is not None:
+            revisions = getattr(turn, '_brai_steer_revisions', {})
+            revisions[identity] = revision
+            turn._brai_steer_revisions = revisions
         # AIDEV-NOTE: Worker подтверждает durable input по этому флагу. Без него
         # уже переданный steer объявлялся непринятым и повторялся supervisor.
         event._gateway_accepted = True

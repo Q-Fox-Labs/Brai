@@ -729,6 +729,71 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.delivery_journal.input_status(ident,digest)['state'],'accepted')
         native.clear_steer_turn(turn)
 
+    async def test_source_replay_is_accepted_without_repeating_steer_but_edits_survive(self):
+        """Новый transport ID не обходит source dedup; новые сообщения и редакции остаются."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        accepted=[]
+        def event(message_id,text):
+            return SimpleNamespace(source=source,message_id=message_id,text=text,media_urls=[],
+                media_types=[],metadata={},internal=False,_gateway_accepted=False)
+        with patch.dict(sys.modules,{'brai_files':native}):
+            for message_id,text in [('later','Да'),('later','Да'),('new','Да'),
+                                    ('later','Нет'),('later','Да')]:
+                value=event(message_id,text)
+                self.assertTrue(await native.steer_active_input(runner,value,'session'))
+                self.assertTrue(value._gateway_accepted)
+                if agent._pending_steer is not None:
+                    accepted.append((message_id,text))
+                    agent._pending_steer=None
+        self.assertEqual(accepted,[('later','Да'),('new','Да'),('later','Нет'),('later','Да')])
+        native.clear_steer_turn(turn)
+        self.assertEqual(turn._brai_steer_revisions,{})
+
+    async def test_original_input_replay_and_uncommitted_final_deltas_are_suppressed(self):
+        """Исходный input известен до первого API, черновые delta не доходят до транспорта."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        initial=SimpleNamespace(source=source,message_id='initial',text='Поручение',
+            media_urls=[],metadata={},internal=False,_gateway_accepted=False)
+        turn.event=initial
+        deltas=[];commentary=[]
+        agent.stream_delta_callback=deltas.append
+        agent.interim_assistant_callback=commentary.append
+        native.bind_steer_turn(agent,runner,ctx)
+        for candidate in ['Черновик до уточнения','Другой черновик']:
+            if agent.stream_delta_callback is not None:
+                agent.stream_delta_callback(candidate)
+        self.assertEqual(deltas,[])
+        agent.interim_assistant_callback('Проверяю документ')
+        self.assertEqual(commentary,['Проверяю документ'])
+        with patch.dict(sys.modules,{'brai_files':native}):
+            self.assertTrue(await native.steer_active_input(runner,initial,'session'))
+        self.assertTrue(initial._gateway_accepted)
+        self.assertIsNone(agent._pending_steer)
+        native.clear_steer_turn(turn)
+
+    def test_steer_revision_uses_published_media_identity_not_download_path(self):
+        """Стабильные вложения сравниваются по artifact ID и сохраняют порядок."""
+        def event(paths,ids):
+            return SimpleNamespace(text='Подпись',media_urls=paths,
+                metadata={'_brai_artifacts':[{'file':{'artifactId':ident}} for ident in ids]})
+        original=native._steer_revision(event(['/copy/one','/copy/two'],['one','two']))
+        self.assertEqual(original,native._steer_revision(event(['/new/one','/new/two'],['one','two'])))
+        self.assertNotEqual(original,native._steer_revision(event(['/copy/two','/copy/one'],['two','one'])))
+        self.assertIsNone(native._steer_revision(event(['/unpublished'],[])))
+
+    def test_telegram_does_not_start_provisional_streaming_tts(self):
+        """Отдельная commentary не может занять доставку ещё не принятого голосового финала."""
+        scope={}
+        function('gateway/run_turn.py',['_run_agent_start_streaming_tts'],scope)
+        runner=SimpleNamespace(_delivery_adapter_for=lambda _:
+            self.fail('Telegram must retain the whole-file final voice path'))
+        holder=[None]
+        scope['_run_agent_start_streaming_tts'](runner,
+            SimpleNamespace(platform=SimpleNamespace(value='telegram')),'voice',{},holder)
+        self.assertEqual(holder,[None])
+
     def test_late_steer_defers_actual_final_response_without_persisting_a_draft(self):
         """Реальный finish_text_response возвращает continue, затем ровно один финал."""
         from dataclasses import make_dataclass
