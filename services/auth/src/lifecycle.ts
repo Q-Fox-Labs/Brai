@@ -61,13 +61,13 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  }
  await client.query("UPDATE brai_user_operation SET state='cancelled',updated_at=now() WHERE user_id=$1 AND state IN ('pending','running')",[user.id]);
  const generation=(await client.query('UPDATE brai_identity SET lifecycle_generation=lifecycle_generation+1 WHERE user_id=$1 RETURNING lifecycle_generation',[user.id])).rows[0].lifecycle_generation;
- if(noop){
+ if(noop||preserveManagement){
   await client.query('UPDATE "session" SET brai_generation=$2 WHERE "userId"=$1 AND brai_generation=$2-1',[user.id,generation]);
  }
  if(!noop){
   const nextStatus=preserveManagement?'active':kind==='stop'?'blocked':'provisioning';
   await client.query("UPDATE brai_identity SET role=$2,status=$3,profile_id=COALESCE(profile_id,$4) WHERE user_id=$1",[user.id,nextRole,nextStatus,randomUUID()]);
-  await client.query('DELETE FROM "session" WHERE "userId"=$1',[user.id]);
+  if(!preserveManagement)await client.query('DELETE FROM "session" WHERE "userId"=$1',[user.id]);
   await client.query('DELETE FROM brai_login_code WHERE user_id=$1',[user.id]);
   // AIDEV-NOTE: Код email-входа тоже не должен ожить после guest → user.
   await client.query(`DELETE FROM verification WHERE identifier IN
@@ -76,13 +76,7 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  }
  const activate=roleChange?user.status==='active':body.status!=='provisioning';
  await client.query("INSERT INTO brai_user_operation(id,request_id,fingerprint,user_id,generation,kind,state,activate_on_success,required_policy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",[randomUUID(),requestId,fingerprint,user.id,generation,kind,noop?'succeeded':'pending',activate,roleChange||nextRole==='guest'?1:0]);
- const auditId=randomUUID();
- await client.query('INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,request_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[auditId,actor,user.id,action,roleChange?user.role:null,roleChange?nextRole:null,requestId,generation]);
- // Эта версия уже отозвала входы в той же транзакции; повторный старт не
- // должен отзывать новые сессии после завершённого повышения.
- if(roleChange&&!noop&&user.role!=='creator'&&nextRole==='creator')
-  await client.query(`INSERT INTO brai_identity_audit(id,actor_id,target_id,action)
-   VALUES($1,'operator',$2,'creator-web-cutover')`,['creator-web-cutover-v1:'+auditId,user.id]);
+ await client.query('INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,request_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),actor,user.id,action,roleChange?user.role:null,roleChange?nextRole:null,requestId,generation]);
  return response(user.id);
 }
 

@@ -77,9 +77,6 @@ test("admin lifecycle serializes grants, revokes, leases and explicit retries",a
   assert.equal((await lifecycleWorker(app,"complete",{operationId:expired.id,leaseToken:expired.leaseToken,success:true})).accepted,false);
   assert.equal((await lifecycleWorker(app,"complete",{operationId:resumed.id,leaseToken:resumed.leaseToken,success:true})).accepted,true);
   assert.equal((await profileReady(app,userId,profileId)).status,"active");
-  // Синтетический Creator нужен для проверки жизненного цикла веб-сессии.
-  await owner.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[actor]);
-  await owner.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[userId]);
   const cfg={identityMode:"telegram",origin:"https://fixture.example",trustedOrigins:["https://fixture.example"],secret};
   const engine=createAuth(cfg,app);
   const login=async(code)=>engine.handler(new Request(cfg.origin+"/api/auth/brai/telegram-redeem",{method:"POST",headers:{origin:cfg.origin,"content-type":"application/json","x-forwarded-for":"192.0.2.77"},body:JSON.stringify({code})}));

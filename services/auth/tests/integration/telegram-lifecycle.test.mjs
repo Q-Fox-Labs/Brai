@@ -73,6 +73,15 @@ test("aliases share admin lifecycle and unlink invalidates pending web login",as
   assert.deepEqual((await action("users-get",{userId:user.id})).body.user.telegramIds,[second]);
 
   const context=await engine.$context,createSession=context.internalAdapter.createSession.bind(context.internalAdapter);
+  // Роль может измениться между погашением кода и созданием cookie.
+  const roleRaceCode=await issueCode(app,secret,second);
+  context.internalAdapter.createSession=async(...args)=>{
+   context.internalAdapter.createSession=createSession;
+   await owner.query("UPDATE brai_identity SET role='user' WHERE user_id=$1",[user.id]);
+   return createSession(...args);
+  };
+  assert.equal((await login(roleRaceCode.code)).status,401);
+  await owner.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[user.id]);
   context.internalAdapter.createSession=async(...args)=>{
    context.internalAdapter.createSession=createSession;
    await owner.query("UPDATE brai_identity SET role='user' WHERE user_id=$1",[user.id]);

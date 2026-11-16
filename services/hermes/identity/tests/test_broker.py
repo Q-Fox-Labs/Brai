@@ -47,7 +47,7 @@ class FakeControl:
             profile = self.profiles.get(params.get("uid"))
             if not profile:
                 raise PermissionError("synthetic inactive principal")
-            return {"userId": profile["userId"], "profileId": profile["profileId"], "role": "user", "generation": 0}
+            return {"userId": profile["userId"], "profileId": profile["profileId"], "role": getattr(self, "role", "user"), "generation": 0}
         if method == "identity.resolve":
             telegram_id = params.get("telegramId")
             profile = next((p for p in self.profiles.values()
@@ -170,6 +170,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.broker.turns)
 
     async def test_account_alias_resolves_same_owner_and_revocation_blocks_active_delivery(self):
+        self.control.role = 'creator'
         self.control.aliases['333444'] = '111222'
         primary = await self.broker.resolve('111222')
         alias = await self.broker.resolve('333444')
@@ -673,6 +674,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.control.calls, [])
 
     async def test_login_requires_registered_private_dm_and_returns_only_suppression(self):
+        self.control.role = 'creator'
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, "login.send", {})
         self.assertFalse(any(method == "login.send" for method, _params, _timeout in self.control.calls))
@@ -710,18 +712,15 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(status, {"suppressFinal": True, "needsAccountConsent": False})
 
-    async def test_login_propagates_verified_role_refusal_without_suppressing_reply(self):
+    async def test_login_refuses_non_creator_without_issuing_a_code(self):
         await self.broker.call(INGRESS_UID, 'ingress.admit', {
             'telegramId':'111222', 'chatId':'111222', 'privateChat':True, 'turnId':'role-denied',
         })
-        original = self.control.call
-        async def control(method, params, timeout=35):
-            if method == 'login.send':
-                return {'status':'denied', 'reason':'web-role-unavailable'}
-            return await original(method, params, timeout)
-        self.control.call = control
-        result = await self.broker.call(WORKER_UID, 'login.send', {})
-        self.assertEqual(result, {'status':'failed', 'reason':'web-role-unavailable', 'suppressFinal':False})
+        for role in ('admin', 'user'):
+            self.control.role = role
+            result = await self.broker.call(WORKER_UID, 'login.send', {})
+            self.assertEqual(result, {'status':'failed', 'reason':'web-role-unavailable', 'suppressFinal':False})
+        self.assertFalse(any(method == 'login.send' for method, _params, _timeout in self.control.calls))
         self.assertFalse(self.broker.turns[WORKER_UID]['suppressFinal'])
 
     def _publish_fixture(self, filename="file.bin"):
@@ -968,6 +967,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(notification)
 
     async def test_repeated_ingress_admit_preserves_suppression_and_request_id(self):
+        self.control.role = 'creator'
         params = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True, 'turnId': 'same'}
         await self.broker.call(INGRESS_UID, 'ingress.admit', params)
         await self.broker.call(WORKER_UID, 'login.send', {})
@@ -983,6 +983,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
 
     async def admit_login_input(self, input_id='a' * 64):
         """Зарегистрировать реальный private input без параметров из модели."""
+        self.control.role = 'creator'
         return await self.broker.call(INGRESS_UID, 'ingress.admit', {
             'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
             'turnId': 'login-turn', 'inputId': input_id})
@@ -1031,6 +1032,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(issued, [first_id, second_id])
 
     async def test_login_uses_admitted_topic_and_rejects_worker_topic_override(self):
+        self.control.role = 'creator'
         admission = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
                      'turnId': 'topic-turn', 'inputId': 'a' * 64, 'threadId': 73}
         broker_module.validate_params('ingress.admit', admission)
@@ -1162,6 +1164,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_unknown_receipt_survives_crash_and_cannot_be_replayed(self):
+        self.control.role = 'creator'
         root = Path(tempfile.mkdtemp(prefix='broker-login-unknown-', dir=TEMP_ROOT))
         state_path = root / 'delivery.sqlite'
         state_path.touch(mode=0o600)

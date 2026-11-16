@@ -99,9 +99,9 @@ test("A03/A04 creator сохраняет управление; admin защищ�
       env: { ...process.env, AUTH_DATABASE_URL: ownerURL, AUTH_OWNER_ROLE: "auth_owner", AUTH_BOOTSTRAP_FILE: bootstrapFile },
       timeout: 30000
     });
-    const converted = (await owner.query('SELECT role,status,lifecycle_generation FROM brai_identity WHERE user_id=$1', [soleAdmin.id])).rows[0];
-    assert.deepEqual(converted, { role: "creator", status: "active", lifecycle_generation: 1 });
-    assert.equal((await owner.query('SELECT 1 FROM "session" WHERE id=$1', [sessionId])).rowCount, 0);
+    const converted = (await owner.query('SELECT i.role,i.status,i.lifecycle_generation,s.brai_generation FROM brai_identity i JOIN "session" s ON s."userId"=i.user_id AND s.id=$2 WHERE i.user_id=$1',
+      [soleAdmin.id, sessionId])).rows[0];
+    assert.deepEqual(converted, { role: "creator", status: "active", lifecycle_generation: 1, brai_generation: 1 });
     assert.equal((await adminAction(app, secret, soleAdmin.id, "users-list", {})).status, 200);
     assert.equal((await adminAction(app, secret, soleAdmin.id, "invite-create", { role: "guest" })).status, 200);
 
