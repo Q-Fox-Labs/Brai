@@ -110,6 +110,7 @@
     "hermes_cli/journey.py",
     "hermes_cli/kanban.py",
     "hermes_cli/kanban_boards.py",
+    "hermes_cli/kanban_db.py",
     "hermes_cli/kanban_ops.py",
     "hermes_cli/kanban_output.py",
     "hermes_cli/kanban_parser.py",

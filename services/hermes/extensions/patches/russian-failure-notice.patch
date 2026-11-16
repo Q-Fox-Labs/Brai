@@ -8721,3 +8721,264 @@ diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
 +            else:
 +                print(f"     ✖ {r.error[:100]}")
      return 0
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -3917,3 +3917,3 @@
+
+-def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
++def build_worker_context(conn: sqlite3.Connection, task_id: str, *, human_ru: bool = False) -> str:
+     """Everything a worker should read about its task: header, body,
+@@ -3928,8 +3928,8 @@
+     lines: list[str] = []
+-    _ctx_header(lines, task)
+-    _ctx_attachments(lines, list_attachments(conn, task_id))
+-    _ctx_prior_attempts(lines, conn, task_id, now)
+-    _ctx_parent_results(lines, conn, task_id, now)
+-    _ctx_role_history(lines, conn, task, now)
+-    _ctx_comments(lines, list_comments(conn, task_id), now)
++    _ctx_header(lines, task, human_ru=human_ru)
++    _ctx_attachments(lines, list_attachments(conn, task_id), human_ru=human_ru)
++    _ctx_prior_attempts(lines, conn, task_id, now, human_ru=human_ru)
++    _ctx_parent_results(lines, conn, task_id, now, human_ru=human_ru)
++    _ctx_role_history(lines, conn, task, now, human_ru=human_ru)
++    _ctx_comments(lines, list_comments(conn, task_id), now, human_ru=human_ru)
+     return "\n".join(lines).rstrip() + "\n"
+@@ -3937,3 +3937,3 @@
+
+-def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
++def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES, *, human_ru: bool = False) -> str:
+     """Truncate to ``limit`` chars with a visible ellipsis."""
+@@ -3944,6 +3944,17 @@
+         return s
+-    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
+-
+-
+-def _ctx_stamp(ts: int, now: int) -> str:
++    return s[:limit] + (f"… [сокращено, пропущено символов: {len(s) - limit}]" if human_ru else f"… [truncated, {len(s) - limit} chars omitted]")
++
++
++def _ctx_age_ru(age: str) -> str:
++    if age == "just now":
++        return "только что"
++    if age.endswith(" ago") and len(age) > 5:
++        amount = age[:-4]
++        units = {"m": "мин", "h": "ч", "d": "дн"}
++        if amount[-1:] in units and amount[:-1].isdigit():
++            return f"{amount[:-1]} {units[amount[-1]]} назад"
++    return age
++
++
++def _ctx_stamp(ts: int, now: int, *, human_ru: bool = False) -> str:
+     """``YYYY-MM-DD HH:MM`` plus a relative age when one is available."""
+@@ -3951,2 +3962,4 @@
+     age = _relative_age(ts, now)
++    if human_ru:
++        age = _ctx_age_ru(age)
+     return f"{disp}, {age}" if age else disp
+@@ -3954,3 +3967,3 @@
+
+-def _ctx_metadata_line(metadata: Any) -> Optional[str]:
++def _ctx_metadata_line(metadata: Any, *, human_ru: bool = False) -> Optional[str]:
+     if not metadata:
+@@ -3958,3 +3971,3 @@
+     try:
+-        return f"_metadata_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True))}`"
++        return f"_{'дополнительные сведения' if human_ru else 'metadata'}_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True), human_ru=human_ru)}`"
+     except Exception:
+@@ -3963,3 +3976,3 @@
+
+-def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
++def _ctx_tail(items: list, cap: int, noun: str, *, human_ru: bool = False) -> tuple[list, Optional[str]]:
+     """Keep the newest ``cap`` items; describe the omitted head, if any."""
+@@ -3968,2 +3981,5 @@
+         return items, None
++    if human_ru:
++        label = {"attempt": "попыток", "comment": "комментариев"}.get(noun, "записей")
++        return items[-cap:], f"_(Пропущено ранних {label}: {omitted}; показаны последние {cap})_"
+     return items[-cap:], (
+@@ -3974,10 +3990,14 @@
+
+-def _ctx_header(lines: list[str], task: Task) -> None:
+-    lines.append(f"# Kanban task {task.id}: {task.title}")
++def _ctx_header(lines: list[str], task: Task, *, human_ru: bool = False) -> None:
++    lines.append(f"# {'Задача' if human_ru else 'Kanban task'} {task.id}: {task.title}")
+     lines.append("")
+-    lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
+-    lines.append(f"Status:   {task.status}")
++    lines.append(f"{'Исполнитель' if human_ru else 'Assignee'}: {task.assignee or ('не назначен' if human_ru else '(unassigned)')}")
++    if human_ru:
++        from hermes_cli.kanban_output import _status_name
++        lines.append(f"Состояние: {_status_name(task.status)}")
++    else:
++        lines.append(f"Status:   {task.status}")
+     if task.tenant:
+-        lines.append(f"Tenant:   {task.tenant}")
+-    lines.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")
++        lines.append(f"{'Организация' if human_ru else 'Tenant'}:   {task.tenant}")
++    lines.append(f"{'Рабочая папка' if human_ru else 'Workspace'}: {task.workspace_kind} @ {task.workspace_path or ('не определена' if human_ru else '(unresolved)')}")
+     if task.max_runtime_seconds is not None:
+@@ -3987,11 +4007,11 @@
+         effective_terminal_timeout = terminal_timeout or os.environ.get("TERMINAL_TIMEOUT")
+-        lines.append(f"Max runtime: {task.max_runtime_seconds}s")
++        lines.append(f"{'Максимальное время' if human_ru else 'Max runtime'}: {task.max_runtime_seconds}{' с' if human_ru else 's'}")
+         if effective_terminal_timeout:
+-            lines.append(f"Terminal timeout: {effective_terminal_timeout}s")
++            lines.append(f"{'Время ожидания терминала' if human_ru else 'Terminal timeout'}: {effective_terminal_timeout}{' с' if human_ru else 's'}")
+     if task.branch_name:
+-        lines.append(f"Branch:   {task.branch_name}")
++        lines.append(f"{'Ветка' if human_ru else 'Branch'}:   {task.branch_name}")
+     lines.append("")
+     if task.body and task.body.strip():
+-        lines.append("## Body")
+-        lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
++        lines.append("## Описание" if human_ru else "## Body")
++        lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES, human_ru=human_ru))
+         lines.append("")
+@@ -3999,3 +4019,3 @@
+
+-def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
++def _ctx_attachments(lines: list[str], attachments: list[Attachment], *, human_ru: bool = False) -> None:
+     """Absolute on-disk paths so the worker's file tools read them directly
+@@ -4004,4 +4024,5 @@
+         return
+-    lines.append("## Attachments")
++    lines.append("## Вложения" if human_ru else "## Attachments")
+     lines.append(
++        "Файлы, прикреплённые к задаче, доступны по указанным путям:" if human_ru else
+         "Files attached to this task. Read them with the file/terminal "
+@@ -4017,3 +4038,3 @@
+
+-def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
++def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int, *, human_ru: bool = False) -> None:
+     """Closed runs on this task (the active run is this worker), newest
+@@ -4021,3 +4042,3 @@
+     all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
+-    shown, omitted_note = _ctx_tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
++    shown, omitted_note = _ctx_tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt", human_ru=human_ru)
+     if not shown:
+@@ -4025,3 +4046,3 @@
+     first_shown_idx = len(all_prior) - len(shown) + 1
+-    lines.append("## Prior attempts on this task")
++    lines.append("## Предыдущие попытки" if human_ru else "## Prior attempts on this task")
+     if omitted_note:
+@@ -4029,12 +4050,19 @@
+     for offset, run in enumerate(shown):
+-        profile = run.profile or "(unknown)"
++        profile = run.profile or ("неизвестно" if human_ru else "(unknown)")
+         outcome = run.outcome or run.status
++        if human_ru:
++            from hermes_cli.kanban_output import _status_name
++            outcome = _status_name(outcome)
+         lines.append(
+-            f"### Attempt {first_shown_idx + offset} — {outcome} ({profile}, {_ctx_stamp(run.started_at, now)})"
++            f"### {'Попытка' if human_ru else 'Attempt'} {first_shown_idx + offset} — {outcome} ({profile}, {_ctx_stamp(run.started_at, now, human_ru=human_ru)})"
+         )
+         if run.summary and run.summary.strip():
+-            lines.append(_ctx_cap(run.summary))
++            lines.append(_ctx_cap(run.summary, human_ru=human_ru))
+         if run.error and run.error.strip():
+-            lines.append(f"_error_: {_ctx_cap(run.error)}")
+-        meta_line = _ctx_metadata_line(run.metadata)
++            if human_ru:
++                from agent.i18n import _russian_gateway_error
++                lines.append(f"_причина ошибки_: {_russian_gateway_error(run.error)}")
++            else:
++                lines.append(f"_error_: {_ctx_cap(run.error)}")
++        meta_line = _ctx_metadata_line(run.metadata, human_ru=human_ru)
+         if meta_line:
+@@ -4044,3 +4072,3 @@
+
+-def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
++def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int, *, human_ru: bool = False) -> None:
+     """Done-parent handoffs: newest ``completed`` run's summary+metadata,
+@@ -4060,4 +4088,5 @@
+         if not wrote_header:
+-            lines.append("## Parent task results")
++            lines.append("## Результаты предыдущих задач" if human_ru else "## Parent task results")
+             lines.append(
++                "_Результаты предыдущих задач сохранены на момент их завершения. Если сведения могли устареть, проверьте их._" if human_ru else
+                 "_Handoffs from upstream tasks, captured when each parent "
+@@ -4071,10 +4100,12 @@
+         age = _relative_age(done_ts, now)
+-        lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
++        if human_ru:
++            age = _ctx_age_ru(age)
++        lines.append(f"### {pid}" + ((f" (завершена {age})" if human_ru else f" (completed {age})") if age else ""))
+         if run is not None and run.summary and run.summary.strip():
+-            lines.append(_ctx_cap(run.summary))
++            lines.append(_ctx_cap(run.summary, human_ru=human_ru))
+         elif pt.result:
+-            lines.append(_ctx_cap(pt.result))
++            lines.append(_ctx_cap(pt.result, human_ru=human_ru))
+         else:
+-            lines.append("(no result recorded)")
+-        meta_line = _ctx_metadata_line(run.metadata) if run is not None else None
++            lines.append("(результат не записан)" if human_ru else "(no result recorded)")
++        meta_line = _ctx_metadata_line(run.metadata, human_ru=human_ru) if run is not None else None
+         if meta_line:
+@@ -4084,3 +4115,3 @@
+
+-def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, now: int) -> None:
++def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, now: int, *, human_ru: bool = False) -> None:
+     """The assignee's 5 most recent completed runs on OTHER tasks — implicit
+@@ -4098,7 +4129,7 @@
+         return
+-    lines.append(f"## Recent work by @{task.assignee}")
++    lines.append(f"## {'Последние задачи исполнителя' if human_ru else 'Recent work by'} @{task.assignee}")
+     for row in role_rows:
+-        first = _first_line(row["summary"], 200) or "(no summary)"
++        first = _first_line(row["summary"], 200) or ("(сводка не записана)" if human_ru else "(no summary)")
+         lines.append(
+-            f"- {row['id']} — {row['title']} ({_ctx_stamp(int(row['ended_at']), now)}): {first}"
++            f"- {row['id']} — {row['title']} ({_ctx_stamp(int(row['ended_at']), now, human_ru=human_ru)}): {first}"
+         )
+@@ -4107,3 +4138,3 @@
+
+-def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
++def _ctx_comments(lines: list[str], comments: list[Comment], now: int, *, human_ru: bool = False) -> None:
+     """Newest ``_CTX_MAX_COMMENTS`` comments. The explicit "comment from
+@@ -4112,6 +4143,6 @@
+     attacker-influenceable body (defense-in-depth)."""
+-    shown, omitted_note = _ctx_tail(comments, _CTX_MAX_COMMENTS, "comment")
++    shown, omitted_note = _ctx_tail(comments, _CTX_MAX_COMMENTS, "comment", human_ru=human_ru)
+     if not shown:
+         return
+-    lines.append("## Comment thread")
++    lines.append("## Комментарии" if human_ru else "## Comment thread")
+     if omitted_note:
+@@ -4124,4 +4155,7 @@
+         safe_author = (c.author or "").replace("`", "")
+-        lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
+-        lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))
++        if human_ru:
++            lines.append(f"Комментарий исполнителя `{safe_author}`, {_ctx_stamp(c.created_at, now, human_ru=True)}:")
++        else:
++            lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
++        lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES, human_ru=human_ru))
+         lines.append("")
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -1443,4 +1443,5 @@
+ def _cmd_context(args: argparse.Namespace) -> int:
+-    with kbc.connect_closing() as conn:
+-        text = kb.build_worker_context(conn, args.task_id)
++    from agent.i18n import get_language
++    with kbc.connect_closing() as conn:
++        text = kb.build_worker_context(conn, args.task_id, human_ru=get_language() == "ru")
+     print(text)
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -4001,3 +4001,4 @@
+         lines.append(f"{'Организация' if human_ru else 'Tenant'}:   {task.tenant}")
+-    lines.append(f"{'Рабочая папка' if human_ru else 'Workspace'}: {task.workspace_kind} @ {task.workspace_path or ('не определена' if human_ru else '(unresolved)')}")
++    workspace = ({"scratch": "временная папка", "worktree": "отдельная рабочая копия", "dir": "папка"}.get(task.workspace_kind, task.workspace_kind) if human_ru else task.workspace_kind)
++    lines.append(f"{'Рабочая папка' if human_ru else 'Workspace'}: {workspace} @ {task.workspace_path or ('не определена' if human_ru else '(unresolved)')}")
+     if task.max_runtime_seconds is not None:
+@@ -4032,3 +4033,3 @@
+         size_kb = max(1, (att.size + 1023) // 1024) if att.size else 0
+-        size_str = f", {size_kb} KB" if size_kb else ""
++        size_str = (f", {size_kb} {'КБ' if human_ru else 'KB'}" if size_kb else "")
+         ctype = f", {att.content_type}" if att.content_type else ""

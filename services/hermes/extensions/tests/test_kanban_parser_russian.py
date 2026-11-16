@@ -173,6 +173,56 @@ class KanbanParserRussianTests(unittest.TestCase):
         self.assertIn('Причина: доступ отклонён', output.getvalue())
         self.assertNotIn('SECRET', output.getvalue())
 
+    def test_user_context_is_russian_and_worker_context_remains_english(self):
+        import __future__
+        import json
+        tree = ast.parse((self.root / 'hermes_cli/kanban_db.py').read_text())
+        names = {'build_worker_context', '_ctx_cap', '_ctx_age_ru', '_ctx_stamp', '_ctx_metadata_line',
+                 '_ctx_tail', '_ctx_header', '_ctx_attachments', '_ctx_prior_attempts',
+                 '_ctx_parent_results', '_ctx_role_history', '_ctx_comments'}
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        self.assertEqual({n.name for n in nodes}, names)
+        task = SimpleNamespace(id='t_12', title='Отчёт', assignee='Мария', status='running', tenant=None,
+                               workspace_kind='scratch', workspace_path='/tmp/work', max_runtime_seconds=None,
+                               branch_name=None, body='User content in English')
+        run = SimpleNamespace(ended_at=110, started_at=100, profile='main', outcome='crashed', status='done',
+                              summary='Результат', error='English provider error SECRET', metadata=None)
+        attachment = SimpleNamespace(size=100, content_type='text/plain', filename='a.txt', stored_path='/tmp/a.txt')
+        comment = SimpleNamespace(author='Мария', created_at=100, body='Комментарий пользователя')
+        class Rows:
+            def fetchall(self): return []
+        class Connection:
+            def execute(self, *args): return Rows()
+        scope = {'_CTX_MAX_FIELD_BYTES': 1000, '_CTX_MAX_BODY_BYTES': 1000, '_CTX_MAX_COMMENT_BYTES': 1000,
+                 '_CTX_MAX_PRIOR_ATTEMPTS': 3, '_CTX_MAX_COMMENTS': 3, 'json': json, 'os': os,
+                 'time': SimpleNamespace(time=lambda: 120, strftime=lambda *args: 'дата', localtime=lambda ts: ts),
+                 '_relative_age': lambda ts, now: '3h ago', '_first_line': lambda text, limit: text,
+                 'get_task': lambda conn, tid: task, 'list_runs': lambda conn, tid: [run],
+                 'list_attachments': lambda conn, tid: [attachment], 'list_comments': lambda conn, tid: [comment]}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), 'kanban_db.py', 'exec',
+                     flags=__future__.annotations.compiler_flag), scope)
+        i18n = SimpleNamespace(_russian_gateway_error=lambda text: 'доступ отклонён')
+        kanban_output = SimpleNamespace(_status_name=lambda status: {'running': 'в работе', 'crashed': 'прервана'}.get(status, status))
+        with patch.dict(sys.modules, {'agent.i18n': i18n, 'hermes_cli.kanban_output': kanban_output}):
+            user = scope['build_worker_context'](Connection(), 't_12', human_ru=True)
+            worker = scope['build_worker_context'](Connection(), 't_12')
+        for text in ('# Задача t_12', 'Исполнитель: Мария', 'Состояние: в работе', '## Описание',
+                     '## Вложения', 'Рабочая папка: временная папка', '## Предыдущие попытки', 'причина ошибки_: доступ отклонён', '## Комментарии'):
+            self.assertIn(text, user)
+        self.assertIn('User content in English', user)
+        self.assertNotIn('English provider error SECRET', user)
+        self.assertIn('# Kanban task t_12', worker)
+        self.assertIn('_error_: English provider error SECRET', worker)
+        self.assertIn('comment from worker', worker)
+        expected = ("# Kanban task t_12: Отчёт\n\nAssignee: Мария\nStatus:   running\n"
+                    "Workspace: scratch @ /tmp/work\n\n## Body\nUser content in English\n\n"
+                    "## Attachments\nFiles attached to this task. Read them with the file/terminal "
+                    "tools at the absolute paths below:\n- `a.txt`, text/plain, 1 KB → `/tmp/a.txt`\n\n"
+                    "## Prior attempts on this task\n### Attempt 1 — crashed (main, дата, 3h ago)\n"
+                    "Результат\n_error_: English provider error SECRET\n\n## Comment thread\n"
+                    "comment from worker `Мария` at дата, 3h ago:\nКомментарий пользователя\n")
+        self.assertEqual(worker, expected)
+
     def test_explicit_english_keeps_original_help(self):
         run, _ = self._runner('en')
         self.assertIn('Task title', run('create -h'))
