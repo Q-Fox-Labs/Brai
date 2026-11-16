@@ -32,7 +32,7 @@ export async function natsPrincipal(wire:Wire,context:unknown):Promise<Principal
   const reply=await wire("brai.auth.v1.session",{headers:context.headers,body:{}});
   const body=reply?.body;
   if(reply?.status!==200||!body?.user?.id||body.session?.userId!==body.user.id||!(Date.parse(body.session?.expiresAt)>Date.now())||body.user.status!=="active")throw new Fault("UNAUTHENTICATED");
-  return {ownerId:body.user.id,actorId:"web:"+body.user.id,source:"web",reviewer:body.user.role==="admin"};
+  return {ownerId:body.user.id,actorId:"web:"+body.user.id,source:"web",reviewer:body.user.role==="admin"||body.user.role==="creator"};
  }
  if(context.kind==="hermes"&&exact(context,["kind","userId","profileId"])&&typeof context.userId==="string"&&typeof context.profileId==="string"){
   await activeIdentity(wire,context.userId,context.profileId);

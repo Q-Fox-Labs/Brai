@@ -23,6 +23,7 @@ function fixture(options={}){
   if(method==="mcpServerStatus/list")return {data:options.openMcp?[{name:"synthetic",runtimeStatus:"ready"}]:[],nextCursor:null};
   if(method==="thread/start"){if(options.lostThreadAck)throw new VF("NATIVE_RPC_TIMEOUT","unknown");return {thread:{id:"own-thread"},sandbox:{type:"readOnly"},approvalPolicy:"never"};}
   if(method==="turn/start"){
+   options.onTurn?.();
    if(options.lostTurnAck)throw new VF("NATIVE_RPC_TIMEOUT","unknown");
    if(options.quiet)return {turn:{id:"own-turn"}};
    setTimeout(()=>{
@@ -182,7 +183,7 @@ test("native turn still obeys a shorter remaining attempt budget",async()=>{
  assert.ok(Date.parse(cp.native.call_deadline_at)>=initial+5000);
 });
 test("native quiet turn notices revoked policy before its long deadline",{timeout:2000},async()=>{
- let checks=0;const f=fixture({quiet:true,allowed:async()=>++checks<3}),i=intent();
+ let revoked=false;const f=fixture({quiet:true,onTurn:()=>{revoked=true;},allowed:async()=>!revoked}),i=intent();
  i.deadline_at=new Date(Date.now()+900000).toISOString();
  const cp=await f.executor.startStep(i,async()=>{});
  assert.equal(cp.state,"failed");assert.equal(cp.code,"POLICY_REVOKED");assert.equal(f.tools,0);

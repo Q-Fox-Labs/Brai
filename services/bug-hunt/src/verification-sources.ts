@@ -5,15 +5,16 @@ import {promisify} from "node:util";
 import {VerificationFault as VF,type Snapshot} from "./verification.js";
 import {verificationHash as hash} from "./verification-store.js";
 const run=promisify(execFile);
-export interface SourceRegistration {id:string;repository:string;components:string[];paths:string[];externalAllowed:boolean}
+export interface SourceRegistration {id:string;repository:string;components:string[];paths:string[];commits:string[];externalAllowed:boolean}
 /** Создаёт reader с операторским registry; модель может выбирать лишь разрешённые относительные paths. */
 export function sourceReader(registry:SourceRegistration[]){
  return {async read(snapshot:Snapshot,id:string,path:string,first=1,last=200){
   const source=snapshot.source,entry=registry.find(r=>r.id===id&&r.components.includes(source?.component_id??""));
-  if(!source||source.id!==id||!entry||!/^[a-f0-9]{40}$/.test(source.commit))throw new VF("SOURCE_UNAVAILABLE");
-  if(!path||path.length>500||path.startsWith("/")||path.includes("\\")||path.split("/").some(p=>!p||p==="."||p===".."||p.startsWith(".")||/^(?:auth|credentials|secrets|private|usercustom)(?:[._-]|$)/i.test(p))||!entry.paths.some(p=>path===p||p.endsWith("/")&&path.startsWith(p)))throw new VF("SOURCE_FORBIDDEN");
+  if(!source||source.id!==id||!entry||!/^[a-f0-9]{40}$/.test(source.commit)||!entry.commits?.includes(source.commit))throw new VF("SOURCE_UNAVAILABLE");
+  if(!path||path.length>500||path.startsWith("/")||path.includes("\\")||path.split("/").some((p,i)=>!p||p==="."||p===".."||p.startsWith(".")||/^(?:credentials|secrets|private|runtime|usercustom)(?:[._-]|$)/i.test(p)||/^auth(?:[._-]|$)/i.test(p)&&!(i===1&&path.startsWith("services/auth/")))||!entry.paths.some(p=>path===p||p.endsWith("/")&&path.startsWith(p)))throw new VF("SOURCE_FORBIDDEN");
   if(!Number.isSafeInteger(first)||!Number.isSafeInteger(last)||first<1||last<first||last-first>=200)throw new VF("INVALID_ARGUMENT");
-  const args=["--no-replace-objects","--git-dir="+entry.repository];
+  // AIDEV-NOTE: Доверие действует только для операторского repository в этом вызове, включая другой UID worker.
+  const args=["--no-replace-objects","-c","safe.directory="+entry.repository,"-C",entry.repository];
   const env={PATH:"/usr/bin:/bin",GIT_CONFIG_NOSYSTEM:"1",GIT_CONFIG_GLOBAL:"/dev/null",GIT_NO_REPLACE_OBJECTS:"1",GIT_OPTIONAL_LOCKS:"0",HOME:"/nonexistent"};
   try{
    const tree=await run("/usr/bin/git",[...args,"ls-tree","-z",source.commit,"--",path],{env,timeout:3000,maxBuffer:2048});

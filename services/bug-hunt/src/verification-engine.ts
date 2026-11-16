@@ -6,13 +6,18 @@ import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import type {Tool} from "@brai/providers";
 import {prepareExternalProjection} from "./projection.js";
-import {VerificationFault as VF,resolveSol,validateResult,sameScope,type InvestigationExecutor,type ModelIntent,type ModelCheckpoint,type Scope,type Evidence,type Candidate,type Review,type ReproductionRunner,type RunSpec,type Oracle} from "./verification.js";
+import {VerificationFault as VF,resolveSol,validateResult,sameScope,type InvestigationExecutor,type ModelIntent,type ModelCheckpoint,type Scope,type Snapshot,type Evidence,type Candidate,type Review,type ReproductionRunner,type RunSpec,type Oracle} from "./verification.js";
 import {verificationHash as hash,type createVerificationStore,type Investigation} from "./verification-store.js";
 import type {sourceReader} from "./verification-sources.js";
 import type {Dispatch} from "./verification-models.js";
 type Store=ReturnType<typeof createVerificationStore>;
 type Row=Record<string,any>;
-export interface PreparedRecipe {ref:string;recipe_id:string;recipe_version:string;source_id:string;source_commit:string;source_sha256:string;source_tree_sha256:string;source_path:string;requirement_path:string;requirement_sha256:string;expected:string;fixture_ref:string;refutes_claim?:string;confirms_claim?:string}
+export interface PreparedRecipe {ref:string;recipe_id:string;recipe_version:string;source_id:string;source_commit:string;source_sha256:string;source_tree_sha256:string;source_path:string;requirement_path:string;requirement_sha256:string;expected:string;fixture_ref:string;refutes_claim?:string;confirms_claim?:string;observation:{title:string;operation:string;expected:string;observed:string}}
+/** Каждый report в snapshot должен описывать тот же фиксированный сценарий. */
+export function recipeApplies(snapshot:Snapshot,observation:PreparedRecipe["observation"]):boolean {
+ const keys=["title","operation","expected","observed"] as const;
+ return !!observation&&Object.keys(observation).length===keys.length&&snapshot.cases.length>0&&snapshot.cases.every(c=>keys.every(k=>typeof observation[k]==="string"&&c.observation[k]===observation[k]));
+}
 interface Options {store:Store;sources:ReturnType<typeof sourceReader>;runner:ReproductionRunner;recipes:PreparedRecipe[];activeOwner:(id:string)=>Promise<boolean>;stopping?:()=>boolean;executor:(r:Investigation,d:Dispatch)=>InvestigationExecutor}
 const schema=JSON.parse(readFileSync(new URL("../schemas/verification-v3.schema.json",import.meta.url),"utf8"));
 const ajv=new Ajv.default({strict:false});addFormats.default(ajv);ajv.addSchema(schema);
@@ -120,9 +125,9 @@ export function createVerificationEngine(options:Options){
       if(unresolved)value={execution_id:unresolved.intent.execution_id,state:"outcome_unknown",code:"RUNNER_RECOVERY_REQUIRED"};
       else{
       const template=options.recipes.find(s=>s.ref===a.spec_ref&&s.source_id===r.snapshot.source?.id&&s.source_commit===r.snapshot.source?.commit);
-      if(!template)throw new VF("RECIPE_NOT_ALLOWED");
+      if(!template||!recipeApplies(r.snapshot,template.observation))throw new VF("RECIPE_NOT_ALLOWED");
       const [requirement,source]=await Promise.all([store.evidenceSource(r,"requirement",template.source_id,template.requirement_path,template.requirement_sha256),store.evidenceSource(r,"source",template.source_id,template.source_path,template.source_sha256)]);
-      if(!requirement||!source)throw new VF("RECIPE_EVIDENCE_REQUIRED");
+      if(!requirement||!source||requirement.provenance.complete!==true||requirement.sha256!==template.requirement_sha256)throw new VF("RECIPE_EVIDENCE_REQUIRED");
       const oracle:Oracle={requirement_id:requirement.id,requirement_sha256:requirement.sha256,expected:template.expected,version:"registry-oracle-v1",...(template.confirms_claim?{confirms_claim:template.confirms_claim}:{}),...(template.refutes_claim?{refutes_claim:template.refutes_claim}:{})};
       const body={execution_id,scope,recipe_id:template.recipe_id,recipe_version:template.recipe_version,source_id:template.source_id,source_commit:template.source_commit,source_sha256:template.source_sha256,source_tree_sha256:template.source_tree_sha256,oracle,oracle_sha256:hash(oracle),fixture_ref:template.fixture_ref};
       const old=all.find(e=>e.kind==="runner"&&e.step_key===execution_id);

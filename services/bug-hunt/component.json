@@ -11,7 +11,11 @@
     "services/bug-hunt/src/health.ts",
     "services/bug-hunt/src/migrate.ts",
     "services/bug-hunt/src/verification-worker.ts",
-    "services/bug-hunt/src/verification-runner.ts"
+    "services/bug-hunt/src/verification-runner.ts",
+    "services/bug-hunt/src/verification-recipes.ts",
+    "services/bug-hunt/owner-rpc/helper.py",
+    "services/bug-hunt/owner-rpc/client.py",
+    "services/bug-hunt/runtime/qualification.mjs"
   ],
   "inputs": {
     "build": [
@@ -71,7 +75,16 @@
       "services/bug-hunt/recipes/regression.mjs",
       "services/bug-hunt/recipes/lifecycle.mjs",
       "services/bug-hunt/recipes/manifest.json",
-      "services/bug-hunt/README.md"
+      "services/bug-hunt/README.md",
+      "services/bug-hunt/src/verification-native.ts",
+      "services/bug-hunt/src/verification-recipes.ts",
+      "services/bug-hunt/recipes/reviewer-role.mjs",
+      "services/bug-hunt/owner-rpc/helper.py",
+      "services/bug-hunt/owner-rpc/client.py",
+      "services/bug-hunt/owner-rpc/openrpc.json",
+      "services/bug-hunt/runtime/node-loader.mjs",
+      "services/bug-hunt/runtime/qualification.mjs",
+      "services/bug-hunt/owner-rpc/README.md"
     ],
     "checks": [
       "services/bug-hunt/tests/contracts.test.mjs",
@@ -116,7 +129,16 @@
       "services/bug-hunt/tests/providers-live-qualification.mjs",
       "services/bug-hunt/tests/integration/verification-restore.mjs",
       "services/bug-hunt/tests/integration/browser-stage3.mjs",
-      "services/bug-hunt/tests/native-scope-qualification.mjs"
+      "services/bug-hunt/tests/native-scope-qualification.mjs",
+      "services/bug-hunt/tests/verification-native.test.mjs",
+      "services/bug-hunt/tests/verification-worker.test.mjs",
+      "services/bug-hunt/tests/verification-recipes.test.mjs",
+      "services/bug-hunt/tests/verification-qualification.test.mjs",
+      "services/bug-hunt/owner-rpc/test_credentials.py",
+      "services/bug-hunt/tests/verification-applicability.test.mjs",
+      "services/bug-hunt/tests/verification-git-ownership.test.mjs",
+      "services/bug-hunt/tests/verification-runner-binding.test.mjs",
+      "services/bug-hunt/tests/verification-sources.test.mjs"
     ]
   },
   "dependencies": [
@@ -164,18 +186,30 @@
       "services/bug-hunt/VERIFICATION.md",
       "services/bug-hunt/asyncapi-v3.json",
       "services/bug-hunt/runner.openrpc.json",
-      "services/bug-hunt/recipes"
+      "services/bug-hunt/recipes",
+      "services/bug-hunt/owner-rpc/helper.py",
+      "services/bug-hunt/owner-rpc/client.py",
+      "services/bug-hunt/owner-rpc/openrpc.json",
+      "services/bug-hunt/runtime",
+      "services/bug-hunt/owner-rpc/README.md"
     ],
     "entrypoints": [
       "services/bug-hunt/dist/main.js",
       "services/bug-hunt/dist/migrate.js",
       "services/bug-hunt/dist/health.js",
       "services/bug-hunt/dist/verification-worker.js",
-      "services/bug-hunt/dist/verification-runner.js"
+      "services/bug-hunt/dist/verification-runner.js",
+      "services/bug-hunt/dist/verification-recipes.js",
+      "services/bug-hunt/runtime/qualification.mjs",
+      "services/bug-hunt/owner-rpc/helper.py",
+      "services/bug-hunt/owner-rpc/client.py"
     ],
     "smokeImports": [],
     "systemRequirements": [
-      "Node.js 24.22.1"
+      "Node.js 24.22.1",
+      "Python 3 (stdlib only); accepted existing Codex credential owner",
+      "bubblewrap (host worker native sandbox and runner)",
+      "Private stdio Codex app-server with auth.command and dynamic tools"
     ]
   },
   "deploy": {

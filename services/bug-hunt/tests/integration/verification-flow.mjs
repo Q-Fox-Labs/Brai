@@ -1,91 +1,118 @@
-// ABOUTME: Проходит настоящий snapshot → Codex investigator/reviewer → bwrap runner → validator → PostgreSQL.
-// ABOUTME: Использует только собственные synthetic БД, Git fixtures, native threads и Unix socket; не включает общий worker.
-import test from "node:test";
-import assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
-import {mkdtemp,mkdir,writeFile,rm,realpath} from "node:fs/promises";
-import {join,dirname} from "node:path";
-import {fileURLToPath} from "node:url";
-import {execFile} from "node:child_process";
-import {promisify} from "node:util";
-import {randomUUID} from "node:crypto";
-import {Pool} from "pg";
-import {migrate} from "../../dist/migrate.js";
-import {createStore} from "../../dist/storage.js";
-import {createVerificationStore,verificationHash as hash} from "../../dist/verification-store.js";
-import {verificationPolicy} from "../../dist/verification.js";
-import {sourceReader} from "../../dist/verification-sources.js";
-import {startRunnerServer,runnerClient,treeDigest,fileDigest} from "../../dist/verification-runner.js";
-import {createVerificationEngine} from "../../dist/verification-engine.js";
-import {connect} from "nats";
-import {codexExecutor,providersExecutor,nativeRpc} from "../../dist/verification-models.js";
-const executorKind=process.env.BUG_HUNT_FLOW_EXECUTOR??"codex_app_server";assert.ok(["codex_app_server","providers"].includes(executorKind));if(executorKind==="providers")assert.equal(process.env.BUG_HUNT_PREFLIGHT_TARGET,"dev");
-if(executorKind==="providers"&&process.getuid?.()===0){const uid=Number(process.env.BUG_HUNT_TEST_UID),gid=Number(process.env.BUG_HUNT_TEST_GID);assert.ok(Number.isSafeInteger(uid)&&uid>=1000&&Number.isSafeInteger(gid)&&gid>=1000);process.setgroups([]);process.setgid(gid);process.setuid(uid);}
-const exec=promisify(execFile),delay=ms=>new Promise(r=>setTimeout(r,ms));
-const fixture=JSON.parse(readFileSync(new URL("../../../../tmp/bug-hunt-test.json",import.meta.url),"utf8"));
-for(const key of ["ownerURL","appURL"]){const u=new URL(fixture[key]);assert.equal(u.hostname,"127.0.0.1");assert.equal(u.pathname,"/brai_bug_hunt_test");}
-test("three real controlled outcomes with immutable originals and a second Codex reviewer",{timeout:600000},async t=>{
- const tmpRoot=fileURLToPath(new URL("../../../../tmp/",import.meta.url));await mkdir(tmpRoot,{recursive:true});
- const root=await mkdtemp(join(tmpRoot,"verification-flow-")),source=join(root,"source"),repo=join(root,"source.git"),socket="/tmp/bhv3-"+randomUUID()+".sock";
- await mkdir(join(source,"fixtures"),{recursive:true});
- const implementation='export const evaluate = value => value > 0 ? "accepted" : "rejected";\n';
- const requirement="Contract: accept all nonnegative integers, including zero. Reject every negative integer.\n";
- const fixtureTexts={zero:JSON.stringify({module:"index.mjs",input:0}),negative:JSON.stringify({module:"index.mjs",input:-1})};
- await writeFile(join(source,"index.mjs"),implementation);await writeFile(join(source,"CONTRACT.md"),requirement);
- for(const [ref,body] of Object.entries(fixtureTexts))await writeFile(join(source,"fixtures",ref+".json"),body);
- await exec("/usr/bin/git",["init","--initial-branch=main",source]);
- await exec("/usr/bin/git",["-C",source,"add","index.mjs","CONTRACT.md","fixtures"]);
- await exec("/usr/bin/git",["-C",source,"-c","user.name=Synthetic Fixture","-c","user.email=fixture@example.invalid","commit","-m","fixture"]);
- const commit=(await exec("/usr/bin/git",["-C",source,"rev-parse","HEAD"])).stdout.trim();
- await exec("/usr/bin/git",["clone","--bare","--no-hardlinks",source,repo]);
+// ABOUTME: Проверяет prepared recipes через настоящий Temporal, runner, PostgreSQL и приватный Codex.
+// ABOUTME: Все владельцы, Auth replies и часы reviewer fixture синтетические; рабочие системы не используются.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {mkdtemp,mkdir,realpath,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {dirname,isAbsolute,join} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {randomUUID} from 'node:crypto';
+import {Pool} from 'pg';
+import {connect,StringCodec} from 'nats';
+import {Connection,Client} from '@temporalio/client';
+import {NativeConnection,Worker} from '@temporalio/worker';
+import {readPrivate} from '../../dist/config.js';
+import {activeIdentity} from '../../dist/identity.js';
+import {migrate} from '../../dist/migrate.js';
+import {createStore} from '../../dist/storage.js';
+import {createVerificationStore,verificationHash as hash} from '../../dist/verification-store.js';
+import {verificationPolicy} from '../../dist/verification.js';
+import {sourceReader} from '../../dist/verification-sources.js';
+import {startRunnerServer,runnerClient,treeDigest,fileDigest} from '../../dist/verification-runner.js';
+import {createVerificationEngine} from '../../dist/verification-engine.js';
+import {verificationProcess} from '../../dist/verification-process.js';
+import {deliverVerification} from '../../dist/verification-worker.js';
+import {codexExecutor} from '../../dist/verification-models.js';
+
+const required=name=>{const value=process.env[name];assert.ok(value,`${name} is required`);return value;};
+const loopbackURL=(value,protocol,path)=>{const url=new URL(value);assert.equal(url.hostname,'127.0.0.1');if(protocol)assert.equal(url.protocol,protocol);if(path)assert.equal(url.pathname,path);return url;};
+const fixture=readPrivate(required('BUG_HUNT_FLOW_DB_CONFIG'));
+for(const key of ['ownerURL','appURL']){const url=loopbackURL(fixture[key],null,'/brai_bug_hunt_test');assert.ok(['postgres:','postgresql:'].includes(url.protocol));}
+const profile=readPrivate(required('BUG_HUNT_NATIVE_PROFILE_FILE'));
+assert.ok(profile.process&&!profile.socketUrl,'a private process NativeProfile is required');
+const registryPath=required('BUG_HUNT_RECIPE_REGISTRY');assert.ok(isAbsolute(registryPath));
+const registry=JSON.parse(readFileSync(registryPath,'utf8'));
+assert.ok(Array.isArray(registry.sources)&&Array.isArray(registry.recipes)&&Array.isArray(registry.runnerRecipes));
+const deps=required('BUG_HUNT_RECIPE_DEPENDENCIES_ROOT');assert.ok(isAbsolute(deps));
+const natsURL=loopbackURL(required('BUG_HUNT_TEST_NATS_URL'),'nats:');
+const temporalAddress=required('BUG_HUNT_TEST_TEMPORAL_ADDRESS');assert.match(temporalAddress,/^127\.0\.0\.1:[1-9]\d{0,4}$/);
+const namespace=required('BUG_HUNT_TEST_TEMPORAL_NAMESPACE');assert.match(namespace,/^bug-hunt-test-[a-z0-9-]+$/);
+
+test('real prepared recipes, independent reviewer, Temporal and isolated originals',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'bug-hunt-real-flow-')),socket=join(root,'runner.sock');
  const owner=new Pool({connectionString:fixture.ownerURL,max:1}),app=new Pool({connectionString:fixture.appURL,max:6});
- const run=randomUUID(),installationId="flow-"+run,p={ownerId:"synthetic-"+run,actorId:"fixture",source:"codex",reviewer:false};
- const policy=verificationPolicy({enabled:true,revision:"flow-one",externalAllowedOwners:[p.ownerId],executor:executorKind,profiles:{providers:{connectionId:"acceptance",provider:"openrouter",model:"deepseek/deepseek-v3.2",revision:"synthetic-flow-qualified",inboxPrefix:"_INBOX.providers_client."}},budgets:{dailyCalls:40,ownerDailyCalls:40,dailyTokens:500000}});
- let server,providerNc;const nativeThreads=new Set();const checkpoints=[];
+ const run=randomUUID(),installationId='flow-'+run,p={ownerId:'synthetic-'+run,actorId:'fixture',source:'codex',reviewer:false};
+ const policy=verificationPolicy({enabled:true,revision:'flow-real-recipes',externalAllowedOwners:[p.ownerId],executor:'codex_app_server',budgets:{dailyCalls:40,ownerDailyCalls:40,dailyTokens:500000}});
+ const taskQueue='bug-hunt-fixture-'+run,handles=[];let server,nc,subscription,control,native,worker,workerRun,execution;
  try{
-  await migrate(owner,"bug_hunt_owner","bug_hunt_app");
-  const originals=createStore(app,{installationId,cursorKey:"synthetic-originals-cursor-key-at-least32",maxReports:100,reportsPerMinute:100,maxDatabaseBytes:1073741824});
-  const store=createVerificationStore(app,{installationId,cursorKey:"synthetic-verification-cursor-key-atleast32",policy:()=>policy,maxDatabaseBytes:1073741824});
-  const node=await realpath(process.execPath),nodeRoot=dirname(dirname(node)),harness=fileURLToPath(new URL("../../recipes/regression.mjs",import.meta.url));
-  const deps=join(root,"deps");await mkdir(deps);const source_tree_sha256=await treeDigest(source);
-  const runnerConfig={socket,stateRoot:join(root,"runs"),node,nodeRoot,dependenciesRoot:deps,dependencies_sha256:await treeDigest(deps),node_sha256:await fileDigest(node),recipes:[{id:"regression",version:"1",harness,harness_sha256:hash(readFileSync(harness,"utf8")),source_root:source,source_file:"index.mjs",source_commit:commit,source_sha256:hash(implementation),source_tree_sha256,fixture_refs:["zero","negative"],fixture_sha256:Object.fromEntries(Object.entries(fixtureTexts).map(([k,v])=>[k,hash(v)]))}]};
-  server=await startRunnerServer(runnerConfig,event=>{if(event.exit_code!==0)console.log(JSON.stringify({synthetic_runner_diagnostic:event}));});
-  const refutedClaim="Rejecting a negative integer is a defect";
-  const recipes=Object.keys(fixtureTexts).map(ref=>({ref,recipe_id:"regression",recipe_version:"1",source_id:"fixture",source_commit:commit,source_sha256:hash(implementation),source_tree_sha256,source_path:"index.mjs",requirement_path:"CONTRACT.md",requirement_sha256:hash(requirement),expected:ref==="zero"?"accepted":"rejected",fixture_ref:ref,...(ref==="zero"?{confirms_claim:"Valid zero was rejected"}:{}),...(ref==="negative"?{refutes_claim:refutedClaim}:{})}));
-  const profile={socketUrl:"ws+unix:///home/agent/.codex/app-server-control/app-server-control.sock:/",generation:"existing-server-0.166.0",serverVersion:"0.166.0",schema_sha256:"1740f9f8334ffec1782494cbf1a7e597b3815c1f8328273889efd2c3e32a763a",filesystem_isolation_verified:true,qualified_models:["gpt-6.1-sol"],tool_policy_version:"no-environment-scoped-tools-v2",cwd:root};
-  if(executorKind==="providers")providerNc=await connect({servers:"nats://127.0.0.1:4223",user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD,inboxPrefix:process.env.NATS_INBOX_PREFIX??"_INBOX.providers_caller",timeout:3000});
-  const engine=createVerificationEngine({store,sources:sourceReader([{id:"fixture",repository:repo,components:["fixture"],paths:["index.mjs","CONTRACT.md"],externalAllowed:true}]),runner:runnerClient(socket),recipes,activeOwner:async()=>true,executor:(r,d)=>{
-   const executor=executorKind==="providers"?providersExecutor(providerNc,p.ownerId,policy.profiles.providers,d):codexExecutor(profile,d);
-   for(const method of ["startStep","inspectStep"]){const original=executor[method].bind(executor);executor[method]=async(...args)=>{const save=args.at(-1);args[args.length-1]=async cp=>{if(cp.native.threadId)nativeThreads.add(cp.native.threadId);checkpoints.push({state:cp.state,code:cp.code,phase:args[0].phase});await save(cp);};return original(...args);};}
-   return executor;
-  }});
+  await migrate(owner,'bug_hunt_owner','bug_hunt_app');
+  const originals=createStore(app,{installationId,cursorKey:'synthetic-originals-cursor-key-at-least32',maxReports:100,reportsPerMinute:100,maxDatabaseBytes:1073741824});
+  const store=createVerificationStore(app,{installationId,cursorKey:'synthetic-verification-cursor-key-atleast32',policy:()=>policy,maxDatabaseBytes:1073741824});
+  const node=await realpath(process.execPath),nodeRoot=dirname(dirname(node));
+  const runnerConfig={socket,stateRoot:join(root,'runs'),node,nodeRoot,dependenciesRoot:deps,dependencies_sha256:await treeDigest(deps,2147483648),node_sha256:await fileDigest(node),recipes:registry.runnerRecipes};
+  server=await startRunnerServer(runnerConfig,event=>{if(event.exit_code!==0)console.log(JSON.stringify({synthetic_runner_exit_code:event.exit_code}));});
+  nc=await connect({servers:natsURL.href,...(process.env.NATS_USER?{user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD}: {})});
+  const codec=StringCodec();subscription=nc.subscribe('brai.auth.v2.identity-get',{callback:(_error,msg)=>{
+   try{const input=JSON.parse(codec.decode(msg.data));msg.respond(codec.encode(JSON.stringify({user:{id:input.userId,status:input.userId===p.ownerId?'active':'blocked'}})));}catch{msg.respond(codec.encode('{}'));}
+  }});await nc.flush();
+  const engine=createVerificationEngine({stopping:()=>execution?.stopping??false,store,sources:sourceReader(registry.sources),runner:runnerClient(socket),recipes:registry.recipes,
+   activeOwner:async id=>{try{await activeIdentity(async(subject,input)=>JSON.parse(codec.decode((await nc.request(subject,codec.encode(JSON.stringify(input)),{timeout:2000})).data)),id);return true;}catch{return false;}},
+   executor:(_r,dispatch)=>codexExecutor(profile,dispatch)});
+  execution=verificationProcess(engine);
+  control=await Connection.connect({address:temporalAddress});native=await NativeConnection.connect({address:temporalAddress});
+  const client=new Client({connection:control,namespace});
+  worker=await Worker.create({connection:native,namespace,taskQueue,workflowBundle:{codePath:fileURLToPath(new URL('../../dist/verification-workflow-bundle.cjs',import.meta.url))},activities:{advance:id=>execution.advance(id)},maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2});
+  workerRun=worker.run();
+  const recipe=ref=>{const found=registry.recipes.filter(x=>x.ref===ref);assert.equal(found.length,1,ref);return found[0];};
+  const baseline=recipe('reviewer-baseline'),fixed=recipe('reviewer-fixed');
+  assert.ok(!registry.recipes.some(item=>item.source_commit==='0'.repeat(40)));
+  assert.notEqual(baseline.source_commit,fixed.source_commit);
   const cases=[
-   {verdict:"confirmed",title:"Valid zero was rejected",operation:"Evaluate integer zero; use only zero spec",expected:"accepted",observed:"rejected",component_id:"fixture",commit_sha:commit},
-   {verdict:"refuted",title:refutedClaim,operation:"Evaluate negative integer -1; use only negative spec. The claim is exactly: "+refutedClaim,expected:"accepted",observed:"rejected",component_id:"fixture",commit_sha:commit},
-   {verdict:"insufficient_evidence",title:"Unknown version and missing evidence",operation:"Read unknown component",expected:"value",observed:"empty"}
+   {name:'reviewer-baseline',verdict:'confirmed',binding:baseline},
+   {name:'reviewer-fixed',verdict:'refuted',binding:fixed},
+   {name:'dto-v1',verdict:'refuted',binding:recipe('dto-v1')},
+   {name:'dto-v3',verdict:'refuted',binding:recipe('dto-v3')},
+   {name:'unsupported',verdict:'insufficient_evidence',binding:fixed,commit:'0'.repeat(40)},
+   {name:'unrelated',verdict:'insufficient_evidence',binding:fixed,observation:{title:'Unrelated synthetic observation',operation:'Inspect an unrelated fixture',expected:'available',observed:'missing'}},
+   {name:'mixed-group',verdict:'insufficient_evidence',binding:fixed,group:true}
   ];
-  for(const scenario of cases)await t.test(scenario.verdict,async()=>{
-   const {verdict,...observation}=scenario;
-   const receipt=await originals.report(p,{request_id:randomUUID(),observation},async()=>{});
-   const before=hash((await owner.query("SELECT observation FROM report WHERE id=$1",[receipt.report_id])).rows[0].observation);
-   const admitted=await store.request(p,{request_id:randomUUID(),target:{kind:"case",id:receipt.case_id}});
-   const id=admitted.investigation_ids[0];let step;
-   for(let n=0;n<25;n++){step=await engine.advance(id);console.log(JSON.stringify({scenario:verdict,step}));if(step.terminal)break;await delay(100);}
-   const result=await store.get(p,id);if(result.state!=="completed")console.log(JSON.stringify({scenario:verdict,model_results:(await owner.query("SELECT step_key,checkpoint->>\'state\' AS state,checkpoint->>\'code\' AS code,checkpoint->\'result\'->>\'verdict\' AS verdict,checkpoint->\'result\'->>\'accepted\' AS accepted FROM verification_effect WHERE investigation_id=$1 AND kind=\'model\' ORDER BY registered_at",[id])).rows}));assert.equal(result.state,"completed",JSON.stringify({state:result.state,code:result.code,checkpoints}));
-   assert.equal(result.results[0].payload.verdict,verdict,JSON.stringify(result.results[0].payload));
-   assert.equal(hash((await owner.query("SELECT observation FROM report WHERE id=$1",[receipt.report_id])).rows[0].observation),before);
-   assert.equal(result.results[0].validator_receipt.verdict,verdict);
-   if(verdict!=="insufficient_evidence"){const e=result.evidence.find(e=>e.kind==="runner");assert.ok(e);const proof=JSON.parse((await store.evidence(p,{investigation_id:id,evidence_id:e.id,limit:65536})).text);assert.equal(proof.cleanup,"done");assert.equal(proof.state,"completed");assert.equal(proof.source_commit,commit);}
-   assert.equal((await store.get(p,id)).model.id,executorKind==="providers"?"deepseek/deepseek-v3.2":"gpt-6.1-sol");assert.equal((await store.get(p,id)).model.effort,executorKind==="providers"?null:"high");
-   await assert.rejects(store.get({...p,ownerId:"foreign"},id),e=>e.code==="NOT_FOUND");
+  for(const scenario of cases)await t.test(scenario.name,async()=>{
+   const binding=scenario.binding,observation={...(scenario.observation??binding.observation),component_id:binding.source_id,commit_sha:scenario.commit??binding.source_commit};
+   const reportInput={request_id:randomUUID(),observation},receipt=await originals.report(p,reportInput,async()=>{});
+   const reports=[receipt.report_id];let target={kind:'case',id:receipt.case_id};
+   if(scenario.group){
+    const other=await originals.report(p,{request_id:randomUUID(),observation:{title:'Unrelated synthetic observation',operation:'Inspect an unrelated fixture',expected:'available',observed:'missing',component_id:binding.source_id,commit_sha:binding.source_commit}},async()=>{});
+    reports.push(other.report_id);const group=randomUUID();
+    await owner.query('INSERT INTO observation_group(id,installation_id,owner_id) VALUES($1,$2,$3)',[group,installationId,p.ownerId]);
+    for(const caseId of [receipt.case_id,other.case_id])await owner.query("INSERT INTO group_membership(installation_id,owner_id,case_id,group_id,method) VALUES($1,$2,$3,$4,'manual')",[installationId,p.ownerId,caseId,group]);
+    target={kind:'group',id:group};
+   }
+   const originalDigest=async()=>hash((await owner.query('SELECT id,observation FROM report WHERE id=ANY($1::uuid[]) ORDER BY id',[reports])).rows);
+   const before=await originalDigest();
+   const input={request_id:randomUUID(),target},admitted=await store.request(p,input),id=admitted.investigation_ids[0];
+   assert.deepEqual(await store.request(p,input),{...admitted,replayed:true});
+   await deliverVerification(store,client,taskQueue);
+   const workflow=(await owner.query('SELECT workflow_id FROM verification_investigation WHERE id=$1',[id])).rows[0].workflow_id;
+   const handle=client.workflow.getHandle(workflow);handles.push(handle);await handle.result();
+   const result=await store.get(p,id);assert.equal(result.state,'completed',JSON.stringify({scenario:scenario.name,state:result.state,code:result.code}));
+   assert.equal(result.results[0].payload.verdict,scenario.verdict);assert.equal(result.results[0].validator_receipt.verdict,scenario.verdict);
+   assert.equal(await originalDigest(),before);
+   const effects=(await owner.query("SELECT kind,step_key,checkpoint FROM verification_effect WHERE investigation_id=$1 ORDER BY id",[id])).rows;
+   const investigator=effects.find(e=>e.kind==='model'&&e.step_key==='investigator'),reviewer=effects.find(e=>e.kind==='model'&&e.step_key==='reviewer');
+   assert.ok(investigator&&reviewer);assert.ok(investigator.checkpoint.native.threadId&&reviewer.checkpoint.native.threadId);assert.notEqual(investigator.checkpoint.native.threadId,reviewer.checkpoint.native.threadId);
+   const runs=effects.filter(e=>e.kind==='runner');
+   if(scenario.verdict==='insufficient_evidence')assert.equal(runs.length,0);
+   else{assert.equal(runs.length,1);const proof=runs[0].checkpoint.result;assert.equal(proof.state,'completed');assert.equal(proof.cleanup,'done');assert.equal(proof.source_commit,binding.source_commit);assert.equal(proof.fidelity,'synthetic');assert.ok(proof.substituted_boundaries.includes('network'));}
+   const effectHash=hash(effects);assert.deepEqual(await store.request(p,input),{...admitted,replayed:true});
+   assert.equal(hash((await owner.query("SELECT kind,step_key,checkpoint FROM verification_effect WHERE investigation_id=$1 ORDER BY id",[id])).rows),effectHash);
+   await assert.rejects(store.get({...p,ownerId:'synthetic-foreign'},id),e=>e.code==='NOT_FOUND');
   });
-  await writeFile(join(tmpRoot,"bug-hunt-verification-live.json"),JSON.stringify({run,installationId,userId:p.ownerId,sourceCommit:commit}),{mode:0o600});
-  console.log(JSON.stringify({native_threads:nativeThreads.size,models:checkpoints.length,source_commit:commit,new_profiles_created:0}));
  }finally{
-  const rpc=nativeRpc({socketUrl:"ws+unix:///home/agent/.codex/app-server-control/app-server-control.sock:/"});
-  try{if(nativeThreads.size){await rpc.connect();await rpc.call("initialize",{clientInfo:{name:"brai_bug_hunt_fixture_cleanup",version:"3.0.0"}});rpc.send({method:"initialized",params:{}});for(const threadId of nativeThreads)await rpc.call("thread/archive",{threadId}).catch(()=>{});}}catch{}finally{rpc.close();}
-  if(providerNc)await providerNc.close();
-  if(server)await new Promise(r=>server.server.close(r));
-  await Promise.all([app.end(),owner.end()]);await rm(root,{recursive:true,force:true});
+  for(const handle of handles)await handle.terminate('synthetic fixture cleanup').catch(()=>{});
+  if(execution)await execution.stop().catch(()=>{});
+  if(worker?.getState()==='RUNNING')worker.shutdown();await workerRun?.catch(()=>{});
+  subscription?.unsubscribe();if(nc)await nc.close();if(server)await new Promise(r=>server.server.close(r));
+  await Promise.all([control?.close(),native?.close(),app.end(),owner.end()]);await rm(root,{recursive:true,force:true});
  }
 });
