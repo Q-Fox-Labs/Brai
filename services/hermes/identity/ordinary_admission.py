@@ -1,9 +1,17 @@
 # ABOUTME: Учитывает native Telegram claim до и после разрешения UID.
 # ABOUTME: Не паркует обработчики и не разрешает неизвестную принадлежность.
 import asyncio
+import re
 from contextvars import ContextVar
 
 _replay_binding = ContextVar('brai_release_replay_binding', default=None)
+
+def transport_command(text):
+    """Эти команды admit_update завершает в ingress, не передавая worker."""
+    raw = text.strip()
+    return bool(re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw)
+                or re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL))
+
 class Tracker:
     def __init__(self, authorize, stage=None, on_release=None):
         self.authorize = authorize
@@ -519,7 +527,8 @@ class Mirror:
                 # Handing-off начинается только перед реальным worker RPC.
                 return False
             text = getattr(getattr(update, 'message', None), 'text', None)
-            if isinstance(text, str) and text.lstrip().startswith('/') and self.command_ready is not None:
+            if (isinstance(text, str) and text.lstrip().startswith('/')
+                    and not transport_command(text) and self.command_ready is not None):
                 self.auto_inputs.add(key)
                 if not await self.command_ready(profile):
                     # Startup не является передачей команды. Как у обычного

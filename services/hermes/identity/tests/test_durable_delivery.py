@@ -244,6 +244,23 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         await self.mirror.pump()
         self.assertEqual(self.mirror.app.update_queue.get_nowait().update_id, 9)
 
+    async def test_transport_account_commands_do_not_wait_for_worker(self):
+        for ident, command in enumerate(('/unlink', '/start link_' + 'a' * 43), 20):
+            raw = update(ident).to_dict()
+            raw['message']['text'] = command
+            item = Update.de_json(raw, self.bot)
+            self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+            self.inbox.capture(PROFILE, item, 123)
+            key = f'123:{ident}'
+            self.mirror.register_snapshot(key, {'state': 'known', 'profile': PROFILE})
+            self.mirror.command_ready = AsyncMock(return_value=False)
+            ticket = self.mirror.enter(key, item)
+            self.assertFalse(await self.mirror.classify(ticket, item))
+            self.mirror.command_ready.assert_not_awaited()
+            await self.mirror.handled(item)
+            self.mirror.finish(ticket, {'completed': True})
+            self.assertEqual(self.inbox.observe(PROFILE, 123, ident)['state'], 'handled')
+
     async def test_voice_and_media_keep_original_file_ids_while_agent_is_offline(self):
         media = [('voice', {'file_id': 'voice-file', 'file_unique_id': 'voice-unique', 'duration': 1}),
                  ('document', {'file_id': 'document-file', 'file_unique_id': 'document-unique', 'file_name': 'fixture.txt'})]

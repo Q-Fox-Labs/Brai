@@ -42,11 +42,12 @@ Worker обновляет send_typing каждые две секунды от п
 
 Bridge публикует основной канал только после `health(require_tools=true)` с
 `operational=true` и совпадением владельца и канонического Telegram ID. До этого
-не отправляются `dispatch`, interactive и release RPC. В DEV известный slash-input
+не отправляются `dispatch`, interactive и release RPC. В DEV передаваемый worker slash-input
 остаётся `captured` до этого handshake; при недоступном worker supervisor возвращает
 его в очередь без нового сообщения пользователя. После начала фактической передачи
 команды неизвестный исход сохраняется без автоматического повтора. Вход нового
 пользователя через `/start` и приглашение обрабатывает ingress без личного worker.
+Привязка через `/start link_…` и транспортный `/unlink` также не ждут worker.
 
 
 ## Минимальный встраиваемый Bridge
