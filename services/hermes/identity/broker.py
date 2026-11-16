@@ -20,7 +20,7 @@ import uuid
 
 from .memory_registry import load_registry
 from .lifecycle import LifecycleRunner
-from .ipc import safe_failure
+from .ipc import AUTHORIZATION_TIMEOUT, safe_failure
 try:
     from ..files.identity import OwnerFiles
     from ..files.generated import GeneratedFiles
@@ -168,9 +168,12 @@ class ControlPort:
                 if value.get('jsonrpc') != '2.0' or future is None or future.done():
                     raise ValueError('Invalid control response')
                 if 'error' in value:
-                    error = PermissionError('Control rejected request')
                     data = value['error'].get('data') if isinstance(value['error'], dict) else None
-                    error.diagnostic = safe_failure(**{k: data.get(k) for k in ('reason', 'stage')}) if isinstance(data, dict) else safe_failure(stage='control')
+                    diagnostic = safe_failure(**{k: data.get(k) for k in ('reason', 'stage')}) if isinstance(data, dict) else safe_failure(stage='control')
+                    error = (PermissionError('Control rejected request')
+                             if diagnostic['reason'] in {'FORBIDDEN', 'OWNER_MISMATCH'}
+                             else ConnectionError('Control unavailable'))
+                    error.diagnostic = diagnostic
                     future.set_exception(error)
                 elif 'result' in value:
                     future.set_result(value['result'])
@@ -265,7 +268,7 @@ class Broker:
         """Повторно прочитать защищённый реестр после каждого обновления."""
         return load_registry(self.config['registryPath'])
 
-    async def authorize(self, uid, *, timeout=3):
+    async def authorize(self, uid, *, timeout=AUTHORIZATION_TIMEOUT):
         """Сверить профиль с текущим состоянием Auth."""
         profile = self.profiles().get(uid)
         if not profile or profile['status'] != 'active':
@@ -519,7 +522,7 @@ class Broker:
             try:
                 await self.authorize(params.get('uid'))
                 return {'allowed': True}
-            except Exception:
+            except PermissionError:
                 return {'allowed': False}
         if method == 'ingress.resolve-known' and ingress:
             if set(params) != {'telegramId'}:

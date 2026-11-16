@@ -91,6 +91,30 @@ class PortableTurnBudgetTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=1) as pool:
             self.assertIs(pool.submit(contextvars.copy_context().run, nested).result(), self.state)
 
+    def test_internal_summary_text_does_not_count_as_delivered_answer(self):
+        attempt = self.state.start({'call_role': 'auxiliary:compression', 'api_request_id': 'summary'})
+        attempt.observe({'type': 'response.output_text.delta', 'delta': 'internal draft'})
+        attempt.finish(failed=True)
+        retry = self.state.start({'call_role': 'auxiliary:compression', 'api_request_id': 'summary'})
+        self.assertFalse(attempt.emitted)
+        self.assertTrue(retry.is_retry)
+        self.assertEqual(self.state.spent, 1)
+
+    def test_parallel_images_are_independent_operations(self):
+        attempts = [self.state.start({'call_role': 'auxiliary:vision', 'api_request_id': str(i)})
+                    for i in range(12)]
+        self.assertEqual(self.state.spent, 0)
+        self.assertEqual(self.state.physical, 12)
+        for attempt in attempts:
+            attempt.finish()
+
+    def test_private_reasoning_is_not_a_delivered_reply(self):
+        attempt = self.state.start({'api_request_id': 'api:1'})
+        attempt.observe({'type': 'response.reasoning_summary_text.delta', 'delta': 'private'})
+        attempt.finish(failed=True)
+        self.assertFalse(attempt.emitted)
+        self.assertTrue(self.state.start({'api_request_id': 'api:1'}).is_retry)
+
     def test_original_deadline_is_retained(self):
         with patch.object(self.budget.time, "monotonic", return_value=0):
             first = self.state.start({"api_request_id": "1"})
@@ -265,10 +289,10 @@ class NativeTurnBudgetTests(unittest.TestCase):
     def test_compression_and_primary_use_same_extra_credit(self):
         self.failed_call()
         self.failed_call("compression:1", "auxiliary:compression")
-        self.failed_call("compression:2", "auxiliary:compression")
+        self.failed_call("compression:1", "auxiliary:compression")
         self.assertEqual(self.state.spent, 1)
         self.failed_call("api:2")
-        blocked = self.failed_call("compression:3", "auxiliary:compression")
+        blocked = self.failed_call("compression:1", "auxiliary:compression")
         blocked.assert_not_called()
         self.assertEqual(self.state.physical, 4)
 
@@ -501,6 +525,33 @@ class NativeTurnBudgetTests(unittest.TestCase):
                 compressor, self.budget.TurnRequestBudgetExhausted("stop"), messages, None, ""))
             self.assertTrue(compressor._last_summary_network_failure)
             self.assertEqual(messages, [{"role": "user", "content": "preserved"}])
+
+    def test_exhausted_auxiliary_request_cannot_enter_or_continue_recovery_ladder(self):
+        module = types.ModuleType('agent.brai_turn_budget')
+        module.TurnRequestBudgetExhausted = self.budget.TurnRequestBudgetExhausted
+        native = native_nodes(self.engine, 'agent/auxiliary_client.py',
+                              {'_aux_recovery_ladder', '_drive_ladder', '_drive_ladder_async'})
+        failure = self.budget.TurnRequestBudgetExhausted('stop')
+        def swallowing_ladder():
+            try:
+                yield object()
+            except Exception:
+                yield object()
+        with patch.dict('sys.modules', {'agent.brai_turn_budget': module}):
+            ladder = native._aux_recovery_ladder(failure, client=None, kwargs={}, task='compression',
+                async_mode=False, base_info='', resolved_provider='', resolved_model=None,
+                resolved_base_url=None, resolved_api_key=None, resolved_api_mode=None,
+                final_model=None, max_tokens=None, main_runtime=None, route_info=None)
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                next(ladder)
+            perform = Mock(side_effect=failure)
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                native._drive_ladder(swallowing_ladder(), perform)
+            self.assertEqual(perform.call_count, 1)
+            async def fail(step):
+                raise failure
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                asyncio.run(native._drive_ladder_async(swallowing_ladder(), fail))
 
     def test_deterministic_fallback_marks_degraded(self):
         native = native_nodes(self.engine, "agent/context_compressor.py", {"_fallback_summary_for_window"})

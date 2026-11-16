@@ -272,7 +272,7 @@ diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,317 @@
 +# ABOUTME: Ограничивает дополнительные физические запросы одним пользовательским ходом.
 +# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
 +"""Общий бюджет Hermes: две дополнительные попытки, включая сжатие истории."""
@@ -325,14 +325,16 @@ new file mode 100644
 +        metadata = metadata or {}
 +        role = str(metadata.get("call_role") or "primary")
 +        # AIDEV-NOTE: Новые request_id после recovery не создают новый бюджет.
-+        lane = role if role.startswith("auxiliary:") else "primary"
++        request_id = str(metadata.get("api_request_id") or "")
++        # В native auxiliary request_id сохраняется на всех ступенях одного recovery.
++        # Разные изображения и сжатие — самостоятельные операции, даже при параллельном запуске.
++        lane = (role, request_id) if role.startswith("auxiliary:") and request_id else "primary"
 +        with self.lock:
 +            previous = self.lanes.get(lane)
-+            request_id = str(metadata.get("api_request_id") or "")
 +            retry = previous is not None and (
 +                previous.failed or not previous.finished or (bool(request_id) and previous.request_id == request_id)
 +            )
-+            deadline = self.deadlines.get(lane)
++            deadline = self.deadlines.get(role if role.startswith("auxiliary:") else lane)
 +            if deadline is not None and retry and time.monotonic() >= deadline[1]:
 +                raise TurnRequestBudgetExhausted(
 +                    "Истёк срок исходного запроса; история сохранена.",
@@ -383,20 +385,20 @@ new file mode 100644
 +            delta = _field(event, "delta", "")
 +            if self.events == 1:
 +                self.record("first_event")
-+            if kind in {"response.output_text.delta", "response.text.delta",
-+                        "response.refusal.delta", "response.reasoning_summary_text.delta",
-+                        "response.reasoning_text.delta"} and delta:
++            visible = self.lane == "primary"
++            if visible and kind in {"response.output_text.delta", "response.text.delta",
++                        "response.refusal.delta"} and delta:
 +                self.emitted = True
-+            if kind == "response.output_item.done":
++            if visible and kind == "response.output_item.done":
 +                item = _field(event, "item", {})
 +                if _field(item, "type") == "message" and _field(item, "phase") == "commentary":
 +                    if any(_field(part, "type") == "output_text" and _field(part, "text")
 +                           for part in (_field(item, "content", []) or [])):
 +                        self.emitted = True
 +            choices = _field(event, "choices", []) or []
-+            if any(_field(_field(choice, "delta", {}), "content") for choice in choices):
++            if visible and any(_field(_field(choice, "delta", {}), "content") for choice in choices):
 +                self.emitted = True
-+            if isinstance(delta, dict) and (delta.get("text") or delta.get("thinking")):
++            if visible and isinstance(delta, dict) and delta.get("text"):
 +                self.emitted = True
 +            if delta and self.stage != "progress":
 +                self.record("progress")
@@ -603,3 +605,33 @@ diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
          self._deadline_lock = threading.Lock()
          self._progress_deadline = self._start + self.no_progress_timeout
          self.saw_content = threading.Event()
+@@ -7967,6 +7972,9 @@
+     strips → Nous heal/refresh → credential refresh/pool rotation → provider fallback.
+     Each rung returns a response, narrows ``first_err`` and falls through, or re-raises.
+     Raises the narrowed ``first_err`` when exhausted (after evicting a connection-poisoned client)."""
++    from agent.brai_turn_budget import TurnRequestBudgetExhausted
++    if isinstance(first_err, TurnRequestBudgetExhausted):
++        raise first_err
+     tag = " (async)" if async_mode else ""
+     route = _LadderRoute(
+         client, task, tag, async_mode, base_info, resolved_provider, resolved_model,
+@@ -8012,6 +8020,9 @@
+             try:
+                 result = perform(step)
+             except Exception as exc:
++                from agent.brai_turn_budget import TurnRequestBudgetExhausted
++                if isinstance(exc, TurnRequestBudgetExhausted):
++                    raise
+                 step = ladder.throw(exc)
+             else:
+                 step = ladder.send(result)
+@@ -8027,6 +8038,9 @@
+             try:
+                 result = await perform(step)
+             except Exception as exc:
++                from agent.brai_turn_budget import TurnRequestBudgetExhausted
++                if isinstance(exc, TurnRequestBudgetExhausted):
++                    raise
+                 step = ladder.throw(exc)
+             else:
+                 step = ladder.send(result)

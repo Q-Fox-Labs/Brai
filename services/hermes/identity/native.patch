@@ -1271,3 +1271,76 @@ index e9819bc..800c70d 100644
          _stts_adapter = self._delivery_adapter_for(source)
          _is_voice_input = (
              message_type is not None
+
+--- a/agent/model_metadata.py
++++ b/agent/model_metadata.py
+@@ -2120,6 +2120,14 @@
+     The proxy's context_window is never trusted; only an opted-in ``-900k`` variant asks the route's own
+     catalog (with the route's own key), and only for its max_context_window cap. Slugs the table does
+     not know take the ordinary endpoint probes."""
++    # AIDEV-NOTE: Личный Brai relay публикует каталог своего доверенного Codex owner.
++    import os
++    if (os.environ.get("BRAI_IDENTITY_MODE") == "worker"
++            and base_url.rstrip("/") == "http://127.0.0.1:18080/model/v1"):
++        route_context = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
++        if route_context is None:
++            raise RuntimeError("BRAI_MODEL_CONTEXT_UNAVAILABLE")
++        return route_context
+     ctx, _source = _resolve_codex_oauth_context_length_with_source(model)
+     if ctx and api_key and is_codex_context_variant(model):
+         # The -900k bump is an account-level assumption; a gateway whose own catalog publishes a
+
+--- a/agent/turn_recovery.py
++++ b/agent/turn_recovery.py
+@@ -1048,7 +1048,12 @@
+     _nonretryable_summary = agent._summarize_api_error(api_error)
+     _plabel = provider_label_for(provider)
+     _label = _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
+-    agent._emit_diagnostic_status(f"❌ {_label}: {_nonretryable_summary}")
++    # AIDEV-NOTE: Личный Telegram получает одно русское уведомление от gateway.
++    import os
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        logger.warning("Non-retryable provider failure: %s", _nonretryable_summary)
++    else:
++        agent._emit_diagnostic_status(f"❌ {_label}: {_nonretryable_summary}")
+     # The endpoint/status trace is developer detail: verbose only (the log has it always).
+     if getattr(agent, "verbose_logging", False):
+         _vlines(
+
+--- a/gateway/russian_failure_notice.py
++++ b/gateway/russian_failure_notice.py
+@@ -169,2 +169,4 @@
+ def _message_for_connection(code, kind):
++    if kind == 'local' and code in {'auth', 'auth_permanent'}:
++        return 'Запрос направлен через локальное подключение и отклонён при проверке доступа. Причина отказа пока не подтверждена; состояние работы сохранено.'
+     message = _COPY.get(code, _UNKNOWN)
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -878,2 +878,6 @@
+-    if get_managed_system(home) is not None:
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and isinstance(path, (str, os.PathLike)):
++        from identity.permissions import secure_profile_parent
++        if secure_profile_parent(Path(path)):
++            return
++    if get_managed_system(home) is not None:
+         return
+--- a/agent/model_metadata.py
++++ b/agent/model_metadata.py
+@@ -679,2 +679,6 @@
+-    try:
++    import os
++    if (os.environ.get("BRAI_IDENTITY_MODE") == "worker" and isinstance(base_url, str)
++            and base_url.rstrip("/") == "http://127.0.0.1:18080/model/v1"):
++        return False  # Локальный relay ведёт к hosted provider, а не к локальной модели.
++    try:
+         parsed = _parse_base_url(base_url)
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -427,2 +427,7 @@
+     from agent.codex_responses_adapter import classify_responses_route
++    import os
++    if (os.environ.get("BRAI_IDENTITY_MODE") == "worker"
++            and str(getattr(agent, "base_url", "") or "").rstrip("/") == "http://127.0.0.1:18080/model/v1"
++            and getattr(agent, "api_mode", None) == "codex_responses"):
++        return True
+     return classify_responses_route(agent).is_codex_backend
