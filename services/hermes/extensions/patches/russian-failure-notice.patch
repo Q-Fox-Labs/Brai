@@ -8548,3 +8548,22 @@ diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
          _print_diagnostics(dl, "    ", with_kind=True)
          print()
      return 0
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -1587,9 +1587,13 @@
+         except SystemExit:
+             pass
+         except Exception as exc:
+-            print(_ui(f"error: {exc}"), file=sys.stderr)
++            if get_language() == "ru":
++                from agent.i18n import _russian_gateway_error
++                print("Не удалось выполнить действие с доской: " + _russian_gateway_error(str(exc)), file=sys.stderr)
++            else:
++                print(_ui(f"error: {exc}"), file=sys.stderr)
+
+     out, err = buf_out.getvalue().rstrip(), buf_err.getvalue().rstrip()
+     if err and out:
+         return f"{out}\n{err}"
+-    return err if err else (out or "(no output)")
++    return err if err else (out or ("Нет результата." if get_language() == "ru" else "(no output)"))

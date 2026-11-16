@@ -119,6 +119,18 @@ class KanbanParserRussianTests(unittest.TestCase):
         self.assertNotIn('SECRET', output.getvalue())
         self.assertNotIn('Check logs', output.getvalue())
 
+    def test_runtime_errors_and_empty_result_are_russian(self):
+        run, _ = self._runner('ru')
+        self.assertEqual(run('list'), 'Нет результата.')
+        def fail(_args):
+            raise RuntimeError('English provider error with a secret')
+        run.__globals__['kanban_command'] = fail
+        result = run('list')
+        self.assertIn('Не удалось выполнить действие с доской', result)
+        self.assertIn('причину ошибки нужно проверить', result)
+        self.assertNotIn('English', result)
+        self.assertNotIn('secret', result)
+
     def test_explicit_english_keeps_original_help(self):
         run, _ = self._runner('en')
         self.assertIn('Task title', run('create -h'))
