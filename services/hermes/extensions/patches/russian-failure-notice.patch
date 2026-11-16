@@ -8982,3 +8982,67 @@ diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
 -        size_str = f", {size_kb} KB" if size_kb else ""
 +        size_str = (f", {size_kb} {'КБ' if human_ru else 'KB'}" if size_kb else "")
          ctype = f", {att.content_type}" if att.content_type else ""
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -90,5 +90,16 @@
+     """Объяснить служебный статус без передачи внутренних подписей в чат."""
+-    if current_tool:
++    desc = str(activity or "").strip().lower()
++    tool = str(current_tool or "").strip().lower()
++    if tool:
++        names = {name.strip() for name in tool.split(",")}
++    elif desc.startswith("executing tool: "):
++        names = {desc.removeprefix("executing tool: ").strip()}
++    else:
++        names = {desc}
++    if "terminal" in names:
++        return "выполняю команды на сервере"
++    if "vision_analyze" in names:
++        return "анализирую изображение"
++    if tool:
+         return "выполняю действие"
+-    desc = str(activity or "").lower()
+     if "compress" in desc:
+@@ -100,3 +111,3 @@
+     if any(word in desc for word in ("wait", "stream", "api", "provider", "model")):
+-        return "ожидаю ответ модели"
++        return "выполняю задачи в фоне"
+     return "продолжаю работу"
+@@ -3609,3 +3620,4 @@
+                 "gateway.progress.timeout_stuck_tool",
+-                tool=_cur_tool, seconds=f"{_secs_ago:.0f}", progress=_iter_progress))
++                tool=_brai_activity_description(_cur_tool, _cur_tool),
++                seconds=f"{_secs_ago:.0f}", progress=_iter_progress))
+         else:
+diff --git a/agent/chat_completion_wait_notice.py b/agent/chat_completion_wait_notice.py
+--- a/agent/chat_completion_wait_notice.py
++++ b/agent/chat_completion_wait_notice.py
+@@ -21,8 +21,8 @@
+ _PHASE_TEXT = {
+-    "first_event": "ожидаю первый ответ модели",
+-    "reconnect": "ожидаю ответ модели после восстановления соединения",
+-    "pre_progress": "ожидаю продолжение ответа модели",
+-    "post_event": "ожидаю продолжение ответа модели",
+-    "first_chunk": "ожидаю первый ответ модели",
+-    "post_chunk": "ожидаю продолжение ответа модели",
++    "first_event": "выполняю задачи в фоне",
++    "reconnect": "выполняю задачи в фоне",
++    "pre_progress": "выполняю задачи в фоне",
++    "post_event": "выполняю задачи в фоне",
++    "first_chunk": "выполняю задачи в фоне",
++    "post_chunk": "выполняю задачи в фоне",
+ }
+@@ -33,3 +33,3 @@
+     """Показать ожидание модели без внутренних технических меток."""
+-    text = f"⏳ {_PHASE_TEXT.get(phase, 'ожидаю ответ модели')} — {int(silence_secs)} сек."
++    text = f"⏳ {_PHASE_TEXT.get(phase, 'выполняю задачи в фоне')} — {int(silence_secs)} сек."
+     if watchdog is not None:
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -819,3 +819,3 @@
+     timeout_header: "⏱️ Агент неактивен {minutes} мин — ни вызовов инструментов, ни ответов API."
+-    timeout_stuck_tool: "Похоже, агент завис на инструменте `{tool}` ({seconds} с с момента последней активности, {progress})."
++    timeout_stuck_tool: "Похоже, выполнение затянулось. Последнее действие: {tool} (нет активности {seconds} с, {progress})."
+     timeout_last_activity: "Последняя активность: {activity} ({seconds} с назад, {progress}). Возможно, агент ждал ответа API."
