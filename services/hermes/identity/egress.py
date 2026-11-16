@@ -20,6 +20,7 @@ import uuid
 from urllib.parse import urlsplit
 
 from . import network
+from .ipc import AUTHORIZATION_TIMEOUT
 
 HEADER_LIMIT = 32768
 BODY_LIMIT = 8 * 1024 * 1024
@@ -469,6 +470,36 @@ async def _resolve_provider(config):
                          "apiKey": access}}, account
 
 
+def _codex_models(provider):
+    """Выдать только размеры окон из каталога принятого владельца Codex."""
+    uid, gid = _codex_parameters(provider)
+    descriptor = os.open(Path(provider['codexHome']) / 'models_cache.json',
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_gid != gid
+                or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > BODY_LIMIT):
+            raise Rejected(503)
+        data = json.load(stream)
+    models = data.get('models') if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        raise Rejected(503)
+    result = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        slug, window, cap = item.get('slug'), item.get('context_window'), item.get('max_context_window')
+        if (not isinstance(slug, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', slug)
+                or type(window) is not int or window <= 0):
+            continue
+        if type(cap) is int and cap > 0:
+            window = min(window, cap)
+        result.append({'id': slug, 'context_window': window})
+    if not result:
+        raise Rejected(503)
+    return {'object': 'list', 'data': result}
+
+
 async def _stop_search(process):
     """Погасить всю группу; прочитать pipe, чтобы paused stdout не блокировал wait."""
     async def discard():
@@ -631,6 +662,13 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
             tls = True
         elif model_target is not None:
             provider = config.get("provider")
+            if (isinstance(provider, dict) and provider.get('type') == 'codex-cli'
+                    and method == 'GET' and model_target == '/model/v1/models' and not body):
+                raw = json.dumps(_codex_models(provider), separators=(',', ':')).encode()
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
+                             + str(len(raw)).encode() + b'\r\n\r\n' + raw)
+                await writer.drain()
+                return
             if (isinstance(provider, dict) and provider.get("type") == "codex-cli"
                     and (method != "POST" or model_target != "/model/v1/responses")):
                 raise Rejected(403)
@@ -714,28 +752,52 @@ async def _authorize_socket(path, uid):
         writer.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
         await writer.drain()
         reply = json.loads(await reader.readuntil(b"\n"))
-        return (isinstance(reply, dict) and reply.get("jsonrpc") == "2.0"
-                and reply.get("id") == 1 and isinstance(reply.get("result"), dict)
-                and reply["result"].get("allowed") is True and "error" not in reply)
+        if (not isinstance(reply, dict) or reply.get('jsonrpc') != '2.0' or reply.get('id') != 1
+                or 'error' in reply or not isinstance(reply.get('result'), dict)
+                or type(reply['result'].get('allowed')) is not bool):
+            raise ConnectionError('Authorization unavailable')
+        return reply['result']['allowed']
     finally:
         writer.close()
         await writer.wait_closed()
 
 
 async def _check_access(uid, registry_loader, authorize):
+    """Различить подтверждённый запрет и временную недоступность Auth."""
     try:
         _profile(registry_loader(), uid)
-        return await asyncio.wait_for(authorize(uid), 0.4) is True
-    except Exception:
-        # AIDEV-NOTE: Любая ошибка проверки означает отказ без вывода данных брокера.
+        return await authorize(uid)
+    except Rejected:
         return False
+    except Exception:
+        return None
 
 
 async def _watch_access(uid, registry_loader, authorize):
     while True:
         await asyncio.sleep(0.4)
-        if not await _check_access(uid, registry_loader, authorize):
-            return
+        allowed = await _check_access(uid, registry_loader, authorize)
+        if allowed is not True:
+            return 'revoke' if allowed is False else 'auth_unavailable'
+
+
+def _shared_authorization(authorize):
+    """Объединить только одновременные проверки UID; завершённые права не кешировать."""
+    pending = {}
+
+    async def check(uid):
+        task = pending.get(uid)
+        if task is None or task.done():
+            task = asyncio.create_task(asyncio.wait_for(authorize(uid), AUTHORIZATION_TIMEOUT))
+            pending[uid] = task
+            def finished(done):
+                if pending.get(uid) is done:
+                    pending.pop(uid, None)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(finished)
+        return await asyncio.shield(task)
+    return check
 
 
 async def start_server(socket_path, registry_loader, config_loader, authorize, dial=_dial,
@@ -756,6 +818,7 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
             searching.discard(uid)
     if resolve_provider is None:
         resolve_provider = _resolve_provider
+    authorize = _shared_authorization(authorize)
 
     async def handle(reader, writer):
         task = asyncio.current_task()
@@ -769,16 +832,21 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
             async with semaphore:
                 sock = writer.get_extra_info("socket")
                 _, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                if not await _check_access(uid, registry_loader, authorize):
-                    writer.write(b"HTTP/1.1 403 Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                allowed = await _check_access(uid, registry_loader, authorize)
+                if allowed is not True:
+                    status = 403 if allowed is False else 503
+                    LOGGER.info('connection=%s stage=access elapsed=%.3f reason=%s',
+                                connection_id, time.monotonic() - started,
+                                'revoke' if allowed is False else 'auth_unavailable')
+                    writer.write(f"HTTP/1.1 {status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".encode())
                     await writer.drain()
                     return
                 operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search, public_only=public_only))
                 watcher = asyncio.create_task(_watch_access(uid, registry_loader, authorize))
                 done, _ = await asyncio.wait((operation, watcher), return_when=asyncio.FIRST_COMPLETED)
                 if watcher in done and operation not in done:
-                    LOGGER.info('connection=%s stage=access elapsed=%.3f reason=revoke',
-                                connection_id, time.monotonic() - started)
+                    LOGGER.info('connection=%s stage=access elapsed=%.3f reason=%s',
+                                connection_id, time.monotonic() - started, watcher.result())
         except (OSError, ValueError, TypeError):
             pass
         finally:

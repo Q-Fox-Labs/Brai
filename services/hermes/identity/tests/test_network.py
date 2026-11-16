@@ -279,9 +279,86 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         self.auth_server.close()
         await self.auth_server.wait_closed()
         reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
-        self.assertIn(b"403", await asyncio.wait_for(reader.read(), 1))
+        self.assertIn(b"503", await asyncio.wait_for(reader.read(), 1))
         self.assertEqual(self.received, [])
         writer.close()
+
+    async def test_slow_auth_keeps_existing_stream_and_next_request_works(self):
+        reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertIn(b'data: first', await asyncio.wait_for(reader.readuntil(b'data: first\n\n'), 2))
+        checked = asyncio.Event()
+        # В существующем server wrapper сохранён bound authorize, подменяем socket seam.
+        socket_authorize = egress._authorize_socket
+        async def delayed(path, uid):
+            await asyncio.sleep(0.6)
+            value = await socket_authorize(path, uid)
+            checked.set()
+            return value
+        with patch.object(egress, '_authorize_socket', delayed):
+            await asyncio.wait_for(checked.wait(), 2)
+            self.release.set()
+            self.assertIn(b'data: last', await asyncio.wait_for(reader.read(), 2))
+        writer.close()
+
+    async def test_temporary_auth_error_is_not_a_credentials_rejection(self):
+        with patch.object(egress, '_authorize_socket', side_effect=TimeoutError):
+            reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
+            self.assertIn(b'503', await asyncio.wait_for(reader.read(), 2))
+            self.assertEqual(self.received, [])
+            writer.close()
+        self.release.set()
+        reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertIn(b'200 OK', await asyncio.wait_for(reader.read(), 2))
+        writer.close()
+
+    async def test_concurrent_checks_share_work_without_caching_rights(self):
+        release = asyncio.Event()
+        started = asyncio.Event()
+        calls = []
+        async def authorize(uid):
+            calls.append(uid)
+            started.set()
+            await release.wait()
+            return self.allowed
+        shared = egress._shared_authorization(authorize)
+        checks = [asyncio.create_task(shared(1)) for _ in range(8)]
+        await asyncio.wait_for(started.wait(), 1)
+        self.assertEqual(calls, [1])
+        checks[0].cancel()
+        release.set()
+        values = await asyncio.gather(*checks, return_exceptions=True)
+        self.assertTrue(all(v is True for v in values[1:]))
+        self.allowed = False
+        self.assertIs(await shared(1), False)
+        self.assertEqual(calls, [1, 1])
+
+    async def test_codex_metadata_is_served_without_resolving_credentials_or_upstream(self):
+        self.config = {'provider': {'type': 'codex-cli'}}
+        catalog = {'object': 'list', 'data': [{'id': 'gpt-6.1-sol', 'context_window': 500000}]}
+        with patch.object(egress, '_codex_models', return_value=catalog):
+            reader, writer = await self.request(b'GET /model/v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            raw = await asyncio.wait_for(reader.read(), 2)
+            self.assertIn(b'200 OK', raw)
+            self.assertEqual(json.loads(raw.split(b'\r\n\r\n', 1)[1]), catalog)
+            self.assertEqual(self.received, [])
+            writer.close()
+
+    def test_codex_catalog_only_exposes_valid_context_metadata(self):
+        cache = Path(self.tmp.name) / 'models_cache.json'
+        cache.write_text(json.dumps({'sensitive': 'do-not-publish', 'models': [
+            {'slug': 'gpt-6.1-sol', 'context_window': 500000, 'private': 'do-not-publish'},
+            {'slug': 'capped', 'context_window': 900000, 'max_context_window': 500000},
+            {'slug': 'broken', 'context_window': True},
+            {'slug': '../path', 'context_window': 500000}]}))
+        cache.chmod(0o600)
+        with patch.object(egress, '_codex_parameters', return_value=(os.getuid(), os.getgid())):
+            self.assertEqual(egress._codex_models({'codexHome': self.tmp.name}), {
+                'object': 'list', 'data': [{'id': 'gpt-6.1-sol', 'context_window': 500000},
+                                         {'id': 'capped', 'context_window': 500000}]})
+            cache.unlink()
+            cache.symlink_to(Path(self.tmp.name) / 'missing')
+            with self.assertRaises(OSError):
+                egress._codex_models({'codexHome': self.tmp.name})
 
     async def test_codex_credentials_are_refreshed_per_request(self):
         self.release.set()

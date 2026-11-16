@@ -94,6 +94,33 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.broker.login_state.close)
         self.broker.profiles = lambda: {WORKER_UID: self.profile}
 
+    async def test_trusted_authorization_distinguishes_denial_from_unavailability(self):
+        for failure in (TimeoutError(), ConnectionError()):
+            with self.subTest(error=type(failure).__name__), mock.patch.object(
+                    self.control, 'call', side_effect=failure):
+                with self.assertRaises(type(failure)):
+                    await self.broker.call(0, 'authorize', {'uid': WORKER_UID})
+        with mock.patch.object(self.control, 'call', side_effect=PermissionError):
+            self.assertEqual(await self.broker.call(0, 'authorize', {'uid': WORKER_UID}), {'allowed': False})
+
+    async def test_control_preserves_transient_failure_category(self):
+        for reason, kind in [('FORBIDDEN', PermissionError), ('UPSTREAM_UNAVAILABLE', ConnectionError),
+                             ('DEADLINE_EXCEEDED', ConnectionError), ('INTERNAL', ConnectionError)]:
+            with self.subTest(reason=reason):
+                reader = asyncio.StreamReader()
+                reader.feed_data((json.dumps({'jsonrpc': '2.0', 'id': 1, 'error': {
+                    'code': -32603, 'message': 'private', 'data': {'reason': reason, 'stage': 'control'}}}) + '\n').encode())
+                reader.feed_eof()
+                port = broker_module.ControlPort([], '/unused')
+                port.process = SimpleNamespace(stdout=reader)
+                pending = asyncio.get_running_loop().create_future()
+                port.pending[1] = pending
+                await port.read()
+                with self.assertRaises(kind) as raised:
+                    await pending
+                self.assertEqual(raised.exception.diagnostic['reason'], reason)
+                self.assertNotIn('private', str(raised.exception))
+
     async def test_invitation_waits_for_queued_installation_beyond_three_minutes(self):
         self.config['accessCommand'] = ['/synthetic/access']
         user = {'id': 'user-a', 'profileId': 'profile-a', 'telegramId': '111222'}

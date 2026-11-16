@@ -9,6 +9,8 @@ import uuid
 
 MAX_FRAME = 1024 * 1024
 MAX_INFLIGHT = 64
+# Общий срок уже действующей проверки Broker.authorize; транспорт не обрывает её раньше.
+AUTHORIZATION_TIMEOUT = 3
 
 # AIDEV-NOTE: Через RPC передаём категории; текст исключения может содержать секреты.
 _FAILURE_REASONS = frozenset((
