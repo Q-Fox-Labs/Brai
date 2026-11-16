@@ -66,7 +66,7 @@ export function createVerificationEngine(options:Options){
      if(["not_sent","blocked"].includes(effect.checkpoint.state)&&!effect.checkpoint.native.turnId&&!effect.checkpoint.native.operationId)continue;
      if(effect.checkpoint.state==="failed"){interrupted=true;continue;}
      const executor=options.executor(r,{tools:()=>[],call:async()=>{throw new VF("CANCEL_REQUESTED");},reserve:async()=>{throw new VF("CANCEL_REQUESTED");},allowed:async()=>false});
-     let cp;try{cp=await executor.cancelStep(effect.intent,effect.checkpoint).catch(()=>({...effect.checkpoint,state:"unknown",code:"CANCEL_UNKNOWN"}));}finally{executor.close?.();}
+     let cp;try{cp=await executor.cancelStep(effect.intent,effect.checkpoint).catch(()=>({...effect.checkpoint,state:"unknown",code:"CANCEL_UNKNOWN"}));}finally{await executor.close?.();}
      await store.checkpoint(r,effect.id,cp);
      if(["unknown","running","dispatching","blocked"].includes(cp.state))modelPending=true;else if(cp.state!=="completed")interrupted=true;
     }
@@ -185,7 +185,7 @@ export function createVerificationEngine(options:Options){
     if(await cleanupRunners(r,await store.effects(r))){await set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}
     const result_id=await store.publish(r,{...author,snapshot_hash:r.snapshot_hash,case_ids:r.snapshot.cases.map(c=>c.case_id),model:r.model,executor:r.executor,config_revision:r.policy.revision,origin:"automatic_evidence",evidence_availability:allEvidence.every(e=>e.availability==="available")?"available":"partial"},receipt);
     return {terminal:true,wait_ms:0,code:"PUBLISHED"};
-   }catch(e){const code=e instanceof VF?e.code:"VERIFICATION_FAILED";if(options.stopping?.()||code==="WORKER_STOPPING"){await set(r,"outcome_unknown","WORKER_STOPPING");return {terminal:false,wait_ms:1,code:"WORKER_STOPPING"};}if(code==="CANCEL_REQUESTED"){await set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}const unknown=e instanceof VF&&e.outcome==="unknown";if(!unknown&&await cleanupRunners(r,await store.effects(r))){await set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}await set(r,unknown?"outcome_unknown":"failed",code);return {terminal:!unknown,wait_ms:60000,code};}finally{executor?.close?.();}
+   }catch(e){const code=e instanceof VF?e.code:"VERIFICATION_FAILED";if(options.stopping?.()||code==="WORKER_STOPPING"){await set(r,"outcome_unknown","WORKER_STOPPING");return {terminal:false,wait_ms:1,code:"WORKER_STOPPING"};}if(code==="CANCEL_REQUESTED"){await set(r,"running","CANCEL_REQUESTED");return {terminal:false,wait_ms:1,code:"CANCEL_REQUESTED"};}const unknown=e instanceof VF&&e.outcome==="unknown";if(!unknown&&await cleanupRunners(r,await store.effects(r))){await set(r,"outcome_unknown","RUNNER_CANCEL_UNKNOWN");return {terminal:false,wait_ms:60000,code:"RUNNER_CANCEL_UNKNOWN"};}await set(r,unknown?"outcome_unknown":"failed",code);return {terminal:!unknown,wait_ms:60000,code};}finally{await executor?.close?.();}
    }finally{
     try{const effects=await store.effects(r);if(effects.every(e=>["completed","failed","not_sent"].includes(e.checkpoint.state)||e.checkpoint.state==="blocked"&&!e.checkpoint.native.turnId&&!e.checkpoint.native.operationId))owned.delete(id);}catch{/* Existing fenced handle remains unresolved until it can be inspected. */}
    }

@@ -8,6 +8,7 @@ if(!dependencies||!isAbsolute(dependencies)||!dependencies.endsWith('/node_modul
 const parentURL=pathToFileURL(join(dependencies,'..','.brai-host-entry.mjs')).href;
 registerHooks({resolve(specifier,context,nextResolve){
  if(specifier==='@brai/providers')return nextResolve(pathToFileURL(join(payload,'services/providers/dist/index.js')).href,context);
+ if(specifier.startsWith('@brai/providers/'))throw Error('BUG_HUNT_PROVIDERS_SUBPATH_FORBIDDEN');
  if(specifier.startsWith('.')||specifier.startsWith('/')||specifier.includes(':'))return nextResolve(specifier,context);
  return nextResolve(specifier,{...context,parentURL});
 }});

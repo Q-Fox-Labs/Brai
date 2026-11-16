@@ -170,7 +170,7 @@ Helper не создаёт History события: credential и account admissi
 ## Проверки
 
 ```sh
-python3 -B -m unittest discover -s services/bug-hunt/credentials -v
+python3 -B -m unittest discover -s services/bug-hunt/owner-rpc -v
 ```
 
 Тесты используют временные синтетические credentials, реальные UDS/SO_PEERCRED,

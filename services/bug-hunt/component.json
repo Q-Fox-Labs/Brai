@@ -138,7 +138,9 @@
       "services/bug-hunt/tests/verification-applicability.test.mjs",
       "services/bug-hunt/tests/verification-git-ownership.test.mjs",
       "services/bug-hunt/tests/verification-runner-binding.test.mjs",
-      "services/bug-hunt/tests/verification-sources.test.mjs"
+      "services/bug-hunt/tests/verification-sources.test.mjs",
+      "services/bug-hunt/tests/verification-node-loader.test.mjs",
+      "services/bug-hunt/tests/verification-close.test.mjs"
     ]
   },
   "dependencies": [
