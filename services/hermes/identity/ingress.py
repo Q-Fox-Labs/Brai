@@ -47,7 +47,7 @@ class Bridge:
             raise ValueError('invalid worker Telegram identity')
 
     async def connect(self):
-        """Соединиться с worker и проверить его UID по данным ядра."""
+        """Проверить UID и дождаться primary/operational handshake до передачи входов."""
         async with self.lock:
             if self.peer is not None and not self.peer.closed:
                 return self.peer
@@ -56,9 +56,26 @@ class Bridge:
                 writer.close()
                 await writer.wait_closed()
                 raise PermissionError('Unexpected worker UID')
-            self.peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended,
+            peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended,
                              'telegram_api': self.call_telegram_api, 'chat_states': self.read_chat_states})
-            self.task = asyncio.create_task(self.peer.run())
+            task = asyncio.create_task(peer.run())
+            # close() должен отменять и ещё не завершившийся handshake.
+            self.task = task
+            try:
+                health = await peer.call('health', {'require_tools': True}, timeout=None)
+                if (not isinstance(health, dict) or health.get('operational') is not True
+                        or health.get('userId') != self.owner
+                        or health.get('telegramId') != self.worker_telegram_id):
+                    raise ConnectionError('Worker operational handshake incomplete')
+            except BaseException:
+                writer.close()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await writer.wait_closed()
+                if self.task is task:
+                    self.task = None
+                raise
+            self.peer, self.task = peer, task
             return self.peer
 
     async def read_chat_states(self, owner):

@@ -279,6 +279,7 @@ class Resolver:
             self.mirror = Mirror(inbox, resolve_known, inventory=inventory, observe=observe,
                                  gate_store=ProfileGateStore(inbox), transport=TransportInbox(journal))
             self.mirror.input_ready = self.input_ready
+            self.mirror.command_ready = self.command_ready
             self.mirror.reconcile_delivery = self.reconcile_delivery
         self.ready_profiles = set()
         self.bridges, self.turns = {}, {}
@@ -505,6 +506,14 @@ class Resolver:
             return False
         turn = self.turns.get(profile['uid'])
         return turn is None or turn['route'] == route
+
+    async def command_ready(self, profile):
+        """Завершить worker handshake до необратимого command handing_off."""
+        try:
+            await self._bridge(profile).connect()
+            return True
+        except (ConnectionError, TimeoutError, OSError, RpcError):
+            return False
 
     async def reconcile_delivery(self, profile, binding):
         """Сверить факт приёма worker после потерянного RPC receipt."""

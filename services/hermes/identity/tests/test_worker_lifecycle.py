@@ -15,9 +15,44 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.worker import Worker, main
 from identity.ipc import Peer, RpcError
+from identity.ingress import Bridge
 
 
 class LifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cold_bridge_claims_worker_before_commands_without_supervisor(self):
+        for command in ('/commands', '/start'):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+                worker._startup_gate = self.gate(worker)
+                async def dispatched(**params):
+                    self.assertIsNotNone(worker.peer)
+                    self.assertTrue(worker.operational.is_set())
+                    self.assertEqual(params['event']['text'], command)
+                    return {'accepted': False, 'turn_id': None}
+                worker.dispatch = AsyncMock(side_effect=dispatched)
+                async def prepare(event):
+                    return {'text': command, 'message_id': '1'}
+                bridge = Bridge('owner', '123', 999, directory + '/worker.sock', None, prepare)
+                source = NS(platform=NS(value='telegram'), user_id='123', is_bot=False,
+                            chat_id='123', thread_id=None, to_dict=lambda: {})
+                with patch('identity.worker.peer_uid', return_value=worker.ingress_uid), \
+                        patch('identity.ingress.peer_uid', return_value=999):
+                    server = await asyncio.start_unix_server(worker.serve_connection, path=bridge.socket_path)
+                    try:
+                        self.assertIsNone(worker.peer)
+                        result = await bridge.dispatch(NS(source=source, message_id='1'))
+                        self.assertFalse(result['accepted'])
+                        worker.dispatch.assert_awaited_once()
+                        self.assertIs(await bridge.connect(), bridge.peer)
+                    finally:
+                        if bridge.peer is not None:
+                            bridge.peer.writer.close()
+                            await bridge.task
+                        await asyncio.wait_for(worker.peer_released.wait(), 2)
+                        server.close()
+                        await server.wait_closed()
+                self.shutdown.clear()
+
     def setUp(self):
         self.calls = []
         self.started = asyncio.Event()

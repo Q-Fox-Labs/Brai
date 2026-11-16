@@ -450,6 +450,25 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await runtime.admit_update(update, adapter))
         self.assertEqual([call.args[0] for call in broker.await_args_list], ['identity.resolve'])
 
+    async def test_new_user_start_and_invite_do_not_require_worker(self):
+        for text, expected_calls in [('/start', ['identity.resolve']),
+                ('/start invite_abcdefghijklmnop', ['identity.resolve', 'identity.invite-redeem'])]:
+            with self.subTest(text=text):
+                adapter = NS()
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
+                    effective_user=NS(id=123, is_bot=False, full_name='Fixture'),
+                    effective_chat=NS(id=123, type='private'))
+                async def broker(method, params, **kwargs):
+                    if method == 'identity.resolve':
+                        raise PermissionError('Unregistered fixture')
+                    self.assertEqual(method, 'identity.invite-redeem')
+                    return {}
+                with patch.object(runtime, 'broker_call', AsyncMock(side_effect=broker)) as call, \
+                        patch.object(runtime, '_notice', AsyncMock()) as notice:
+                    self.assertFalse(await runtime.admit_update(update, adapter))
+                    self.assertEqual([c.args[0] for c in call.await_args_list], expected_calls)
+                    notice.assert_awaited_once()
+
     async def test_uid_rebinding_to_other_owner_fails_closed(self):
         resolver = runtime.Resolver(NS())
         first = profile()

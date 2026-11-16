@@ -129,6 +129,7 @@ class Mirror:
         self.capture_lock = asyncio.Lock()
         self.bot_id = None
         self.input_ready = self.reconcile_delivery = None
+        self.command_ready = None
         self.pump_lock = asyncio.Lock()
         self.auto_inputs, self.terminal_inputs = set(), set()
         self.input_routes = {}
@@ -517,6 +518,14 @@ class Mirror:
                 self.input_routes[uid] = route
                 # Handing-off начинается только перед реальным worker RPC.
                 return False
+            text = getattr(getattr(update, 'message', None), 'text', None)
+            if isinstance(text, str) and text.lstrip().startswith('/') and self.command_ready is not None:
+                self.auto_inputs.add(key)
+                if not await self.command_ready(profile):
+                    # Startup не является передачей команды. Как у обычного
+                    # отложенного input, освободить callback, сохранив captured.
+                    return True
+                self.auto_inputs.discard(key)
             if getattr(getattr(update, 'message', None), 'forum_topic_created', None):
                 self.service_updates[key] = update
         if self.transport is not None:
