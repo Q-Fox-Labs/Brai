@@ -153,6 +153,8 @@ _mcp_log.addHandler(_mcp_handler)
                 return {'profiles': [profile], 'allProfileIds': [profile['profileId']]}
             if method == 'ingress.resolve-known':
                 return {'state': 'known', 'profile': profile}
+            if method == 'ingress.input-ready':
+                return {'ready': True}
             if method == 'identity.resolve': return profile
             if method in ('ingress.admit', 'ingress.close', 'ingress.status'): return {}
             raise AssertionError('Unexpected fixture Auth operation: ' + method)
