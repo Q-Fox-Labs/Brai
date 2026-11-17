@@ -10,7 +10,10 @@ export type StreamFrame = EventEnvelope | DeltaFrame;
 export function encodeFrame(value: EventEnvelope, previous?: NativeSnapshot): StreamFrame {
   if (!previous || previous.generation !== value.generation || previous.epoch !== value.epoch) return value;
   const patch: DeltaFrame = { ...value, baseSeq: previous.seq, event: { type: "STATE_DELTA", delta: jsonPatch.compare(previous, value.event.snapshot) } };
-  return bytes(patch) < bytes(value) ? patch : value;
+  const patchBytes = bytes(patch);
+  // Text length is a lower bound for its JSON UTF-8 bytes; avoid serializing the whole history for a small delta.
+  const textBytesAtLeast = value.event.snapshot.items.reduce((total, item) => total + (typeof item.text === "string" ? item.text.length : 0), 0);
+  return patchBytes < textBytesAtLeast || patchBytes < bytes(value) ? patch : value;
 }
 /** Возвращает проверенный полный снимок. Несовпадение базы не допускает частичного применения. */
 export function decodeFrame(value: StreamFrame, previous?: NativeSnapshot | null): NativeSnapshot {
