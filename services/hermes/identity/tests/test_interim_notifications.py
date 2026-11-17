@@ -85,6 +85,36 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(consumer._already_sent)
         self.assertEqual(consumer._delivered_commentary_texts, ['Проверяю документы'])
 
+    def test_fallback_commentary_keeps_progress_marker(self):
+        marker = '--- a/gateway/run_turn_runner.py\n+++ b/gateway/run_turn_runner.py\n'
+        patch_text = (IDENTITY / 'native.patch').read_text()
+        block = marker + patch_text.split(marker, 1)[1].split('--- a/', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'gateway/run_turn_runner.py'
+            target.parent.mkdir(parents=True)
+            target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/gateway/run_turn_runner.py').read_text())
+            subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
+                           stdout=subprocess.DEVNULL, check=True)
+            tree = ast.parse(target.read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'GatewayTurnRunner')
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '_setup_stream_consumer')
+        future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+        module = ast.fix_missing_locations(ast.Module(body=[future, method], type_ignores=[]))
+        scope = {}
+        exec(compile(module, 'runner-fixture', 'exec'), scope)
+        ctx = SimpleNamespace(mute_notification_reply=False, streaming_tts_consumer_holder=[None],
+            resolve_display_setting=lambda *_: False, scheduled_heartbeat=False,
+            interim_assistant_messages_enabled=False, user_config={}, _run_still_current=lambda: True,
+            _status_adapter=object(), _status_thread_metadata={'thread_id': '77'})
+        calls = []
+        runner = SimpleNamespace(_ctx=ctx, _runner=SimpleNamespace(
+            config=SimpleNamespace(streaming=SimpleNamespace(enabled_for=lambda _: False))),
+            _send_status_text=lambda *args: calls.append(args))
+        _, _, callback, _ = scope['_setup_stream_consumer'](runner, 'telegram')
+        callback('Проверяю документы')
+        self.assertEqual(calls[0][1], {'thread_id': '77', '_interim_send': True, '_brai_progress': True})
+
     async def test_interim_prefix_is_added_once_and_final_is_untouched(self):
         for text, metadata, expected in [
             ('Проверяю документы', {'_interim_send': True, '_brai_progress': True}, '⏳ Работаю: Проверяю документы'),
