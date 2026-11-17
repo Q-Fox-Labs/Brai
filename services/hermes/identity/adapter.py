@@ -3,6 +3,9 @@
 """Создание адаптера отложено до загрузки закреплённого Hermes."""
 import asyncio
 import logging
+import os
+from pathlib import Path
+import tempfile
 import uuid
 from contextvars import ContextVar
 from .ipc import RpcError
@@ -201,6 +204,20 @@ def make_adapter(config, platform, peer, publish_file):
             return None
 
         async def send(self, chat_id, content, reply_to=None, metadata=None):
+            from .long_reply import needs_pdf, excerpt, render_pdf
+            if isinstance(content, str) and needs_pdf(self, content):
+                # Сокращённый текст и PDF идут одной доставкой и одной квитанцией.
+                try:
+                    workspace = Path(os.environ['HERMES_HOME']) / 'workspace'
+                    workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with tempfile.TemporaryDirectory(prefix='brai-long-reply-', dir=workspace) as directory:
+                        target = Path(directory) / 'Полный ответ.pdf'
+                        await asyncio.to_thread(render_pdf, content, target)
+                        return await self.send_document(chat_id, str(target), caption=excerpt(self, content),
+                                                        reply_to=reply_to, metadata=metadata)
+                except Exception as error:
+                    logging.getLogger(__name__).warning('identity_long_reply_failed error=%s', type(error).__name__)
+                    return SendResult(success=False, error='Full reply preparation failed')
             return await self._action('send', dict(chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata))
 
         async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):

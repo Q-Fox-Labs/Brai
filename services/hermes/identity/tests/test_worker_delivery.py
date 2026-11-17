@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import contextlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -22,6 +23,31 @@ from identity.scope import delivery_scope
 from identity import telegram_runtime as runtime
 from files import native
 from files.tests.test_files import Backend
+
+
+class LongReplyTests(unittest.TestCase):
+    def test_limits_use_the_rendered_rich_payload_and_utf8_bytes(self):
+        from identity.long_reply import needs_pdf
+        adapter = NS(_rich_message_payload=lambda value: {'markdown': value})
+        self.assertFalse(needs_pdf(adapter, 'я' * 32768))
+        self.assertTrue(needs_pdf(adapter, 'я' * 32769))
+        adapter._rich_message_payload = lambda value: {'markdown': '😀' * 32769}
+        self.assertTrue(needs_pdf(adapter, 'short'))
+
+    def test_excerpt_accounts_for_markdown_escaping_and_surrogate_pairs(self):
+        from identity.long_reply import excerpt
+        adapter = NS(format_message=lambda text: text.replace('_', r'\_'))
+        value = excerpt(adapter, '_😀' * 2000)
+        self.assertLessEqual(len(adapter.format_message(value).encode('utf-16-le')) // 2, 1024)
+        self.assertIn('Полный ответ — в PDF.', value)
+
+    @unittest.skipUnless(importlib.util.find_spec('markdown'), 'Markdown is supplied by the pinned Hermes SDK')
+    def test_pdf_html_retains_beginning_and_end_and_disables_external_resources(self):
+        from identity.long_reply import report_html
+        body = report_html('# Начало\n\n' + ('Текст.\n\n' * 5000) + 'Конечный вывод.', 'Ответ')
+        self.assertIn('Начало', body)
+        self.assertIn('Конечный вывод.', body)
+        self.assertIn('default-src', body)
 
 
 class PersonalRichDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -226,6 +252,43 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         async def publish_file(path):
             return {'artifact_id': self.files.publish(path, 'ipc-publish')['artifactId']}
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
+
+    async def test_overlong_reply_sends_excerpt_and_full_pdf_as_one_document(self):
+        from identity import long_reply
+        sent = []
+        document = []
+        async def deliver(owner, action, payload):
+            sent.append((action, payload))
+            artifact = self.files.fetch(payload['artifact']['artifact_id'])
+            document.append(Path(artifact['localPath']).read_bytes())
+            return {'success': True, 'message_id': '400'}
+        def render(content, target):
+            self.assertEqual(content, text)
+            target.write_bytes(b'%PDF-1.7\ncomplete fixture')
+        worker = self.adapter(deliver, sent=('5',))
+        text = 'Первый вывод. ' + 'подробности ' * 4000 + 'ЗАКЛЮЧИТЕЛЬНЫЙ ВЫВОД'
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.input)}), patch.object(long_reply, 'render_pdf', render):
+            result = await worker.send('123', text, reply_to='5', metadata={'thread_id': '77'})
+        self.assertTrue(result.success)
+        self.assertEqual(document, [b'%PDF-1.7\ncomplete fixture'])
+        self.assertEqual(len(sent), 1)
+        action, payload = sent[0]
+        self.assertEqual(action, 'send_document')
+        self.assertEqual(payload['metadata']['thread_id'], '77')
+        self.assertEqual(payload['reply_to'], '5')
+        self.assertIn('Первый вывод.', payload['caption'])
+        self.assertIn('Полный ответ — в PDF.', payload['caption'])
+        self.assertLessEqual(len(payload['caption'].encode('utf-16-le')) // 2, 1024)
+
+    async def test_pdf_render_failure_never_claims_delivery_or_splits(self):
+        from identity import long_reply
+        deliver = AsyncMock()
+        worker = self.adapter(deliver)
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.root)}), \
+                patch.object(long_reply, 'render_pdf', side_effect=RuntimeError('unavailable')):
+            result = await worker.send('123', 'x' * 32769, metadata={'thread_id': '77'})
+        self.assertFalse(result.success)
+        deliver.assert_not_awaited()
 
     async def test_forbidden_rpc_is_a_permanent_native_send_result(self):
         calls = []
