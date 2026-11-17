@@ -46,7 +46,7 @@ export async function sessionIdentity(pool:Pool,cfg:Config,handler:Handler,heade
  if(!response.ok)return null;
  const session=await response.json() as {user?:{id?:unknown},session?:{id?:unknown}}|null;
  if(typeof session?.user?.id!=="string"||typeof session.session?.id!=="string")return null;
- const result=await pool.query('SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId" FROM brai_identity i JOIN "user" u ON u.id=i.user_id JOIN "session" s ON s."userId"=i.user_id WHERE i.user_id=$1 AND i.status=\'active\' AND i.role IN (\'creator\',\'admin\',\'user\') AND s.id=$2 AND s.brai_generation=i.lifecycle_generation AND s."expiresAt">now()',[session.user.id,session.session.id]);
+ const result=await pool.query('SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId" FROM brai_identity i JOIN "user" u ON u.id=i.user_id JOIN "session" s ON s."userId"=i.user_id WHERE i.user_id=$1 AND i.status=\'active\' AND i.role=\'creator\' AND s.id=$2 AND s.brai_generation=i.lifecycle_generation AND s."expiresAt">now()',[session.user.id,session.session.id]);
  return result.rows[0]?{...result.rows[0],sessionId:session.session.id}:null;
 }
 /** Исполняет валидированный запрос; секреты не попадают в ошибки транспорта. */

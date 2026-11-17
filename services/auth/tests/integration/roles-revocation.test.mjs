@@ -55,7 +55,7 @@ test("A09 guest не получает код и теряет прежние ко
   try {
     await migrate();
     const creator = await seed({ role: "creator", name: "Credential manager fixture" });
-    const user = await seed({ role: "user", name: "Credential user fixture" });
+    const user = await seed({ role: "creator", name: "Credential user fixture" });
     ids.push(creator.id, user.id);
     const cfg = { identityMode: "telegram", origin: hub, trustedOrigins: [hub, preview],
       ssoHubOrigin: hub, ssoPreviewOrigins: [preview], secret };
@@ -128,7 +128,7 @@ test("A11 guest → user применяет профиль без смены use
       [previous.id, previous.name, previous.telegram_id, previous.profile_id]);
     assert.deepEqual([current.role, current.status], ["user", "active"]);
     assert.equal(await consumeCode(app, secret, code, "old-guest-code"), null);
-    assert.ok(await issueCode(app, secret, guest.channel));
+    assert.equal(await issueCode(app, secret, guest.channel), null);
   } finally {
     await cleanup(ids);
   }

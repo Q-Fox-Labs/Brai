@@ -769,6 +769,8 @@ class Broker:
             turn = self.turns.get(peer_uid)
             if not turn or not turn['privateChat']:
                 raise PermissionError('Private Telegram turn required')
+            if profile['role'] != 'creator':
+                return {'status': 'failed', 'reason': 'web-role-unavailable', 'suppressFinal': False}
             receipt = turn['loginRecord']
             lock = self.login_locks.setdefault(peer_uid, asyncio.Lock())
             async with lock:

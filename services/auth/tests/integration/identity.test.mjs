@@ -53,6 +53,8 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   await invoke('verify-provision.js','AUTH_ACCOUNTS_FILE',accounts);
   await invoke('ready-profiles.js','AUTH_READY_FILE',[{userId:owner,profileId:'fixture-owner'},{userId:user.id,profileId:'fixture-user'}]);
   assert.equal((await profileReady(pool,user.id,"fixture-user")).status,"active");
+  assert.equal(await issueCode(pool,secret,'10002'),null);
+  await pool.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[user.id]);
   const first=await issueCode(pool,secret,"10002");assert.match(first.code,/^[0-9A-HJKMNP-TV-Z]{12}$/);
   const second=await issueCode(pool,secret,"10002");
   assert.equal(await consumeCode(pool,secret,first.code,"fixture-client"),null);
@@ -60,6 +62,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal(results.filter(value=>value===user.id).length,1);
   assert.equal((await issueCode(pool,secret,"10002"))!==null,true);
   assert.equal(await issueCode(pool,secret,"10002"),null);
+  await pool.query("UPDATE brai_identity SET role='user' WHERE user_id=$1",[user.id]);
   const multi=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'10005',name:'Multiple accounts',role:'user',status:'active',profileId:'fixture-multiple'});
   assert.equal(await issueTelegramLink(runtime,secret,'99999'),null);
   const link=await issueTelegramLink(runtime,secret,'10005');
@@ -76,11 +79,13 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   await migrateIdentity(pool);
   assert.deepEqual(await resolveTelegram(pool,alias),multi);
   assert.deepEqual(await provision(runtime,secret,{requestId:randomUUID(),telegramId:alias,userId:multi.id,profileId:multi.profileId,role:'user',status:'active'}),multi);
+  await pool.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[multi.id]);
   const aliasCode=await issueCode(runtime,secret,alias);
   assert.equal(await consumeCode(pool,secret,aliasCode.code,'alias-client'),multi.id);
   assert.ok(await issueCode(runtime,secret,'10005'));
   assert.ok(await issueCode(runtime,secret,alias));
   assert.equal(await issueCode(runtime,secret,'10005'),null);
+  await pool.query("UPDATE brai_identity SET role='user' WHERE user_id=$1",[multi.id]);
   assert.equal(await unlinkTelegram(runtime,'10005','10002'),false);
   await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'alias-session-fixture',multi.id]);
   assert.equal(await unlinkTelegram(runtime,alias,alias),true);
@@ -120,7 +125,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.deepEqual(await resolveTelegram(runtime,'30002'),equal);
   await migrateIdentity(pool);await migrateIdentity(pool);
   assert.equal(await resolveTelegram(runtime,'30001'),null);
-  assert.ok(await issueCode(runtime,secret,'30002'));
+  assert.equal(await issueCode(runtime,secret,'30002'),null);
   const detachedLink=await issueTelegramLink(runtime,secret,'30002');
   assert.equal(await unlinkTelegram(runtime,'30002','30002'),true);
   equal.generation+=1;
@@ -148,10 +153,14 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   const adminAccount=(await getIdentity(runtime,owner)).telegramIds[0];
   assert.equal((await getIdentity(runtime,owner)).telegramIds.length,1);
   assert.equal(await unlinkTelegram(runtime,adminAccount,adminAccount),false);
-  assert.ok(await issueCode(runtime,secret,adminAccount));
+  assert.equal(await issueCode(runtime,secret,adminAccount),null);
   for(const [index,issue] of [issueCode,issueTelegramLink].entries()){
    const telegramId=String(48001+index),application="fixture-issuance-"+index;
    const raceUser=await provision(runtime,secret,{requestId:randomUUID(),telegramId,role:'user',status:'active',profileId:'fixture-issuance-'+index});
+   if(index===0){
+    await pool.query("UPDATE brai_identity SET role='creator' WHERE user_id=$1",[raceUser.id]);
+    await pool.query('INSERT INTO sys_telegram_account(telegram_id,user_id) VALUES($1,$2)',[telegramId+'9',raceUser.id]);
+   }
    const issuing=new Pool({connectionString:appURL.href,application_name:application});
    let release,locked,pid,issuer,revocation;
    const gate=new Promise(resolve=>{release=resolve;});
@@ -178,10 +187,11 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
     assert.equal(await revocation,true);
     assert.equal(await issuer,null,"A detached account must not obtain a new credential after waiting");
     assert.equal(await resolveTelegram(runtime,telegramId),null);
-    assert.deepEqual((await getIdentity(runtime,raceUser.id)).telegramIds,[]);
+    assert.deepEqual((await getIdentity(runtime,raceUser.id)).telegramIds,index===0?[telegramId+'9']:[]);
    }finally{
     release();await Promise.allSettled([revocation,issuer].filter(Boolean));await issuing.end();
    }
+   if(index===0)await pool.query("UPDATE brai_identity SET role='user' WHERE user_id=$1",[raceUser.id]);
   }
   const last=await Promise.all([
    adminAction(pool,secret,owner,"role-set",{userId:owner,role:"user"}),

@@ -7,16 +7,17 @@ import { Control } from '../control.mjs';
 const profile = { userId: 'u1', profileId: 'p1', telegramId: '42', memoryEpoch: 'epoch-1', status: 'active' };
 const registry = async () => ({ version: 1, profiles: { '1001': profile } });
 const headers = { cookie: 'session=token', origin: 'https://brai.example' };
-function setup(overrides = {}) {
+function setup(overrides = {}, loginRole = 'user') {
   const calls = [];
   const authCall = async (op, value) => {
     calls.push(op);
     if (op === 'session') return { status: 200, body: { user: { id: 'admin', role: 'admin', status: 'active' }, session: {} } };
     if (op === 'admin-audit') return { status: 200 };
-    if (op === 'telegram-resolve' || op === 'identity-get') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active', role: 'user' } };
+    if (op === 'telegram-resolve' || op === 'identity-get') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active', role: loginRole } };
     if (op === 'telegram-code-issue') return { code: '123456789ABC', origin: 'https://brai.example', expiresAt: 'later' };
   };
-  const control = new Control({ origin: headers.origin, cursorKey: 'x'.repeat(32), registry, authCall,
+  const selectedRegistry = loginRole === 'user' ? registry : async () => ({version:1, profiles:{'1001':{...profile,role:loginRole,generation:0}}});
+  const control = new Control({ origin: headers.origin, cursorKey: 'x'.repeat(32), registry:selectedRegistry, authCall,
     memoryRead: async () => { calls.push('read'); return { items: [], nextCursor: 'snapshot:1' }; },
     telegramSend: async value => { calls.push(value); return { ok: true }; }, ...overrides });
   return { control, calls };
@@ -77,7 +78,7 @@ test('denied session or audit does not read', async () => {
 });
 
 test('login sends only to bound private owner and returns no secret', async () => {
-  const { control, calls } = setup();
+  const { control, calls } = setup({}, 'creator');
   assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: false, requestId: 'r' }), { status: 'denied' });
   assert.equal(calls.length, 0);
   assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r' }), { status: 'sent' });
@@ -85,8 +86,21 @@ test('login sends only to bound private owner and returns no secret', async () =
   assert.match(calls[2].message, /123456789ABC/);
 });
 
+test('login refuses all non-creator roles without issuing or sending a code', async () => {
+  for (const role of ['admin', 'user', 'guest']) {
+    const calls = [];
+    const { control } = setup({authCall: async op => {
+      calls.push(op);
+      return {user: {id:'u1',profileId:'p1',telegramId:'42',status:'active',role}};
+    }, telegramSend: async () => { throw new Error('must not send'); }}, role);
+    assert.deepEqual(await control.sendLogin({uid:1001,telegramId:'42',privateChat:true,requestId:'r'}),
+      {status:'denied'});
+    assert.deepEqual(calls, ['telegram-resolve']);
+  }
+});
+
 test('linked account receives its own login code after Auth confirms canonical owner', async () => {
-  const { control, calls } = setup();
+  const { control, calls } = setup({}, 'creator');
   assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '84', privateChat: true, requestId: 'alias' }), { status: 'sent' });
   assert.equal(calls[2].telegramId, '84');
   const foreign = setup({ authCall: async () => ({ user: { id: 'other', profileId: 'other', telegramId: '84', status: 'active' } }) });
@@ -222,11 +236,11 @@ test('login preserves trusted DM topic and rejects invalid topics before issuing
     assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r', threadId }), { status: 'denied' });
     assert.equal(calls.length, 0);
   }
-  const { control, calls } = setup();
+  const { control, calls } = setup({}, 'creator');
   assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r', threadId: 73 }), { status: 'sent' });
   assert.equal(calls[2].threadId, 73);
   assert.equal(calls[2].telegramId, '42');
-  const failed = setup({ telegramSend: async () => ({ ok: false }) });
+  const failed = setup({ telegramSend: async () => ({ ok: false }) }, 'creator');
   assert.deepEqual(await failed.control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r', threadId: 73 }), { status: 'failed' });
 });
 

@@ -11,7 +11,8 @@
 | files_get, files_list, files_prepare | Собственные | Собственные | Собственные | Собственные |
 | create_text_file, create_document_file, create_spreadsheet_file, read_text_file, fetch_file | Собственные | Собственные | Собственные | Собственные |
 | local_ai_models_install/configure/load/unload/remove, local_ai_cancel, transcription_settings_set | Да | Да | Нет | Нет |
-| brai_login, brai_telegram_link_account, brai_telegram_unlink_account | Да | Да | Да | Нет |
+| brai_login | Код | Объяснение отказа | Объяснение отказа | Нет; ответ по инструкции |
+| brai_telegram_link_account, brai_telegram_unlink_account | Да | Да | Да | Нет |
 | web_search, безопасные browser_* из TOOL_MATRIX, image_generate, text_to_speech | Да | Да | Да | Ограниченные аргументы и отдельные артефакты |
 | Остальные включённые личные MCP и native инструменты | Прежний профиль | Прежний профиль | Прежний профиль | Нет |
 | terminal/process/code_execution, cron, дочерние исполнители, конфигурация и навыки | Прежняя ограниченная среда | Прежняя ограниченная среда | Прежняя ограниченная среда | Нет |
@@ -48,3 +49,5 @@ Guest health не требует brai_login. Bootstrap возвращает role
 Проекты, shell, произвольная запись на диск, навыки, настройки, rawCDP и JS-eval
 остаются закрыты. Браузер имеет отдельные Unix-аккаунт, HOME и публичный egress;
 прежний личный config и файлы worker в него не монтируются.
+
+При запросе веб-доступа admin, user и guest получают объяснение: «Доступ к веб-версии для вашего типа учётной записи сейчас недоступен». Control повторно сверяет роль с Auth; техническая ошибка не превращается в отказ по роли.
