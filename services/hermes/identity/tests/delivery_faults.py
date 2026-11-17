@@ -1,10 +1,12 @@
 # ABOUTME: Проверяет автоматическую доставку при настоящем SIGKILL личного native worker.
 # ABOUTME: Создаёт только отдельные synthetic UID/HOME; Telegram и backend заменены тестовыми портами.
 import asyncio
+import array
 import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import time
 from types import SimpleNamespace as NS
@@ -60,9 +62,10 @@ async def run(config, fixture, native, receipt):
         system_instructions.publish(software / 'instructions', stable_instructions)
         stage = 'profile-prepare'
         uid = fixture.unused_uid()
+        ingress_uid = fixture.unused_uid((uid,))
         home = root / 'profiles/personal'
         home.parent.mkdir(mode=0o711)
-        configuration = fixture.prepare_home(home, uid, 0, runtime, root / 'broker.sock')
+        configuration = fixture.prepare_home(home, uid, ingress_uid, runtime, root / 'broker.sock')
         # Streaming has its separate boundary tests. This stand exercises durable final replies.
         settings = json.loads((home / 'config.yaml').read_text())
         settings['display']['platforms']['telegram']['streaming'] = False
@@ -223,7 +226,7 @@ _mcp_log.addHandler(_mcp_handler)
                 broker = fixture.FixtureBroker(uid, configuration)
                 broker_runs.append(broker)
             unit = 'brai-native-fixture-' + uuid.uuid4().hex
-            args = fixture.worker_unit_args(unit, uid, 0, home, software, runtime, root / 'broker.sock',
+            args = fixture.worker_unit_args(unit, uid, ingress_uid, home, software, runtime, root / 'broker.sock',
                 root / 'model.sock', receipt['paths']['python'], lock, launcher,
                 dependency_paths={'venv': receipt['paths']['venv'], 'site-packages': receipt['paths']['sitePackages']})
             args.insert(args.index('/usr/bin/env'), '--property=BindReadOnlyPaths=' + str(stable_instructions) + ':/opt/brai-profile/system-instructions')
@@ -261,7 +264,40 @@ _mcp_log.addHandler(_mcp_handler)
                 fixture.require(not fixture.cgroup_pids(state['ControlGroup'], unit), 'CLEANUP_CGROUP_SURVIVED')
                 await process.wait()
 
-        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth), patch.object(telegram_runtime.Resolver, 'durable_reply', traced_reply):
+        native_open = asyncio.open_unix_connection
+        async def open_as_ingress(path=None, **kwargs):
+            if str(path) != str(home / 'control/worker.sock'):
+                return await native_open(path, **kwargs)
+            # Сокет соединяет отдельный UID, а не Root-контроллер fixture. Сам
+            # подключённый дескриптор передаётся обратно без TCP-прокси.
+            parent, child = socket.socketpair()
+            code = '''import array,socket,sys
+channel=socket.socket(fileno=int(sys.argv[1]))
+peer=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+peer.connect(sys.argv[2])
+channel.sendmsg([b"x"],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array("i",[peer.fileno()]))])
+peer.close();channel.close()
+'''
+            try:
+                process = await asyncio.create_subprocess_exec('/usr/bin/python3', '-I', '-B', '-c', code,
+                    str(child.fileno()), str(path), pass_fds=(child.fileno(),), user=ingress_uid,
+                    group=ingress_uid, extra_groups=[], stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                child.close()
+                data, control, _, _ = await asyncio.to_thread(parent.recvmsg, 1, socket.CMSG_SPACE(array.array('i').itemsize))
+                status = await process.wait()
+                if status or data != b'x' or len(control) != 1:
+                    raise ConnectionError('Fixture ingress connection failed')
+                level, kind, raw = control[0]
+                if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+                    raise ConnectionError('Fixture ingress descriptor missing')
+                descriptors = array.array('i'); descriptors.frombytes(raw[:descriptors.itemsize])
+                peer = socket.socket(fileno=descriptors[0]); peer.setblocking(False)
+                return await native_open(sock=peer, **kwargs)
+            finally:
+                parent.close(); child.close()
+
+        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth), patch.object(telegram_runtime.Resolver, 'durable_reply', traced_reply), patch('asyncio.open_unix_connection', open_as_ingress):
             resolver = create()
             await resolver.mirror.hydrate()
             supervisor = asyncio.create_task(resolver._supervise())
