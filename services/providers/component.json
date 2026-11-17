@@ -10,7 +10,9 @@
   "executableSources": [
     "services/providers/src/main.ts",
     "services/providers/src/migrate.ts",
-    "services/providers/src/catalog.ts"
+    "services/providers/src/catalog.ts",
+    "services/providers/codex-auth/helper.py",
+    "services/providers/codex-auth/client.py"
   ],
   "inputs": {
     "build": [
@@ -97,7 +99,10 @@
       "services/providers/migrations",
       "services/providers/package.json",
       "services/providers/schemas",
-      "services/providers/codex-auth"
+      "services/providers/codex-auth/helper.py",
+      "services/providers/codex-auth/client.py",
+      "services/providers/codex-auth/openrpc.json",
+      "services/providers/codex-auth/README.md"
     ],
     "entrypoints": [
       "services/providers/dist/main.js",
