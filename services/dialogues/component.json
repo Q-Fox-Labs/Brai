@@ -86,8 +86,16 @@
     ]
   },
   "dependencies": [
-    "auth",
-    "providers"
+    {
+      "id": "auth",
+      "inputs": [],
+      "delivery": []
+    },
+    {
+      "id": "providers",
+      "inputs": [],
+      "delivery": []
+    }
   ],
   "commands": {
     "build": "npm run build",
