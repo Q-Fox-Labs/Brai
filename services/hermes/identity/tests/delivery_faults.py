@@ -91,6 +91,12 @@ for _name in ('gateway', 'agent', 'run_agent'):
         broker_runs = [broker]
         async def broker_port(reader, writer):
             await broker.handle(reader, writer)
+        original_catalog = fixture.synthetic_model_catalog
+        def synthetic_catalog():
+            # Native endpoint metadata consumes the OpenAI-compatible data list;
+            # retain the Codex models list for its separate catalog consumer.
+            return {**original_catalog(), 'data': [{'id': 'gpt-6-luna', 'context_length': 65536}]}
+        fixture.synthetic_model_catalog = synthetic_catalog
         model = fixture.FixtureModel(None, uid)
         provider_unavailable = False
         provider_failures = []
