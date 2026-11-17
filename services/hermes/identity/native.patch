@@ -1441,7 +1441,7 @@ index e9819bc..800c70d 100644
 
 --- a/gateway/run_turn.py
 +++ b/gateway/run_turn.py
-@@ -3846,5 +3846,18 @@
+@@ -3846,5 +3846,24 @@
                  first_response = _unexpected_silence_reply()
                  _already_streamed = False
 +        # AIDEV-NOTE: Очередь тоже должна показывать незавершённый ответ с ошибкой.
@@ -1449,7 +1449,13 @@ index e9819bc..800c70d 100644
 +                         (_delivery_result.get("partial") and _delivery_result.get("error")))
 +        if str(getattr(turn_ctx.source.platform, "value", turn_ctx.source.platform)) == "telegram" and _first_failed:
 +            _failure_result = dict(_delivery_result)
-+            if _already_streamed:
++            _partial = _failure_result.get("brai_delivered_partial")
++            _partial_delivered = _already_streamed
++            _has_delivered = getattr(_sc, "has_durably_delivered_text", None)
++            if _partial and callable(_has_delivered):
++                with suppress(Exception):
++                    _partial_delivered = _partial_delivered or bool(_has_delivered(_partial))
++            if _partial_delivered:
 +                # Текст уже доставлен, осталось показать только предупреждение.
 +                _failure_result.pop("brai_delivered_partial", None)
 +            first_response = _telegram_failure_explanation(

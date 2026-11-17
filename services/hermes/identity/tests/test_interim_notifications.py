@@ -104,6 +104,15 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sender.await_args.args[0], '⚠️ Работа не завершена.')
         self.assertFalse(sender.await_args.kwargs['text_already_delivered'])
 
+        # Поток подтвердил только часть, а итог также содержит техническую ошибку.
+        runner._run_agent_stream_confirmed_final_delivery = lambda *_a, **_kw: False
+        ctx.stream_consumer_holder[0] = SimpleNamespace(
+            has_durably_delivered_text=lambda text: text == 'Сохранённая часть')
+        result['final_response'] = 'Сохранённая часть\n\nEnglish error'
+        sender.reset_mock()
+        await deliver(runner, ctx, None, result, result, None)
+        self.assertEqual(sender.await_args.args[0], '⚠️ Работа не завершена.')
+
     def test_only_interim_is_silent_even_if_all_notifications_are_enabled(self):
         for mode in ('important', 'all'):
             adapter = SimpleNamespace(_notifications_mode=mode)
