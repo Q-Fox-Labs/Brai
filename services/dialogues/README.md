@@ -108,8 +108,20 @@ identity broker. Нужны `DIALOGUES_NATS_SERVERS`, `DIALOGUES_NATS_CREDS_FILE
 Контракт принадлежит [Auth](../auth/dialogues-access.asyncapi.yaml).
 Ошибка транспорта даёт HTTP 503, подтверждённый запрет — 403.
 Изоляция LOGIN/RLS и проверка binding сохраняются.
-В этом режиме свёртка использует `DIALOGUES_CODEX_SOCKET_URL` и
-`DIALOGUES_SUMMARY_CWD`; socket должен принадлежать отдельному исполнителю
-Диалогов. Наличие этих входов не доказывает независимость установленного runtime:
-самостоятельный native доступен через DIALOGUES_SUBSCRIPTION_CONFIG_FILE.
+В этом режиме свёртка требует `DIALOGUES_SUBSCRIPTION_CONFIG_FILE` с собственным
+подписочным исполнителем. Общий Codex socket не используется. Файл NATS может
+содержать NKEY creds или закрытый JSON `{user,pass}`; ACL разрешает только
+закреплённый subject и собственный inbox. Каждый завершённый запрос Luna сохраняет
+native thread/turn/launch ID в очереди, не используя ephemeral историю при restart.
+
+Операторский `dist/provision.js` принимает JSON через stdin: `operatorFile`,
+`account`, `directory`, `stateDirectory`, `provider`, `payload`, `uid`.
+Он проверяет существующего пользователя и профиль в штатной схеме Better Auth,
+создаёт только технический LOGIN и собственные runtime inputs. Аккаунты Auth
+не создаются. Защищённый operator JSON и порядок переключения принадлежат
+установщику. Повторная подготовка сохраняет пароль, токен, cursor key и owner_id.
+При существующей привязке без своего connection state требуется явный импорт
+закрытого `account.connection_file`; смена principal не выполняется автоматически.
+Установщик хранит поколения отдельно, принимает настоящий MCP initialize,
+откатывает неудачный запуск и удаляет только собственные службы/ACL, сохраняя DATA.
 Операторский переход и приёмка полного installed runtime проверяются отдельно.

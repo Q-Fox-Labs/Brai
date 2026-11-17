@@ -86,9 +86,11 @@ export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<L
     timer=setTimeout(()=>reject(fault('LUNA_EXECUTION_TIMEOUT')),120000);
    });
    void done.catch(()=>{});
-   await save({execution_state:'running'});
+   const provenance={native_thread_id:thread,native_launch_id:randomUUID()};
+   await save({...provenance,execution_state:'running'});
    const launched=await call('turn/start',{threadId:thread,model:'gpt-6-luna',effort,environments:[],clientUserMessageId:randomUUID(),input:[{type:'text',text:input}]});
    turnId=launched.turn.id;
+   await save({...provenance,native_turn_id:turnId,execution_state:'running'});
    const turn=await done;
    if(turn.id!==turnId||turn.status!=='completed')throw fault('LUNA_EXECUTION_FAILED');
    const items=active!.items;
@@ -96,7 +98,7 @@ export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<L
    if([...items.values()].some(i=>!['userMessage','agentMessage','reasoning'].includes(i.type)))throw fault('LUNA_ISOLATION_VIOLATION');
    const output=[...items.values()].filter(i=>i.type==='agentMessage'&&(i.phase==='final_answer'||!i.phase)).map(i=>i.text??'').join('\n');
    summaryText(output);
-   await save({execution_state:'completed',result:output});
+   await save({...provenance,native_turn_id:turnId,execution_state:'completed',result:output});
    turnId=undefined;
    return output;
   }finally{

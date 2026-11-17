@@ -7,7 +7,10 @@ import type {PersonalPrincipal} from './personal-auth.js';
 export async function connectAuthAccess(env:NodeJS.ProcessEnv,expected:PersonalPrincipal){
  const subject=env.DIALOGUES_AUTH_SUBJECT;
  if(!subject||!/^brai\.auth\.v2\.dialogues-access\.[a-f0-9]{64}$/.test(subject)||!env.DIALOGUES_NATS_CREDS_FILE||!env.DIALOGUES_NATS_SERVERS||!env.DIALOGUES_NATS_INBOX_PREFIX)throw new Error('INVALID_AUTH_CONFIG');
- const nc=await connect({servers:env.DIALOGUES_NATS_SERVERS.split(','),authenticator:credsAuthenticator(readFileSync(env.DIALOGUES_NATS_CREDS_FILE)),tls:env.DIALOGUES_NATS_CA_FILE?{caFile:env.DIALOGUES_NATS_CA_FILE}:undefined,inboxPrefix:env.DIALOGUES_NATS_INBOX_PREFIX,maxReconnectAttempts:-1,name:'dialogues-auth'});
+ const raw=readFileSync(env.DIALOGUES_NATS_CREDS_FILE);
+ const credentials=raw[0]===123?JSON.parse(raw.toString('utf8')):undefined;
+ if(credentials&&(typeof credentials.user!=='string'||typeof credentials.pass!=='string'))throw new Error('INVALID_AUTH_CONFIG');
+ const nc=await connect({...credentials,servers:env.DIALOGUES_NATS_SERVERS.split(','),authenticator:credentials?undefined:credsAuthenticator(raw),tls:env.DIALOGUES_NATS_CA_FILE?{caFile:env.DIALOGUES_NATS_CA_FILE}:undefined,inboxPrefix:env.DIALOGUES_NATS_INBOX_PREFIX,maxReconnectAttempts:-1,name:'dialogues-auth'});
  return {authorize:createAuthAccess(nc,subject,expected),close:()=>nc.drain()};
 }
 /** Ошибка транспорта закрывает доступ с отдельным кодом, без повторной выдачи данных. */

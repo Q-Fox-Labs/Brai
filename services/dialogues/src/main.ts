@@ -40,9 +40,7 @@ try {
     if(process.env.DIALOGUES_OPERATOR_TOKEN_FILE)personal.operatorToken=readFileSync(required('DIALOGUES_OPERATOR_TOKEN_FILE'),'utf8').trim();
     // AIDEV-NOTE: Общий управляющий socket Codex не передаётся персональному runtime.
     if(process.env.DIALOGUES_SUMMARY_ENABLED==='true')luna=authAccess
-      ?(process.env.DIALOGUES_SUBSCRIPTION_CONFIG_FILE
-        ?createSubscriptionLuna(JSON.parse(readFileSync(required('DIALOGUES_SUBSCRIPTION_CONFIG_FILE'),'utf8')))
-        :createLuna(required('DIALOGUES_CODEX_SOCKET_URL'),required('DIALOGUES_SUMMARY_CWD')))
+      ?createSubscriptionLuna(JSON.parse(readFileSync(required('DIALOGUES_SUBSCRIPTION_CONFIG_FILE'),'utf8')))
       :createPersonalSummarizer(required('DIALOGUES_IDENTITY_SOCKET'),personal.authorize);
   }
   if((await pool.query("SELECT 1 FROM dialogues_live.messages m WHERE m.owner_id=$1 AND char_length(m.text)>100 AND NOT EXISTS(SELECT 1 FROM dialogues_live.message_summaries s WHERE s.owner_id=m.owner_id AND s.dialogue_id=m.dialogue_id AND s.message_id=m.id) LIMIT 1",[owner])).rowCount)throw new Error("BACKFILL_REQUIRED");

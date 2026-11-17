@@ -328,7 +328,7 @@ class RpcTests(Fixture):
             try:
                 connection.sendall(b'{"jsonrpc":"2.0","method":"credentials.resolve","id":"x"}\n')
                 self.assertEqual(connection.recv(4096), b'')
-            except ConnectionResetError:
+            except (ConnectionResetError, BrokenPipeError):
                 pass
         self.assertEqual(self.owner.calls, [])
 

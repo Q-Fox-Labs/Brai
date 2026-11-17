@@ -57,7 +57,7 @@ test('Luna: потерянный временный запрос повторя�
  const f=await fixture('unknown');let state={};
  try{
   await assert.rejects(f.luna.run('synthetic',state,async x=>{state=x;}),{code:'NATIVE_OUTCOME_UNKNOWN'});
-  assert.equal(state.execution_state,'running');assert.equal(state.native_thread_id,undefined);
+  assert.equal(state.execution_state,'running');assert.equal(state.native_thread_id,'service-thread-1');assert.equal(state.native_turn_id,undefined);assert.match(state.native_launch_id,/^[a-f0-9-]{36}$/);
   const result=await f.luna.run('synthetic',state,async x=>{state=x;});
   assert.match(result,/37/);assert.equal(f.starts,2);assert.equal(state.execution_state,'completed');
   assert.equal(f.calls.some(x=>x.method==='thread/read'),false);
@@ -139,7 +139,7 @@ test('Luna: ранние события перед RPC-ответом дают �
  const f=await fixture('early');let state={};
  try{
   assert.match(await f.luna.run('synthetic',state,async x=>{state=x;}),/37/);
-  assert.equal(state.native_thread_id,undefined);
+  assert.equal(state.native_thread_id,'service-thread-1');assert.ok(state.native_turn_id);assert.match(state.native_launch_id,/^[a-f0-9-]{36}$/);
   assert.equal(f.calls.filter(x=>x.method==='thread/unsubscribe').length,1);
   assert.equal(f.calls.some(x=>x.method==='thread/read'),false);
   assert.match(await f.luna.run('synthetic',{},async()=>{}),/37/);
@@ -150,7 +150,7 @@ test('Luna: restart с прежними native IDs повторяет тольк
  const f=await fixture();let state={native_thread_id:'old-durable-thread',native_turn_id:'old-turn',execution_state:'running'};
  try{
   assert.match(await f.luna.run('synthetic',state,async x=>{state=x;}),/37/);
-  assert.equal(f.starts,1);assert.equal(state.native_thread_id,undefined);
+  assert.equal(f.starts,1);assert.equal(state.native_thread_id,'service-thread-1');assert.ok(state.native_turn_id);assert.match(state.native_launch_id,/^[a-f0-9-]{36}$/);
   assert.equal(f.calls.some(x=>x.method==='thread/read'),false);
  }finally{await f.close();}
 });
