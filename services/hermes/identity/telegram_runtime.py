@@ -605,7 +605,10 @@ class Resolver:
         metadata = self.ledger.metadata(profile, route)
         if metadata is None:
             raise PermissionError('Reply input admission unavailable')
-        metadata = {**metadata, **({'_interim_send': True} if supplied.get('_interim_send') else {})}
+        if supplied.get('_interim_send') is True:
+            metadata['_interim_send'] = True
+            if supplied.get('_brai_progress') is True:
+                metadata['_brai_progress'] = True
         values = {**payload, 'metadata': metadata}
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
         key = self.ledger.owner(profile)
@@ -807,9 +810,12 @@ class Resolver:
         current()
         turn['accountOfferId'] = state.get('accountOfferId') if state.get('needsAccountConsent') is True else None
         interim = metadata.get('_interim_send') is True
+        progress = interim and metadata.get('_brai_progress') is True
         metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
         if interim:
             metadata['_interim_send'] = True
+            if progress:
+                metadata['_brai_progress'] = True
         return route, metadata, turn, current, bool(state.get('suppressFinal'))
 
     async def _background_delivery_context(self, profile, owner, payload, scope_id):

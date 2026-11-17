@@ -99,6 +99,17 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body['profile']['authorTelegramId'], '123')
         self.assertNotIn('authorTelegramId', restored)
 
+        progress_id = delivery_id('supervisor-progress')
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=active)):
+            await bridge.durable_delivery('owner', 'send', {
+                'chat_id': '123', 'content': 'Проверяю документы',
+                'metadata': {'thread_id': '77', '_interim_send': True, '_brai_progress': True}},
+                progress_id, delivery_id('input'))
+        body = json.loads(resolver.ledger.db.execute(
+            'SELECT body FROM reply_outbox WHERE id=?', (progress_id,)).fetchone()[0])
+        self.assertEqual(body['payload']['metadata'],
+                         {'thread_id': '77', '_interim_send': True, '_brai_progress': True})
+
 
 
 

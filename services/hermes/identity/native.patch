@@ -1014,6 +1014,40 @@ diff --git a/agent/redact.py b/agent/redact.py
              await asyncio.sleep(interval)
 
      @staticmethod
+--- a/gateway/stream_consumer_fallback.py
++++ b/gateway/stream_consumer_fallback.py
+@@ -353,6 +353,8 @@
+             # with interim text and orphan the true final.
+             _md = self._metadata_for_send(final=False) or {}
+             _md["_interim_send"] = True
++            # AIDEV-NOTE: Отдельный признак отличает текст модели от предупреждений.
++            _md["_brai_progress"] = True
+             # reply_to only for reply-anchored threading; Discord/Telegram use
+             # thread_id metadata and reply_to on every commentary is spam.
+             _plat = getattr(getattr(self.adapter, "platform", None), "value", None)
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -804,6 +804,8 @@
+
+     def _notification_kwargs(self, metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
+         """In "important" mode return disable_notification=True unless ``notify`` or ``is_approval_prompt`` (#132516)."""
++        if (metadata or {}).get("_brai_progress") is True and not (metadata or {}).get("is_approval_prompt"):
++            return {"disable_notification": True}
+         if getattr(self, "_notifications_mode", "important") != "important" or (metadata or {}).get("notify") \
+                 or (metadata or {}).get("is_approval_prompt"):
+             return {}
+@@ -3670,6 +3672,10 @@
+         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
+         if not content or not content.strip():
+             return SendResult(success=True, message_id=None)
++        # AIDEV-NOTE: Только промежуточные сообщения помечаются до отправки в Telegram.
++        if (metadata or {}).get("_brai_progress") is True and not (metadata or {}).get("is_approval_prompt"):
++            if not content.lstrip().startswith("⏳ Работаю:"):
++                content = "⏳ Работаю: " + content.lstrip()
+         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
+         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
+         async with self._chat_send_lock(chat_id):
+
 diff --git a/plugins/platforms/telegram/update_admission.py b/plugins/platforms/telegram/update_admission.py
 index be158a8..28cc883 100644
 --- a/plugins/platforms/telegram/update_admission.py

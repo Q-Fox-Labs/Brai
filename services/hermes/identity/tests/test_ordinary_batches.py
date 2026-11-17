@@ -31,7 +31,9 @@ class PatchedFixture(unittest.IsolatedAsyncioTestCase):
         shutil.copytree(FIXTURE/'plugins',root/'plugins')
         source=(BASE/'native.patch').read_text()
         self.assertEqual(source.count(MARKER),1)
+        # Ограничить набор patch-файлов теми, которые есть в этой фикстуре.
         section=MARKER+source.split(MARKER,1)[1]
+        section=section.split('--- a/gateway/run_turn.py\n',1)[0]
         subprocess.run(['patch','-p1','--batch'],cwd=root,input=section,text=True,check=True,stdout=subprocess.DEVNULL)
         self.adapter_path=root/'plugins/platforms/telegram/adapter.py'
         self.held_path=root/'plugins/platforms/telegram/telegram_held_inbound.py'
