@@ -73,12 +73,18 @@ async def run(config, fixture, native, receipt):
         (home / 'config.yaml').write_text(json.dumps(settings))
         lock = root / 'pm.lock'; lock.touch(mode=0o600); os.chown(lock, uid, uid)
         launcher = home.parent / 'worker_launcher.py'
-        launcher.write_text("""import logging, sys
+        launcher.write_text("""import logging, sys, traceback
 _mcp_log = logging.getLogger('tools.mcp_tool')
 _mcp_log.setLevel(logging.DEBUG)
 _mcp_handler = logging.StreamHandler(sys.stderr)
 _mcp_handler.setFormatter(logging.Formatter('MCPDIAG %(levelname)s %(message)s'))
 _mcp_log.addHandler(_mcp_handler)
+class _FixtureErrors(logging.Handler):
+    def emit(self, record):
+        if record.exc_info:
+            print('FIXTUREERR ' + ''.join(traceback.format_exception(*record.exc_info))[-6000:], file=sys.stderr, flush=True)
+for _name in ('gateway', 'agent', 'run_agent'):
+    logging.getLogger(_name).addHandler(_FixtureErrors())
 """ + fixture.WORKER_LAUNCHER)
         launcher.chmod(0o444)
         broker = fixture.FixtureBroker(uid, configuration)
@@ -325,6 +331,7 @@ peer.close();channel.close()
             unit, process = await launch()
             stage = 'first-automatic-reply'
             await eventually(lambda: len(deliveries) >= 1, 'first-delivery', watch=process)
+            fixture.require('SYNTHETIC_OK' in deliveries[0].get('content', ''), 'INITIAL_SYNTHETIC_MODEL_FAILED')
             await eventually(lambda: not resolver.turns, 'first-idle')
             fixture.require(resolver.mirror.inbox.observe(profile, 123, 1)['state'] == 'accepted', 'INPUT_NOT_ACCEPTED')
             proof['scenarios'].append('worker-absent-automatic-admission')
@@ -500,6 +507,11 @@ peer.close();channel.close()
             proof['mcpDiagnostics'] = [line[:300] for raw in logs if isinstance(raw, bytes)
                 for line in raw.decode('utf-8', 'replace').splitlines()
                 if line.startswith('MCPDIAG ')][-20:]
+            proof['workerLogTail'] = [line[:500] for raw in logs if isinstance(raw, bytes)
+                for line in raw.decode('utf-8', 'replace').splitlines()
+                if line and not line.startswith(('#', 'import ', 'MCPDIAG '))][-80:]
+            proof['fixtureErrors'] = [raw.decode('utf-8', 'replace').split('FIXTUREERR ', 1)[1][:6000]
+                for raw in logs if isinstance(raw, bytes) and b'FIXTUREERR ' in raw]
         if cleanup_errors:
             proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
         else:
