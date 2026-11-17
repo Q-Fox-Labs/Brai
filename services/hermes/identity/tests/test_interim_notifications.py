@@ -61,6 +61,49 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.notification, self.send = adapter_methods()
 
+    async def test_queued_partial_gets_explanation_without_repeating_delivered_text(self):
+        marker = '--- a/gateway/run_turn.py\n+++ b/gateway/run_turn.py\n'
+        candidates = (IDENTITY / 'native.patch').read_text().split(marker)[1:]
+        block = marker + next(part.split('--- a/', 1)[0] for part in candidates if '_first_failed' in part)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'gateway/run_turn.py'
+            target.parent.mkdir(parents=True)
+            target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/gateway/run_turn.py').read_text())
+            subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
+                           stdout=subprocess.DEVNULL, check=True)
+            tree = ast.parse(target.read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == '_run_agent_deliver_first_response')
+        future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+        def explanation(response, source, *, result, failure_notice):
+            return (result.get('brai_delivered_partial', '') + '\n⚠️ Работа не завершена.').lstrip()
+        scope = {'logger': logging.getLogger('test-queue'), 'suppress': suppress,
+                 '_telegram_failure_explanation': explanation}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, method], type_ignores=[])),
+                     'queued-failure-fixture', 'exec'), scope)
+        deliver = scope['_run_agent_deliver_first_response']
+        ctx = SimpleNamespace(mute_notification_reply=False, session_key='s', stream_consumer_holder=[None],
+            source=SimpleNamespace(platform='telegram'), _status_thread_metadata={}, event_message_id=None,
+            inbound_message_id='inbound', run_generation=1, persist_user_display_kind='human', reply_expected=True)
+        sender = AsyncMock(return_value=True)
+        runner = SimpleNamespace(_run_agent_stream_confirmed_final_delivery=lambda *_a, **_kw: False,
+            _is_intentional_silence=lambda *_: False, _deliver_queued_first_response=sender,
+            _hmwa_failed_turn_notice=lambda *_: None, _pop_post_delivery_callback=lambda *_: None)
+        result = {'final_response': 'English technical error', 'partial': True, 'error': 'обрыв',
+                  'brai_delivered_partial': 'Сохранённая часть'}
+        await deliver(runner, ctx, None, result, result, None)
+        self.assertEqual(sender.await_args.args[0], 'Сохранённая часть\n⚠️ Работа не завершена.')
+        self.assertFalse(sender.await_args.kwargs['deliver_media'])
+        self.assertTrue(result['already_sent'])
+
+        # Если часть уже пришла потоковой доставкой, повторяем только предупреждение.
+        runner._run_agent_stream_confirmed_final_delivery = lambda *_a, **_kw: True
+        sender.reset_mock()
+        await deliver(runner, ctx, None, result, result, None)
+        self.assertEqual(sender.await_args.args[0], '⚠️ Работа не завершена.')
+        self.assertFalse(sender.await_args.kwargs['text_already_delivered'])
+
     def test_only_interim_is_silent_even_if_all_notifications_are_enabled(self):
         for mode in ('important', 'all'):
             adapter = SimpleNamespace(_notifications_mode=mode)
@@ -161,7 +204,9 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
 
         scope = {'asyncio': asyncio, 're': re, 'SendResult': SendResult,
                  'logger': logging.getLogger('test-progress-split'),
-                 '_separate_chunk_indicator_from_fence': lambda text: text}
+                 '_separate_chunk_indicator_from_fence': lambda text: text,
+                 '_brai_hide_bare_urls': lambda text: text, '_wrap_markdown_tables': lambda text: text,
+                 '_MDV2_ESCAPE_RE': re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')}
         base = IDENTITY / 'tests/fixtures/ordinary_release/gateway/platform_split.py'
         load_methods(base.read_text(), {'fence_state_after', '_custom_unit_to_cp', 'utf16_len', 'truncate_message'}, scope)
         patch_text = (IDENTITY / 'native.patch').read_text()
@@ -175,7 +220,9 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
             target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/plugins/platforms/telegram/adapter.py').read_text())
             subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
                            stdout=subprocess.DEVNULL, check=True)
-            load_methods(target.read_text(), {'send', '_send_text_locked', '_send_chunks', '_notification_kwargs'}, scope)
+            load_methods(target.read_text(), {'send', '_send_text_locked', '_send_chunks', '_notification_kwargs',
+                                             'format_message', '_escape_bare_bracket', '_escape_mdv2'}, scope)
+        scope['TelegramAdapter'] = SimpleNamespace(_escape_bare_bracket=scope['_escape_bare_bracket'])
 
         async def send_text(text, metadata):
             captured = []
@@ -184,12 +231,13 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
                 _send_flood_cooldown_remaining=lambda _: None, _chat_outbound_slot_remaining=lambda _: 0,
                 _hold_chat_outbound_slot=lambda _: None, _telegram_error_types=lambda: (Exception, None, None),
                 _should_attempt_rich=lambda *a, **kw: False, truncate_message=scope['truncate_message'],
-                format_message=lambda value: value, MAX_MESSAGE_LENGTH=4096, _metadata_thread_id=lambda _: None,
+                MAX_MESSAGE_LENGTH=4096, _metadata_thread_id=lambda _: None,
                 _message_thread_id_for_send=lambda _: None, _notifications_mode='all', _retrigger_typing=AsyncMock())
             async def send_chunk(chat, body, index, reply, metadata, thread, fallback, errors):
                 captured.append((body, scope['_notification_kwargs'](adapter, metadata)))
                 return SimpleNamespace(message_id=index + 1), fallback
             adapter._send_chunk_with_retries = send_chunk
+            adapter.format_message = scope['format_message'].__get__(adapter)
             adapter._send_chunks = scope['_send_chunks'].__get__(adapter)
             adapter._send_text_locked = scope['_send_text_locked'].__get__(adapter)
             result = await scope['send'](adapter, '123', text, metadata=metadata)
@@ -207,6 +255,23 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(body.startswith('⏳ Работаю: ') and len(body) > len('⏳ Работаю: ')
                             and options == {'disable_notification': True} for body, options in interim))
         self.assertEqual(''.join(strip_indicator(body)[len('⏳ Работаю: '):] for body, _ in interim), text)
+
+        bold_text = 'Проверка🔥' * 900
+        for metadata in ({}, {'_interim_send': True, '_brai_progress': True}):
+            with self.subTest(metadata=metadata):
+                parts = await send_text('**' + bold_text + '**', metadata)
+                self.assertGreater(len(parts), 1)
+                decoded = []
+                for body, options in parts:
+                    self.assertLessEqual(scope['utf16_len'](body), 4096)
+                    body = strip_indicator(body)
+                    if metadata:
+                        self.assertEqual(options, {'disable_notification': True})
+                        self.assertTrue(body.startswith('⏳ Работаю: '))
+                        body = body[len('⏳ Работаю: '):]
+                    self.assertTrue(body.startswith('*') and body.endswith('*'))
+                    decoded.append(body[1:-1])
+                self.assertEqual(''.join(decoded), bold_text)
 
     def test_fallback_commentary_keeps_progress_marker(self):
         marker = '--- a/gateway/run_turn_runner.py\n+++ b/gateway/run_turn_runner.py\n'
@@ -242,6 +307,8 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         for text, metadata, expected in [
             ('Проверяю документы', {'_interim_send': True, '_brai_progress': True}, '⏳ Работаю: Проверяю документы'),
             ('⏳ Работаю: Проверяю документы', {'_interim_send': True, '_brai_progress': True}, '⏳ Работаю: Проверяю документы'),
+            ('> Важная цитата', {'_interim_send': True, '_brai_progress': True}, '⏳ Работаю:\n> Важная цитата'),
+            ('⏳ Работаю: > Важная цитата', {'_interim_send': True, '_brai_progress': True}, '⏳ Работаю:\n> Важная цитата'),
             ('Итог готов', {}, 'Итог готов'),
             ('⚠️ Время ожидания истекло', {'_interim_send': True}, '⚠️ Время ожидания истекло'),
             ('Подтвердите действие', {'_interim_send': True, '_brai_progress': True, 'is_approval_prompt': True}, 'Подтвердите действие'),
