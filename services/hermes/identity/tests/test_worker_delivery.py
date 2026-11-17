@@ -125,7 +125,13 @@ class PersonalRichDeliveryTests(unittest.IsolatedAsyncioTestCase):
         adapter.truncate_message.assert_not_called()
 
     async def test_native_rich_api_keeps_personal_topic_and_returns_one_receipt(self):
-        from plugins.platforms.telegram.adapter import TelegramAdapter
+        try:
+            from plugins.platforms.telegram.adapter import TelegramAdapter
+        except ModuleNotFoundError as error:
+            if error.name not in ('plugins', 'plugins.platforms', 'plugins.platforms.telegram',
+                                  'plugins.platforms.telegram.adapter'):
+                raise
+            self.skipTest('Native Telegram adapter is supplied by the pinned Hermes SDK')
         adapter = object.__new__(TelegramAdapter)
         adapter._bot = NS(do_api_request=AsyncMock(return_value={'message_id': 2621}))
         adapter._reply_to_mode = 'first'
@@ -254,7 +260,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
 
     async def test_overlong_reply_sends_excerpt_and_full_pdf_as_one_document(self):
-        from identity import long_reply
+        long_reply = importlib.import_module('identity.long_reply')
         sent = []
         document = []
         async def deliver(owner, action, payload):
@@ -281,7 +287,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(payload['caption'].encode('utf-16-le')) // 2, 1024)
 
     async def test_pdf_render_failure_never_claims_delivery_or_splits(self):
-        from identity import long_reply
+        long_reply = importlib.import_module('identity.long_reply')
         deliver = AsyncMock()
         worker = self.adapter(deliver)
         with patch.dict(os.environ, {'HERMES_HOME': str(self.root)}), \
