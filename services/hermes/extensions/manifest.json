@@ -5,6 +5,7 @@
     "agent/auxiliary_client.py",
     "agent/chat_completion_nonstream.py",
     "agent/codex_runtime.py",
+    "agent/compression_facade.py",
     "agent/context_compressor.py",
     "agent/conversation_compression.py",
     "agent/conversation_loop.py",
