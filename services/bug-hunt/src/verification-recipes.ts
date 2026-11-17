@@ -29,8 +29,8 @@ export async function prepareRecipes(repo:string,fixed:string,baseline:string,ou
  if(digest(baselineIdentity)!=='08e2eab15e1fd9db3a19268caeaf0622da8268d9f8b5296015e9313cb8ff559c'||fixedIdentity.toString('utf8')!==baselineIdentity.toString('utf8').replace('reviewer:body.user.role==="admin"','reviewer:body.user.role==="admin"||body.user.role==="creator"'))throw Error('UNSUPPORTED_REVIEWER_SOURCE');
  const lock=git(fixed,'package-lock.json'),baselineLock=git(baseline,'package-lock.json');
  for(const content of [lock,baselineLock])if(JSON.parse(content.toString('utf8')).packages?.['node_modules/typescript']?.version!==ts.version)throw Error('UNSUPPORTED_COMPILER_LOCK');
- // Resolve the installed compiler as Node does, including a shared dependency symlink.
- const compiler=await import('node:module').then(({createRequire})=>createRequire(import.meta.url).resolve('typescript'));
+ // AIDEV-NOTE: ESM resolution сохраняет принятый host loader вне checkout; CJS resolve обходит его.
+ const compiler=new URL(import.meta.resolve('typescript'));
  const compilerSha=digest(await readFile(compiler));
  await mkdir(out,{mode:0o700});
  const sources=[{id:'bug-hunt',repository:repo,components:['bug-hunt'],commits:[baseline,fixed],paths:['services/bug-hunt/src/identity.ts','services/bug-hunt/schemas/messages.schema.json','services/bug-hunt/schemas/verification-v3.schema.json','services/bug-hunt/CONTRACT.md','services/bug-hunt/VERIFICATION.md','services/auth/ROLES.md'],externalAllowed:true}];
