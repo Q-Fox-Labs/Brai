@@ -1,14 +1,15 @@
 # ABOUTME: Формирует PDF полного ответа через личный Chrome и прежний renderer brai-delivery.
 # ABOUTME: Сеть документа отключена; файл остаётся в закрытой рабочей области профиля.
 """Восстановление текста, превышающего предел Telegram Rich Message."""
+import asyncio
+import base64
 import html
 from html.parser import HTMLParser
 import json
 import os
-from pathlib import Path
 import re
-import subprocess
 from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, build_opener
 
 RICH_MAX_CHARS = 32768
 RICH_MAX_BYTES = 128 * 1024
@@ -208,9 +209,63 @@ def report_html(content, title):
 
 def render_pdf(content, target):
     """Записать полный текст в PDF, используя существующий личный Chrome."""
-    command = [os.environ.get('BRAI_HERMES_NODE_EXECUTABLE', '/usr/local/bin/node'),
-               str(Path(__file__).with_name('render_long_reply.mjs'))]
-    subprocess.run(command, input=json.dumps({'html': report_html(content, 'Полный ответ'), 'path': str(target)}),
-                   text=True, capture_output=True, check=True, timeout=45)
-    if not Path(target).read_bytes().startswith(b'%PDF-'):
+    endpoint = os.environ.get('BROWSER_CDP_URL', 'http://127.0.0.1:19364')
+    parsed = urlsplit(endpoint)
+    if parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost'} or parsed.username or parsed.password:
+        raise ValueError('PDF_CDP_ENDPOINT')
+    opener = build_opener(ProxyHandler({}))
+    with opener.open(endpoint.rstrip('/') + '/json/version', timeout=5) as response:
+        ws_url = json.load(response)['webSocketDebuggerUrl']
+    websocket = urlsplit(ws_url)
+    if (websocket.scheme != 'ws' or websocket.hostname not in {'127.0.0.1', 'localhost'}
+            or websocket.username or websocket.password or (websocket.port or 80) != (parsed.port or 80)):
+        raise ValueError('PDF_CDP_ENDPOINT')
+
+    async def create():
+        import websockets
+        async with websockets.connect(ws_url, max_size=None, open_timeout=15, close_timeout=5, proxy=None) as ws:
+            sequence = 0
+            async def call(method, params=None, session_id=None):
+                nonlocal sequence
+                sequence += 1
+                ident = sequence
+                request = {'id': ident, 'method': method, 'params': params or {}}
+                if session_id:
+                    request['sessionId'] = session_id
+                await ws.send(json.dumps(request))
+                async def receive():
+                    while True:
+                        result = json.loads(await ws.recv())
+                        if result.get('id') == ident:
+                            if 'error' in result:
+                                raise RuntimeError('PDF_CDP_COMMAND')
+                            return result.get('result', {})
+                return await asyncio.wait_for(receive(), timeout=15)
+
+            context = None
+            try:
+                context = (await call('Target.createBrowserContext', {'disposeOnDetach': True}))['browserContextId']
+                target_id = (await call('Target.createTarget', {'url': 'about:blank', 'browserContextId': context}))['targetId']
+                session = (await call('Target.attachToTarget', {'targetId': target_id, 'flatten': True}))['sessionId']
+                await call('Page.enable', session_id=session)
+                frame = (await call('Page.getFrameTree', session_id=session))['frameTree']['frame']['id']
+                await call('Page.setDocumentContent', {'frameId': frame, 'html': report_html(content, 'Полный ответ')}, session)
+                await call('Runtime.evaluate', {'expression': 'document.fonts.ready.then(() => true)', 'awaitPromise': True}, session)
+                result = await call('Page.printToPDF', {'printBackground': True, 'preferCSSPageSize': True,
+                    'displayHeaderFooter': True, 'headerTemplate': '<span></span>',
+                    'footerTemplate': '<div style="font-size:8px;color:#667588;width:100%;text-align:center;font-family:Arial">Brai · <span class="pageNumber"></span> / <span class="totalPages"></span></div>',
+                    'generateTaggedPDF': True, 'generateDocumentOutline': True}, session)
+                return base64.b64decode(result['data'], validate=True)
+            finally:
+                if context is not None:
+                    try:
+                        await call('Target.disposeBrowserContext', {'browserContextId': context})
+                    except Exception:
+                        pass
+
+    data = asyncio.run(create())
+    if not data.startswith(b'%PDF-'):
         raise ValueError('REPORT_PDF_INVALID')
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as output:
+        output.write(data)
