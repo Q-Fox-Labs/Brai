@@ -23,3 +23,13 @@ test('credential, стабильный initiator и отзыв Auth/реестр
   await assert.rejects(natsPrincipal(wire,{kind:'hermes',userId:'owner-a',profileId:'profile-a',reviewer:true}),e=>e.code==='UNAUTHENTICATED');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('web reviewer follows current Auth role and status on every request',async()=>{
+ let role='creator',status='active';
+ const wire=async()=>({status:200,body:{user:{id:'owner-a',role,status},session:{userId:'owner-a',expiresAt:'2999-01-01T00:00:00Z'}}});
+ const context={kind:'web',headers:{cookie:'synthetic'}};
+ for(const [value,reviewer] of [['creator',true],['admin',true],['user',false],['guest',false],['unknown',false]]){
+  role=value;assert.equal((await natsPrincipal(wire,context)).reviewer,reviewer);
+ }
+ status='blocked';await assert.rejects(natsPrincipal(wire,context),e=>e.code==='UNAUTHENTICATED');
+});

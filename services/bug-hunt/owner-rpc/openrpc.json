@@ -1,0 +1,72 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Bug Hunt private credentials",
+    "version": "1.0.0",
+    "description": "Private newline JSON-RPC 2.0 over a Root-created UDS. Fixed SO_PEERCRED UID. README.md defines launcher input, shutdown, binding and unknown-outcome recovery. No generic cancellation or automatic retry."
+  },
+  "methods": [
+    {
+      "name": "credentials.status",
+      "description": "Read metadata without refresh or owner flock. Named params must be empty or omitted. A pending/unknown attempt is never cleared by status.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "status",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ready", "code", "binding", "accountId", "expiresAt", "baseUrl", "sourceRef"],
+          "properties": {
+            "ready": {"type": "boolean"},
+            "code": {"type": "string", "enum": ["READY", "OWNER_OUTCOME_UNKNOWN", "CODEX_OWNER_ACCESS_EXPIRED", "CODEX_OWNER_REJECTED", "CODEX_OWNER_UNAVAILABLE", "HELPER_BINDING_CHANGED", "HELPER_STOPPING", "HELPER_REJECTED"]},
+            "binding": {"type": ["string", "null"], "description": "Opaque persisted observation epoch; null when snapshot is unavailable."},
+            "accountId": {"type": ["string", "null"]},
+            "expiresAt": {"type": ["integer", "null"], "description": "Unix seconds."},
+            "baseUrl": {"type": "string", "const": "https://chatgpt.com/backend-api/codex"},
+            "sourceRef": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        }
+      },
+      "errors": [
+        {"code": -32602, "message": "Invalid params"},
+        {"code": -32000, "message": "HELPER_REJECTED"}
+      ]
+    },
+    {
+      "name": "credentials.resolve",
+      "description": "Resolve through the unchanged accepted owner. Omitted expectedBinding is only for trusted preflight before fixing a phase. expectedBinding is a fence, never an account selector. Every observed auth-file/access change rotates binding, including refresh: the old fenced phase then fails closed. Params have no other properties.",
+      "paramStructure": "by-name",
+      "params": [
+        {"name": "expectedBinding", "required": false, "schema": {"type": "string", "minLength": 1}}
+      ],
+      "result": {
+        "name": "credential",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["access", "binding", "accountId", "expiresAt", "baseUrl", "sourceRef"],
+          "properties": {
+            "access": {"type": "string", "minLength": 1, "pattern": "^[!-~]+$", "description": "Sensitive bearer, memory and private response only."},
+            "binding": {"type": "string", "minLength": 1},
+            "accountId": {"type": "string", "minLength": 1, "pattern": "^[!-~]+$"},
+            "expiresAt": {"type": "integer", "description": "Unix seconds, fresh under the owner's existing 120-second skew."},
+            "baseUrl": {"type": "string", "const": "https://chatgpt.com/backend-api/codex"},
+            "sourceRef": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        }
+      },
+      "errors": [
+        {"code": -32602, "message": "Invalid params"},
+        {"code": -32000, "message": "HELPER_BINDING_CHANGED"},
+        {"code": -32000, "message": "OWNER_OUTCOME_UNKNOWN"},
+        {"code": -32000, "message": "CODEX_OWNER_BUSY"},
+        {"code": -32000, "message": "CODEX_OWNER_ACCESS_EXPIRED"},
+        {"code": -32000, "message": "CODEX_OWNER_REJECTED"},
+        {"code": -32000, "message": "CODEX_OWNER_UNAVAILABLE"},
+        {"code": -32000, "message": "HELPER_STOPPING"},
+        {"code": -32000, "message": "HELPER_REJECTED"}
+      ]
+    }
+  ]
+}

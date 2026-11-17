@@ -5,7 +5,9 @@
 вызывают одно предметное ядро. Web предоставляет список и карточку.
 
 [Контракт v1](CONTRACT.md), [систематизация v2](SYSTEMATIZATION.md), [машинные DTO](schemas/messages.schema.json),
-[операторские входы и восстановление](DEPLOYMENT.md).
+[проверка наблюдений v3](VERIFICATION.md),
+[credential helper и его закрытый RPC](owner-rpc/README.md),
+[установка и восстановление](DEPLOYMENT.md).
 
 Подключённый агент постоянно получает только строку-подсказку.
 bug_hunt_help({}) читает правила и пример из публичного
@@ -72,8 +74,25 @@ externalAllowedOwners. Сервис готовит технические пол
 ## Расследование v3
 
 Отдельные verification-worker и verification-runner поставляются тем же
-компонентом. Worker использует Temporal и существующую авторизацию Codex либо
-явно выбранный Providers. Runner исполняет принятые synthetic recipes в
-физической изоляции. Dispatch по умолчанию выключен. Ограниченная порция
-допускается раз в шесть часов или по явной команде. Контракты, проверки и
-ограничения восстановления: [VERIFICATION.md](VERIFICATION.md).
+компонентом. Worker использует Temporal, собственный приватный stdio-процесс
+Codex и существующего credential owner через private UDS helper. Новые login,
+копия auth.json и изменения ядра/egress Hermes не нужны. Providers выбирается
+отдельно, без автоматического fallback при отказе Codex.
+
+До фазы выбирается последняя стабильная Sol/high из настоящего каталога той же
+авторизации. Startup-проекция меняет только tool_mode выбранной модели на direct.
+Native state имеет стабильную generation; checkpoint отдельно закрепляет
+catalog/source/account/binding. Refresh того же account меняет binding и
+закрывает прежнюю фазу. Потерянный ACK не разрешает повторять inference вслепую.
+
+Runner исполняет только принятые recipes в физической изоляции: начальный набор
+проверяет настоящую собранную identity-функцию reviewer и DTO schemas. Применимость
+требует точного совпадения source commit и observation registry; результат нельзя
+переносить на другие обращения. Область доказательства и recovery описаны в
+[VERIFICATION.md](VERIFICATION.md).
+
+Dispatch по умолчанию выключен. Ограниченная порция допускается раз в шесть часов
+или по явной команде только после приёмки фактического состава. Native/helper/runner
+имеют отдельный lifecycle, который обеспечивает Root через общую роль обоих
+операторских установщиков. Сборка и unit tests не подтверждают приёмку DEV;
+до принятой целевой квитанции admission остаётся закрытым.

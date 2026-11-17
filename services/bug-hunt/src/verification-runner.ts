@@ -12,7 +12,7 @@ import {randomUUID,createHash} from "node:crypto";
 import {VerificationFault as VF,sameScope,type RunSpec,type RunnerReceipt,type Scope,type ReproductionRunner} from "./verification.js";
 import {verificationHash as hash} from "./verification-store.js";
 import {readPrivate} from "./config.js";
-export interface RunnerRecipe {id:string;version:string;harness:string;harness_sha256:string;source_root:string;source_file:string;source_commit:string;source_sha256:string;source_tree_sha256:string;fixture_refs:string[];fixture_sha256:Record<string,string>}
+export interface RunnerRecipe {id:string;version:string;harness:string;harness_sha256:string;source_root:string;source_file:string;source_id:string;source_commit:string;source_sha256:string;source_tree_sha256:string;fixture_refs:string[];fixture_sha256:Record<string,string>;oracle:Omit<RunSpec["oracle"],"requirement_id">}
 export interface RunnerConfig {socket:string;stateRoot:string;node:string;nodeRoot:string;dependenciesRoot:string;dependencies_sha256:string;node_sha256:string;recipes:RunnerRecipe[]}
 const contract=JSON.parse(readFileSync(new URL("../runner.openrpc.json",import.meta.url),"utf8"));
 const validator=new Ajv.default({strict:true});addFormats.default(validator);
@@ -60,8 +60,9 @@ export function createRunner(config:RunnerConfig,onDiagnostic?:(event:{execution
    const previous=await get(spec.scope,spec.execution_id);
    if(previous){const original=await privateFile(join(location(spec.execution_id),"intent.json"));if(hash(original)!==hash(spec))throw new VF("IDEMPOTENCY_CONFLICT");return previous;}
    if(busy)throw new VF("RUNNER_BUSY");
-   const recipe=config.recipes.find(r=>r.id===spec.recipe_id&&r.version===spec.recipe_version);
-   if(!recipe||recipe.source_tree_sha256!==spec.source_tree_sha256||recipe.source_commit!==spec.source_commit||recipe.source_sha256!==spec.source_sha256||!recipe.fixture_refs.includes(spec.fixture_ref))throw new VF("RECIPE_NOT_ALLOWED");
+   const {requirement_id,...boundOracle}=spec.oracle;
+   const recipe=config.recipes.find(r=>r.id===spec.recipe_id&&r.version===spec.recipe_version&&r.source_id===spec.source_id&&r.source_tree_sha256===spec.source_tree_sha256&&r.source_commit===spec.source_commit&&r.source_sha256===spec.source_sha256&&r.fixture_refs.includes(spec.fixture_ref)&&r.oracle&&hash(r.oracle)===hash(boundOracle));
+   if(!recipe)throw new VF("RECIPE_NOT_ALLOWED");
    if(!recipe.source_file||recipe.source_file.startsWith("/")||recipe.source_file.split("/").some(p=>p===".."||!p)||hash(await readFile(join(recipe.source_root,recipe.source_file),"utf8"))!==recipe.source_sha256||hash(await readFile(recipe.harness,"utf8"))!==recipe.harness_sha256||spec.oracle_sha256!==hash(spec.oracle))throw new VF("RECIPE_INTEGRITY");
    if(!/^[a-z0-9-]{1,100}$/.test(spec.fixture_ref)||hash(await readFile(join(recipe.source_root,"fixtures",spec.fixture_ref+".json"),"utf8"))!==recipe.fixture_sha256?.[spec.fixture_ref])throw new VF("FIXTURE_INTEGRITY");
    const {spec_sha256,deadline_at,...body}=spec;if(hash(body)!==spec_sha256)throw new VF("SPEC_INTEGRITY");

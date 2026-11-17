@@ -170,20 +170,104 @@ inputHash/text остаётся необязательным исключени�
 
 ## Verification v3
 
-Миграция 005 применяется owner-программой без изменения originals/v1/v2.
-Поставка включает workflow bundle, worker, runner, schemas и recipes.
-Dispatch включается после приёмки immutable поставки, replay и qualification
-существующего Codex. Новых профилей авторизации Codex не требуется.
-Защищённый registry закрепляет existing Unix endpoint, server/schema generation,
-source/recipe hashes, Temporal queue/identity и runner socket.
+Миграция 005 добавляется owner-программой без изменения originals/v1/v2.
+Поставка включает workflow bundle, worker, runner, credential helper/client,
+schemas и принятый source/recipe registry. До фактической приёмки целевого
+состава verification.enabled=false; наличие артефакта и успешная сборка не
+открывают admission и не объявляют DEV принятым.
 
-Worker и runner запускаются отдельно от intake/API и worker v2. Worker видит
-существующий native socket, runner — собственные inputs/state и immutable код.
-Users/groups, ACL и limits задаёт установщик экземпляра. Процесс с полномочиями
-агента не заменяет отдельный runner. Credentials не входят в evidence.
+### Lifecycle и приватные программы
 
-Перед остановкой/откатом выключить verification dispatch и сверить свои
-in-flight bindings. Backup БД дополняется native state, runner tombstones,
-protected inputs и согласованной Temporal history. Потеря истории не разрешает
-новый dispatch вслепую; таблицы и совместимый worker сохраняются.
-Подробности: [VERIFICATION.md](VERIFICATION.md).
+Worker, helper и runner имеют отдельный host lifecycle от intake/API и worker v2.
+Их запуском, readiness, остановкой, обновлением и rollback владеет Root через
+общую роль обоих операторских установщиков. Клиентский и административный входы
+используют эту роль; собственные процессы worker или ручной запуск из чата не
+заменяют принятый lifecycle. Параметры конкретного экземпляра находятся у
+установщика, а не в observation или ответе модели.
+
+Root принимает source/producer receipts и immutable программы, готовит users,
+private sockets, закрытые inputs и mount namespaces. Helper запускается под
+существующим credential owner UID/GID без дополнительных групп; native/worker
+работает отдельно и не видит owner DATA. Root заранее создаёт UDS listener для
+worker и передаёт его helper после drop UID/GID. Helper проверяет SO_PEERCRED;
+worker не получает provider group. Точный launcher/config/env контракт находится
+в [credentials/README.md](owner-rpc/README.md).
+
+Native app-server — собственный private stdio-процесс с чистым HOME/CODEX_HOME,
+read-only runtime assets и закрытым startup config. Через auth.command он получает
+только access из существующего owner. Нового login, копии auth.json, собственного
+refresh механизма или изменений ядра/egress Hermes нет. Единственный owner
+сохраняет своё DATA и общий inode flock с остальными потребителями.
+
+Защищённый native registry задаёт принятые программы/launcher, helper socket,
+sourceRef, private stateRoot/catalogPath и стабильную generation этого state.
+Обычная смена CLI, metadata или OAuth binding не меняет generation native state.
+CLI version и hashes каталога записываются для диагностики; версия CLI и набор
+qualified model IDs не служат whitelist. До новой фазы загружается авторитетный
+каталог того же account, выбирается последняя стабильная Sol/high, а startup
+проекция меняет только tool_mode выбранной модели на direct.
+
+Checkpoint отдельно фиксирует source/account/provider binding и catalog revision.
+Нельзя обновить эти поля задним числом для продолжения старой фазы. Каждый
+наблюдаемый refresh того же account меняет provider binding; старая фаза получает
+закрытый допуск. Новая фаза требует preflight с актуальной связью. Root сохраняет
+mapping profile revision → generation/stateRoot для восстановления собственных
+threads. Потеря state не маскируется выдачей прежней generation пустому каталогу.
+
+Runner получает только собственные intents/receipts и immutable inputs; его
+namespace не имеет сети, owner HOME и credentials. Source registry и начальные
+recipes подготавливаются из принятых Git commits; hashes source/tree/harness,
+fixture, requirement и compiler provenance проверяются до запуска. Применимость
+к observation проверяет [контракт v3](VERIFICATION.md), а не текст модели.
+
+### Порядок включения
+
+1. Сохранить согласованное состояние и прежний API release; оставить v3 dispatch
+   выключенным. Применить additive migration 005 отдельным owner-процессом.
+2. Подготовить общей Root ролью private runtime, mounts, UDS peers, source/recipe
+   registry и отдельную очередь/identity Temporal. Проверить readiness программ
+   без допуска inference, а также сохранность прежних v1/v2 запросов и квитанций.
+3. На фактическом установленном маршруте проверить Root/source admission,
+   отрицательные UID/mount/config проверки, отсутствие auth.json и bearer в
+   native state/evidence/журналах, общий refresh lock и закрытый unknown recovery.
+4. Проверить настоящий подписочный каталог, Sol/high/direct dynamic tools,
+   investigator→reviewer→validator и три исхода на изолированных synthetic данных.
+   [Private native probe](runtime/qualification.mjs) проверяет подключение отдельным
+   настоящим turn с непредсказуемым oracle; health его не вызывает.
+   Нужны реальные runner receipts, точная recipe applicability, replay, restart,
+   потеря ACK без повторного start и restore. Старый опыт на другом endpoint или
+   fake/unit tests не являются квитанцией этой установленной поставки.
+5. Только после принятия квитанции точного состава включить защищённую policy
+   для разрешённых owners. Сохранить принятую revision и проверить первый
+   разрешённый проход. Наличие настроенного profile не доказывает его квалификацию;
+   незавершённая приёмка оставляет admission закрытым.
+
+### Backup, неизвестный исход и первый откат
+
+Backup включает всю БД, installationId/cursorKey и защищённые runtime inputs,
+native private state/history с generation mapping, metadata catalog, несекретный
+helper state с pending/unknown, runner intents/receipts/tombstones, принятый
+source/recipe registry и согласованную Temporal history. Секретные runtime inputs
+сохраняются только установленным защищённым способом. Backup Bug Hunt не копирует
+OAuth auth.json и не создаёт второй credential owner. Сохранение единственной
+авторизации остаётся lifecycle её владельца.
+
+Восстановление проверяется в изоляции: прежние IDs/receipts, scope, grants,
+generation/stateRoot, unknown effects и старые v1/v2 запросы должны сохраняться.
+Restore одной БД не восстанавливает native state и Temporal. При отсутствии
+соответствующих state/history новый model/run start запрещён. Потерянный
+thread/turn ACK читается только по прежнему собственному binding; неизвестный
+refresh разрешает только read-only recovery нового свежего access. Ни timeout,
+ни новое соединение не доказывают отмену уже начатой операции.
+
+Первый путь rollback v3 — выключить новый admission/dispatch и вернуть прежний
+принятый API с v3 off. Сначала сверить собственные in-flight checkpoints и
+остановить их принятым lifecycle; неясные исходы сохранить unknown. Не удалять
+таблицы, originals, evidence, native/helper state, runner tombstones или Temporal
+history. Сохранить совместимую возможность дочитать незавершённые histories;
+остановка без подтверждения не освобождает допуск на повторный inference.
+
+Rollback программы не откатывает additive schema и не запускает старый migrator
+001: его grants несовместимы с новыми таблицами. Возврат v3 требует сверки
+прежних effects и повторной приёмки изменённого состава, а не слепого dispatch.
+Подробности исходов и ограничений — в [VERIFICATION.md](VERIFICATION.md).

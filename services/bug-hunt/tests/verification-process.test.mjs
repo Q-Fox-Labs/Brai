@@ -57,3 +57,8 @@ test("cleanup is sequential and continues after one failure without exhausting t
  await assert.rejects(process.stop(),e=>e.message==="VERIFICATION_STOP_UNKNOWN");
  assert.deepEqual(calls,["a","b","c"]);assert.equal(peak,1);
 });
+test("native EOF releases owned flight and saved unknown stop does not await remote completion",{timeout:2000},async()=>{
+ let eof,stopping=false,calls=0;const nativeFlight=new Promise(resolve=>eof=resolve);
+ const process=verificationProcess({advance:async()=>{calls++;return stopping?{terminal:false,wait_ms:60000,code:"WORKER_STOP_UNKNOWN"}:nativeFlight;},requestStopOwned:async()=>{stopping=true;eof({terminal:false,wait_ms:60000,code:"NATIVE_CONNECTION_LOST"});return {ids:["own"],unknown:false};}});
+ await process.advance("own");await flush();await assert.rejects(process.stop(),/VERIFICATION_STOP_UNKNOWN/);assert.equal(calls,2);assert.equal((await process.advance("own")).code,"WORKER_STOPPING");
+});
