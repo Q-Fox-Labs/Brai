@@ -7,6 +7,8 @@ import { mkdir, mkdtemp, readFile, writeFile, rm, readdir, symlink, open, unlink
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -75,6 +77,12 @@ test('audio signatures publish ready hashes and OGG reaches the real STT admissi
     ['vorbis.ogg', ogg(Buffer.from([1, 118, 111, 114, 98, 105, 115])), 'audio/ogg'],
     ['voice.bin', Buffer.from('RIFF0000WAVEfmt '), 'audio/wav'],
     ['lossless.bin', Buffer.from('fLaC0000'), 'audio/flac'],
+    ['tagged.bin', Buffer.concat([Buffer.from([73,68,51,4,0,0,0,0,0,0]), Buffer.from([255,251,144,0]), Buffer.alloc(413)]), 'audio/mpeg', true],
+    ['frames.bin', Buffer.concat([Buffer.from([255,251,144,0]), Buffer.alloc(413)]), 'audio/mpeg'],
+    ['fake.mp3', Buffer.from('this is not audio'), 'application/octet-stream', false],
+    ['truncated.mp3', Buffer.from('ID3'), 'application/octet-stream'],
+    ['invalid-tag.mp3', Buffer.from([73,68,51,4,0,0,128,0,0,0]), 'application/octet-stream'],
+    ['reserved-frame.mp3', Buffer.from([255,251,240,0]), 'application/octet-stream'],
     ['false.ogg', Buffer.from('not an OGG stream'), 'application/octet-stream', false],
     ['other.ogg', ogg(Buffer.from('not-audio')), 'application/octet-stream'],
     ['false.wav', Buffer.from('RIFF0000AVI '), 'application/octet-stream'],
@@ -232,4 +240,36 @@ test('native HTTP waits for upload completion headers and caller abort stops sta
   const body = Readable.from((async function* () { for (let n = 0; n < 4; n++) { await new Promise(resolve => setTimeout(resolve, 60)); yield Buffer.alloc(65536); } })());
   const start = performance.now(), response = await publisherFetch(url, { method: 'PUT', body, signal: AbortSignal.timeout(2000) }); assert.equal(response.status, 201); assert.ok(performance.now() - start >= 200); await response.body.cancel();
   const controller = new AbortController(), stalled = await publisherFetch(url, { signal: controller.signal }); const consuming = stalled.arrayBuffer(); controller.abort(); await assert.rejects(consuming); await closed;
+});
+
+
+test('MP3 publishes ready artifact bytes and crosses the real Hermes sendAudio boundary without notices', async t => {
+  const f = await fixture(t), bytes = Buffer.concat([Buffer.from([73,68,51,4,0,0,0,0,0,0,255,251,144,0]), Buffer.alloc(413)]);
+  const path = join(f.input, 'melody.mp3'); await writeFile(path, bytes);
+  const published = await f.publisher.publishFile({ path, requestId: 'mp3-telegram' });
+  assert.equal(published.mimeType, 'audio/mpeg');
+  assert.deepEqual(f.bytesById.get(published.artifactId), bytes);
+  const script = [
+    'import sys,json,asyncio,hashlib,types',
+    'sys.path.insert(0,sys.argv[1])',
+    'from files import native',
+    'file=json.loads(sys.argv[2]); calls=[]',
+    'telegram=types.ModuleType("telegram")',
+    'for name in ("Photo","Video","Audio","Document"): setattr(telegram,"InputMedia"+name,lambda **kw: types.SimpleNamespace(**kw))',
+    'sys.modules["telegram"]=telegram',
+    'class Bot:',
+    ' async def send_audio(self,**kw):',
+    '  assert kw["chat_id"]==123 and kw["message_thread_id"]==77',
+    '  assert hashlib.sha256(kw["audio"].read()).hexdigest()==file["sha256"]',
+    '  calls.append("sendAudio"); return types.SimpleNamespace(message_id=101)',
+    'adapter=types.SimpleNamespace(_bot=Bot())',
+    'items=[{"file":file,"localPath":file["localPath"],"presentation":native.presentation(file),"caption":""}]',
+    'native.validate_telegram(items)',
+    'receipt=asyncio.run(native.telegram_sender(adapter,"123",{"thread_id":"77"},"single",items,True))',
+    'assert receipt==[101] and calls==["sendAudio"]',
+    'print(json.dumps({"calls":calls,"receipt":receipt}))',
+  ].join('\n');
+  const result = spawnSync('python3', ['-B', '-c', script, fileURLToPath(new URL('../../hermes/', import.meta.url)), JSON.stringify(published)], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { calls: ['sendAudio'], receipt: [101] });
 });

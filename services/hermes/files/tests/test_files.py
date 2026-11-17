@@ -1060,6 +1060,32 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             migrate(self.store, manifest, retire=True)
         self.assertTrue(all(path.is_file() for path in paths))
 
+    async def test_file_error_notice_hides_internal_code_and_preserves_topic(self):
+        """Отказ файла не превращается в техническую ошибку с советом reset."""
+        from contextlib import nullcontext
+        original, sent = [], []
+        async def notify(event, error): original.append(error)
+        async def send(chat_id, content, metadata=None):
+            sent.append((chat_id, content, metadata))
+            return SimpleNamespace(success=True, message_id="42")
+        adapter = SimpleNamespace(platform="telegram", _notify_turn_error=notify, send=send,
+            _media_delivery_scope=lambda source: nullcontext(),
+            warning_text=lambda detail, brief, **kwargs: detail)
+        event = SimpleNamespace(source=SimpleNamespace(platform="telegram", chat_id="123"), metadata={})
+        base = ModuleType("gateway.platforms.base")
+        base._thread_metadata_for_event = lambda event: {"thread_id": "77"}
+        with patch.dict(sys.modules, {"gateway.platforms.base": base}):
+            native.install_adapter(adapter)
+            with self.assertLogs(native.__name__, level="WARNING") as logs:
+                result = await adapter._notify_turn_error(event, FileError("FILE_SET_INCOMPATIBLE"))
+            self.assertIn("FILE_SET_INCOMPATIBLE", " ".join(logs.output))
+            self.assertEqual(result, {"thread_id": "77"})
+            self.assertEqual(sent, [("123", "Не удалось отправить файл.", {"thread_id": "77"})])
+            self.assertFalse(original)
+            error = RuntimeError("other failure")
+            await adapter._notify_turn_error(event, error)
+            self.assertEqual(original, [error])
+
     async def test_telegram_preflight_rejects_wrong_type_and_last_oversize(self):
         items = self.items(2)
         invalid = [items[0], {**items[1], 'presentation': 'audio'}]
@@ -1222,7 +1248,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await adapter._notify_turn_error(recovered, FileError('ARTIFACTS_UNAVAILABLE')))
         self.assertEqual(seen, [])
         direct = self.event('direct')
-        self.assertEqual(await adapter._notify_turn_error(direct, FileError('ARTIFACTS_UNAVAILABLE')), {'thread': 'metadata'})
+        self.assertEqual(await adapter._notify_turn_error(direct, RuntimeError('other failure')), {'thread': 'metadata'})
         self.assertEqual(len(seen), 1)
         self.assertEqual(await adapter._notify_turn_error(recovered, RuntimeError('other failure')), {'thread': 'metadata'})
         self.assertEqual(len(seen), 2)
