@@ -41,6 +41,7 @@ async def run(config, fixture, native, receipt):
     identity = root.stat().st_dev, root.stat().st_ino
     workers, servers, log_tasks = [], [], []
     deliveries = []
+    connection_errors = []
     consumer = supervisor = None
     resolver = None
     proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': config['sourceSha'],
@@ -282,12 +283,13 @@ peer.close();channel.close()
                 process = await asyncio.create_subprocess_exec('/usr/bin/python3', '-I', '-B', '-c', code,
                     str(child.fileno()), str(path), pass_fds=(child.fileno(),), user=ingress_uid,
                     group=ingress_uid, extra_groups=[], stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
                 child.close()
                 data, control, _, _ = await asyncio.to_thread(parent.recvmsg, 1, socket.CMSG_SPACE(array.array('i').itemsize))
                 status = await process.wait()
                 if status or data != b'x' or len(control) != 1:
-                    raise ConnectionError('Fixture ingress connection failed')
+                    detail = (await process.stderr.read()).decode('utf-8', 'replace')[-1000:]
+                    raise ConnectionError('Fixture ingress connection failed: ' + detail)
                 level, kind, raw = control[0]
                 if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
                     raise ConnectionError('Fixture ingress descriptor missing')
@@ -297,7 +299,15 @@ peer.close();channel.close()
             finally:
                 parent.close(); child.close()
 
-        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth), patch.object(telegram_runtime.Resolver, 'durable_reply', traced_reply), patch('asyncio.open_unix_connection', open_as_ingress):
+        from identity.ingress import Bridge
+        connect = Bridge.connect
+        async def traced_connect(self):
+            try:
+                return await connect(self)
+            except Exception as error:
+                connection_errors.append({'type': type(error).__name__, 'detail': str(error)[:1000]})
+                raise
+        with patch.dict(os.environ, {'BRAI_IDENTITY_INSTANCE': 'dev'}), patch.object(telegram_runtime, 'broker_call', auth), patch.object(telegram_runtime.Resolver, 'durable_reply', traced_reply), patch('asyncio.open_unix_connection', open_as_ingress), patch.object(Bridge, 'connect', traced_connect):
             resolver = create()
             await resolver.mirror.hydrate()
             supervisor = asyncio.create_task(resolver._supervise())
@@ -443,6 +453,7 @@ peer.close();channel.close()
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
         proof['syntheticReplyAttempts'] = locals().get('reply_attempts', [])
+        proof['connectionErrors'] = connection_errors[-10:]
         if str(error) in {'FAULT_KILL_FAILED', 'FAULT_NOT_OBSERVED', 'TOPIC_ORDER_CHANGED', 'WORKER_EXITED',
                           'EARLY_ACK', 'INPUT_NOT_ACCEPTED', 'LOST_ACK_REEXECUTED', 'OUTBOX_RERAN_MODEL',
                           'PAUSED_INPUT_EXECUTED', 'AUTOMATIC_PROCESSOR_DIED', 'REPLIES_UNPROVEN',
