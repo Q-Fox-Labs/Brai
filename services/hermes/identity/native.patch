@@ -1039,6 +1039,17 @@ diff --git a/agent/redact.py b/agent/redact.py
              # reply_to only for reply-anchored threading; Discord/Telegram use
              # thread_id metadata and reply_to on every commentary is spam.
              _plat = getattr(getattr(self.adapter, "platform", None), "value", None)
+@@ -367,7 +369,5 @@
+                 self._notify_new_message()
+-                # Lets run.py confirm whether an interim send carried the final.
+-                # Record the exact delivered text so run.py can confirm whether an interim "preview"
+-                # actually carried the final response, vs. unrelated commentary delivered during a session
+-                # split (#14238).
+-                self._delivered_commentary_texts.append(text)
++                # AIDEV-NOTE: Помеченный прогресс Telegram не подтверждает готовый ответ.
++                if _platform_name != "telegram":
++                    self._delivered_commentary_texts.append(text)
+             return result.success
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
 @@ -804,6 +804,8 @@
@@ -1061,6 +1072,24 @@ diff --git a/agent/redact.py b/agent/redact.py
          # One chat at a time (held only around the API calls, never across the reconnect wait above), so
          # two concurrent split replies to one chat cannot interleave their chunks (#114396).
          async with self._chat_send_lock(chat_id):
+@@ -3707,5 +3707,16 @@
+                         await self._retrigger_typing(chat_id, metadata)
+                     return rich_result
+-            chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
++            if (metadata or {}).get("_brai_progress") is True and not (metadata or {}).get("is_approval_prompt"):
++                # AIDEV-NOTE: Пометка должна помещаться в каждом сообщении после разбиения.
++                prefix = "⏳ Работаю: "
++                text = content.lstrip()
++                if text.startswith("⏳ Работаю:"):
++                    text = text[len("⏳ Работаю:"):].lstrip()
++                if not text:
++                    return SendResult(success=True, message_id=None)
++                chunks = self.truncate_message(self.format_message(text), self.MAX_MESSAGE_LENGTH - utf16_len(prefix), len_fn=utf16_len)
++                chunks = [prefix + chunk for chunk in chunks]
++            else:
++                chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
+             if len(chunks) > 1:
+                 # truncate_message appends a raw " (1/2)" suffix; escape the MarkdownV2-special parentheses.
 
 diff --git a/plugins/platforms/telegram/update_admission.py b/plugins/platforms/telegram/update_admission.py
 index be158a8..28cc883 100644

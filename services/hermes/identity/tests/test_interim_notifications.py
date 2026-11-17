@@ -2,6 +2,9 @@
 # ABOUTME: Использует закреплённый адаптер и синтетический транспорт без сети.
 import ast
 import asyncio
+from contextlib import suppress
+import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -39,6 +42,19 @@ def adapter_methods():
     scope = {'SendResult': lambda **kw: SimpleNamespace(**kw)}
     exec(compile(module, 'telegram-notification-fixture', 'exec'), scope)
     return scope['_notification_kwargs'], scope['send']
+
+
+def fixture_method(filename, classname, name):
+    """Загрузить закреплённый метод Hermes для проверки настоящих правил доставки."""
+    path = IDENTITY / 'tests/fixtures/ordinary_release/gateway' / filename
+    tree = ast.parse(path.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == classname)
+    method = next(n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+    method.decorator_list = []
+    future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+    scope = {'suppress': suppress}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[future, method], type_ignores=[])), str(path), 'exec'), scope)
+    return scope[name]
 
 
 class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
@@ -83,7 +99,114 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.send.await_args.kwargs['metadata'],
                          {'_interim_send': True, '_brai_progress': True})
         self.assertFalse(consumer._already_sent)
+        self.assertEqual(consumer._delivered_commentary_texts, [])
+
+        adapter.name = 'other'
+        self.assertTrue(await scope['_send_commentary'](consumer, 'Проверяю документы'))
         self.assertEqual(consumer._delivered_commentary_texts, ['Проверяю документы'])
+
+    async def test_commentary_equal_to_long_final_does_not_suppress_final_delivery(self):
+        marker = '--- a/gateway/stream_consumer_fallback.py\n+++ b/gateway/stream_consumer_fallback.py\n'
+        patch_text = (IDENTITY / 'native.patch').read_text()
+        block = marker + patch_text.split(marker, 1)[1].split('--- a/', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'gateway/stream_consumer_fallback.py'
+            target.parent.mkdir(parents=True)
+            target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/gateway/stream_consumer_fallback.py').read_text())
+            subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
+                           stdout=subprocess.DEVNULL, check=True)
+            tree = ast.parse(target.read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'StreamFallbackMixin')
+        commentary = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == '_send_commentary')
+        scope = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[commentary], type_ignores=[])), 'commentary', 'exec'), scope)
+        delivered = []
+        async def capture(*args, **kwargs):
+            delivered.append((args[1], kwargs.get('metadata')))
+            return SimpleNamespace(success=True, message_id='200')
+        adapter = SimpleNamespace(name='telegram', _bot=object(), _send_path_degraded=False,
+            strip_media_directives_for_display=lambda value: value, _chat_send_lock=lambda chat: asyncio.Lock(),
+            _send_text_locked=AsyncMock(side_effect=capture))
+        async def send(**kwargs):
+            return await self.send(adapter, **kwargs)
+        adapter.send = send
+        consumer = SimpleNamespace(adapter=adapter, chat_id='123', _initial_reply_to_id=None,
+            _clean_for_display=lambda text: text, _metadata_for_send=lambda final: {},
+            _notify_new_message=lambda: None, _delivered_commentary_texts=[], _delivered_segment_texts=[],
+            _already_sent=False, final_response_sent=False, _visible_prefix=lambda: '')
+        consumer.has_durably_delivered_text = lambda text: fixture_method(
+            'stream_consumer.py', 'GatewayStreamConsumer', 'has_durably_delivered_text')(consumer, text)
+        final = 'Готовый результат. ' * 300
+        self.assertTrue(await scope['_send_commentary'](consumer, final))
+        self.assertEqual(delivered[0][0], '⏳ Работаю: ' + final)
+        confirmed = fixture_method('run_turn.py', 'GatewayTurnMixin', '_run_agent_stream_confirmed_final_delivery')
+        self.assertFalse(confirmed(consumer, final))
+        await adapter.send(chat_id='123', content=final, metadata={})
+        self.assertEqual(delivered[1][0], final)
+
+    async def test_long_messages_keep_all_text_and_each_progress_part_is_marked_and_silent(self):
+        class SendResult:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        def load_methods(source, names, scope):
+            tree = ast.parse(source)
+            nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
+            self.assertEqual(len(nodes), len(names))
+            for node in nodes:
+                node.decorator_list = []
+            future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[])), 'telegram', 'exec'), scope)
+
+        scope = {'asyncio': asyncio, 're': re, 'SendResult': SendResult,
+                 'logger': logging.getLogger('test-progress-split'),
+                 '_separate_chunk_indicator_from_fence': lambda text: text}
+        base = IDENTITY / 'tests/fixtures/ordinary_release/gateway/platform_split.py'
+        load_methods(base.read_text(), {'fence_state_after', '_custom_unit_to_cp', 'utf16_len', 'truncate_message'}, scope)
+        patch_text = (IDENTITY / 'native.patch').read_text()
+        candidates = [MARKER + part.split('--- a/', 1)[0].split('diff --git ', 1)[0]
+                      for part in patch_text.split(MARKER)[1:]]
+        block = next(part for part in candidates if '_brai_progress' in part)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'plugins/platforms/telegram/adapter.py'
+            target.parent.mkdir(parents=True)
+            target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/plugins/platforms/telegram/adapter.py').read_text())
+            subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
+                           stdout=subprocess.DEVNULL, check=True)
+            load_methods(target.read_text(), {'send', '_send_text_locked', '_send_chunks', '_notification_kwargs'}, scope)
+
+        async def send_text(text, metadata):
+            captured = []
+            adapter = SimpleNamespace(name='telegram', _bot=object(), _send_path_degraded=False,
+                strip_media_directives_for_display=lambda value: value, _chat_send_lock=lambda _: asyncio.Lock(),
+                _send_flood_cooldown_remaining=lambda _: None, _chat_outbound_slot_remaining=lambda _: 0,
+                _hold_chat_outbound_slot=lambda _: None, _telegram_error_types=lambda: (Exception, None, None),
+                _should_attempt_rich=lambda *a, **kw: False, truncate_message=scope['truncate_message'],
+                format_message=lambda value: value, MAX_MESSAGE_LENGTH=4096, _metadata_thread_id=lambda _: None,
+                _message_thread_id_for_send=lambda _: None, _notifications_mode='all', _retrigger_typing=AsyncMock())
+            async def send_chunk(chat, body, index, reply, metadata, thread, fallback, errors):
+                captured.append((body, scope['_notification_kwargs'](adapter, metadata)))
+                return SimpleNamespace(message_id=index + 1), fallback
+            adapter._send_chunk_with_retries = send_chunk
+            adapter._send_chunks = scope['_send_chunks'].__get__(adapter)
+            adapter._send_text_locked = scope['_send_text_locked'].__get__(adapter)
+            result = await scope['send'](adapter, '123', text, metadata=metadata)
+            self.assertTrue(result.success)
+            return captured
+
+        text = 'ПроверочныйТекст🔥' * 900
+        final = await send_text(text, {})
+        interim = await send_text(text, {'_interim_send': True, '_brai_progress': True})
+        strip_indicator = lambda value: re.sub(r' \\\(\d+/\d+\\\)$', '', value)
+        self.assertGreater(len(final), 1)
+        self.assertGreater(len(interim), 1)
+        self.assertTrue(all(scope['utf16_len'](body) <= 4096 for body, _ in final + interim))
+        self.assertEqual(''.join(strip_indicator(body) for body, _ in final), text)
+        self.assertTrue(all(body.startswith('⏳ Работаю: ') and len(body) > len('⏳ Работаю: ')
+                            and options == {'disable_notification': True} for body, options in interim))
+        self.assertEqual(''.join(strip_indicator(body)[len('⏳ Работаю: '):] for body, _ in interim), text)
 
     def test_fallback_commentary_keeps_progress_marker(self):
         marker = '--- a/gateway/run_turn_runner.py\n+++ b/gateway/run_turn_runner.py\n'
