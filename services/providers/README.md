@@ -43,3 +43,4 @@ immutable release manifest и готовые container images нужны для
 - [CONTRACT.md](CONTRACT.md).
 - [HTTP.md](HTTP.md).
 - [SPEC.md](SPEC.md).
+- [Закрытая авторизация отдельного Codex](codex-auth/README.md).
