@@ -1,10 +1,14 @@
 # ABOUTME: Проверяет сохранение доставки, потерянные квитанции и автоматический возврат очереди.
 # ABOUTME: Использует настоящие SQLite/PTB Update и перезапуск объектов без пользовательских данных.
 import asyncio
+import ast
+from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
+import threading
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -40,6 +44,17 @@ class JournalTests(unittest.TestCase):
         restarted.complete_turn('native-turn')
         self.assertEqual(self.store.input_status(IDENT, DIGEST)['state'], 'completed')
 
+    def test_continuation_binding_survives_restart_and_requires_existing_input(self):
+        with self.assertRaisesRegex(ValueError, 'INPUT_UNKNOWN'):
+            self.store.save_continuation('session', IDENT, 3)
+        self.store.begin_input(IDENT, DIGEST)
+        self.store.save_continuation('session', IDENT, 3)
+        restarted = DeliveryJournal(self.path, 'owner')
+        self.assertEqual(restarted.continuation('session'), {'input_id': IDENT, 'chat_generation': 3})
+        restarted.clear_continuation('session')
+        self.assertIsNone(self.store.continuation('session'))
+
+
     def test_dispatch_crash_does_not_claim_success_or_reexecute_unknown_effects(self):
         self.store.begin_input(IDENT, DIGEST)
         restarted = DeliveryJournal(self.path, 'owner')
@@ -69,6 +84,171 @@ class JournalTests(unittest.TestCase):
         restarted.output_state(IDENT, 'sent', {'success': True, 'message_id': '1'})
         restarted.output_state(IDENT, 'pending')
         self.assertEqual(self.store.pending_outputs(), [])
+
+
+class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.worker = Worker(os.getuid() + 1, 'owner', '42', None)
+        self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
+        self.worker.delivery_journal.begin_input(IDENT, DIGEST)
+        self.worker.peer = NS(closed=False)
+        self.worker.chat_snapshot_ready = True
+        self.worker.chat_states[('42', '7')] = {'paused': False, 'generation': 3, 'recoveryBlocked': False}
+        self.worker.operational.set()
+        self.source = NS(chat_id='42', thread_id='7', user_id='42', is_bot=False)
+        self.entry = NS(session_key='session', resume_pending=False, resume_reason=None,
+                        suspended=False, origin=self.source)
+        self.slot = NS(turn=NS(agent=None, started_ts=None))
+        self.tasks = []
+        self.adapter = NS(bind_source=lambda source: None)
+        async def mark(key, reason):
+            self.assertEqual(key, 'session')
+            self.entry.resume_pending, self.entry.resume_reason = True, reason
+        async def shape(result, *args, **kwargs):
+            if not result.get('failed') and not result.get('partial') and not result.get('error'):
+                self.entry.resume_pending = False
+            return 'native'
+        self.runner = NS(
+            _hmwa_shape_agent_response=shape,
+            async_session_store=NS(mark_resume_pending=mark),
+            session_store=NS(_lock=threading.RLock(), _ensure_loaded_locked=lambda: None,
+                             _entries={'session': self.entry}),
+            _is_session_running=lambda key: self.slot.turn.agent is not None,
+            _restored_source=lambda entry: entry.origin,
+            _resume_owner_authorized=lambda key, source: True,
+            _delivery_adapter_for=lambda source: self.adapter,
+            _session_state=lambda key: self.slot,
+            _persist_active_agents=lambda: None,
+            _retain_background_task=self.tasks.append,
+            _run_startup_resume_event=AsyncMock(),
+        )
+        self.worker.runner, self.worker.adapter = self.runner, self.adapter
+        self.worker._install_failure_recovery(self.runner)
+
+    async def test_failure_recovers_without_new_input_and_uses_original_outbox(self):
+        from identity.scope import input_delivery, continuation_turn
+        async def resume(adapter, event, key):
+            self.assertEqual(input_delivery.get(), IDENT)
+            self.assertTrue(continuation_turn.get())
+            self.assertTrue(event.internal)
+            self.assertEqual(event.text, '')
+            self.assertEqual(key, 'session')
+        self.runner._run_startup_resume_event.side_effect = resume
+        token = input_delivery.set(IDENT)
+        try:
+            await self.runner._hmwa_shape_agent_response({'failed': True}, self.source, [], self.entry, 'session')
+        finally:
+            input_delivery.reset(token)
+        self.assertEqual(self.entry.resume_reason, 'brai_technical_failure')
+        self.assertEqual(self.worker.delivery_journal.continuation('session')['input_id'], IDENT)
+        with patch('identity.native_policy.principal', side_effect=[ConnectionError(), {'role': 'user'}, {'role': 'user'}]):
+            await self.worker._retry_failed_sessions()
+            self.assertEqual(self.tasks, [])
+            await self.worker._retry_failed_sessions()
+            await self.worker._retry_failed_sessions()
+        self.assertEqual(len(self.tasks), 1)
+        await asyncio.gather(*self.tasks)
+        self.runner._run_startup_resume_event.assert_awaited_once()
+        await self.runner._hmwa_shape_agent_response({'failed': False, 'completed': True}, self.source, [], self.entry, 'session')
+        self.assertIsNone(self.worker.delivery_journal.continuation('session'))
+
+    async def test_pause_or_changed_chat_generation_prevents_automatic_resume(self):
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        self.entry.resume_pending, self.entry.resume_reason = True, 'brai_technical_failure'
+        with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+            self.worker.chat_states[('42', '7')]['paused'] = True
+            await self.worker._retry_failed_sessions()
+            self.worker.chat_states[('42', '7')].update(paused=False, generation=4)
+            await self.worker._retry_failed_sessions()
+        self.assertEqual(self.tasks, [])
+        self.assertTrue(self.entry.resume_pending)
+
+    async def test_restarted_worker_keeps_old_pending_turn_without_time_expiry(self):
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
+        self.entry.resume_pending, self.entry.resume_reason = True, 'brai_technical_failure'
+        self.entry.last_resume_marked_at = '2000-01-01T00:00:00'
+        with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+            await self.worker._retry_failed_sessions()
+            await asyncio.gather(*self.tasks)
+        self.runner._run_startup_resume_event.assert_awaited_once()
+
+    async def test_user_interrupt_does_not_create_recovery(self):
+        await self.runner._hmwa_shape_agent_response({'failed': True, 'interrupted': True}, self.source, [], self.entry, 'session')
+        self.assertFalse(self.entry.resume_pending)
+        self.assertIsNone(self.worker.delivery_journal.continuation('session'))
+
+    async def test_review_outage_resumes_but_consent_halt_does_not(self):
+        from identity.scope import input_delivery
+        token = input_delivery.set(IDENT)
+        try:
+            await self.runner._hmwa_shape_agent_response(
+                {'completed': True, 'guardrail': {'code': 'brai_review_unavailable'}},
+                self.source, [], self.entry, 'session')
+            self.assertTrue(self.entry.resume_pending)
+            self.assertEqual(self.worker.delivery_journal.continuation('session')['input_id'], IDENT)
+            with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+                await self.worker._retry_failed_sessions()
+                await asyncio.gather(*self.tasks)
+            self.runner._run_startup_resume_event.assert_awaited_once()
+            self.entry.resume_pending = False
+            self.worker.delivery_journal.clear_continuation('session')
+            await self.runner._hmwa_shape_agent_response(
+                {'completed': True, 'guardrail': {'code': 'brai_conversation'}},
+                self.source, [], self.entry, 'session')
+            self.assertFalse(self.entry.resume_pending)
+            self.assertIsNone(self.worker.delivery_journal.continuation('session'))
+        finally:
+            input_delivery.reset(token)
+
+    async def test_partial_response_with_error_remains_resumable(self):
+        from identity.scope import input_delivery
+        token = input_delivery.set(IDENT)
+        try:
+            await self.runner._hmwa_shape_agent_response(
+                {'partial': True, 'error': 'synthetic'}, self.source, [], self.entry, 'session')
+            self.assertTrue(self.entry.resume_pending)
+            self.assertEqual(self.worker.delivery_journal.continuation('session')['input_id'], IDENT)
+        finally:
+            input_delivery.reset(token)
+
+    async def test_existing_native_watcher_starts_saved_work_without_new_message(self):
+        """Проверить связку поставляемого native watcher, журнала и worker scheduler."""
+        root = Path(self.tmp.name) / 'native'
+        target = root / 'gateway/return_notices.py'
+        target.parent.mkdir(parents=True)
+        extensions = Path(__file__).resolve().parents[2] / 'extensions'
+        core = (extensions / 'patches/hermes-core.patch').read_text()
+        section = core.split('diff --git a/gateway/return_notices.py b/gateway/return_notices.py', 1)[1]
+        section = section.split('diff --git ', 1)[0]
+        target.write_text('\n'.join(line[1:] for line in section.splitlines()
+                                    if line.startswith('+') and not line.startswith('+++')) + '\n')
+        identity = Path(__file__).resolve().parents[1] / 'native.patch'
+        subprocess.run(['git', 'apply', '--include=gateway/return_notices.py', str(identity)],
+                       cwd=root, check=True, capture_output=True)
+        node = next(node for node in ast.walk(ast.parse(target.read_text()))
+                    if isinstance(node, ast.AsyncFunctionDef) and node.name == '_return_notice_watcher')
+        scope = {'read_return_notices': lambda path: None}
+        async def tick(_):
+            fake._running = False
+        scope['asyncio'] = NS(sleep=tick)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(target), 'exec'), scope)
+        @asynccontextmanager
+        async def release_source():
+            yield
+        fake = NS(_running=True, _brai_release_source=release_source,
+                  _brai_retry_failed_sessions=self.worker._retry_failed_sessions)
+        self.entry.resume_pending, self.entry.resume_reason = True, 'brai_technical_failure'
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        from gateway import run
+        with patch.object(run, '_planned_restart_notification_path', return_value=Path('/unused')), \
+                patch('identity.native_policy.principal', return_value={'role': 'user'}):
+            await scope['_return_notice_watcher'](fake)
+            await asyncio.gather(*self.tasks)
+        self.runner._run_startup_resume_event.assert_awaited_once()
+
 
 
 class WorkerReceiptsTests(unittest.IsolatedAsyncioTestCase):

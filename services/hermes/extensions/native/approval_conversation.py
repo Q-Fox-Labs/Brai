@@ -19,7 +19,7 @@ _scope = ContextVar("brai_consent_scope", default=None)
 _action = ContextVar("brai_consent_action", default=None)
 _YES = frozenset(("да", "да, разрешаю", "разрешаю", "разрешаю это действие", "подтверждаю", "согласен", "согласна", "yes", "approve"))
 _NO = frozenset(("нет", "не разрешаю", "отмена", "отмени", "не надо", "no", "deny", "cancel"))
-_NOTICE = "Сейчас не удалось проверить безопасность действия. Оно не выполнено. Попробуйте продолжить позже."
+_NOTICE = "Не удалось проверить действие из-за технического сбоя. Действие не выполнено."
 _CHANGED = "Состояние беседы изменилось. Старое действие не выполнено."
 _POLICY = """You are Brai's action reviewer. Operator rules are authoritative.
 Return ONLY a JSON object with exactly these keys:
@@ -362,8 +362,8 @@ def review_action(descriptor, scope, *, call=None, clock=time.monotonic, prior_r
             for key in ("target","consequences","reason"):
                 value[key]=_safe_text(value[key],descriptor.get("command",""))
             return value
-        except Exception:
-            logger.warning("Brai action review unavailable: attempt=%s",attempt+1)
+        except Exception as error:
+            logger.warning("Brai action review unavailable: attempt=%s error_type=%s",attempt+1,type(error).__name__)
     return {"decision":"unavailable","target":"","consequences":"","reason":_NOTICE}
 
 def descriptor_for(command, *, cwd=None, backend=None):
@@ -531,7 +531,8 @@ def halt_if_needed(agent,result):
         return
     from agent.tool_guardrails import ToolGuardrailDecision
     agent._set_tool_guardrail_halt(ToolGuardrailDecision(
-        action="halt",code="brai_conversation",message=data.get("user_summary") or data.get("message") or _NOTICE))
+        action="halt",code="brai_review_unavailable" if data.get("status") == "review_unavailable" else "brai_conversation",
+        message=data.get("user_summary") or data.get("message") or _NOTICE))
 
 
 @contextmanager

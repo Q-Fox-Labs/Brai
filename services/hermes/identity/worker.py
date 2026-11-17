@@ -12,6 +12,7 @@ import signal
 import socket
 import stat
 import sys
+import time
 from types import SimpleNamespace
 import uuid
 from datetime import datetime
@@ -211,6 +212,7 @@ class Worker:
             lambda user_id, *args, **kwargs: platform == Platform.TELEGRAM
             and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
         self.runner._brai_identity_recovery_allowed = lambda source: self.route_allowed(source, recovery=True)
+        self._install_failure_recovery(self.runner)
         self.runner._brai_return_notice_state = self.return_notice_state
         self.runner._brai_consent_generation = lambda source: (
             self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
@@ -240,6 +242,125 @@ class Worker:
             return self.adapter
         self.runner._instantiate_adapter = adapter_factory
         self.lifecycle_task = asyncio.create_task(self._run_lifecycle())
+
+    def _install_failure_recovery(self, runner):
+        """Сохранить технически прерванный ход до его закрытия и подключить штатный watcher."""
+        original = getattr(runner, '_hmwa_shape_agent_response', None)
+        if not callable(original):
+            return
+
+        async def remember(source, session_key):
+            if session_key and self.route_allowed(source, recovery=True):
+                from .scope import input_delivery
+                input_id = input_delivery.get()
+                if self.delivery_journal is not None and input_id is not None:
+                    generation = self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
+                    self.delivery_journal.save_continuation(session_key, input_id, generation)
+                await runner.async_session_store.mark_resume_pending(session_key, 'brai_technical_failure')
+
+        async def shape(result, source, history, entry, session_key, *args, **kwargs):
+            guardrail = result.get('guardrail') if isinstance(result, dict) else None
+            review_unavailable = isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable'
+            if (isinstance(result, dict) and not result.get('interrupted')
+                    and (result.get('failed') or (result.get('partial') and result.get('error')))):
+                await remember(source, session_key)
+            value = await original(result, source, history, entry, session_key, *args, **kwargs)
+            if review_unavailable and not result.get('interrupted'):
+                # Native regards a controlled guardrail halt as complete; restore the marker afterwards.
+                await remember(source, session_key)
+            elif (isinstance(result, dict) and not result.get('failed') and not result.get('interrupted')
+                    and not result.get('partial') and not result.get('error')
+                    and result.get('completed') is not False and session_key and self.delivery_journal is not None):
+                self.delivery_journal.clear_continuation(session_key)
+            return value
+
+        runner._hmwa_shape_agent_response = shape
+        original_error = getattr(runner, '_hmwa_agent_error_reply', None)
+        if callable(original_error):
+            async def error_reply(error, event, source, entry, session_key, prepared):
+                from .scope import continuation_turn
+                value = await original_error(error, event, source, entry, session_key, prepared)
+                await remember(source, session_key)
+                return None if continuation_turn.get() else value
+            runner._hmwa_agent_error_reply = error_reply
+        original_deliver = getattr(runner, '_hmwa_deliver_turn_response', None)
+        if callable(original_deliver):
+            async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
+                from .scope import continuation_turn
+                guardrail = result.get('guardrail') if isinstance(result, dict) else None
+                if (continuation_turn.get() and isinstance(result, dict)
+                        and (result.get('failed') or (result.get('partial') and result.get('error'))
+                             or (isinstance(guardrail, dict)
+                             and guardrail.get('code') == 'brai_review_unavailable'))):
+                    return None
+                return await original_deliver(event, source, entry, session_key, generation, result, *args, **kwargs)
+            runner._hmwa_deliver_turn_response = deliver
+        runner._brai_retry_failed_sessions = self._retry_failed_sessions
+
+    async def _retry_failed_sessions(self):
+        """Вернуть сохранённые попытки в native turn после проверки владельца и маршрута."""
+        runner, adapter, peer = self.runner, self.adapter, self.peer
+        if (runner is None or adapter is None or peer is None or peer.closed
+                or not self.operational.is_set() or self.policy_stopping):
+            return
+        try:
+            with runner.session_store._lock:
+                runner.session_store._ensure_loaded_locked()
+                entries = [entry for entry in runner.session_store._entries.values()
+                           if entry.resume_pending and not entry.suspended and entry.origin is not None
+                           and entry.resume_reason == 'brai_technical_failure']
+            if not entries:
+                return
+            from .native_policy import principal
+            await asyncio.to_thread(principal)
+            if (self.runner is not runner or self.adapter is not adapter or self.peer is not peer
+                    or peer.closed or not self.operational.is_set() or self.policy_stopping):
+                return
+            if self.delivery_journal is None:
+                self._enable_delivery()
+            from gateway.run import _AGENT_PENDING_SENTINEL
+            from gateway.platforms.event import MessageEvent, MessageType
+            for entry in entries:
+                with runner.session_store._lock:
+                    current = runner.session_store._entries.get(entry.session_key)
+                    if (current is not entry or not entry.resume_pending or entry.suspended
+                            or entry.resume_reason != 'brai_technical_failure'):
+                        continue
+                if runner._is_session_running(entry.session_key):
+                    continue
+                source = runner._restored_source(entry)
+                binding = self.delivery_journal.continuation(entry.session_key) if self.delivery_journal else None
+                if (not self.route_allowed(source, recovery=True)
+                        or binding is None
+                        or binding['chat_generation'] != self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
+                        or not runner._resume_owner_authorized(entry.session_key, source)
+                        or runner._delivery_adapter_for(source) is not adapter):
+                    continue
+                state = runner._session_state(entry.session_key)
+                state.turn.agent = _AGENT_PENDING_SENTINEL
+                state.turn.started_ts = time.time()
+                runner._persist_active_agents()
+                event = MessageEvent(text='', message_type=MessageType.TEXT, source=source, internal=True)
+                runner._retain_background_task(asyncio.create_task(
+                    self._resume_failed_turn(runner, adapter, event, entry.session_key, binding['input_id'])))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logging.getLogger(__name__).warning('HERMES_FAILED_TURN_RECOVERY_WAITING error=%s', type(error).__name__)
+
+    async def _resume_failed_turn(self, runner, adapter, event, session_key, input_id):
+        """Сохранить input для outbox и доверенный маршрут в дочерней native task."""
+        from .scope import input_delivery, delivery_scope, continuation_turn
+        source_token = input_delivery.set(input_id)
+        scope_token = delivery_scope.set(None)
+        continuation_token = continuation_turn.set(True)
+        try:
+            adapter.bind_source(event.source)
+            await runner._run_startup_resume_event(adapter, event, session_key)
+        finally:
+            continuation_turn.reset(continuation_token)
+            delivery_scope.reset(scope_token)
+            input_delivery.reset(source_token)
 
     def _install_telegram_profile(self):
         """Установить несекретный профиль до любого native plugin discovery."""

@@ -5,6 +5,7 @@ from contextvars import ContextVar
 
 # AIDEV-NOTE: Задачи native наследуют ID исходного durable input, включая final send.
 input_delivery = ContextVar('brai_input_delivery', default=None)
+continuation_turn = ContextVar('brai_continuation_turn', default=False)
 
 delivery_scope = ContextVar('brai_identity_delivery_scope', default=None)
 UNSCOPED = object()

@@ -920,7 +920,7 @@ diff --git a/agent/redact.py b/agent/redact.py
      async def _session_housekeeping(self) -> None:
 --- a/gateway/return_notices.py
 +++ b/gateway/return_notices.py
-@@ -198,8 +198,9 @@
+@@ -198,8 +198,12 @@
          from gateway.run import _planned_restart_notification_path
 
          while self._running:
@@ -929,6 +929,9 @@ diff --git a/agent/redact.py b/agent/redact.py
 +            async with self._brai_release_source():
 +                if read_return_notices(_planned_restart_notification_path()) is not None:
 +                    await self._replay_pending_planned_restart_notification()
++                retry = getattr(self, "_brai_retry_failed_sessions", None)
++                if callable(retry):
++                    await retry()
              await asyncio.sleep(interval)
 
      async def _replay_pending_planned_restart_notification(self) -> None:
@@ -1344,3 +1347,49 @@ index e9819bc..800c70d 100644
 +            and getattr(agent, "api_mode", None) == "codex_responses"):
 +        return True
      return classify_responses_route(agent).is_codex_backend
+
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -3699,6 +3699,17 @@
+         chunks: list[str] = []
+         delivered: list[str] = []
+         try:
++            # Personal-profile replies must never enter the legacy chunk loop.
++            if (os.environ.get("BRAI_IDENTITY_MODE") == "telegram" and
++                    (utf16_len(content) > 3500 or utf16_len(self.format_message(content)) > 3500)):
++                if not self._content_fits_rich_limits(content):
++                    return SendResult(success=False, error="rich_message_too_long", retryable=False, error_kind="too_long")
++                rich_result = await self._try_send_rich(chat_id, content, reply_to, metadata)
++                if rich_result is None:
++                    return SendResult(success=False, error="rich_message_unavailable", retryable=False, error_kind="bad_format")
++                if rich_result.success and not rich_result.message_id:
++                    return SendResult(success=False, error="rich_delivery_unknown", retryable=False)
++                return rich_result
+             # Bot API 10.1 rich fast-path; falls through to legacy MarkdownV2 on permanent/capability
+             # errors or DM-topic skips; returns directly on success or transient failure (no legacy resend).
+             if self._should_attempt_rich(content, metadata=metadata):
+
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -918,6 +918,10 @@
+         # display.platforms.<plat>.streaming may disable streaming per platform; None = follow global.
+         plat_streaming = ctx.resolve_display_setting(ctx.user_config, platform_key, "streaming")
+         want_stream_deltas = not ctx.scheduled_heartbeat and scfg.enabled_for(plat_streaming)
++        # Personal Telegram finals must reach the one-message delivery boundary intact.
++        import os
++        if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform_key == "telegram":
++            want_stream_deltas = False
+         want_interim_messages = bool(ctx.interim_assistant_messages_enabled) and not ctx.scheduled_heartbeat
+         if want_stream_deltas or want_interim_messages:
+             try:
+
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -2766,5 +2766,7 @@
+     def _proxy_stream_consumer(self, source: "SessionSource", event_message_id, _thread_metadata, _run_still_current):
+         """Platform stream consumer for the proxy path when streaming is enabled, else ``None``."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and source.platform == Platform.TELEGRAM:
++            return None
+         from gateway.run import _load_gateway_config, _platform_config_key
+         _scfg = getattr(getattr(self, "config", None), "streaming", None)
+         # #60671 — streaming TTS consumer is created on the outer event-loop thread before run_sync

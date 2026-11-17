@@ -27,6 +27,7 @@ from collections.abc import Iterator
 EXTENSIONS = Path(__file__).resolve().parents[1]
 SOURCE = os.environ.get("BRAI_NATIVE_SOURCE", "/opt/brai-identity/dev/software/release-fb5e7fb91bee427182e4da0f56466b3a/engine")
 SOURCE = SOURCE if Path(SOURCE).is_dir() else None
+INSTALLED_SOURCE = os.environ.get("BRAI_NATIVE_INSTALLED_ENGINE")
 HASHES = {
     "agent/auxiliary_client.py": "a91d1922271172fb884d3f3c27f927c27f49c6e924d9f0e1d5049bcd866cbc16",
     "agent/turn_api_call.py": "2897575995d8dcbe94bba666ef66043a64c52a6c99e72c45e7da64a5fbdf576b",
@@ -231,20 +232,27 @@ class PortableTurnBudgetTests(unittest.TestCase):
                     self.budget.transport_timeout_policy()
 
 
-@unittest.skipUnless(SOURCE, "BRAI_NATIVE_SOURCE points to the exact read-only pinned engine")
+@unittest.skipUnless(SOURCE or INSTALLED_SOURCE, "Provide the pinned source or installed composed engine")
 class NativeTurnBudgetTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Проверить bytes источника и применить shipped patch в изолированной копии."""
         cls.temp = tempfile.TemporaryDirectory(prefix="brai-native-budget-")
         cls.engine = Path(cls.temp.name)
-        for path, expected in HASHES.items():
-            source = Path(SOURCE) / path
-            if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
-                raise AssertionError("Pinned source changed: " + path)
+        for path in [*HASHES, *([] if SOURCE else ["agent/brai_turn_budget.py"])]:
+            source = Path(SOURCE or INSTALLED_SOURCE) / path
             target = cls.engine / path
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
+        if not SOURCE:
+            subprocess.run(["git", "apply", "-R", str(EXTENSIONS / "patches/turn-request-budget.patch")],
+                           cwd=cls.engine, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "apply", "-R", "--include=agent/turn_recovery.py",
+                            str(EXTENSIONS.parent / "identity/native.patch")],
+                           cwd=cls.engine, check=True, capture_output=True, text=True)
+        for path, expected in HASHES.items():
+            if hashlib.sha256((cls.engine / path).read_bytes()).hexdigest() != expected:
+                raise AssertionError("Pinned source changed: " + path)
         checked = subprocess.run(["git", "apply", "--check", str(EXTENSIONS / "patches/turn-request-budget.patch")],
                                  cwd=cls.engine, capture_output=True, text=True)
         if checked.returncode:

@@ -41299,7 +41299,8 @@ index 445c9319..86f3e327 100644
          persist_override: Optional[Any] = ctx.persist_user_message
          self._prepend_pending_note("_pending_model_notes")
 @@ -1643,14 +1641,14 @@ class TurnRunner:
-         if resume_pending and (interruption_is_fresh or mark_is_fresh):
+-        if resume_pending and (interruption_is_fresh or mark_is_fresh):
++        if resume_pending and (resume_reason == "brai_technical_failure" or interruption_is_fresh or mark_is_fresh):
              # Empty message = the startup auto-resume turn; there is no NEW user message.
              ctx.message, persist_override = _prepare_resume_pending_message(
 -                resume_reason, ctx.message, interactive=self._resume_note_interactive(),

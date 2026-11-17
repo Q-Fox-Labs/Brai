@@ -82,6 +82,20 @@ class ConsentTests(unittest.TestCase):
     def authorize(self,row):
         self.store.delivered(row["id"],"10")
         return self.store.answer(self.scope.key,"alice","11","да",time.time()+1,"10")
+    def test_review_unavailable_has_distinct_machine_readable_halt(self):
+        class Decision:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+        module=types.ModuleType('agent.tool_guardrails')
+        module.ToolGuardrailDecision=Decision
+        seen=[]
+        agent=types.SimpleNamespace(_set_tool_guardrail_halt=seen.append)
+        with patch.dict(sys.modules, {'agent.tool_guardrails':module}):
+            with consent.turn_scope(self.db,source(),'session','Проверь источники','1'):
+                consent.halt_if_needed(agent, {'status':'review_unavailable'})
+                self.assertEqual(seen[-1].code, 'brai_review_unavailable')
+                consent.halt_if_needed(agent, {'status':'needs_consent'})
+                self.assertEqual(seen[-1].code, 'brai_conversation')
     def test_consent_reuses_exact_authenticated_workspace_after_reply(self):
         sys.path.insert(0, str(ROOT / 'services/hermes'))
         try:

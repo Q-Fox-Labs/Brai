@@ -5,6 +5,8 @@ import asyncio
 import contextlib
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import ModuleType, SimpleNamespace as NS
@@ -20,6 +22,130 @@ from identity.scope import delivery_scope
 from identity import telegram_runtime as runtime
 from files import native
 from files.tests.test_files import Backend
+
+
+class PersonalRichDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Применить именно отправляемый patch к закреплённой fixture-копии native adapter."""
+        cls.temp = tempfile.TemporaryDirectory()
+        root = Path(cls.temp.name)
+        fixture = Path(__file__).parent / 'fixtures/ordinary_release/plugins/platforms/telegram/adapter.py'
+        target = root / 'plugins/platforms/telegram/adapter.py'
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(fixture, target)
+        patch_text = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()
+        marker = '\n--- a/plugins/platforms/telegram/adapter.py\n+++ b/plugins/platforms/telegram/adapter.py\n'
+        delta = marker.lstrip('\n') + patch_text.rsplit(marker, 1)[1]
+        subprocess.run(['git', 'apply', '--include=plugins/platforms/telegram/adapter.py', '-'],
+                       cwd=root, input=delta, text=True, check=True, capture_output=True)
+        tree = ast.parse(target.read_text())
+        method = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == '_send_text_locked')
+        module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), method], type_ignores=[])
+        scope = {'os': os, 'asyncio': asyncio, 'SendResult': NS,
+                 'utf16_len': lambda text: len(text.encode('utf-16-le')) // 2}
+        exec(compile(ast.fix_missing_locations(module), str(target), 'exec'), scope)
+        cls.send = staticmethod(scope['_send_text_locked'])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    async def test_long_answer_uses_one_rich_message_and_never_chunks(self):
+        rich = AsyncMock(return_value=NS(success=True, message_id='2621'))
+        adapter = NS(_send_flood_cooldown_remaining=lambda chat: None,
+                     _chat_outbound_slot_remaining=lambda chat: 0,
+                     _hold_chat_outbound_slot=lambda chat: None,
+                     _telegram_error_types=lambda: (),
+                     _content_fits_rich_limits=lambda text: len(text) <= 32768,
+                     _try_send_rich=rich, truncate_message=Mock(side_effect=AssertionError('split')))
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+            result = await self.send(adapter, '42', 'Я' * 5536, None, {'thread_id': '7'})
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, '2621')
+        rich.assert_awaited_once_with('42', 'Я' * 5536, None, {'thread_id': '7'})
+        adapter.truncate_message.assert_not_called()
+
+    async def test_rich_refusal_or_oversize_does_not_fall_back_to_parts(self):
+        rich = AsyncMock(return_value=None)
+        adapter = NS(_send_flood_cooldown_remaining=lambda chat: None,
+                     _chat_outbound_slot_remaining=lambda chat: 0,
+                     _hold_chat_outbound_slot=lambda chat: None,
+                     _telegram_error_types=lambda: (),
+                     _content_fits_rich_limits=lambda text: len(text) <= 32768,
+                     _try_send_rich=rich, truncate_message=Mock(side_effect=AssertionError('split')))
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+            rejected = await self.send(adapter, '42', 'Я' * 5536, None, {})
+            oversized = await self.send(adapter, '42', 'Я' * 32769, None, {})
+        self.assertFalse(rejected.success)
+        self.assertFalse(oversized.success)
+        self.assertEqual(rich.await_count, 1)
+        adapter.truncate_message.assert_not_called()
+
+    async def test_markdown_escaping_cannot_force_a_short_reply_into_chunks(self):
+        rich = AsyncMock(return_value=NS(success=True, message_id='1'))
+        adapter = NS(_send_flood_cooldown_remaining=lambda chat: None,
+                     _chat_outbound_slot_remaining=lambda chat: 0,
+                     _hold_chat_outbound_slot=lambda chat: None,
+                     _telegram_error_types=lambda: (),
+                     _content_fits_rich_limits=lambda text: True,
+                     format_message=lambda text: text.replace('_', r'\_'),
+                     _try_send_rich=rich, truncate_message=Mock(side_effect=AssertionError('split')))
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+            result = await self.send(adapter, '42', '_' * 3000, None, {})
+        self.assertTrue(result.success)
+        rich.assert_awaited_once()
+        adapter.truncate_message.assert_not_called()
+
+    async def test_native_rich_api_keeps_personal_topic_and_returns_one_receipt(self):
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+        adapter = object.__new__(TelegramAdapter)
+        adapter._bot = NS(do_api_request=AsyncMock(return_value={'message_id': 2621}))
+        adapter._reply_to_mode = 'first'
+        adapter._send_flood_cooldown_remaining = lambda chat: None
+        adapter._chat_outbound_slot_remaining = lambda chat: 0
+        adapter._hold_chat_outbound_slot = lambda chat: None
+        adapter._record_rich_sent = AsyncMock()
+        metadata = {'thread_id': '7', 'direct_messages_topic_id': '7',
+                    'telegram_dm_topic_reply_fallback': True}
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+            result = await self.send(adapter, '42', 'Я' * 5536, None, metadata)
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, '2621')
+        adapter._bot.do_api_request.assert_awaited_once()
+        call = adapter._bot.do_api_request.await_args
+        self.assertEqual(call.args[0], 'sendRichMessage')
+        self.assertEqual(call.kwargs['api_kwargs']['message_thread_id'], 7)
+
+    async def test_personal_final_deltas_do_not_enter_stream_split_path(self):
+        engine = os.environ.get('BRAI_RICH_TEST_ENGINE')
+        if not engine:
+            self.skipTest('BRAI_RICH_TEST_ENGINE requires the pinned composed engine')
+        root = Path(self.temp.name)
+        relative = 'gateway/run_turn_runner.py'
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(engine) / relative, target)
+        patch_text = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()
+        marker = '\n--- a/' + relative + '\n+++ b/' + relative + '\n'
+        delta = marker.lstrip('\n') + patch_text.rsplit(marker, 1)[1]
+        subprocess.run(['git', 'apply', '--include=' + relative, '-'], cwd=root,
+                       input=delta, text=True, check=True, capture_output=True)
+        tree = ast.parse(target.read_text())
+        method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                      and node.name == '_setup_stream_consumer')
+        module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), method], type_ignores=[])
+        scope = {}
+        exec(compile(ast.fix_missing_locations(module), str(target), 'exec'), scope)
+        ctx = NS(mute_notification_reply=False, streaming_tts_consumer_holder=[None],
+                 resolve_display_setting=lambda *args: True, user_config={}, scheduled_heartbeat=False,
+                 interim_assistant_messages_enabled=False)
+        holder = NS(_ctx=ctx, _runner=NS(config=NS(streaming=NS(enabled_for=lambda value: True))))
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}):
+            consumer, delta_callback, _, _ = scope['_setup_stream_consumer'](holder, 'telegram')
+        self.assertIsNone(consumer)
+        self.assertIsNone(delta_callback)
 
 
 class DeliveryTest(unittest.IsolatedAsyncioTestCase):
@@ -132,6 +258,29 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(peer.call.await_count, 1)
         finally:
             input_delivery.reset(token)
+
+    async def test_recovered_turn_delivers_through_original_durable_input(self):
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        ident, digest = delivery_id('input'), delivery_id('bytes')
+        journal = DeliveryJournal(self.root / 'recovered.sqlite3', 'owner')
+        journal.begin_input(ident, digest)
+        peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': '2621'}))
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, AsyncMock())
+        adapter._brai_delivery_journal = journal
+        source = NS(chat_id='123', thread_id='77', chat_name='', chat_type='dm')
+        event = NS(source=source)
+        async def native_resume(native_adapter, received, key):
+            self.assertIs(received, event)
+            sent = await native_adapter.send('123', 'Готово', metadata={'thread_id': '77'})
+            self.assertTrue(sent.success)
+        runner = NS(_run_startup_resume_event=native_resume)
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        await worker._resume_failed_turn(runner, adapter, event, 'session', ident)
+        call = peer.call.await_args.args[1]
+        self.assertEqual(call['input_delivery_id'], ident)
+        self.assertIsNone(call['scope_id'])
+        self.assertEqual(call['payload']['metadata']['thread_id'], '77')
+        self.assertEqual(journal.output(call['delivery_id'])['state'], 'sent')
 
     async def test_consecutive_identical_output_reuses_receipt_but_new_input_allows_repeat(self):
         """Побайтный дубль отсечён; новый steer с прежним task context разрешает повтор."""

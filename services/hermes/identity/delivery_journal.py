@@ -39,6 +39,8 @@ class DeliveryJournal:
             db.execute('''CREATE TABLE IF NOT EXISTS output_deliveries (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
                 action TEXT NOT NULL, payload TEXT NOT NULL, phase TEXT NOT NULL, receipt TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS continuation_inputs (
+                session_key TEXT PRIMARY KEY, input_id TEXT NOT NULL, chat_generation INTEGER NOT NULL)''')
 
     @contextmanager
     def open(self):
@@ -73,6 +75,29 @@ class DeliveryJournal:
         """Вернуть последний начатый input до native приёма; смена phase не меняет границу."""
         with self.open() as db:
             return db.execute('SELECT rowid,id,digest FROM input_deliveries ORDER BY rowid DESC LIMIT 1').fetchone()
+
+    def save_continuation(self, session_key, input_id, chat_generation):
+        """Связать незавершённую сессию с исходным durable input и поколением чата."""
+        self.identity(input_id, input_id)
+        if not isinstance(session_key, str) or not session_key or type(chat_generation) is not int or chat_generation < 0:
+            raise ValueError('CONTINUATION_BINDING_INVALID')
+        with self.open() as db:
+            if db.execute('SELECT 1 FROM input_deliveries WHERE id=?', (input_id,)).fetchone() is None:
+                raise ValueError('CONTINUATION_INPUT_UNKNOWN')
+            db.execute('INSERT OR REPLACE INTO continuation_inputs VALUES(?,?,?)',
+                       (session_key, input_id, chat_generation))
+
+    def continuation(self, session_key):
+        """Читать привязку без повторной передачи исходного сообщения."""
+        with self.open() as db:
+            row = db.execute('SELECT input_id,chat_generation FROM continuation_inputs WHERE session_key=?',
+                             (session_key,)).fetchone()
+        return {'input_id': row[0], 'chat_generation': row[1]} if row else None
+
+    def clear_continuation(self, session_key):
+        """Удалить привязку только после подтверждённого завершения native хода."""
+        with self.open() as db:
+            db.execute('DELETE FROM continuation_inputs WHERE session_key=?', (session_key,))
 
     def begin_input(self, ident, digest):
         """До native handler закрепить попытку; dispatching после crash не переисполняется."""
