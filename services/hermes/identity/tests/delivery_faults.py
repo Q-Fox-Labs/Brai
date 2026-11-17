@@ -439,6 +439,13 @@ async def run(config, fixture, native, receipt):
         logs = await asyncio.gather(*log_tasks, return_exceptions=True)
         proof['workerExceptions'] = [row for raw in logs if isinstance(raw, bytes)
                                      for row in fixture.worker_exception_diagnostics(raw)]
+        if proof.get('state') != 'verified':
+            proof['brokerMethods'] = [{'method': event['method'], 'allowed': event['allowed']}
+                                      for run in broker_runs for event in run.events]
+            proof['mcpDiagnostics'] = [line[:300] for raw in logs if isinstance(raw, bytes)
+                for line in raw.decode('utf-8', 'replace').splitlines()
+                if ('mcp' in line.lower() or 'brai_login' in line.lower())
+                and ('warn' in line.lower() or 'error' in line.lower() or 'fail' in line.lower())][-20:]
         if cleanup_errors:
             proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
         else:
