@@ -25,21 +25,22 @@ import {verificationProcess} from '../../dist/verification-process.js';
 import {deliverVerification} from '../../dist/verification-worker.js';
 import {codexExecutor} from '../../dist/verification-models.js';
 import {verificationFlowConfig,verificationFlowPolicyInput} from './verification-flow-config.mjs';
+import {fixtureNetwork,fixtureDatabase,fixtureServices} from './fixture-network.mjs';
 
 const flowConfig=verificationFlowConfig(process.env);
 const required=name=>{const value=process.env[name];assert.ok(value,`${name} is required`);return value;};
-const loopbackURL=(value,protocol,path)=>{const url=new URL(value);assert.equal(url.hostname,'127.0.0.1');if(protocol)assert.equal(url.protocol,protocol);if(path)assert.equal(url.pathname,path);return url;};
+const proof=fixtureNetwork();
 const fixture=readPrivate(required('BUG_HUNT_FLOW_DB_CONFIG'));
-for(const key of ['ownerURL','appURL']){const url=loopbackURL(fixture[key],null,'/brai_bug_hunt_test');assert.ok(['postgres:','postgresql:'].includes(url.protocol));}
+for(const [key,role] of [['ownerURL','owner'],['appURL','app']])fixtureDatabase(fixture[key],role,'brai_bug_hunt_test',proof);
 const profile=readPrivate(required('BUG_HUNT_NATIVE_PROFILE_FILE'));
 assert.ok(profile.process&&!profile.socketUrl,'a private process NativeProfile is required');
 const registryPath=required('BUG_HUNT_RECIPE_REGISTRY');assert.ok(isAbsolute(registryPath));
 const registry=JSON.parse(readFileSync(registryPath,'utf8'));
 assert.ok(Array.isArray(registry.sources)&&Array.isArray(registry.recipes)&&Array.isArray(registry.runnerRecipes));
 const deps=required('BUG_HUNT_RECIPE_DEPENDENCIES_ROOT');assert.ok(isAbsolute(deps));
-const natsURL=loopbackURL(required('BUG_HUNT_TEST_NATS_URL'),'nats:');
-const temporalAddress=required('BUG_HUNT_TEST_TEMPORAL_ADDRESS');assert.match(temporalAddress,/^127\.0\.0\.1:[1-9]\d{0,4}$/);
-const namespace=required('BUG_HUNT_TEST_TEMPORAL_NAMESPACE');assert.match(namespace,/^bug-hunt-test-[a-z0-9-]+$/);
+const temporalAddress=required('BUG_HUNT_TEST_TEMPORAL_ADDRESS');
+const namespace=required('BUG_HUNT_TEST_TEMPORAL_NAMESPACE');
+const natsURL=fixtureServices(required('BUG_HUNT_TEST_NATS_URL'),temporalAddress,namespace,proof);
 
 test('real prepared recipes, independent reviewer, Temporal and isolated originals',async t=>{
  const {externalWorker,runnerSocket:externalRunnerSocket,installationId,ownerId,taskQueue}=flowConfig;

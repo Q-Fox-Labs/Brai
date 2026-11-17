@@ -1,6 +1,7 @@
 // ABOUTME: Проверяет v3 на собственной настоящей PostgreSQL БД с конкуренцией и восстановлением.
-// ABOUTME: Loopback fixture и новый installation ID исключают рабочие обращения и чужие задания.
+// ABOUTME: Изолированный fixture и новый installation ID исключают рабочие обращения и чужие задания.
 import test from "node:test";
+import {fixtureNetwork,fixtureDatabase} from "./fixture-network.mjs";
 import assert from "node:assert/strict";
 import {readPrivate} from "../../dist/config.js";
 import {randomUUID} from "node:crypto";
@@ -13,7 +14,8 @@ import {createVerificationEngine} from "../../dist/verification-engine.js";
 import {verificationProcess} from "../../dist/verification-process.js";
 assert.ok(process.env.BUG_HUNT_FLOW_DB_CONFIG,"BUG_HUNT_FLOW_DB_CONFIG is required");
 const fixture=readPrivate(process.env.BUG_HUNT_FLOW_DB_CONFIG);
-for(const k of ["ownerURL","appURL"]){const u=new URL(fixture[k]);assert.equal(u.hostname,"127.0.0.1");assert.equal(u.pathname,"/brai_bug_hunt_test");}
+const proof=fixtureNetwork();
+for(const [key,role] of [["ownerURL","owner"],["appURL","app"]])fixtureDatabase(fixture[key],role,"brai_bug_hunt_test",proof);
 test("v3 admission, timer, immutable data, fencing, ACL and replay use one scoped ledger",async t=>{
  const owner=new Pool({connectionString:fixture.ownerURL,max:1}),app=new Pool({connectionString:fixture.appURL,max:6});
  const installationId="v3-"+randomUUID(),p={ownerId:randomUUID(),actorId:"fixture:one",source:"codex",reviewer:false},foreign={...p,ownerId:randomUUID(),actorId:"fixture:foreign"};
