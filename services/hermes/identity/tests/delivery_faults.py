@@ -76,7 +76,33 @@ async def run(config, fixture, native, receipt):
         async def broker_port(reader, writer):
             await broker.handle(reader, writer)
         model = fixture.FixtureModel(None, uid)
-        for name, handler in (('broker.sock', broker_port), ('model.sock', model.handle)):
+        provider_unavailable = False
+        provider_failures = []
+        async def model_port(reader, writer):
+            if not provider_unavailable:
+                return await model.handle(reader, writer)
+            try:
+                fixture.require(fixture.peer_credentials(writer)[1] == uid, 'MODEL_PEER_DENIED')
+                headers = await reader.readuntil(b'\r\n\r\n')
+                lines = headers.split(b'\r\n')
+                if lines[0].startswith(b'POST '):
+                    lengths = [line.split(b':', 1)[1].strip() for line in lines
+                               if line.lower().startswith(b'content-length:')]
+                    fixture.require(len(lengths) == 1 and lengths[0].isdigit(), 'INVALID_LENGTH')
+                    model.requests.append(json.loads(await reader.readexactly(int(lengths[0]))))
+                    provider_failures.append(503)
+                    payload = b'{"error":{"message":"synthetic provider outage","type":"server_error"}}'
+                    writer.write(b'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
+                                 + str(len(payload)).encode() + b'\r\n\r\n' + payload)
+                else:
+                    payload = json.dumps(fixture.synthetic_model_catalog()).encode()
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
+                                 + str(len(payload)).encode() + b'\r\n\r\n' + payload)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        for name, handler in (('broker.sock', broker_port), ('model.sock', model_port)):
             path = root / name
             servers.append(await asyncio.start_unix_server(handler, path=path, limit=65537))
             path.chmod(0o666)
@@ -351,6 +377,24 @@ async def run(config, fixture, native, receipt):
             fixture.require(resolver.journal.chat_state(profile, ('123', '13'))['paused'], 'PAUSE_LOST_ON_RESTART')
             proof['scenarios'].append('ingress-and-worker-restart-two-messages-one-native-turn')
             fixture.require(len(deliveries) == 6 and all('SYNTHETIC_OK' in p.get('content', '') for p in deliveries), 'REPLIES_UNPROVEN')
+            stage = 'provider-failure-and-automatic-continuation'
+            batch_mode = False
+            provider_unavailable = True
+            raw = item(9, 15)
+            await resolver.mirror.capture([raw], 123)
+            await resolver.mirror.app.update_queue.put(raw)
+            await eventually(lambda: len(deliveries) >= 7, 'provider-failure-notice', watch=process)
+            fixture.require(len(provider_failures) >= 1 and 'SYNTHETIC_OK' not in deliveries[6].get('content', ''),
+                            'PROVIDER_FAILURE_NOT_OBSERVED')
+            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process)
+            requests_before_recovery = len(model.requests)
+            provider_unavailable = False
+            await eventually(lambda: any('SYNTHETIC_OK' in item.get('content', '') for item in deliveries[7:]),
+                             'automatic-provider-recovery', watch=process)
+            fixture.require(dispatches.count(9) == 1, 'RECOVERY_REQUIRES_NEW_INPUT')
+            fixture.require(len(model.requests) > requests_before_recovery, 'RECOVERY_MODEL_NOT_CALLED')
+            proof['scenarios'].append('provider-503-auto-continue-without-new-message')
+            proof['providerFailures'] = len(provider_failures)
             proof.update(state='verified', delivered=len(deliveries), uniqueInputs=len(set(consumed)),
                          processKills=3, mergedInputs=2, mergedNativeTurns=len(batch_dispatches),
                          mergedModelRequests=len(model.requests)-requests_before, modelRequests=len(model.requests), manualQueueResets=0)
