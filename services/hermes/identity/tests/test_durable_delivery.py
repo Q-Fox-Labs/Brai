@@ -49,6 +49,7 @@ class JournalTests(unittest.TestCase):
             self.store.save_continuation('session', IDENT, 3)
         self.store.begin_input(IDENT, DIGEST)
         self.store.save_continuation('session', IDENT, 3)
+        self.assertEqual(self.store.pending_outputs(), [])
         restarted = DeliveryJournal(self.path, 'owner')
         self.assertEqual(restarted.continuation('session'), {'input_id': IDENT, 'chat_generation': 3})
         restarted.clear_continuation('session')
