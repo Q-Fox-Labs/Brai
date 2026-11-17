@@ -41298,7 +41298,7 @@ index 445c9319..86f3e327 100644
          ctx = self._ctx
          persist_override: Optional[Any] = ctx.persist_user_message
          self._prepend_pending_note("_pending_model_notes")
-@@ -1643,7 +1641,7 @@ class TurnRunner:
+@@ -1643,14 +1641,14 @@ class TurnRunner:
          if resume_pending and (interruption_is_fresh or mark_is_fresh):
              # Empty message = the startup auto-resume turn; there is no NEW user message.
              ctx.message, persist_override = _prepare_resume_pending_message(
@@ -41307,6 +41307,15 @@ index 445c9319..86f3e327 100644
              )
          elif agent_history and agent_history[-1].get("role") == "tool" and interruption_is_fresh:
              persist_override = ctx.message
+             ctx.message = (
+                 "[System note: A new message has arrived. The conversation "
+                 "history contains pending tool outputs from an interrupted turn. "
+-                "IGNORE those pending results. Address the user's NEW message "
+-                "below FIRST. Do NOT re-execute old tool calls from the history.]\n\n"
++                "Use these results, address the new message and continue the interrupted task "
++                "unless the user stopped or replaced it. Check uncertain effects before retrying.]\n\n"
+                 + ctx.message
+             )
 @@ -1659,7 +1657,7 @@ class TurnRunner:
          # did not fire (freshness signals disagreed, marker cleared) we must NOT hand the model a blank
          # user turn. Restricted to resume_pending sessions so caption-less image turns are untouched.
@@ -41427,9 +41436,9 @@ index 00000000..f196f46f
 +        else "a gateway shutdown" if reason == "shutdown_timeout" else "a gateway interruption")
 +    if message:
 +        resume_guidance = (
-+            "Address the user's NEW message below FIRST and focus on what the user is asking now.")
++            "Address the user's NEW message and continue the interrupted task unless the user stopped or replaced it.")
 +        tail_guidance = (
-+            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
++            "Do not repeat completed tool calls; check the outcome of uncertain actions before retrying."
 +        )
 +    elif interactive:
 +        resume_guidance = (
