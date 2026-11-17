@@ -32,12 +32,34 @@ class DefaultsTests(unittest.TestCase):
         self.assertIs(settings['memory']['memory_enabled'], False)
         self.assertIs(settings['memory']['user_profile_enabled'], False)
         self.assertEqual(settings['memory']['nudge_interval'], 0)
+        self.assertEqual(settings['display']['memory_notifications'], 'off')
         # Имя группы memory нужно штатной инъекции инструментов внешнего provider.
         self.assertIn('memory', settings['platform_toolsets']['telegram'])
 
 
 @unittest.skipUnless(ENGINE, 'BRAI_NATIVE_ENGINE points to a composed pinned engine')
 class NativeMemoryTests(unittest.TestCase):
+    def test_background_skill_and_memory_summaries_are_disabled(self):
+        settings = json.loads((ROOT / 'config/server-defaults.json').read_text())
+        defaults = tuple((name, default) for name, default in (
+            ('action', '?'), ('target', 'memory'), ('content', ''), ('old_text', ''), ('name', ''),
+            ('old_string', ''), ('new_string', '')))
+        review = functions('agent/background_review.py', {
+            'summarize_background_review_actions', '_prior_tool_keys', '_tool_messages',
+            '_collect_review_call_details', '_action_lines'},
+            json=json, _CALL_DETAIL_DEFAULTS=defaults,
+            t=lambda key, **kw: key + ' ' + ' '.join(map(str, kw.values())))
+        calls = [{'id': 'skill', 'function': {'name': 'skill_manage', 'arguments': '{}'}},
+                 {'id': 'memory', 'function': {'name': 'memory', 'arguments': '{"target":"memory"}'}}]
+        messages = [{'role': 'assistant', 'tool_calls': calls},
+                    {'role': 'tool', 'tool_call_id': 'skill', 'content': json.dumps(
+                        {'success': True, 'message': "Skill 'test' created."})},
+                    {'role': 'tool', 'tool_call_id': 'memory', 'content': json.dumps(
+                        {'success': True, 'target': 'memory', 'message': 'Entry added'})}]
+        self.assertEqual(review.summarize_background_review_actions(
+            messages, [], settings['display']['memory_notifications']), [])
+        self.assertEqual(len(review.summarize_background_review_actions(messages, [], 'on')), 2)
+
     def memory(self):
         return functions('tools/memory_tool.py', {'get_builtin_memory_store_flags', 'memory_tool', 'check_memory_requirements'},
                          _memory_surface_flags=Mock(), tool_error=lambda text, **kw: {'error': text, **kw})
