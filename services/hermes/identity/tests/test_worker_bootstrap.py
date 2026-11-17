@@ -127,6 +127,11 @@ class ToolClientTest(unittest.TestCase):
             result = tool_client.handle('tools/call', {'name':'brai_login'})
         self.assertTrue(result['isError'])
 
+    def test_login_explains_role_restriction(self):
+        with patch.object(tool_client, 'broker_call', return_value={'status':'denied', 'reason':'web-role-unavailable'}):
+            result = tool_client.handle('tools/call', {'name':'brai_login'})
+        self.assertIn('для вашего типа учётной записи сейчас недоступен', result['content'][0]['text'])
+
     def test_tools_call_cannot_set_owner(self):
         with patch.object(tool_client, 'broker_call', return_value={'ok':True}) as call:
             tool_client.handle('tools/call', {'name':'test', 'arguments':{'value':1}, 'uid':0})

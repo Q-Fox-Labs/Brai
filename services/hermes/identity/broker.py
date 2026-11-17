@@ -496,6 +496,9 @@ class Broker:
             uid = params['uid']
             profile = await self.authorize(uid)
             return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
+        if method == 'ingress.input-ready' and ingress and not params:
+            gateway = self.dev_gateway()
+            return {'ready': await asyncio.to_thread(gateway.input_ready)}
         if method == 'ingress.profiles-strict' and ingress and not params:
             profiles = []
             registry = self.profiles()
@@ -766,6 +769,8 @@ class Broker:
             turn = self.turns.get(peer_uid)
             if not turn or not turn['privateChat']:
                 raise PermissionError('Private Telegram turn required')
+            if profile['role'] != 'creator':
+                return {'status': 'failed', 'reason': 'web-role-unavailable', 'suppressFinal': False}
             receipt = turn['loginRecord']
             lock = self.login_locks.setdefault(peer_uid, asyncio.Lock())
             async with lock:
@@ -943,6 +948,7 @@ PARAMETERS = {
     'files.create-spreadsheet': ({'filename','workbook','requestId'}, set()),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
+    'ingress.input-ready': (set(), set()),
     'ingress.profiles': (set(), set()),
     'ingress.profiles-strict': (set(), set()),
     'ingress.delivery-artifact': ({'uid', 'artifactId'}, set()),

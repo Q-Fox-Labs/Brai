@@ -575,11 +575,14 @@ class Mirror:
             await pump(self)
 
     async def before_delivery(self, event):
-        """Связать исходные updates и durable ID перед единственной внешней передачей."""
+        """Связать входы до RPC либо вернуть deferred, сохранив их captured."""
         ids = getattr(event, '_brai_release_updates', [])
         if not ids or not all(f'{self.bot_id}:{ident}' in self.auto_inputs for ident in ids):
             return None
         profile = self.snapshot(f'{self.bot_id}:{ids[0]}')['profile']
+        row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, ids[0])
+        if self.input_ready is not None and not await self.input_ready(profile, (row['chat'], row['thread'])):
+            return {'deferred': True}
         result = await asyncio.to_thread(self.inbox.bind_delivery, profile, self.bot_id, ids)
         for ident in ids:
             await asyncio.to_thread(self.inbox.claim_for_delivery, profile, self.bot_id, ident)

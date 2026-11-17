@@ -1166,10 +1166,6 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             target['message_thread_id'] = int(thread)
         if reply_to:
             target['reply_to_message_id'] = int(reply_to)
-    if fallback:
-        notice = await bot.send_message(**target, text='Этот набор нельзя отправить одним альбомом. Файлы идут отдельно в исходном порядке.')
-        if not getattr(notice, 'message_id', None):
-            raise FileError('DELIVERY_UNKNOWN')
     captions = []
     for item in items:
         caption = item.get('caption', '')
@@ -1229,19 +1225,11 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
     items = [{key: value for key, value in item.items() if key != '_setId'} for item in items]
     explicit = identity or (metadata or {}).get('brai_delivery_id')
     fingerprint = key([store().owner, platform, str(chat_id), metadata or {}, items, mode]) if not explicit else None
-    announced = False
     async def sender(kind, prepared, fallback):
-        nonlocal announced
-        explain = (fallback or platform != 'telegram' and kind == 'album') and not announced
-        announced = announced or explain
         if platform == 'telegram':
             if getattr(adapter, 'file_delivery_via_ipc', False):
-                return await adapter.send_file_set(chat_id, prepared, kind, explain, metadata)
-            return await telegram_sender(adapter, chat_id, metadata, kind, prepared, explain)
-        if explain:
-            notice = await adapter.send(chat_id, 'Файлы набора будут отправлены отдельно в исходном порядке.', metadata=metadata)
-            if not notice.success:
-                raise FileError('DELIVERY_UNKNOWN')
+                return await adapter.send_file_set(chat_id, prepared, kind, fallback, metadata)
+            return await telegram_sender(adapter, chat_id, metadata, kind, prepared, fallback)
         receipt, token = [], _sending.set(True)
         try:
             for item in prepared:
@@ -1381,6 +1369,21 @@ def install_adapter(adapter):
                 await _notify_observer('observe_files', event, 'failed',
                     (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', []))
                 return None
+            if isinstance(error, FileError):
+                from gateway.platforms.base import _thread_metadata_for_event
+                metadata = _thread_metadata_for_event(event)
+                code = str(error)
+                logging.getLogger(__name__).warning('BRAI_FILE_DELIVERY_FAILED code=%s',
+                    code if re.fullmatch(r'[A-Z_]{1,80}', code) else 'FILE_OPERATION_FAILED')
+                try:
+                    with adapter._media_delivery_scope(event.source):
+                        content = adapter.warning_text('Не удалось отправить файл.', 'Не удалось отправить файл.',
+                            logical_platform=event.source.platform, chat_id=event.source.chat_id, metadata=metadata)
+                    if content is not None:
+                        await adapter.send(chat_id=event.source.chat_id, content=content, metadata=metadata)
+                except Exception:
+                    logging.getLogger(__name__).warning('BRAI_FILE_ERROR_NOTICE_FAILED')
+                return metadata
             return await notify_error(event, error)
         adapter._notify_turn_error = notify_file_error
     send = getattr(adapter, 'send', None)

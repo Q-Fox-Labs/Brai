@@ -78,12 +78,12 @@ after(async () => {
   await Promise.all([app.end(), owner.end()]);
 });
 
-test("linked user OTP is stamped with its captured generation and creates a live session", async () => {
+test("linked creator OTP is stamped with its captured generation and creates a live session", async () => {
   const ids = [];
   try {
     await migrate();
     const creator = await seed("creator");
-    const user = await seed("user");
+    const user = await seed("creator");
     ids.push(creator.id, user.id);
     deliveries.length = 0;
     auth = createAuth(cfg, app, async (email, otp) => { deliveries.push({ email, otp }); });
@@ -114,12 +114,12 @@ test("linked user OTP is stamped with its captured generation and creates a live
   }
 });
 
-test("guest grant is denied and an OTP from before guest→user never becomes valid again", async () => {
+test("guest grant is denied and an OTP from before creator→guest→creator never becomes valid again", async () => {
   const ids = [];
   try {
     await migrate();
     const creator = await seed("creator");
-    const user = await seed("user");
+    const user = await seed("creator");
     const guest = await seed("guest");
     ids.push(creator.id, user.id, guest.id);
     deliveries.length = 0;
@@ -134,7 +134,7 @@ test("guest grant is denied and an OTP from before guest→user never becomes va
     assert.equal(sent.status, 200);
     const oldOtp = deliveries.find(item => item.email === user.email).otp;
     await roleChange(creator.id, user.id, "guest");
-    await roleChange(creator.id, user.id, "user");
+    await roleChange(creator.id, user.id, "creator");
     const current = await captureEmailGrant(app, user.email);
     assert.equal(current.allowed, true);
     assert.ok(current.generation > 0);
@@ -153,7 +153,7 @@ test("OTP request captured before downgrade cannot stamp or send after generatio
   try {
     await migrate();
     const creator = await seed("creator");
-    const user = await seed("user");
+    const user = await seed("creator");
     ids.push(creator.id, user.id);
     deliveries.length = 0;
     auth = createAuth(cfg, app, async (email, otp) => { deliveries.push({ email, otp }); });
@@ -166,7 +166,7 @@ test("OTP request captured before downgrade cannot stamp or send after generatio
       if (!transitioned) {
         transitioned = true;
         await roleChange(creator.id, user.id, "guest");
-        await roleChange(creator.id, user.id, "user");
+        await roleChange(creator.id, user.id, "creator");
       }
       return original(...args);
     };

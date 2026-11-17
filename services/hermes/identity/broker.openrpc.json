@@ -2134,6 +2134,33 @@
           "$ref": "#/components/errors/Unavailable"
         }
       ]
+    },
+    {
+      "name": "ingress.input-ready",
+      "summary": "DEV ingress-only read-only admission: false while the release owner holds apply.lock or selected Hermes differs from accepted. No paths or owner supplied by caller; error keeps ordinary inputs captured. Existing broker RPC deadline applies; retry is safe.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "admission",
+        "schema": {
+          "type": "object",
+          "required": [
+            "ready"
+          ],
+          "properties": {
+            "ready": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "code": -32001,
+          "message": "Access denied or admission unavailable"
+        }
+      ]
     }
   ],
   "components": {

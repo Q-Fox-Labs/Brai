@@ -539,7 +539,7 @@ class Resolver:
                 async def before_delivery(event):
                     binding = await self.mirror.before_delivery(event)
                     turn = self.turns.get(profile['uid'])
-                    if turn is not None and binding:
+                    if turn is not None and binding and 'delivery_id' in binding:
                         turn['delivery'] = binding
                     return binding
                 bridge.before_delivery = before_delivery
@@ -562,6 +562,13 @@ class Resolver:
         """Ожидать реальную готовность и свободную тему без отклонения сообщения."""
         if profile['uid'] not in self.ready_profiles:
             return False
+        if self.mirror is not None and self.mirror.restartable:
+            try:
+                status = await broker_call('ingress.input-ready', {})
+            except (ConnectionError, TimeoutError, OSError, RpcError):
+                return False
+            if not isinstance(status, dict) or status.get('ready') is not True:
+                return False
         turn = self.turns.get(profile['uid'])
         return turn is None or turn['route'] == route
 

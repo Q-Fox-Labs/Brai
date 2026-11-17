@@ -28,6 +28,18 @@ function safeFilename(value: string): string {
   if (!value || value === '.' || value === '..' || basename(value) !== value || /[\\<>?#%\x00-\x1f\x7f]/.test(value) || Buffer.byteLength(value) > 255) fail('INVALID_FILENAME');
   return value;
 }
+/** Распознаёт ID3v2 или MPEG Layer III по байтам, без доверия расширению файла. */
+function mp3(prefix: Buffer): boolean {
+  if (prefix.length >= 10 && prefix.subarray(0, 3).toString() === 'ID3') {
+    const version = prefix[3], reserved = version === 2 ? 0x3f : version === 3 ? 0x1f : 0x0f;
+    return [2, 3, 4].includes(version) && prefix[4] !== 0xff && (prefix[5] & reserved) === 0
+      && prefix.subarray(6, 10).every(byte => byte < 0x80);
+  }
+  return prefix.length >= 4 && prefix[0] === 0xff && (prefix[1] & 0xe0) === 0xe0
+    && (prefix[1] & 0x18) !== 0x08 && (prefix[1] & 0x06) === 0x02
+    && (prefix[2] & 0xf0) !== 0 && (prefix[2] & 0xf0) !== 0xf0
+    && (prefix[2] & 0x0c) !== 0x0c && (prefix[3] & 0x03) !== 0x02;
+}
 function mime(prefix: Buffer, filename: string): string {
   if (prefix.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png';
   if (prefix.length >= 3 && prefix[0] === 255 && prefix[1] === 216 && prefix[2] === 255) return 'image/jpeg';
@@ -37,6 +49,7 @@ function mime(prefix: Buffer, filename: string): string {
   if (prefix.length >= 4 && prefix.subarray(0, 4).equals(Buffer.from([26, 69, 223, 163])) && prefix.includes(Buffer.from('webm'))) return 'video/webm';
   if (prefix.subarray(0, 4).toString() === 'RIFF' && prefix.subarray(8, 12).toString() === 'WAVE') return 'audio/wav';
   if (prefix.subarray(0, 4).toString() === 'fLaC') return 'audio/flac';
+  if (mp3(prefix)) return 'audio/mpeg';
   if (prefix.length >= 28 && prefix.subarray(0, 4).toString() === 'OggS' && prefix[4] === 0 && prefix[26] > 0) {
     const packet = 27 + prefix[26];
     if (prefix.subarray(packet, packet + 8).equals(Buffer.from('OpusHead'))
