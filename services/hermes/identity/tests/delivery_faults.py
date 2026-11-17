@@ -69,7 +69,13 @@ async def run(config, fixture, native, receipt):
         (home / 'config.yaml').write_text(json.dumps(settings))
         lock = root / 'pm.lock'; lock.touch(mode=0o600); os.chown(lock, uid, uid)
         launcher = home.parent / 'worker_launcher.py'
-        launcher.write_text(fixture.WORKER_LAUNCHER)
+        launcher.write_text("""import logging, sys
+_mcp_log = logging.getLogger('tools.mcp_tool')
+_mcp_log.setLevel(logging.DEBUG)
+_mcp_handler = logging.StreamHandler(sys.stderr)
+_mcp_handler.setFormatter(logging.Formatter('MCPDIAG %(levelname)s %(message)s'))
+_mcp_log.addHandler(_mcp_handler)
+""" + fixture.WORKER_LAUNCHER)
         launcher.chmod(0o444)
         broker = fixture.FixtureBroker(uid, configuration)
         broker_runs = [broker]
@@ -444,8 +450,7 @@ async def run(config, fixture, native, receipt):
                                       for run in broker_runs for event in run.events]
             proof['mcpDiagnostics'] = [line[:300] for raw in logs if isinstance(raw, bytes)
                 for line in raw.decode('utf-8', 'replace').splitlines()
-                if ('mcp' in line.lower() or 'brai_login' in line.lower())
-                and ('warn' in line.lower() or 'error' in line.lower() or 'fail' in line.lower())][-20:]
+                if line.startswith('MCPDIAG ')][-20:]
         if cleanup_errors:
             proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
         else:
