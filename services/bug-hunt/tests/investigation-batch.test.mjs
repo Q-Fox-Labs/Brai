@@ -1,0 +1,73 @@
+// ABOUTME: Проверяет границы снимка очереди и параллельное выполнение расследований.
+// ABOUTME: Использует поддельные MCP и модель, без обращения к DEV и провайдеру.
+import test from "node:test";
+import assert from "node:assert/strict";
+import {diagnosticWindows,runBatch,snapshotQueue} from "../dist/investigation-batch.js";
+
+const fixed={verdict:"fixed",description:"Known issue",scope:{commit_sha:"test"},evidence:[]};
+const facts={component:"hermes",facts:[]};
+
+test("snapshot reads each page with the same cutoff and preserves an event window",async()=>{
+ const at=new Date("2026-11-18T18:00:00.999Z");
+ const early="2026-11-16T00:00:00.000Z";
+ const card=(id,component="hermes")=>({id,component_id:component,revision:1,owner_id:"owner",installation_id:"installation",registered_at:"2026-11-17T01:02:03.001Z",review_state:"new"});
+ const read=[];
+ const call=async (tool,input)=>{
+  if (tool==="list") {
+   read.push(input.filters.registered_to);
+   return input.cursor?{items:[card("b","nats"),card("c")],next_cursor:null}:{items:[card("a")],next_cursor:"second"};
+  }
+  const id=input.case_id;
+  return {case:card(id),report:{observation:{component_id:"hermes",client_occurred_at:early}},
+   investigation:{state:id==="c"?"running":"pending",applicability:"none"}};
+ };
+ const snapshot=await snapshotQueue(call,at);
+ assert.deepEqual(read,[at.toISOString(),at.toISOString()]);
+ assert.equal(snapshot.examined,3);
+ assert.deepEqual(snapshot.candidates.map(card=>card.id),["a","b"]);
+ assert.deepEqual(diagnosticWindows(snapshot),[{id:"a",component:"hermes",since:"2026-11-16T00:00:00Z",until:"2026-11-17T01:02:03Z"}]);
+});
+
+test("batch bounds model overlap, handles exact repeats and leaves unknown outcomes alone",async()=>{
+ const candidates=[
+  {id:"a",signature:"same"},{id:"repeat",signature:"same"},{id:"b"},{id:"c"},{id:"unsupported",component:"nats"},{id:"changed"},
+ ].map(card=>({revision:1,component:"hermes",...card}));
+ const snapshot={as_of:"now",examined:6,candidates};
+ const known=new Set();
+ const completed=[];
+ const started=[];
+ let providerChecks=0;
+ let bothStarted;
+ const paired=new Promise(resolve=>{bothStarted=resolve;});
+ const call=async (operation,args)=>{
+  const id=args.case_id;
+  if (operation==="get") return {case:{id,revision:id==="changed"?2:1,review_state:"new"},
+   investigation:{state:"pending",applicability:known.has(id)?"exact":"none",result:known.has(id)?fixed:undefined}};
+  if (operation==="investigation_claim") {
+   return {state:"running",replayed:false,investigation_id:id,case_revision:1,projection:"safe technical details"};
+  }
+  if (operation==="investigation_complete") {
+   completed.push(args.investigation_id);
+   return {state:"completed"};
+  }
+  throw Error("unexpected "+operation);
+ };
+ const sources=Object.fromEntries(candidates.map(card=>[card.id,facts]));
+ const outcome=await runBatch(call,snapshot,sources,2,async()=>{providerChecks++;},async (job,_facts,onDispatch)=>{
+  onDispatch();
+  const id=job.investigation_id;
+  started.push(id);
+  if (started.length===2) bothStarted();
+  await paired;
+  if (id==="a") {
+   known.add("repeat");
+   return "completed";
+  }
+  if (id==="b") throw Error("unknown model outcome");
+  return "failed";
+ });
+ assert.deepEqual(started.slice().sort(),["a","b","c"]);
+ assert.deepEqual(completed,["repeat"]);
+ assert.equal(providerChecks,1);
+ assert.deepEqual(outcome,{as_of:"now",examined:6,candidates:6,reused:1,completed:1,failed:1,deferred:1,skipped:1,unresolved:1,model_started:3,model_peak:2});
+});
