@@ -110,7 +110,7 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertNotIn('/stop', session_stall.format_session_stall_notification(180))
         for phase in chat_completion_wait_notice._PHASE_TEXT:
             text = chat_completion_wait_notice.wait_notice_text('model', 90, phase, ('TTFB', 12))
-            self.assertIn('ожидаю', text)
+            self.assertIn('выполняю задачи в фоне', text)
             self.assertNotIn('TTFB', text)
             self.assertIn('12 сек.', text)
         for old in ('Your request was not processed. Send it again if you still want me to carry it out.',
@@ -122,9 +122,49 @@ class FailureNoticeTest(unittest.TestCase):
         namespace = {}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), namespace)
         describe = namespace['_brai_activity_description']
-        self.assertEqual(describe('waiting for non-streaming API response'), 'ожидаю ответ модели')
+        self.assertEqual(describe('waiting for non-streaming API response'), 'выполняю задачи в фоне')
+        self.assertEqual(describe('receiving stream response'), 'выполняю задачи в фоне')
+        self.assertEqual(describe('context compression in progress'), 'сокращаю историю разговора')
         self.assertEqual(describe('unrecognised internal state'), 'продолжаю работу')
         self.assertEqual(describe('ignored', 'browser'), 'выполняю действие')
+        self.assertEqual(describe('ignored', 'terminal'), 'выполняю команды на сервере')
+        self.assertEqual(describe('terminal'), 'выполняю команды на сервере')
+        self.assertEqual(describe('executing tool: terminal'), 'выполняю команды на сервере')
+        self.assertEqual(describe('ignored', 'browser, terminal'), 'выполняю команды на сервере')
+        self.assertEqual(describe('vision_analyze', 'vision_analyze'), 'анализирую изображение')
+        self.assertEqual(describe('vision_analyze'), 'анализирую изображение')
+        self.assertEqual(describe('terminal', 'browser'), 'выполняю действие')
+
+    def test_inactivity_timeout_describes_tools_without_internal_names(self):
+        import os
+        import yaml
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        root = Path(candidate)
+        tree = ast.parse((root / 'gateway/run_turn.py').read_text())
+        helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_brai_activity_description')
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_run_agent_timeout_result')
+        method.returns = None
+        for arg in method.args.args:
+            arg.annotation = None
+        progress = yaml.safe_load((root / 'locales/ru.yaml').read_text())['gateway']['progress']
+        scope = {'logger': logging.getLogger('notice-test'),
+                 'format_iteration_progress': lambda *args: 'этап 1',
+                 't': lambda key, **kwargs: progress[key.rsplit('.', 1)[1]].format(**kwargs)}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[helper, method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        gateway = types.SimpleNamespace(_INTERRUPT_REASON_TIMEOUT='timeout', _INTERRUPT_TOOL_REASON_TIMEOUT='timeout',
+                                        request_hard_interrupt=lambda *args, **kwargs: None)
+        worker = types.SimpleNamespace(agent_timeout=180)
+        ctx = types.SimpleNamespace(session_key='s', result_holder=[None], tools_holder=[None], agent_holder=[None])
+        for tool, expected in (('terminal', 'выполняю команды на сервере'),
+                               ('vision_analyze', 'анализирую изображение'),
+                               ('browser', 'выполняю действие')):
+            with self.subTest(tool=tool), patch.dict('sys.modules', {'gateway.run': gateway}):
+                runner = types.SimpleNamespace(_agent_activity_summary=lambda agent: {'current_tool': tool})
+                result = scope['_run_agent_timeout_result'](runner, worker, ctx)['final_response']
+                self.assertIn(expected, result)
+                self.assertNotIn(tool, result)
 
     def test_gateway_russian_catalog_covers_all_english_keys(self):
         import os
@@ -147,6 +187,26 @@ class FailureNoticeTest(unittest.TestCase):
                     self.assertIsInstance(ru[key], dict)
                     check(value, ru[key], f'{path}.{key}')
         check(english, russian)
+
+    def test_gateway_catalog_has_no_untranslated_english_sentences(self):
+        import os
+        import re
+        import yaml
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for catalog integration')
+        catalog = yaml.safe_load((Path(candidate) / 'locales/ru.yaml').read_text())['gateway']
+
+        def check(value, path):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    check(child, f'{path}.{key}')
+            elif isinstance(value, str):
+                literal = re.sub(r'\{[^{}]*\}', '', value)
+                english_sentence = re.search(r'\b[A-Za-z]{3,}\s+[A-Za-z]{3,}\b', literal)
+                self.assertFalse(english_sentence and not re.search(r'[А-Яа-яЁё]', literal), path)
+                self.assertNotRegex(literal, '[\u3400-\u9fff]', path)
+        check(catalog, 'gateway')
 
     def test_literal_agent_status_messages_have_no_english_prose(self):
         import os
@@ -495,6 +555,12 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertEqual(prepare('api_server', 'warn', DiagnosticText('Original diagnostic')), 'Original diagnostic')
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}):
             self.assertEqual(prepare('telegram', 'warn', DiagnosticText('Ошибка сервиса OpenAI API')), 'Ошибка сервиса OpenAI API')
+        with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING'):
+            mixed = '⚠ Compression aborted: Бюджет повторов исчерпан. No messages were dropped.'
+            localized = prepare('telegram', 'warn', DiagnosticText(mixed))
+            self.assertIn('сокращении истории', localized)
+            self.assertNotIn('Compression', localized)
+            self.assertNotIn('No messages', localized)
 
     def test_error_messages_keep_visible_formatting(self):
         for code in self.notice._COPY:
@@ -539,6 +605,26 @@ class FailureNoticeTest(unittest.TestCase):
             self.assertNotIn('администратор', self.render(code, result={'brai_connection_kind':'external'}))
         self.assertIn('стороннего сервиса ИИ', self.render('timeout', result={'brai_connection_kind':'external'}))
         self.assertIn('или в соединении', self.render('timeout', result={'brai_connection_kind':'external'}))
+
+    def test_composed_formatter_keeps_typed_stream_failure(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for native integration')
+        path = Path(candidate) / 'gateway/russian_failure_notice.py'
+        spec = importlib.util.spec_from_file_location('candidate_russian_failure_notice', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for code in ('stream_drop', 'timeout'):
+            with self.subTest(code=code):
+                text = module.explain_failure(
+                    '', surface={'code': 'unknown', 'layer': 'streaming'}, diagnostic='',
+                    logger=self.log, redact=lambda value: value,
+                    result={'brai_failure_kind': code, 'brai_connection_kind': 'external'})
+                self.assertIn(f'Код: `{code}`', text)
+                self.assertIn('продолжай', text)
+                self.assertNotIn('/retry', text)
+                self.assertNotIn(module._UNKNOWN, text)
 
     def test_error_meaning_and_unverified_billing(self):
         self.assertIn('Сервер, который обрабатывает запросы к модели', self.render('overloaded'))
@@ -920,7 +1006,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         tree = ast.parse((root / 'gateway/run_startup.py').read_text())
         method = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
                       and node.name == '_redeliver_claimed_obligations')
-        scope = {'asyncio': asyncio, 'logging': logging, 'logger': logging.getLogger('notice-test'),
+        scope = {'asyncio': asyncio, 'os': os, 'logging': logging, 'logger': logging.getLogger('notice-test'),
                  '_log_suppressed': lambda *args, **kwargs: contextlib.nullcontext()}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), '<candidate>', 'exec'), scope)
         adapter = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(success=True)))
@@ -957,23 +1043,31 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                  'format_iteration_progress': lambda *args: 'этап 1',
                  't': lambda key, **kw: f"⏳ Работаю — {kw['minutes']} мин{kw['detail']}"}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[helper, method], type_ignores=[])), '<candidate>', 'exec'), scope)
-        adapter = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(success=True, message_id='1')))
-        calls = iter([True, True, False])
-        runner = types.SimpleNamespace(_delivery_adapter_for=lambda source: adapter,
-            _should_emit_long_running_notification=lambda *args: next(calls),
-            _agent_activity_summary=lambda agent: {'api_call_count': 1, 'max_iterations': 2,
-                'last_activity_desc': 'waiting for non-streaming API response'})
         disp = types.SimpleNamespace(_display_surface_mode=lambda *args, **kwargs: 'raw',
             resolve_display_setting=lambda *args: False, user_config={}, platform_key='telegram')
         ctx = types.SimpleNamespace(source=types.SimpleNamespace(chat_id='1', platform='telegram'),
             session_key='s', agent_holder=[object()], _status_thread_metadata={}, _cleanup_progress=False)
         fake_run = types.SimpleNamespace(_float_env=lambda *args: 0.001, _interim_metadata=lambda x: x,
                                          _non_conversational_metadata=lambda x, **kwargs: x)
-        with patch.dict('sys.modules', {'gateway.run': fake_run}):
-            await scope['_run_agent_notify_long_running'](runner, disp, ctx, [None])
-        text = adapter.send.await_args.args[1]
-        self.assertIn('ожидаю ответ модели', text)
-        self.assertNotIn('waiting for', text)
+        for activity, tool, expected in (
+            ('waiting for non-streaming API response', None, 'выполняю задачи в фоне'),
+            ('terminal', 'terminal', 'выполняю команды на сервере'),
+            ('vision_analyze', 'vision_analyze', 'анализирую изображение'),
+        ):
+            with self.subTest(activity=activity):
+                adapter = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(success=True, message_id='1')))
+                calls = iter([True, True, False])
+                runner = types.SimpleNamespace(_delivery_adapter_for=lambda source: adapter,
+                    _should_emit_long_running_notification=lambda *args: next(calls),
+                    _agent_activity_summary=lambda agent: {'api_call_count': 1, 'max_iterations': 2,
+                        'last_activity_desc': activity, 'current_tool': tool})
+                with patch.dict('sys.modules', {'gateway.run': fake_run}):
+                    await scope['_run_agent_notify_long_running'](runner, disp, ctx, [None])
+                text = adapter.send.await_args.args[1]
+                self.assertIn(expected, text)
+                self.assertNotIn('waiting for', text)
+                self.assertNotIn('terminal', text)
+                self.assertNotIn('vision_analyze', text)
 
     async def test_failure_is_translated_before_voice_and_final_delivery(self):
         import contextlib

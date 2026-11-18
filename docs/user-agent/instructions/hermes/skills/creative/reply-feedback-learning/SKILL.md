@@ -1,6 +1,6 @@
 ---
 name: reply-feedback-learning
-description: "Use when owner gives feedback on generated replies."
+description: "Использовать, когда владелец оценивает или исправляет подготовленные ответы."
 version: 0.1.0
 author: Hermes Agent
 license: MIT

@@ -1491,17 +1491,18 @@ index e9819bc..800c70d 100644
 
 --- a/agent/turn_recovery.py
 +++ b/agent/turn_recovery.py
-@@ -1048,7 +1048,12 @@
+@@ -1048,8 +1048,12 @@
      _nonretryable_summary = agent._summarize_api_error(api_error)
      _plabel = provider_label_for(provider)
-     _label = _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
--    agent._emit_diagnostic_status(f"❌ {_label}: {_nonretryable_summary}")
+     _label = _NONRETRYABLE_LABELS.get(classified.reason, "Сервис ИИ отклонил запрос")
+-    # Подробности остаются в диагностике и итоговой классификации ошибки.
+-    agent._emit_diagnostic_status(f"❌ {_label}.")
 +    # AIDEV-NOTE: Личный Telegram получает одно русское уведомление от gateway.
 +    import os
 +    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
 +        logger.warning("Non-retryable provider failure: %s", _nonretryable_summary)
 +    else:
-+        agent._emit_diagnostic_status(f"❌ {_label}: {_nonretryable_summary}")
++        agent._emit_diagnostic_status(f"❌ {_label}.")
      # The endpoint/status trace is developer detail: verbose only (the log has it always).
      if getattr(agent, "verbose_logging", False):
          _vlines(

@@ -1,6 +1,6 @@
 ---
 name: youtube-content
-description: "YouTube links/files: metadata, audio, frames, transcripts."
+description: "Получать сведения о видео YouTube, звук, кадры и расшифровку по ссылке или файлу."
 version: 2.0.0
 author: Teknium (teknium1), Hermes Agent
 license: MIT
