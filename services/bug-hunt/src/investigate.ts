@@ -1,12 +1,13 @@
-// ABOUTME: Передаёт одну карточку и проверенные факты Ansible в существующий сеанс Codex.
-// ABOUTME: Использует закрытый профиль, сохраняет только итог в Bug Hunt и не повторяет неизвестный запуск.
+// ABOUTME: Ведёт одно расследование с фактами Ansible и собственным сеансом Codex.
+// ABOUTME: Получает авторизацию у общего владельца и сохраняет только итог в Bug Hunt.
 import {createHash, randomUUID} from "node:crypto";
 import {Client} from "@modelcontextprotocol/sdk/client/index.js";
 import {StreamableHTTPClientTransport} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {readPrivate} from "./config.js";
 import {canonical} from "./contracts.js";
 import {resultSchema,validateInvestigation} from "./investigation-contract.js";
-import {codexExecutor,nativeRpc,type NativeProfile} from "./verification-models.js";
+import {codexExecutor,type NativeProfile} from "./verification-models.js";
+import {credentialCall} from "./verification-native.js";
 import {resolveSol,VerificationFault} from "./verification.js";
 
 const sha = (value:string) => createHash("sha256").update(value).digest("hex");
@@ -16,9 +17,11 @@ async function main() {
  const [, , action, configPath] = process.argv;
  const config = readPrivate(configPath);
  const url = new URL(config.mcp_url);
- const socket = typeof config.codex_socket==="string" && /^ws\+unix:\/{1,3}([a-zA-Z0-9_./-]+\.sock):\/?$/.exec(config.codex_socket);
+ const native = config.native;
+ const sourceRef = native?.sourceRef;
  if (url.protocol!=="http:" || url.hostname!=="127.0.0.1" || url.pathname!=="/mcp" || url.username || url.password || url.search || url.hash ||
-   !socket || !/^[a-f0-9]{64}$/.test(config.account_sha256) ||
+   typeof sourceRef!=="string" || !/^[a-f0-9]{64}$/.test(sourceRef) ||
+   native?.credentialSocket!=="/run/brai-bug-hunt-investigator-credential/credentials.sock" ||
    typeof config.mcp_token!=="string" || !config.mcp_token) throw new Error("INVESTIGATOR_CONFIG_INVALID");
  const chunks:Buffer[] = [];
  for await (const chunk of process.stdin) chunks.push(chunk);
@@ -34,24 +37,24 @@ async function main() {
   await client.connect(transport);
   if (action==="claim") {
    validateInvestigation("claim",input);
+   const credential = await credentialCall(native.credentialSocket,"status");
+   // AIDEV-NOTE: Истёкший access обновит штатный owner. Недоступный owner не забирает карточку из очереди.
+   const bound = credential.ready===true && credential.sourceRef===sourceRef;
+   const canRefresh = credential.code==="CODEX_OWNER_ACCESS_EXPIRED" && (credential.sourceRef==null || credential.sourceRef===sourceRef);
+   if (!bound && !canRefresh) throw new Error("INVESTIGATOR_OWNER_UNAVAILABLE");
    console.log(JSON.stringify(await call("claim",input)));
    return;
   }
-  if (action!=="resolve" || input.job?.state!=="running" || input.job.replayed!==false ||
-    input.diagnostics?.component!==input.job.component || !Array.isArray(input.diagnostics?.facts)) throw new Error("INVESTIGATION_INPUT_INVALID");
+  if (input.job?.state!=="running" || input.job.replayed!==false) throw new Error("INVESTIGATION_INPUT_INVALID");
   const job = input.job, diagnostics = input.diagnostics, request_id = randomUUID();
   const finish = (operation:string,result?:unknown) => call(operation,{request_id,investigation_id:job.investigation_id,...(result===undefined?{}:{result})});
-  const profile:NativeProfile = {socketUrl:"ws+unix:///"+socket[1]+":/",generation:job.investigation_id,cwd:"/tmp",filesystem_isolation_verified:true,tool_policy_version:"no-environment-scoped-tools-v2"};
-  const base = nativeRpc(profile);
-  const checkAccount = async () => {
-   const {account} = await base.call("account/read",{refreshToken:false});
-   if (account?.type!=="chatgpt" || typeof account.email!=="string" || sha(account.email.trim().toLowerCase())!==config.account_sha256) {
-    throw new VerificationFault("NATIVE_CREDENTIAL_BINDING_CHANGED");
-   }
-   return {account};
-  };
-  const rpc = {...base,call:(method:string,params:unknown,timeout?:number)=>method==="account/read" ? checkAccount() : base.call(method,params,timeout),checkBinding:async()=>{await checkAccount();}};
-  const executor = codexExecutor(profile,{tools:()=>[],call:async()=>{throw new VerificationFault("TOOL_FORBIDDEN");},reserve:async()=>{},allowed:async()=>true},rpc,{instructions,ephemeral:true});
+  if (action==="fail") {
+   console.log(JSON.stringify(await finish("fail")));
+   return;
+  }
+  if (action!=="resolve" || diagnostics?.component!==job.component || !Array.isArray(diagnostics?.facts)) throw new Error("INVESTIGATION_INPUT_INVALID");
+  const profile:NativeProfile = {process:native,generation:job.investigation_id,cwd:config.cwd,filesystem_isolation_verified:true,tool_policy_version:"no-environment-scoped-tools-v2"};
+  const executor = codexExecutor(profile,{tools:()=>[],call:async()=>{throw new VerificationFault("TOOL_FORBIDDEN");},reserve:async()=>{},allowed:async()=>true},undefined,{instructions,ephemeral:true});
   let dispatching = false;
   try {
    const ready = await executor.preflight();
@@ -59,7 +62,7 @@ async function main() {
    const {properties} = resultSchema;
    const output_schema = {...resultSchema,properties:{verdict:properties.verdict,description:properties.description,advice:{anyOf:[properties.advice,{type:"null"}]}},required:["verdict","description","advice"]};
    const modelInput = {observation:job.projection,diagnostics,output_schema};
-   const response = await executor.startStep({id:job.investigation_id,scope:{investigation_id:job.investigation_id,owner_id:"",installation_id:""},phase:"investigator",executor:"codex_app_server",config_hash:sha(config.codex_socket),model:resolveSol(ready.models,ready.catalog_revision),deadline_at:null,input:modelInput,input_hash:sha(canonical(modelInput))},async checkpoint=>{
+   const response = await executor.startStep({id:job.investigation_id,scope:{investigation_id:job.investigation_id,owner_id:"",installation_id:""},phase:"investigator",executor:"codex_app_server",config_hash:sourceRef,model:resolveSol(ready.models,ready.catalog_revision),deadline_at:null,input:modelInput,input_hash:sha(canonical(modelInput))},async checkpoint=>{
     if (checkpoint.state==="dispatching") dispatching=true;
    });
    if (response.state!=="completed") {
@@ -67,7 +70,6 @@ async function main() {
     console.log(JSON.stringify(await finish("fail")));
     return;
    }
-   await checkAccount();
    const answer = response.result as Record<string,unknown>;
    const result = {verdict:answer.verdict,description:answer.description,...(answer.advice?{advice:answer.advice}:{}),scope:diagnostics.current_scope,
     evidence:diagnostics.facts.map((fact:unknown)=>({source:"ansible:read_brai_bug_hunt_diagnostics",observed_at:diagnostics.observed_at,fact:JSON.stringify(fact)}))};

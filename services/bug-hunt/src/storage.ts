@@ -215,8 +215,10 @@ export function createStore(pool:Pool,options:Options) {
       WHERE c.installation_id=$1 AND c.owner_id=$2 AND c.review_state <> 'archived'
         AND ($3::uuid IS NULL OR c.id=$3) AND ($4::text IS NULL OR c.component_id=$4)
         AND NOT EXISTS (SELECT 1 FROM diagnostic_investigation i WHERE i.case_id=c.id
-          AND i.case_revision=c.revision AND ($3::uuid IS NULL OR i.state IN ('running','completed')))
-      ORDER BY c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.ownerId,input.case_id??null,input.component??null]);
+          AND i.case_revision=c.revision AND i.state IN ('running','completed'))
+      ORDER BY (SELECT max(i.finished_at) FROM diagnostic_investigation i WHERE i.case_id=c.id
+        AND i.case_revision=c.revision AND i.state='failed') NULLS FIRST,
+        c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.ownerId,input.case_id??null,input.component??null]);
     if (!selected.rowCount) return {state:"no_work"};
     const {id:caseId,revision,observation,registered_at} = selected.rows[0];
     const signature = exactSignature(installationId,p.ownerId,observation),id=randomUUID();

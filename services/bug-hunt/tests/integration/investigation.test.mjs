@@ -66,5 +66,15 @@ test('diagnostic result, exact reuse, isolation, replay and restore', {skip:!fix
   const competing = await store.claimInvestigation(principal,{request_id:randomUUID(),case_id:changed.case_id});
   await store.review({...other,reviewer:true},{request_id:randomUUID(),case_id:changed.case_id,expected_revision:1,review_state:'archived',explanation:'Manual decision'});
   await assert.rejects(store.finishInvestigation(principal,'complete',{...finish,request_id:randomUUID(),investigation_id:competing.investigation_id}),{code:'REVISION_CONFLICT'});
+  const automatic = () => store.claimInvestigation(principal,{request_id:randomUUID(),component:'hermes'});
+  const failedWork = await automatic();
+  assert.equal(failedWork.case_id,second.case_id);
+  assert.equal((await automatic()).state,'no_work');
+  const fresh = await store.report(principal,{...input,request_id:randomUUID()},noEvidence);
+  await store.finishInvestigation(principal,'fail',{request_id:randomUUID(),investigation_id:failedWork.investigation_id});
+  assert.equal((await automatic()).case_id,fresh.case_id);
+  const retry = await automatic();
+  assert.equal(retry.case_id,second.case_id);
+  assert.notEqual(retry.investigation_id,failedWork.investigation_id);
  } finally {await Promise.all([owner.end(),app.end()]);}
 });

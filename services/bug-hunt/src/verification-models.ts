@@ -176,6 +176,7 @@ export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc:Native
      if(!completed){const reason=policyRevoked?"POLICY_REVOKED":blocked?"NATIVE_UNEXPECTED_REQUEST":overflow?"NATIVE_CAPACITY":"MODEL_DEADLINE";cp={...cp,state:"unknown",code:reason,native:{...cp.native,cancel_reason:reason}};await save(cp);await rpc.call("turn/interrupt",{threadId:cp.native.threadId,turnId:cp.native.turnId}).catch(()=>{});return options.ephemeral?cp:await inspect(intent,cp,save);}
      if(options.ephemeral){
       // AIDEV-NOTE: Эфемерный сеанс берёт итог из notifications и не читает persistent историю.
+      await rpc.checkBinding?.();
       if(terminalStatus!=="completed"||typeof finalText!=="string"||Buffer.byteLength(finalText)>32768)return failed(cp,"NATIVE_CANDIDATE_MISSING","failed");
       let result:unknown;try{result=JSON.parse(finalText);}catch{return failed(cp,"NATIVE_CANDIDATE_INVALID","failed");}
       const done:ModelCheckpoint={...cp,state:"completed",result,code:null};await save(done);return done;
