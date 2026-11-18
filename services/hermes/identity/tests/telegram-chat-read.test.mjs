@@ -28,7 +28,11 @@ test('retired and current bot messages with the same ID read only their own file
     JSON.stringify({platform:'telegram',account,chat:'123',thread:'',itemId:'7:0'}),0);
   }
   const read = createTelegramChatRead({root:'/journals',uid:1033,
-   snapshot: (_profile, fn, options) => fn(options.databaseName === 'files.sqlite' ? files : journal)});
+   snapshot: (profile, fn, options) => {
+    if (options.databaseName !== 'files.sqlite') return fn(journal);
+    assert.equal(profile.home, '/profile/workspace/files');
+    return fn(files);
+   }});
   const request = {operation:'admin-chats-get',profile:{profileId:pid,home:'/profile'},id:'["123",""]',limit:1};
   const active = await read(request);
   const older = await read({...request,cursor:active.nextCursor});

@@ -98,30 +98,36 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
     // его подтверждённые ссылки по exact source; байты и owner повторно проверяет Artifacts.
     const incoming = page.messages?.filter(message => message.role === 'user' && !message.deleted) ?? [];
     if (incoming.length) {
-      try {
-        snapshot({ ...profile, home: join(profile.home, 'brai-files') }, db => {
-          const liveFileAccount = 'release:' + profile.profileId + ':';
-          const query = db.prepare(`SELECT ref FROM items WHERE artifact IS NOT NULL AND ref IS NOT NULL
-            AND json_extract(source,'$.platform')='telegram' AND json_extract(source,'$.chat')=?
-            AND json_extract(source,'$.thread') IN (?,?)
-            AND (?=0 OR (substr(COALESCE(json_extract(source,'$.account'),''),1,?)=?)=?)
-            AND (json_extract(source,'$.messageId')=? OR (
-              json_type(source,'$.messageId') IS NULL
-              AND json_extract(source,'$.itemId') GLOB ?
-              AND substr(json_extract(source,'$.itemId'), length(?) + 2) NOT GLOB '*[^0-9]*'
-            )) ORDER BY position`);
-          for (const message of incoming) {
-            // AIDEV-NOTE: Личный FileStore сохраняет message:attachment в itemId;
-            // прежний общий gateway дополнительно сохранял messageId. Не связываем
-            // файлы по имени, подписи, соседнему сообщению или ключу альбома.
-            for (const row of query.all(message.chat, message.thread, message.thread || '1', Number(page._retired),
-              liveFileAccount.length, liveFileAccount, Number(Number(message.id) > 0), message.telegramId,
-              message.telegramId + ':[0-9]*', message.telegramId)) {
-              const file = ref(JSON.parse(row.ref));
-              if (file && !message.attachments.some(item => item.artifactId === file.artifactId)) message.attachments.push(file);
-            }
+      const readFiles = home => snapshot({ ...profile, home }, db => {
+        const liveFileAccount = 'release:' + profile.profileId + ':';
+        const query = db.prepare(`SELECT ref FROM items WHERE artifact IS NOT NULL AND ref IS NOT NULL
+          AND json_extract(source,'$.platform')='telegram' AND json_extract(source,'$.chat')=?
+          AND json_extract(source,'$.thread') IN (?,?)
+          AND (?=0 OR (substr(COALESCE(json_extract(source,'$.account'),''),1,?)=?)=?)
+          AND (json_extract(source,'$.messageId')=? OR (
+            json_type(source,'$.messageId') IS NULL
+            AND json_extract(source,'$.itemId') GLOB ?
+            AND substr(json_extract(source,'$.itemId'), length(?) + 2) NOT GLOB '*[^0-9]*'
+          )) ORDER BY position`);
+        for (const message of incoming) {
+          // AIDEV-NOTE: Личный FileStore сохраняет message:attachment в itemId;
+          // прежний общий gateway дополнительно сохранял messageId. Не связываем
+          // файлы по имени, подписи, соседнему сообщению или ключу альбома.
+          for (const row of query.all(message.chat, message.thread, message.thread || '1', Number(page._retired),
+            liveFileAccount.length, liveFileAccount, Number(Number(message.id) > 0), message.telegramId,
+            message.telegramId + ':[0-9]*', message.telegramId)) {
+            const file = ref(JSON.parse(row.ref));
+            if (file && !message.attachments.some(item => item.artifactId === file.artifactId)) message.attachments.push(file);
           }
-        }, { databaseName: 'files.sqlite' });
+        }
+      }, { databaseName: 'files.sqlite' });
+      try {
+        try {
+          readFiles(join(profile.home, 'workspace', 'files'));
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          readFiles(join(profile.home, 'brai-files'));
+        }
       } catch { /* Файл ещё публикуется; следующая свежая страница повторит чтение. */ }
     }
     for (const message of page.messages ?? []) {
