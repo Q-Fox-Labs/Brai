@@ -69,7 +69,6 @@
       "services/bug-hunt/src/verification-workflows.ts",
       "services/bug-hunt/src/verification-bundle.ts",
       "services/bug-hunt/migrations/005.sql",
-      "services/bug-hunt/migrations/006.sql",
       "services/bug-hunt/src/investigation-contract.ts",
       "services/bug-hunt/src/investigate.ts",
       "services/bug-hunt/src/client.ts",

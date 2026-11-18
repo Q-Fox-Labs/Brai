@@ -12,6 +12,22 @@ interface Options {targetGeneration?:()=>string;installationId:string;cursorKey:
 interface Cursor {at:string;id:string;binding:string}
 const digest=(value:unknown)=>createHash("sha256").update(canonical(value)).digest("hex");
 const columns="id,owner_id,installation_id,title,component_id,source,review_state,verification_status,revision,registered_at,updated_at";
+// AIDEV-NOTE: Отдельные операции в существующем append-only журнале сохраняют
+// диагностику без DDL. Изменения сериализует тот же transaction lock, что и квитанции.
+const diagnosticRows=`WITH diagnostics AS (
+ SELECT job.request_id::uuid AS id, job.actor_id,
+        (job.result->>'case_id')::uuid AS case_id,
+        (job.result->>'case_revision')::int AS case_revision,
+        (job.result->>'at')::timestamptz AS created_at,
+        COALESCE(done.result->>'state','running') AS state,
+        done.result->'result' AS result, (done.result->>'at')::timestamptz AS finished_at,
+        done.result->>'signature_hash' AS signature_hash, done.result->>'signature_canonical' AS signature_canonical
+ FROM verification_mutation job LEFT JOIN verification_mutation done
+   ON (done.installation_id,done.owner_id,done.actor_id,done.request_id) =
+      (job.installation_id,job.owner_id,job.actor_id,job.request_id)
+   AND done.operation='diagnostic-result'
+ WHERE job.installation_id=$1 AND job.owner_id=$2 AND job.operation='diagnostic-job'
+)`;
 function dates(row:Record<string,any>):Record<string,any> {
  return Object.fromEntries(Object.entries(row).map(([k,v])=>[k,v instanceof Date?v.toISOString():v]));
 }
@@ -83,25 +99,30 @@ export function createStore(pool:Pool,options:Options) {
   if(!found.rowCount)throw new Fault("NOT_FOUND");
   return found.rows[0];
  };
+ async function appendDiagnostic(db:PoolClient,p:Principal,operation:"diagnostic-job"|"diagnostic-result",id:string,record:Record<string,unknown>) {
+  await db.query(`INSERT INTO verification_mutation(installation_id,owner_id,actor_id,operation,request_id,input_hash,result)
+    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb || jsonb_build_object('at',clock_timestamp()))`,
+   [installationId,p.ownerId,p.actorId,operation,id,digest(record),JSON.stringify(record)]);
+ }
  async function investigation(db:PoolClient, row:Record<string,any>, observation:Observation) {
-  const state = await db.query(`SELECT id,case_id,state,result,finished_at FROM diagnostic_investigation
-    WHERE installation_id=$1 AND owner_id=$2 AND case_id=$3 AND case_revision=$4
+  const state = await db.query(`${diagnosticRows} SELECT id,case_id,state,result,finished_at FROM diagnostics
+    WHERE case_id=$3 AND case_revision=$4
     ORDER BY created_at DESC,id DESC LIMIT 1`,[installationId,row.owner_id,row.id,row.revision]);
   const current = state.rows[0];
   if (current?.state === "completed") return {...dates(current),state:"processed",applicability:"investigated"};
   const processing = current?.state === "running" ? "running" : current?.state === "failed" ? "failed" : "pending";
   const signature = exactSignature(installationId,row.owner_id,observation);
   if (row.review_state === "archived") return {state:processing, applicability:"none"};
-  const known = signature && await db.query(`SELECT i.id,i.case_id,i.result,i.finished_at
-    FROM diagnostic_investigation i JOIN bug_case c ON c.id=i.case_id AND c.revision=i.case_revision
-    WHERE i.installation_id=$1 AND i.owner_id=$2 AND i.state='completed'
+  const known = signature && await db.query(`${diagnosticRows} SELECT i.id,i.case_id,i.result,i.finished_at
+    FROM diagnostics i JOIN bug_case c ON c.id=i.case_id AND c.revision=i.case_revision
+    WHERE i.state='completed'
       AND i.signature_hash=$3 AND i.signature_canonical=$4 AND c.review_state <> 'archived'
     ORDER BY i.finished_at DESC,i.id DESC LIMIT 1`,[installationId,row.owner_id,signature.hash,signature.canonical]);
   if (known?.rowCount) return {state:processing,applicability:"exact",...dates(known.rows[0])};
-  const similar = await db.query(`SELECT i.case_id FROM group_membership own
+  const similar = await db.query(`${diagnosticRows} SELECT i.case_id FROM group_membership own
     JOIN group_membership related ON (related.group_id,related.installation_id,related.owner_id)=(own.group_id,own.installation_id,own.owner_id)
     JOIN bug_case c ON c.id=related.case_id AND c.review_state <> 'archived'
-    JOIN diagnostic_investigation i ON i.case_id=c.id AND i.case_revision=c.revision AND i.state='completed'
+    JOIN diagnostics i ON i.case_id=c.id AND i.case_revision=c.revision AND i.state='completed'
     WHERE own.installation_id=$1 AND own.owner_id=$2 AND own.case_id=$3 AND related.case_id<>own.case_id
     ORDER BY i.finished_at DESC,i.id DESC LIMIT 1`,[installationId,row.owner_id,row.id]);
   return similar.rowCount ? {state:processing,applicability:"similar",case_id:similar.rows[0].case_id} : {state:processing,applicability:"none"};
@@ -182,10 +203,10 @@ export function createStore(pool:Pool,options:Options) {
   validateInvestigation(operation,request);
   const input = request as Complete|Fail;
   return mutation(p,"diagnostic-"+operation,input,async db=>{
-   const found = await db.query(`SELECT i.*,c.revision,c.review_state,r.observation FROM diagnostic_investigation i
+   const found = await db.query(`${diagnosticRows} SELECT i.*,c.revision,c.review_state,r.observation FROM diagnostics i
      JOIN bug_case c ON c.id=i.case_id JOIN report r ON r.case_id=c.id
-     WHERE i.id=$1 AND i.installation_id=$2 AND i.owner_id=$3 AND i.actor_id=$4 FOR UPDATE OF c,i`,
-    [input.investigation_id,installationId,p.ownerId,p.actorId]);
+     WHERE i.id=$3 AND i.actor_id=$4 FOR UPDATE OF c`,
+    [installationId,p.ownerId,input.investigation_id,p.actorId]);
    if (!found.rowCount) throw new Fault("NOT_FOUND");
    const row = found.rows[0];
    if (row.state !== "running") throw new Fault("REVISION_CONFLICT");
@@ -195,9 +216,8 @@ export function createStore(pool:Pool,options:Options) {
    const specified = claimedVersions.filter(key=>row.observation[key]?.trim() && row.observation[key].trim().toLowerCase() !== "unknown");
    const sameVersion = specified.length > 0 && specified.every(key=>row.observation[key] === result?.scope[key]);
    const state = result ? "completed" : "failed";
-   await db.query(`UPDATE diagnostic_investigation SET state=$2,result=$3,finished_at=clock_timestamp(),
-     signature_hash=CASE WHEN $4 THEN signature_hash END,signature_canonical=CASE WHEN $4 THEN signature_canonical END WHERE id=$1`,
-    [row.id,state,result,sameVersion && result?.verdict !== "insufficient_evidence"]);
+   const signature = sameVersion && result?.verdict !== "insufficient_evidence" ? exactSignature(installationId,p.ownerId,row.observation) : null;
+   await appendDiagnostic(db,p,"diagnostic-result",row.id,{state,result,signature_hash:signature?.hash??null,signature_canonical:signature?.canonical??null});
    return {investigation_id:row.id,case_id:row.case_id,state};
   });
  }
@@ -211,20 +231,18 @@ export function createStore(pool:Pool,options:Options) {
    const input = request as Claim;
    return mutation(p,"diagnostic-claim",input,async db=>{
     if (input.case_id) await lookup(db,{...p,reviewer:false},input.case_id);
-    const selected = await db.query(`SELECT c.id,c.revision,r.observation,r.registered_at FROM bug_case c JOIN report r ON r.case_id=c.id
+    const selected = await db.query(`${diagnosticRows} SELECT c.id,c.revision,r.observation,r.registered_at FROM bug_case c JOIN report r ON r.case_id=c.id
       WHERE c.installation_id=$1 AND c.owner_id=$2 AND c.review_state <> 'archived'
         AND ($3::uuid IS NULL OR c.id=$3) AND ($4::text IS NULL OR c.component_id=$4)
-        AND NOT EXISTS (SELECT 1 FROM diagnostic_investigation i WHERE i.case_id=c.id
+        AND NOT EXISTS (SELECT 1 FROM diagnostics i WHERE i.case_id=c.id
           AND i.case_revision=c.revision AND i.state IN ('running','completed'))
-      ORDER BY (SELECT max(i.finished_at) FROM diagnostic_investigation i WHERE i.case_id=c.id
+      ORDER BY (SELECT max(i.finished_at) FROM diagnostics i WHERE i.case_id=c.id
         AND i.case_revision=c.revision AND i.state='failed') NULLS FIRST,
         c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.ownerId,input.case_id??null,input.component??null]);
     if (!selected.rowCount) return {state:"no_work"};
     const {id:caseId,revision,observation,registered_at} = selected.rows[0];
-    const signature = exactSignature(installationId,p.ownerId,observation),id=randomUUID();
-    await db.query(`INSERT INTO diagnostic_investigation
-      (id,case_id,owner_id,installation_id,case_revision,actor_id,signature_hash,signature_canonical)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,[id,caseId,p.ownerId,installationId,revision,p.actorId,signature?.hash??null,signature?.canonical??null]);
+    const id=randomUUID();
+    await appendDiagnostic(db,p,"diagnostic-job",id,{case_id:caseId,case_revision:revision});
     const projection = prepareExternalProjection(observation,[p.ownerId]);
     return {state:"running",investigation_id:id,case_id:caseId,case_revision:revision,component:observation.component_id??null,projection,registered_at};
    });
