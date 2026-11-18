@@ -3,8 +3,8 @@
 // ABOUTME: Собирает только изменённые компоненты и передаёт привилегированные операции фиксированным helper.
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve, posix } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
@@ -64,7 +64,27 @@ export function selectComponents(graph, current, next, before) {
 
 function assertReady(status) {
   if (!status || !Object.hasOwn(status, 'current') || !status.supportedComponents) fail('OPERATOR_STATUS_INVALID');
+  if (status.operatorStopped) fail('DEV_OPERATOR_STOPPED');
   if (status.operation && !['accepted', 'rolled-back', 'failed'].includes(status.operation.state)) fail(`RECONCILE_REQUIRED: ${status.operation.releaseId}`);
+}
+
+function assertOutputPaths(root, policy) {
+  if (!policy) return; // Старый оператор и publisher по-прежнему проверяют точные пути при импорте.
+  if (!Array.isArray(policy.roots) || !Array.isArray(policy.tmpOnlyRoots)) fail('OPERATOR_STATUS_INVALID');
+  for (const name of ['dev-release', 'component-packages']) {
+    const path = join(root, 'tmp', name);
+    for (let parent = path; ; parent = dirname(parent)) {
+      const entry = lstatSync(parent, {throwIfNoEntry: false});
+      if (!entry) continue;
+      if (!entry.isDirectory() || realpathSync(parent) !== parent) fail('RELEASE_OUTPUT_PATH_NOT_CANONICAL');
+      break;
+    }
+    if (!policy.roots.some(base => {
+      const tail = relative(base, path);
+      return (path === base || path.startsWith(base + '/')) &&
+        (!policy.tmpOnlyRoots.includes(base) || tail.split('/').includes('tmp'));
+    })) fail('RELEASE_OUTPUT_OUTSIDE_IMPORT_ROOT');
+  }
 }
 
 function baseId(status) { return status.current?.releaseId ?? null; }
@@ -158,7 +178,12 @@ export async function release({root, source, prepareOnly = false}, ports) {
     }
     assertSupported(status, selected);
     // AIDEV-NOTE: Проверка возможностей и базы предшествует сборке и импорту, а root повторно проверяет expectedBase под lock.
-    await timed('preflight', async () => { await ports.assertSource(root, source); assertSameBase(await ports.operator('status'), expectedBase); });
+    await timed('preflight', async () => {
+      await ports.assertSource(root, source);
+      const latest = await ports.operator('status');
+      assertSameBase(latest, expectedBase);
+      assertOutputPaths(root, latest.importPolicy);
+    });
     const components = [];
     for (const id of selected) components.push(await prepareComponent(root, id, graph, status, ports, timed));
     await timed('before-apply', async () => { await ports.assertSource(root, source); assertSameBase(await ports.operator('status'), expectedBase); });

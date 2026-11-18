@@ -2,7 +2,7 @@
 // ABOUTME: Не вызывает привилегированные helper, Docker, live DEV, PROD или пользовательскую БД.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {assertSource, assertAncestry, schemaRef, manifestInfo, selectComponents, release, preview, main, parseArguments, waitForOperation, localPorts} from './brai-dev.mjs';
 import {execFileSync} from 'node:child_process';
@@ -44,7 +44,8 @@ function fixture() {
     saveCandidate: async (_root, candidate) => {state.candidate = candidate; calls.push(['candidate', candidate]); return '/candidate.json';},
     operator: async (action, arg) => {
       calls.push(['operator', action, arg]);
-      if (action === 'status') return {current: state.current, previous: state.previous, operation: state.operation, supportedComponents};
+      if (action === 'status') return {current: state.current, previous: state.previous, operation: state.operation, supportedComponents,
+        operatorStopped: state.operatorStopped, importPolicy: state.importPolicy};
       if (action === 'seal') return state.candidate;
       if (action === 'apply') {state.operation = {releaseId, action:'apply', sourceSha:source, state: 'accepted', timings: [{phase: 'smoke', durationMs: 4}]}; state.current = {releaseId, sourceSha: source, components: state.candidate.components}; return {releaseId, state: 'queued'};}
       if (action === 'rollback') {state.operation = {releaseId, action:'rollback', sourceSha:state.previous.sourceSha, targetReleaseId:state.previous.releaseId, state: 'rolled-back'}; state.current = state.previous; return {releaseId};}
@@ -157,6 +158,24 @@ test('prepare-only returns the actual candidate without applying or waiting', as
   assert.deepEqual(result.components,['auth','web']);
   assert.ok(!state.calls.some(call=>call[0]==='operator'&&call[1]!=='status'));
   assert.equal(state.current.releaseId,base);
+});
+
+test('release rejects an operator stop or an invalid output root before building', async () => {
+  const root = mkdtempSync('/tmp/brai-release-location-');
+  try {
+    const {ports, state} = fixture();
+    state.operatorStopped = true;
+    await assert.rejects(release({root, source}, ports), /DEV_OPERATOR_STOPPED/);
+    state.operatorStopped = false;
+    state.importPolicy = {roots: [root + '-other'], tmpOnlyRoots: []};
+    await assert.rejects(release({root, source}, ports), /RELEASE_OUTPUT_OUTSIDE_IMPORT_ROOT/);
+    state.importPolicy = {roots: [root], tmpOnlyRoots: [root]};
+    symlinkSync('/tmp', join(root, 'tmp'));
+    await assert.rejects(release({root, source}, ports), /RELEASE_OUTPUT_PATH_NOT_CANONICAL/);
+    assert.ok(!state.calls.some(call => ['build', 'run', 'candidate'].includes(call[0])));
+    rmSync(join(root, 'tmp'));
+    assert.equal((await release({root, source}, ports)).state, 'accepted');
+  } finally { rmSync(root, {recursive: true, force: true}); }
 });
 
 test('release reports its historical acceptance when a later release is already current', async () => {
