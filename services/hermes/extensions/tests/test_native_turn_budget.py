@@ -1,4 +1,4 @@
-# ABOUTME: Проверяет общий бюджет на точных исходниках закреплённого native Hermes.
+# ABOUTME: Проверяет повторы и защиту ответа на точных исходниках native Hermes.
 # ABOUTME: Патчит только временную копию; сеть, рабочие службы и HOME не использует.
 """Поведенческая приёмка: BRAI_NATIVE_SOURCE указывает read-only pinned engine."""
 
@@ -76,25 +76,25 @@ class PortableTurnBudgetTests(unittest.TestCase):
         self.budget._current.reset(self.token)
         self.policy_env.stop()
 
-    def test_shared_extra_limit_without_native_dependency(self):
+    def test_retries_are_not_limited_across_the_whole_turn(self):
         physical = Mock(side_effect=ConnectionError("synthetic"))
         for request_id in ("1", "1", "2", "3"):
             callback = self.budget.physical_callback(physical, {"api_request_id": request_id})
-            with self.assertRaises((ConnectionError, self.budget.TurnRequestBudgetExhausted)):
+            with self.assertRaises(ConnectionError):
                 callback({})
-        self.assertEqual(physical.call_count, 3)
-        self.assertEqual(self.state.spent, 2)
+        self.assertEqual(physical.call_count, 4)
+        self.assertEqual(self.state.spent, 3)
 
-    def test_retry_exhaustion_preserves_safe_cause_without_error_text(self):
+    def test_partial_stream_preserves_safe_cause_without_error_text(self):
         class ProviderError(Exception):
             status_code = 503
+        def response():
+            yield {"type": "response.output_text.delta", "delta": "partial"}
+            raise ProviderError('private request text')
         callback = self.budget.physical_callback(
-            Mock(side_effect=ProviderError('private request text')), {'api_request_id': 'same'})
-        for _ in range(2):
-            with self.assertRaises(ProviderError):
-                callback({})
+            lambda request: response(), {'api_request_id': 'same'}, streaming=True)
         with self.assertRaises(self.budget.TurnRequestBudgetExhausted) as raised:
-            callback({})
+            list(callback({}))
         cause, status = self.budget.failure_cause(raised.exception)
         self.assertEqual((cause, status), ('ProviderError', 503))
         self.assertNotIn('private request text', cause)
@@ -202,8 +202,7 @@ class PortableTurnBudgetTests(unittest.TestCase):
                     self.budget.physical_callback(callback, {"api_request_id": "api:retry"})({"content": secret})
         self.assertTrue(all("turn_id=" + self.state.turn_id in line for line in captured.output))
         self.assertTrue(all("request_id=api:retry" in line for line in captured.output))
-        self.assertIn("reason=retry_limit", captured.output[-1])
-        self.assertIn("stage=exhausted", captured.output[-1])
+        self.assertIn("stage=failed", captured.output[-1])
         self.assertNotIn(secret, "\n".join(captured.output))
         self.assertEqual(callback.call_count, 3)
         self.assertEqual(callback.call_args.args, ({"content": secret},))
@@ -332,14 +331,14 @@ class NativeTurnBudgetTests(unittest.TestCase):
                           metadata={**self.metadata(request, role), "api_mode": "chat_completions"})
         return callback
 
-    def test_retry_layers_and_changed_api_ids_share_two_extras(self):
+    def test_retry_layers_do_not_share_a_global_limit(self):
         for request, role in (("api:1", "primary"), ("api:1", "primary"),
                               ("api:2", "fallback"), ("api:3", "primary")):
             self.failed_call(request, role)
-        self.assertEqual(self.state.physical, 3)
-        self.assertEqual(self.state.spent, 2)
+        self.assertEqual(self.state.physical, 4)
+        self.assertEqual(self.state.spent, 3)
 
-    def test_successful_tool_iterations_do_not_reset_spent_credit(self):
+    def test_successful_tool_iterations_do_not_block_later_retries(self):
         self.failed_call()
         relay = self.relay()
         for request in ("api:1", "api:2"):
@@ -347,19 +346,19 @@ class NativeTurnBudgetTests(unittest.TestCase):
                           metadata={**self.metadata(request), "api_mode": "chat_completions"})
         self.failed_call("api:3")
         self.failed_call("api:3")
-        blocked = self.failed_call("api:4")
-        blocked.assert_not_called()
-        self.assertEqual(self.state.spent, 2)
+        later = self.failed_call("api:4")
+        later.assert_called_once()
+        self.assertEqual(self.state.spent, 3)
 
-    def test_compression_and_primary_use_same_extra_credit(self):
+    def test_compression_retries_do_not_block_primary(self):
         self.failed_call()
         self.failed_call("compression:1", "auxiliary:compression")
         self.failed_call("compression:1", "auxiliary:compression")
         self.assertEqual(self.state.spent, 1)
         self.failed_call("api:2")
-        blocked = self.failed_call("compression:1", "auxiliary:compression")
-        blocked.assert_not_called()
-        self.assertEqual(self.state.physical, 4)
+        later = self.failed_call("compression:1", "auxiliary:compression")
+        later.assert_called_once()
+        self.assertEqual(self.state.physical, 5)
 
     def test_async_native_execute_uses_same_physical_guard(self):
         async def fail(request):
@@ -369,7 +368,7 @@ class NativeTurnBudgetTests(unittest.TestCase):
             with self.assertRaises((ConnectionError, self.budget.TurnRequestBudgetExhausted)):
                 asyncio.run(relay.execute_async({}, fail, name="fixture", model_name="fixture",
                                                 metadata=self.metadata()))
-        self.assertEqual(self.state.physical, 3)
+        self.assertEqual(self.state.physical, 4)
 
     def test_retry_origin_is_not_reset_on_new_api_id(self):
         first = self.state.start(self.metadata())
