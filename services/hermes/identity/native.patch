@@ -1,3 +1,89 @@
+--- a/agent/codex_runtime.py
++++ b/agent/codex_runtime.py
+@@ -379,4 +379,8 @@
+     # item_id -> (tool_name, args, started_monotonic); duration even when codex omits durationMs.
+     started: dict[str, tuple[str, dict, float]] = {}
++    progress = None
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from identity.codex_progress import CodexProgress
++        progress = agent._brai_codex_progress = CodexProgress()
+-
++
+     def agent_cb(attr: str, fail_msg: str, *fail_args: Any, args: tuple = (), kwargs: dict | None = None) -> None:
+@@ -411,4 +415,7 @@
+-
++
+     def _fire_delta(params: dict, attr: str) -> None:
++        # AIDEV-NOTE: Фаза может стать известной только после дельт; сохраняем их до сверки.
++        if progress is not None and attr == "_fire_stream_delta":
++            return
+         text = _delta_text(params)
+         # Single-writer guard (#65991): a superseded stream must not pollute the turn's accumulated text
+@@ -419,4 +426,7 @@
+-
++
+     def _fire_agent_message_completed(item: dict) -> None:
++        if progress is not None and progress.phase(item) != "commentary":
++            agent._current_streamed_assistant_text = ""
++            return
+         text = item.get("text") or ""
+         # display.show_commentary=false keeps mid-turn narration off the interim path too (codex_responses contract).
+@@ -448,4 +458,6 @@
+         if not isinstance(note, dict):
+             return
++        if progress is not None:
++            progress.observe(note)
+         method = note.get("method") or ""
+         params = note.get("params")
+@@ -730,4 +742,7 @@
+                                   "without a truthful pre-compaction transcript boundary")
+     _ensure_codex_session(agent, messages)
++    progress = getattr(agent, "_brai_codex_progress", None)
++    if progress is not None:
++        progress.reset()
+     try:
+         _start_codex_thread(agent)
+@@ -737,4 +752,5 @@
+             model=wire_model, reasoning_effort=_codex_turn_effort(agent, wire_model),
+             service_tier=_codex_turn_service_tier(agent))
++        progress_partial = progress.reconcile(turn) if progress is not None else ""
+     except Exception as exc:
+         logger.exception("codex app-server turn failed")
+@@ -743,4 +759,5 @@
+             _consume_user_interrupt(agent), messages, api_calls=0, completed=False, error=str(exc),
+             final_response=f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
++            **({"brai_delivered_partial": progress.result(False)} if progress is not None and progress.result(False) else {}),
+         )
+     interrupt = _consume_user_interrupt(agent, turn.interrupted)
+@@ -761,7 +778,7 @@
+         # We flushed the projected rows ourselves (agent_persisted); the gateway must skip its own DB write.
+         final_response=turn.final_text, agent_persisted=True, codex_thread_id=turn.thread_id, codex_turn_id=turn.turn_id,
+-        **usage_result,
++        **({"brai_delivered_partial": progress_partial} if progress_partial else {}), **usage_result,
+     )
+-
++
+-
++
+ def _turn_result(interrupt: tuple[bool, Any], messages: list[dict[str, Any]], *, api_calls: int, completed: bool,
+--- a/agent/transports/codex_app_server_session.py
++++ b/agent/transports/codex_app_server_session.py
+@@ -438,4 +438,15 @@
+         self._track_pending_file_change(note)
+         projection = projector.project(note)
++        # AIDEV-NOTE: Только подтверждённый final_answer допустим до конца хода.
++        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++            params = note.get("params") if isinstance(note.get("params"), dict) else {}
++            item = params.get("item") if isinstance(params.get("item"), dict) else {}
++            if item.get("type") == "agentMessage" and projection.final_text is not None:
++                phase = item.get("phase")
++                if ((not isinstance(phase, str) or phase.strip().lower() != "final_answer")
++                        and not _has_turn_aborted_marker(projection.final_text)):
++                    projection.final_text = None
++            elif item.get("type") and item.get("type") != "agentMessage":
++                result.final_text = ""
+         if projection.messages:
+             result.projected_messages.extend(projection.messages)
 diff --git a/agent/redact.py b/agent/redact.py
 --- a/agent/redact.py
 +++ b/agent/redact.py
@@ -1017,6 +1103,87 @@ diff --git a/agent/redact.py b/agent/redact.py
              await asyncio.sleep(interval)
 
      @staticmethod
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -978,6 +978,9 @@
+             if stream_consumer is not None:
+                 stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
+             elif not already_streamed and ctx._status_adapter and str(text or "").strip():
+-                self._send_status_text(text, ctx._status_thread_metadata, "interim_assistant_callback scheduling error")
+-
++                # AIDEV-NOTE: Запасной путь тоже не должен считаться готовым ответом.
++                metadata = {**(ctx._status_thread_metadata or {}),
++                            "_interim_send": True, "_brai_progress": True}
++                self._send_status_text(text, metadata, "interim_assistant_callback scheduling error")
++
+         return stream_consumer, stream_delta_cb, interim_assistant_cb, want_interim_messages
+--- a/gateway/stream_consumer_fallback.py
++++ b/gateway/stream_consumer_fallback.py
+@@ -353,6 +353,8 @@
+             # with interim text and orphan the true final.
+             _md = self._metadata_for_send(final=False) or {}
+             _md["_interim_send"] = True
++            # AIDEV-NOTE: Отдельный признак отличает текст модели от предупреждений.
++            _md["_brai_progress"] = True
+             # reply_to only for reply-anchored threading; Discord/Telegram use
+             # thread_id metadata and reply_to on every commentary is spam.
+             _plat = getattr(getattr(self.adapter, "platform", None), "value", None)
+@@ -367,7 +369,5 @@
+                 self._notify_new_message()
+-                # Lets run.py confirm whether an interim send carried the final.
+-                # Record the exact delivered text so run.py can confirm whether an interim "preview"
+-                # actually carried the final response, vs. unrelated commentary delivered during a session
+-                # split (#14238).
+-                self._delivered_commentary_texts.append(text)
++                # AIDEV-NOTE: Помеченный прогресс Telegram не подтверждает готовый ответ.
++                if _platform_name != "telegram":
++                    self._delivered_commentary_texts.append(text)
+             return result.success
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -804,6 +804,8 @@
+
+     def _notification_kwargs(self, metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
+         """In "important" mode return disable_notification=True unless ``notify`` or ``is_approval_prompt`` (#132516)."""
++        if (metadata or {}).get("_brai_progress") is True and not (metadata or {}).get("is_approval_prompt"):
++            return {"disable_notification": True}
+         if getattr(self, "_notifications_mode", "important") != "important" or (metadata or {}).get("notify") \
+                 or (metadata or {}).get("is_approval_prompt"):
+             return {}
+@@ -3670,6 +3672,13 @@
+         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
+         if not content or not content.strip():
+             return SendResult(success=True, message_id=None)
++        # AIDEV-NOTE: Только промежуточные сообщения помечаются до отправки в Telegram.
++        if (metadata or {}).get("_brai_progress") is True and not (metadata or {}).get("is_approval_prompt"):
++            text = content.lstrip()
++            if text.startswith("⏳ Работаю:"):
++                text = text[len("⏳ Работаю:"):].lstrip()
++            separator = "\n" if text.startswith((">", "**>")) else " "
++            content = "⏳ Работаю:" + separator + text
+         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
+         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
+         async with self._chat_send_lock(chat_id):
+@@ -3707,5 +3707,17 @@
+                         await self._retrigger_typing(chat_id, metadata)
+                     return rich_result
+-            chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
++            from identity.telegram_markdown import split_bold
++            if (metadata or {}).get("_brai_progress") is True and not (metadata or {}).get("is_approval_prompt"):
++                # AIDEV-NOTE: Пометка должна помещаться в каждом сообщении после разбиения.
++                prefix = "⏳ Работаю: "
++                text = content.lstrip()
++                if text.startswith("⏳ Работаю:"):
++                    text = text[len("⏳ Работаю:"):].lstrip()
++                if not text:
++                    return SendResult(success=True, message_id=None)
++                chunks = split_bold(self.format_message(text), self.MAX_MESSAGE_LENGTH - utf16_len(prefix), truncate=self.truncate_message, len_fn=utf16_len)
++                chunks = [("⏳ Работаю:\n" if chunk.startswith((">", "**>")) else prefix) + chunk for chunk in chunks]
++            else:
++                chunks = split_bold(self.format_message(content), self.MAX_MESSAGE_LENGTH, truncate=self.truncate_message, len_fn=utf16_len)
+             if len(chunks) > 1:
+                 # truncate_message appends a raw " (1/2)" suffix; escape the MarkdownV2-special parentheses.
+
 diff --git a/plugins/platforms/telegram/update_admission.py b/plugins/platforms/telegram/update_admission.py
 index be158a8..28cc883 100644
 --- a/plugins/platforms/telegram/update_admission.py
@@ -1274,6 +1441,35 @@ index e9819bc..800c70d 100644
          _stts_adapter = self._delivery_adapter_for(source)
          _is_voice_input = (
              message_type is not None
+
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3846,5 +3846,24 @@
+                 first_response = _unexpected_silence_reply()
+                 _already_streamed = False
++        # AIDEV-NOTE: Очередь тоже должна показывать незавершённый ответ с ошибкой.
++        _first_failed = (_delivery_result.get("failed") or
++                         (_delivery_result.get("partial") and _delivery_result.get("error")))
++        if str(getattr(turn_ctx.source.platform, "value", turn_ctx.source.platform)) == "telegram" and _first_failed:
++            _failure_result = dict(_delivery_result)
++            _partial = _failure_result.get("brai_delivered_partial")
++            _partial_delivered = _already_streamed
++            _has_delivered = getattr(_sc, "has_durably_delivered_text", None)
++            if _partial and callable(_has_delivered):
++                with suppress(Exception):
++                    _partial_delivered = _partial_delivered or bool(_has_delivered(_partial))
++            if _partial_delivered:
++                # Текст уже доставлен, осталось показать только предупреждение.
++                _failure_result.pop("brai_delivered_partial", None)
++            first_response = _telegram_failure_explanation(
++                first_response, turn_ctx.source, result=_failure_result,
++                failure_notice=self._hmwa_failed_turn_notice,
++            )
++            _already_streamed = False
+         # Failed turns deliver their text but never their attachments (completed-turn parity).
+-        _deliver_media = not _delivery_result.get("failed")
++        _deliver_media = not _first_failed
+         if first_response:
 
 --- a/agent/model_metadata.py
 +++ b/agent/model_metadata.py

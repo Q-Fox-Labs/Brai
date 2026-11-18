@@ -248,6 +248,7 @@
     "suppress_warning_notifications": false,
     "busy_input_mode": "interrupt",
     "background_process_notifications": "concise",
+    "memory_notifications": "off",
     "bell_on_complete": false,
     "bell_on_prompt": false,
     "streaming": true,
