@@ -25,14 +25,18 @@ test("snapshot reads each page with the same cutoff and preserves an event windo
  assert.deepEqual(read,[at.toISOString(),at.toISOString()]);
  assert.equal(snapshot.examined,3);
  assert.deepEqual(snapshot.candidates.map(card=>card.id),["a","b"]);
- assert.deepEqual(diagnosticWindows(snapshot),[{id:"a",component:"hermes",since:"2026-11-16T00:00:00Z",until:"2026-11-17T01:02:03Z"}]);
+ assert.deepEqual(diagnosticWindows(snapshot),[
+  {id:"a",component:"hermes",since:"2026-11-16T00:00:00Z",until:"2026-11-17T01:02:03Z"},
+  {id:"b",component:"nats",since:"2026-11-16T00:00:00Z",until:"2026-11-17T01:02:03Z"},
+ ]);
 });
 
 test("batch bounds model overlap, handles exact repeats and leaves unknown outcomes alone",async()=>{
  const candidates=[
-  {id:"a",signature:"same"},{id:"repeat",signature:"same"},{id:"b"},{id:"c"},{id:"unsupported",component:"nats"},{id:"changed"},
+  {id:"a",signature:"same"},{id:"repeat",signature:"same"},{id:"b"},{id:"c"},
+  {id:"unsupported",component:"nats"},{id:"read-failed",component:"agent"},{id:"unknown",component:"unknown"},{id:"changed"},
  ].map(card=>({revision:1,component:"hermes",...card}));
- const snapshot={as_of:"now",examined:6,candidates};
+ const snapshot={as_of:"now",examined:candidates.length,candidates};
  const known=new Set();
  const completed=[];
  const started=[];
@@ -41,19 +45,20 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
  const paired=new Promise(resolve=>{bothStarted=resolve;});
  const call=async (operation,args)=>{
   const id=args.case_id;
-  if (operation==="get") return {case:{id,revision:id==="changed"?2:1,review_state:"new"},
+  if (operation==="get") return {case:{id,revision:id==="changed"?2:1,review_state:"new",owner_id:"owner"},
+   report:{observation:id==="unknown"?{}:{title:"Safe description"}},
    investigation:{state:"pending",applicability:known.has(id)?"exact":"none",result:known.has(id)?fixed:undefined}};
   if (operation==="investigation_claim") {
-   return {state:"running",replayed:false,investigation_id:id,case_revision:1,projection:"safe technical details"};
+   return {state:"running",replayed:false,investigation_id:id,case_revision:1,projection:id==="unknown"?null:"safe technical details"};
   }
   if (operation==="investigation_complete") {
-   completed.push(args.investigation_id);
+   completed.push([args.investigation_id,args.result]);
    return {state:"completed"};
   }
   throw Error("unexpected "+operation);
  };
- const sources=Object.fromEntries(candidates.map(card=>[card.id,facts]));
- const outcome=await runBatch(call,snapshot,sources,2,async()=>{providerChecks++;},async (job,_facts,onDispatch)=>{
+ const sources={diagnostics:{a:facts,b:facts,c:facts},components_without_reader:["nats","unknown"],failed_components:["agent"]};
+ const outcome=await runBatch(call,snapshot,sources,2,async()=>{providerChecks++;},async (job,diagnostic,onDispatch)=>{
   onDispatch();
   const id=job.investigation_id;
   started.push(id);
@@ -64,10 +69,18 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
    return "completed";
   }
   if (id==="b") throw Error("unknown model outcome");
+  if (id==="unsupported" || id==="read-failed") {
+   assert.equal(diagnostic.unavailable,id==="unsupported"?"no_reader":"read_failed");
+   assert.ok(!("facts" in diagnostic));
+   return "completed";
+  }
   return "failed";
  });
- assert.deepEqual(started.slice().sort(),["a","b","c"]);
- assert.deepEqual(completed,["repeat"]);
+ assert.deepEqual(started.slice().sort(),["a","b","c","read-failed","unsupported"]);
+ assert.deepEqual(completed.map(([id])=>id).sort(),["repeat","unknown"]);
+ const missing=completed.find(([id])=>id==="unknown")[1];
+ assert.equal(missing.verdict,"insufficient_evidence");
+ assert.match(missing.description,/операции.*время события.*строка журнала/);
  assert.equal(providerChecks,1);
- assert.deepEqual(outcome,{as_of:"now",examined:6,candidates:6,reused:1,completed:1,failed:1,deferred:1,skipped:1,unresolved:1,model_started:3,model_peak:2});
+ assert.deepEqual(outcome,{as_of:"now",examined:8,candidates:8,reused:1,completed:4,completed_without_diagnostics:3,failed:1,skipped:1,unresolved:1,model_started:5,model_peak:2});
 });

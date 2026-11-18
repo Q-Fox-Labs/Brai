@@ -3,18 +3,20 @@
 import {randomUUID} from "node:crypto";
 import {limits,type Observation} from "./contracts.js";
 import type {DiagnosticResult} from "./investigation-contract.js";
-import {exactSignature} from "./projection.js";
+import {exactSignature,prepareExternalProjection} from "./projection.js";
 
 export type CallTool = (tool:string,args:Record<string,unknown>)=>Promise<Record<string,unknown>>;
 type Card = {id:string; owner_id:string; installation_id:string; component_id:string; revision:number; review_state:string; registered_at:string};
 type Investigation = {state:string; applicability:string; result?:DiagnosticResult};
 type CardDetail = {case:Card; report:{observation:Observation}; investigation:Investigation};
-type Job = {state:string; replayed:boolean; investigation_id:string; case_id:string; case_revision:number; component:string; projection:unknown};
-export type Facts = {component:string; current_scope:DiagnosticResult["scope"]; since:string; until:string; observed_at:string; facts:unknown[]};
+type Job = {state:string; replayed:boolean; investigation_id:string; case_id:string; case_revision:number; component:string|null; projection:unknown};
+type Window = {component:string; since:string; until:string};
+type Facts = Window & {current_scope:DiagnosticResult["scope"]; observed_at:string; facts:unknown[]};
+export type DiagnosticInput = Facts | (Window & {unavailable:"no_reader"|"read_failed"|"not_collected"});
+type DiagnosticBatch = {diagnostics:Record<string,Facts>; failed_components:string[]; components_without_reader:string[]};
 type Candidate = {id:string; revision:number; component:string; signature:string|null; since:string; until:string; known:boolean};
 type Snapshot = {as_of:string; examined:number; candidates:Candidate[]};
-type Resolve = (job:Job,facts:Facts,onDispatch:()=>void)=>Promise<string>;
-const hasReader = (component:string) => component==="agent" || component==="hermes";
+type Resolve = (job:Job,diagnostics:DiagnosticInput,onDispatch:()=>void)=>Promise<string>;
 const second = (date:Date)=>date.toISOString().slice(0,19)+"Z";
 
 async function get(call:CallTool,id:string) {
@@ -53,14 +55,14 @@ export async function snapshotQueue(call:CallTool, now:Date, selected?:string[])
  return {as_of,examined,candidates};
 }
 
-/** Returns only the time windows that the approved Ansible readers need to inspect. */
+/** Returns windows for pending cards that have no exact prior result. Ansible owns reader selection. */
 export function diagnosticWindows(snapshot:Snapshot) {
- return snapshot.candidates.filter(card=>hasReader(card.component) && !card.known)
+ return snapshot.candidates.filter(card=>!card.known)
   .map(({id,component,since,until})=>({id,component,since,until}));
 }
 
 /** Uses the requested concurrency across distinct signatures, claiming work immediately before dispatch. */
-export async function runBatch(call:CallTool,snapshot:Snapshot,diagnostics:Record<string,Facts>,parallelism:number,
+export async function runBatch(call:CallTool,snapshot:Snapshot,batch:DiagnosticBatch,parallelism:number,
   checkProvider:()=>Promise<void>,resolve:Resolve) {
  if (!Number.isSafeInteger(parallelism) || parallelism<1) throw new Error("INVALID_INVESTIGATION_PARALLELISM");
  const groups=new Map<string,Candidate[]>();
@@ -71,17 +73,17 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,diagnostics:Recor
   groups.set(key,group);
  }
  const queue=[...groups.values()].values();
- const counts={reused:0,completed:0,failed:0,deferred:0,skipped:0,unresolved:0,model_started:0,model_peak:0};
+ const withoutReader=new Set(batch.components_without_reader);
+ const failedReaders=new Set(batch.failed_components);
+ const counts={reused:0,completed:0,completed_without_diagnostics:0,failed:0,skipped:0,unresolved:0,model_started:0,model_peak:0};
  let modelActive=0;
  let providerCheck:Promise<void>|undefined;
  async function run(card:Candidate) {
-  const facts=diagnostics[card.id];
-  if (!card.known && !hasReader(card.component)) return "deferred";
   const detail=await get(call,card.id);
   if (!waiting(detail) || detail.case.revision!==card.revision) return "skipped";
   const known=detail.investigation.applicability==="exact" && detail.investigation.result;
-  if (!known && (!facts || !hasReader(card.component))) return "deferred";
-  if (!known) await (providerCheck??=checkProvider());
+  const observation=detail.report.observation;
+  if (!known && prepareExternalProjection(observation,[detail.case.owner_id])) await (providerCheck??=checkProvider());
   const job=await call("investigation_claim",{request_id:randomUUID(),case_id:card.id}) as unknown as Job;
   if (job.state!=="running" || job.replayed) return "skipped";
   if (job.case_revision!==card.revision) {
@@ -92,21 +94,29 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,diagnostics:Recor
    await call("investigation_complete",{request_id:randomUUID(),investigation_id:job.investigation_id,result:known});
    return "reused";
   }
+  const {component,since,until}=card;
+  const diagnostics:DiagnosticInput=batch.diagnostics[card.id]??{component,since,until,
+   unavailable:withoutReader.has(component)?"no_reader":failedReaders.has(component)?"read_failed":"not_collected"};
+  const missingDiagnostics="unavailable" in diagnostics;
   if (!job.projection) {
    await call("investigation_complete",{request_id:randomUUID(),investigation_id:job.investigation_id,result:{
-    verdict:"insufficient_evidence",description:"В карточке нет технического описания, пригодного для передачи модели.",scope:facts.current_scope,evidence:[],
+    verdict:"insufficient_evidence",
+    description:"Нужны обезличенное описание операции, ожидаемый и фактический результат, время события и строка журнала или результат проверки, где видно расхождение.",
+    scope:missingDiagnostics?{}:diagnostics.current_scope,evidence:[],
    }});
-   return "completed";
+   return missingDiagnostics?"completed_without_diagnostics":"completed";
   }
   let dispatched=false;
   try {
-   return await resolve(job,facts,()=>{
+   const state=await resolve(job,diagnostics,()=>{
     if (dispatched) return;
     dispatched=true;
     modelActive++;
     counts.model_started++;
     counts.model_peak=Math.max(counts.model_peak,modelActive);
-   })==="completed"?"completed":"failed";
+   });
+   if (state!=="completed") return "failed";
+   return missingDiagnostics?"completed_without_diagnostics":"completed";
   } finally {
    if (dispatched) modelActive--;
   }
@@ -115,7 +125,9 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,diagnostics:Recor
   for (const group of queue) {
    for (const card of group) {
     try {
-     counts[await run(card)]++;
+     const outcome=await run(card);
+     counts[outcome]++;
+     if (outcome==="completed_without_diagnostics") counts.completed++;
     } catch {
      // AIDEV-NOTE: При неизвестном исходе claim/turn карточка остаётся привязанной к исходной попытке.
      counts.unresolved++;
