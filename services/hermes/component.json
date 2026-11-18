@@ -541,9 +541,10 @@
       },
       {
         "id": "core",
-        "command": "set --; for path in tests/*.test.mjs; do case \"$path\" in tests/extensions.test.mjs|tests/skill-documentation.test.mjs|tests/skill-connect.test.mjs|tests/native-conversation.test.mjs) ;; *) set -- \"$@\" \"$path\";; esac; done; node --test --test-isolation=none \"$@\"",
+        "command": "npm run build --workspace @brai/dialogues || exit $?; set --; for path in tests/*.test.mjs; do case \"$path\" in tests/extensions.test.mjs|tests/skill-documentation.test.mjs|tests/skill-connect.test.mjs|tests/native-conversation.test.mjs) ;; *) set -- \"$@\" \"$path\";; esac; done; node --test --test-isolation=none \"$@\"",
         "tools": [
           "node",
+          "npm",
           "python3",
           "git",
           "sh",
@@ -593,7 +594,10 @@
           "services/hermes/identity/profile_release.py"
         ],
         "extraInputs": [
-          "services/hermes/tests/*.test.mjs"
+          "services/hermes/tests/*.test.mjs",
+          "services/dialogues/src/**",
+          "services/dialogues/tsconfig.json",
+          "services/dialogues/package.json"
         ]
       },
       {
