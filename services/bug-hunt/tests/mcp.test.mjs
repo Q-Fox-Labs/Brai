@@ -39,3 +39,29 @@ test('new MCP client receives a short reminder and loads help only on demand',as
   assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['bug_hunt_help','bug_hunt_report','bug_hunt_get','bug_hunt_list']);
  }finally{await client.close();await runtime.close();gate.stop();await gate.drain();}
 });
+
+test('diagnostic writes are visible and callable only for the designated MCP identity',async()=>{
+ const gate=createGate(),hosts=[];
+ const identities={ordinary:'codex:ordinary',investigator:'codex:investigator'};
+ const runtime=await startMcp({host:'127.0.0.1',port:0,allowedHosts:hosts,allowedOrigins:[],principalsFile:'/unused',maxConnections:4,investigators:['codex:investigator']},gate,
+  async header=>({ownerId:'fixture',actorId:identities[header.split(' ')[1]],source:'codex',reviewer:false}),async()=>({}),undefined,undefined,
+  async (operation,principal)=>({operation,actor:principal.actorId}));
+ hosts.push(new URL(runtime.url).host);
+ try {
+  for(const identity of Object.keys(identities)) {
+   const client=new Client({name:identity,version:'1.0.0'});
+   try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(runtime.url),{requestInit:{headers:{authorization:'Bearer '+identity}}}));
+    const visible=(await client.listTools()).tools.some(tool=>tool.name==='bug_hunt_investigation_claim');
+    const result=await client.callTool({name:'bug_hunt_investigation_claim',arguments:{request_id:'ac886e81-cc92-4ad0-b3e5-9eeda5bf72d2'}});
+    if(identity==='investigator') {
+     assert.equal(visible,true);
+     assert.deepEqual(result.structuredContent,{operation:'claim',actor:'codex:investigator'});
+    } else {
+     assert.equal(visible,false);
+     assert.equal(result.isError,true);
+    }
+   } finally {await client.close();}
+  }
+ } finally {await runtime.close();gate.stop();await gate.drain();}
+});

@@ -68,7 +68,7 @@ export function nativeThreadConfig(mcpNames:string[],pluginNames:string[]=[]){re
 /** Discovery без своего thread недостаточно: до модели проверяем фактические session connections. */
 export async function nativeMcpClosed(rpc:NativeRpc,threadId:string){let cursor=null;for(let page=0;page<10;page++){const r=await rpc.call("mcpServerStatus/list",{threadId,limit:100,detail:"full",cursor});if(!Array.isArray(r.data)||r.data.some((s:any)=>s.runtimeStatus!=="disabled"))return false;cursor=r.nextCursor;if(!cursor)return true;}return false;}
 /** Codex ведёт один native turn; tools исполняет только общий dispatcher своего подтверждённого turn. */
-export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc:NativeRpc=nativeRpc(profile)):InvestigationExecutor{
+export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc:NativeRpc=nativeRpc(profile),options:{instructions?:string;ephemeral?:boolean}={}):InvestigationExecutor{
  let initialized=false;const loadedThreads=new Set<string>();
  async function init(){
   if(initialized)return;
@@ -133,10 +133,10 @@ export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc:Native
     const day=await dispatch.reserve();
     cp={...cp,state:"dispatching",native:{generation:profile.generation,...(rpc.preparation?.()?{providerBinding:rpc.preparation()!.binding,sourceRef:rpc.preparation()!.sourceRef,accountId:rpc.preparation()!.accountId,catalog_revision:rpc.preparation()!.catalog_revision,effective_catalog_revision:rpc.preparation()!.effective_catalog_revision,cli_version:rpc.preparation()!.version,context_window:rpc.preparation()!.contextWindow}:{}),stage:"thread",budget_day:typeof day==="string"?day:new Date().toISOString().slice(0,10)}};await save(cp);
     await rpc.checkBinding?.();if(!await dispatch.allowed())throw new VF("POLICY_REVOKED");
-    const thread=await rpc.call("thread/start",{model:intent.model.id,allowProviderModelFallback:false,ephemeral:false,cwd:profile.cwd,sandbox:"read-only",approvalPolicy:"never",baseInstructions:investigationInstructions,developerInstructions:"",selectedCapabilityRoots:[],environments:[],dynamicTools:dispatch.tools(intent.phase).map(t=>({name:t.function.name,description:t.function.description??"",inputSchema:t.function.parameters})),config:restrictedConfig});
+    const thread=await rpc.call("thread/start",{model:intent.model.id,allowProviderModelFallback:false,ephemeral:options.ephemeral??false,cwd:profile.cwd,sandbox:"read-only",approvalPolicy:"never",baseInstructions:options.instructions??investigationInstructions,developerInstructions:"",selectedCapabilityRoots:[],environments:[],dynamicTools:dispatch.tools(intent.phase).map(t=>({name:t.function.name,description:t.function.description??"",inputSchema:t.function.parameters})),config:restrictedConfig});
     cp.native={...cp.native,threadId:thread.thread.id,stage:"turn"};loadedThreads.add(thread.thread.id);await save(cp);
     if(thread.sandbox?.type!=="readOnly"||thread.approvalPolicy!=="never")return failed(cp,"NATIVE_EFFECTIVE_POLICY_INVALID","blocked");
-    if(!await nativeMcpClosed(rpc,thread.thread.id)){await rpc.call("thread/archive",{threadId:thread.thread.id}).catch(()=>{});return failed(cp,"NATIVE_MCP_ISOLATION_UNPROVEN","blocked");}
+    if(!await nativeMcpClosed(rpc,thread.thread.id)){await rpc.call(options.ephemeral?"thread/unsubscribe":"thread/archive",{threadId:thread.thread.id}).catch(()=>{});return failed(cp,"NATIVE_MCP_ISOLATION_UNPROVEN","blocked");}
     const queue:Json[]=[];let completed=false,blocked=false,overflow=false;
     const unsubscribe=rpc.subscribe(p=>{if(p.params?.threadId!==cp.native.threadId)return;if(p.id===undefined&&!["item/started","item/completed","turn/completed","thread/tokenUsage/updated"].includes(p.method))return;if(queue.length>=32){overflow=true;return;}queue.push(p);});
     try{
@@ -150,6 +150,7 @@ export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc:Native
      const turn=await rpc.call("turn/start",{threadId:cp.native.threadId,model:intent.model.id,effort:intent.model.effort,input:[{type:"text",text:JSON.stringify(intent.input)}],outputSchema:nativeOutputSchema(intent.input.output_schema)});
      cp={...cp,state:"running",native:{...cp.native,turnId:turn.turn.id}};await save(cp);
      let nextPolicyCheck=0,policyRevoked=false;
+     let finalText:unknown,terminalStatus:unknown;
      while((cp.native.call_deadline_at===null||Date.now()<Date.parse(String(cp.native.call_deadline_at)))&&!completed&&!blocked&&!overflow){
       if(Date.now()>=nextPolicyCheck){
        await rpc.checkBinding?.();if(!await dispatch.allowed()){policyRevoked=true;break;}
@@ -169,11 +170,18 @@ export function codexExecutor(profile:NativeProfile,dispatch:Dispatch,rpc:Native
        // Ответ принадлежит только этому соединению; reconnect не пересылает его по числовому ID.
        rpc.send({id:p.id,result:{contentItems:[{type:"inputText",text:JSON.stringify(result)}],success}});
       }
-      if(p.method==="turn/completed")completed=true;
+      if(p.method==="item/completed"&&p.params.item?.type==="agentMessage"&&p.params.item.phase!=="commentary")finalText=p.params.item.text;
+      if(p.method==="turn/completed"){completed=true;terminalStatus=p.params.turn.status;}
      }
-     if(!completed){const reason=policyRevoked?"POLICY_REVOKED":blocked?"NATIVE_UNEXPECTED_REQUEST":overflow?"NATIVE_CAPACITY":"MODEL_DEADLINE";cp={...cp,state:"unknown",code:reason,native:{...cp.native,cancel_reason:reason}};await save(cp);await rpc.call("turn/interrupt",{threadId:cp.native.threadId,turnId:cp.native.turnId}).catch(()=>{});return await inspect(intent,cp,save);}
+     if(!completed){const reason=policyRevoked?"POLICY_REVOKED":blocked?"NATIVE_UNEXPECTED_REQUEST":overflow?"NATIVE_CAPACITY":"MODEL_DEADLINE";cp={...cp,state:"unknown",code:reason,native:{...cp.native,cancel_reason:reason}};await save(cp);await rpc.call("turn/interrupt",{threadId:cp.native.threadId,turnId:cp.native.turnId}).catch(()=>{});return options.ephemeral?cp:await inspect(intent,cp,save);}
+     if(options.ephemeral){
+      // AIDEV-NOTE: Эфемерный сеанс берёт итог из notifications и не читает persistent историю.
+      if(terminalStatus!=="completed"||typeof finalText!=="string"||Buffer.byteLength(finalText)>32768)return failed(cp,"NATIVE_CANDIDATE_MISSING","failed");
+      let result:unknown;try{result=JSON.parse(finalText);}catch{return failed(cp,"NATIVE_CANDIDATE_INVALID","failed");}
+      const done:ModelCheckpoint={...cp,state:"completed",result,code:null};await save(done);return done;
+     }
      return await inspect(intent,cp,save);
-    }finally{unsubscribe();}
+    }finally{unsubscribe();if(options.ephemeral)await rpc.call("thread/unsubscribe",{threadId:cp.native.threadId}).catch(()=>{});}
    }catch(e){
     if(e instanceof VF&&["NATIVE_CREDENTIAL_BINDING_CHANGED","NATIVE_CREDENTIAL_UNAVAILABLE","POLICY_REVOKED"].includes(e.code)&&cp.native.threadId&&cp.native.turnId){cp={...cp,native:{...cp.native,cancel_reason:e.code}};await save(cp);await rpc.call("turn/interrupt",{threadId:cp.native.threadId,turnId:cp.native.turnId}).catch(()=>{});}
     return failed(cp,e instanceof VF?e.code:"NATIVE_UNAVAILABLE",cp.state==="not_sent"?"blocked":"unknown");
