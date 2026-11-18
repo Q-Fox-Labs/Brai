@@ -1,0 +1,280 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Brai client backup plan v1",
+  "type": "object",
+  "required": [
+    "format",
+    "installation_manifest",
+    "environment",
+    "components",
+    "installer",
+    "snapshot",
+    "docker_scope",
+    "systemd_scope"
+  ],
+  "properties": {
+    "format": {
+      "const": "brai-client-backup-plan-v1"
+    },
+    "installation_manifest": {
+      "type": "string",
+      "pattern": "^/[^\\r\\n,]+$"
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "installer": {
+      "type": "object",
+      "required": [
+        "repository",
+        "revision",
+        "entrypoint"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "components": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^/[^\\r\\n,]+$"
+            }
+          },
+          "postgres": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/postgres"
+            }
+          },
+          "rebuild": {
+            "type": "string",
+            "minLength": 1
+          },
+          "opaque_roots": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "enter",
+        "leave",
+        "units",
+        "containers"
+      ],
+      "properties": {
+        "enter": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "leave": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "ingress_socket": {
+          "type": "string",
+          "pattern": "^/[^\\r\\n,]+$"
+        },
+        "ingress_uid": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "docker_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "systemd_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "exclude": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "reason",
+          "proof"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "proof": {
+            "type": "object",
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/[^\\r\\n,]+$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "additionalProperties": false
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/[^\\r\\n,]+$"
+          },
+          "root": {
+            "type": "string",
+            "pattern": "^/[^\\r\\n,]+$"
+          },
+          "relative": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "path"
+            ]
+          },
+          {
+            "required": [
+              "root",
+              "relative"
+            ]
+          }
+        ]
+      }
+    },
+    "destination": {
+      "type": "string",
+      "pattern": "^(googledrive://|file:///)"
+    },
+    "duplicati": {
+      "type": "object",
+      "required": [
+        "image"
+      ],
+      "properties": {
+        "image": {
+          "type": "string",
+          "pattern": "^duplicati/duplicati@sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "keep_versions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "local_keep_versions": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "postgres": {
+      "type": "object",
+      "required": [
+        "container",
+        "user",
+        "database",
+        "data_mounts",
+        "dedicated"
+      ],
+      "properties": {
+        "container": {
+          "type": "string",
+          "minLength": 1
+        },
+        "user": {
+          "type": "string",
+          "minLength": 1
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data_mounts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/[^\\r\\n,]+$"
+          },
+          "minItems": 1
+        },
+        "dedicated": {
+          "const": true
+        },
+        "socket": {
+          "type": "string",
+          "pattern": "^/[^\\r\\n,]+$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

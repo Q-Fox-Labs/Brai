@@ -134,3 +134,18 @@ Telegram публикует каждый готовый элемент в Artifa
 Private files.create-text принимает filename, content и requestId; без пути и ownerId. До 1 МиБ точных UTF-8 байтов. Публикация использует штатные staging/Artifacts и проверяет имя, размер и SHA-256; код в содержимом не исполняется. Ответ — bounded artifact descriptor с канонической artifact-ссылкой. files.read-text принимает только artifactId и возвращает filename/content после owner/size/hash проверки. Guest-публикация входного файла требует root-owned admission receipt для точного профиля, пути и байтов; общий files.publish модели не выдаётся. [Политика](../identity/ROLES.md), [OpenRPC](../identity/broker.openrpc.json).
 
 Служебный bootstrap допускает только точные readonly `serviceRoots` за пределами HOME: `/opt/brai-profile/engine`, `/opt/brai-profile/runtime`, `/opt/brai-profile/instructions`, `/opt/brai-profile/skills`, `/opt/brai-profile/system-skills`. Последние два имени поддерживаются валидатором конфигурации для соответствующих namespace mounts. Это не добавляет эти каталоги в пользовательские `readRoots`, `temporaryRoots` или `legacyRoots`; похожие имена отклоняются. Защищённый reader актуальных поколений общих документов описан выше и не требует изменения конфигурации.
+<!-- BEGIN CLIENT BACKUP STORAGE CONTRACT -->
+## Контракт снимка для резервирования
+
+При согласованной остановке писателей операторский сборщик может читать
+brai-files/files.sqlite через SQLite read-only API. Полный файл БД сохраняется
+штатным SQLite backup. Для исходных байтов незавершённых операций сохраняются
+все path из items с artifact IS NULL и publications с confirmed=0.
+Это зависимости операций, даже если они находятся в исключаемом workspace/files/work.
+Подтверждённые материалы восстанавливаются из Артефактов. Добавление другого
+источника незавершённых файлов требует обновить этот контракт, адаптер
+pending_files в deploy/backup/recovery.py и сценарий восстановления в той же задаче.
+Сборщик не вызывает публикацию, не меняет квитанции и не выбирает рабочие файлы
+по предположению об их полезности. Зарегистрированные исходные файлы и байты
+Артефактов копируются без преобразования их формата, включая SQLite-файлы.
+<!-- END CLIENT BACKUP STORAGE CONTRACT -->
