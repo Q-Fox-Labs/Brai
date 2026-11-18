@@ -46,7 +46,8 @@ export interface InvestigationExecutor {
  startStep(intent:ModelIntent,save:(checkpoint:ModelCheckpoint)=>Promise<void>):Promise<ModelCheckpoint>;
  inspectStep(intent:ModelIntent,checkpoint:ModelCheckpoint,save:(checkpoint:ModelCheckpoint)=>Promise<void>):Promise<ModelCheckpoint>;
  cancelStep(intent:ModelIntent,checkpoint:ModelCheckpoint):Promise<ModelCheckpoint>;
- close?():void;
+ /** Завершает локальный transport/собственный child; не ждёт естественного завершения remote turn. */
+ close?():void|Promise<void>;
 }
 /** Повтор execution ID сверяет input hash; неизвестный запуск читается get. */
 export interface ReproductionRunner {

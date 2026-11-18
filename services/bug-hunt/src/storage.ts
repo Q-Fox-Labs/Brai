@@ -2,9 +2,11 @@
 // ABOUTME: Транзакционные блокировки сохраняют атомарность повторов и конкурентного разбора.
 import {createHash,createHmac,randomUUID,timingSafeEqual} from "node:crypto";
 import type {Pool,PoolClient} from "pg";
-import {Fault,canonical,type Principal,type ReportInput,type ReviewInput,type GetInput,type ListInput} from "./contracts.js";
+import {Fault,canonical,type Principal,type Observation,type ReportInput,type GetInput} from "./contracts.js";
 import {enqueueProcessing} from "./processing-store.js";
 import {assertReviewTransition,type Store} from "./domain.js";
+import {exactSignature,prepareExternalProjection} from "./projection.js";
+import {validateInvestigation,type Claim,type Complete,type Fail} from "./investigation-contract.js";
 
 interface Options {targetGeneration?:()=>string;installationId:string;cursorKey:string;maxReports:number;reportsPerMinute:number;deadlineAt?:number;maxDatabaseBytes?:number}
 interface Cursor {at:string;id:string;binding:string}
@@ -29,7 +31,7 @@ function cursorCodec(key:string) {
  };
 }
 /** Создаёт PostgreSQL-порт. Runtime не выполняет DDL и не удаляет исходные записи. */
-export function createStore(pool:Pool,options:Options):Store {
+export function createStore(pool:Pool,options:Options) {
  const {installationId,cursorKey}=options;
  const cursors=cursorCodec(cursorKey);
  async function transaction<T>(work:(db:PoolClient)=>Promise<T>,readOnly=false):Promise<T> {
@@ -57,7 +59,7 @@ export function createStore(pool:Pool,options:Options):Store {
    throw new Fault("DATABASE_UNAVAILABLE",committing||!rolledBack?"unknown":"not_accepted");
   }finally{db.release();}
  }
- async function mutation(p:Principal,operation:string,input:ReportInput|ReviewInput,work:(db:PoolClient)=>Promise<Record<string,unknown>>) {
+ async function mutation<T extends Record<string,unknown>>(p:Principal,operation:string,input:{request_id:string},work:(db:PoolClient)=>Promise<T>) {
   const hash=digest(input);
   return transaction(async db=>{
    // AIDEV-NOTE: Стабильный initiator, а не connection/token, определяет ключ повтора.
@@ -66,7 +68,7 @@ export function createStore(pool:Pool,options:Options):Store {
    const previous=await db.query("SELECT input_hash,result FROM mutation WHERE installation_id=$1 AND owner_id=$2 AND actor_id=$3 AND operation=$4 AND request_id=$5",key);
    if(previous.rowCount){
     if(previous.rows[0].input_hash!==hash)throw new Fault("IDEMPOTENCY_CONFLICT");
-    return {...previous.rows[0].result,replayed:true};
+    return {...previous.rows[0].result as T,replayed:true};
    }
    await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",["bug-hunt-capacity:"+installationId]);
    const size=await db.query("SELECT pg_database_size(current_database()) AS bytes");
@@ -81,7 +83,30 @@ export function createStore(pool:Pool,options:Options):Store {
   if(!found.rowCount)throw new Fault("NOT_FOUND");
   return found.rows[0];
  };
- return {
+ async function investigation(db:PoolClient, row:Record<string,any>, observation:Observation) {
+  const state = await db.query(`SELECT id,case_id,state,result,finished_at FROM diagnostic_investigation
+    WHERE installation_id=$1 AND owner_id=$2 AND case_id=$3 AND case_revision=$4
+    ORDER BY created_at DESC,id DESC LIMIT 1`,[installationId,row.owner_id,row.id,row.revision]);
+  const current = state.rows[0];
+  if (current?.state === "completed") return {...dates(current),state:"processed",applicability:"investigated"};
+  const processing = current?.state === "running" ? "running" : current?.state === "failed" ? "failed" : "pending";
+  const signature = exactSignature(installationId,row.owner_id,observation);
+  if (row.review_state === "archived") return {state:processing, applicability:"none"};
+  const known = signature && await db.query(`SELECT i.id,i.case_id,i.result,i.finished_at
+    FROM diagnostic_investigation i JOIN bug_case c ON c.id=i.case_id AND c.revision=i.case_revision
+    WHERE i.installation_id=$1 AND i.owner_id=$2 AND i.state='completed'
+      AND i.signature_hash=$3 AND i.signature_canonical=$4 AND c.review_state <> 'archived'
+    ORDER BY i.finished_at DESC,i.id DESC LIMIT 1`,[installationId,row.owner_id,signature.hash,signature.canonical]);
+  if (known?.rowCount) return {state:processing,applicability:"exact",...dates(known.rows[0])};
+  const similar = await db.query(`SELECT i.case_id FROM group_membership own
+    JOIN group_membership related ON (related.group_id,related.installation_id,related.owner_id)=(own.group_id,own.installation_id,own.owner_id)
+    JOIN bug_case c ON c.id=related.case_id AND c.review_state <> 'archived'
+    JOIN diagnostic_investigation i ON i.case_id=c.id AND i.case_revision=c.revision AND i.state='completed'
+    WHERE own.installation_id=$1 AND own.owner_id=$2 AND own.case_id=$3 AND related.case_id<>own.case_id
+    ORDER BY i.finished_at DESC,i.id DESC LIMIT 1`,[installationId,row.owner_id,row.id]);
+  return similar.rowCount ? {state:processing,applicability:"similar",case_id:similar.rows[0].case_id} : {state:processing,applicability:"none"};
+ }
+ const store = {
   report(p,input,validateNew){
    return mutation(p,"report",input,async db=>{
     await validateNew();
@@ -113,7 +138,7 @@ export function createStore(pool:Pool,options:Options):Store {
     return {request_id:input.request_id,review_id:reviewId,case_id:input.case_id,revision:input.expected_revision+1,review_state:input.review_state,verification_status:"unverified",registered_at:at};
    });
   },
-  async get(p,input){
+  async get(p,input,includeInvestigation=false){
    return transaction(async db=>{
     const row=await lookup(db,p,input.case_id);
     const report=await db.query("SELECT id,actor_id,observation,registered_at FROM report WHERE case_id=$1 AND owner_id=$2 AND installation_id=$3 ORDER BY registered_at,id LIMIT 1",[row.id,row.owner_id,installationId]);
@@ -121,7 +146,8 @@ export function createStore(pool:Pool,options:Options):Store {
     const cursor=cursors.decode(input.cursor,binding),limit=input.limit??20;
     const reviews=await db.query("SELECT id,actor_id,explanation,old_state,new_state,old_revision,new_revision,registered_at FROM review WHERE case_id=$1 AND installation_id=$2 AND ($3::timestamptz IS NULL OR (registered_at,id)<($3::timestamptz,$4::uuid)) ORDER BY registered_at DESC,id DESC LIMIT $5",[row.id,installationId,cursor?.at??null,cursor?.id??null,limit+1]);
     const items=reviews.rows.slice(0,limit).map(dates),last=items.at(-1);
-    return {case:dates(row),report:dates(report.rows[0]),reviews:{items,next_cursor:reviews.rows.length>limit&&last?cursors.encode({at:last.registered_at,id:last.id,binding}):null}};
+    const result = {case:dates(row),report:dates(report.rows[0]),reviews:{items,next_cursor:reviews.rows.length>limit&&last?cursors.encode({at:last.registered_at,id:last.id,binding}):null}};
+    return includeInvestigation ? {...result,investigation:await investigation(db,row,report.rows[0].observation)} : result;
    },true);
   },
   async list(p,input,operator){
@@ -151,5 +177,58 @@ export function createStore(pool:Pool,options:Options):Store {
     return {ready:true,schema_version:1};
    }catch{throw new Fault("DATABASE_UNAVAILABLE");}
   },
+ } satisfies Store;
+ async function finish(p:Principal,operation:"complete"|"fail",request:unknown) {
+  validateInvestigation(operation,request);
+  const input = request as Complete|Fail;
+  return mutation(p,"diagnostic-"+operation,input,async db=>{
+   const found = await db.query(`SELECT i.*,c.revision,c.review_state,r.observation FROM diagnostic_investigation i
+     JOIN bug_case c ON c.id=i.case_id JOIN report r ON r.case_id=c.id
+     WHERE i.id=$1 AND i.installation_id=$2 AND i.owner_id=$3 AND i.actor_id=$4 FOR UPDATE OF c,i`,
+    [input.investigation_id,installationId,p.ownerId,p.actorId]);
+   if (!found.rowCount) throw new Fault("NOT_FOUND");
+   const row = found.rows[0];
+   if (row.state !== "running") throw new Fault("REVISION_CONFLICT");
+   const result = "result" in input ? input.result : null;
+   if (result && (row.case_revision !== row.revision || row.review_state === "archived")) throw new Fault("REVISION_CONFLICT");
+   const claimedVersions = ["component_version","commit_sha","deployment_revision"] as const;
+   const specified = claimedVersions.filter(key=>row.observation[key]?.trim() && row.observation[key].trim().toLowerCase() !== "unknown");
+   const sameVersion = specified.length > 0 && specified.every(key=>row.observation[key] === result?.scope[key]);
+   const state = result ? "completed" : "failed";
+   await db.query(`UPDATE diagnostic_investigation SET state=$2,result=$3,finished_at=clock_timestamp(),
+     signature_hash=CASE WHEN $4 THEN signature_hash END,signature_canonical=CASE WHEN $4 THEN signature_canonical END WHERE id=$1`,
+    [row.id,state,result,sameVersion && result?.verdict !== "insufficient_evidence"]);
+   return {investigation_id:row.id,case_id:row.case_id,state};
+  });
+ }
+ return {...store,
+  async investigationForReport(p:Principal,caseId:string,input:ReportInput) {
+   return transaction(async db=>investigation(db,await lookup(db,p,caseId),input.observation),true);
+  },
+  getWithInvestigation(p:Principal,input:GetInput) {return store.get(p,input,true);},
+  async claimInvestigation(p:Principal,request:unknown) {
+   validateInvestigation("claim",request);
+   const input = request as Claim;
+   return mutation(p,"diagnostic-claim",input,async db=>{
+    if (input.case_id) await lookup(db,{...p,reviewer:false},input.case_id);
+    const selected = await db.query(`SELECT c.id,c.revision,r.observation,r.registered_at FROM bug_case c JOIN report r ON r.case_id=c.id
+      WHERE c.installation_id=$1 AND c.owner_id=$2 AND c.review_state <> 'archived'
+        AND ($3::uuid IS NULL OR c.id=$3) AND ($4::text IS NULL OR c.component_id=$4)
+        AND NOT EXISTS (SELECT 1 FROM diagnostic_investigation i WHERE i.case_id=c.id
+          AND i.case_revision=c.revision AND i.state IN ('running','completed'))
+      ORDER BY (SELECT max(i.finished_at) FROM diagnostic_investigation i WHERE i.case_id=c.id
+        AND i.case_revision=c.revision AND i.state='failed') NULLS FIRST,
+        c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.ownerId,input.case_id??null,input.component??null]);
+    if (!selected.rowCount) return {state:"no_work"};
+    const {id:caseId,revision,observation,registered_at} = selected.rows[0];
+    const signature = exactSignature(installationId,p.ownerId,observation),id=randomUUID();
+    await db.query(`INSERT INTO diagnostic_investigation
+      (id,case_id,owner_id,installation_id,case_revision,actor_id,signature_hash,signature_canonical)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,[id,caseId,p.ownerId,installationId,revision,p.actorId,signature?.hash??null,signature?.canonical??null]);
+    const projection = prepareExternalProjection(observation,[p.ownerId]);
+    return {state:"running",investigation_id:id,case_id:caseId,case_revision:revision,component:observation.component_id??null,projection,registered_at};
+   });
+  },
+  finishInvestigation:finish,
  };
 }

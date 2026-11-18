@@ -358,6 +358,19 @@
         "retryable"
       ]
     },
+    "investigation_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["pending", "running", "failed", "processed", "unavailable"]},
+        "applicability": {"enum": ["none", "similar", "exact", "investigated"]},
+        "id": {"type": "string", "format": "uuid"},
+        "case_id": {"type": "string", "format": "uuid"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "result": {"type": "object"}
+      },
+      "required": ["state", "applicability"]
+    },
     "report_response": {
       "type": "object",
       "additionalProperties": false,
@@ -385,6 +398,9 @@
         },
         "replayed": {
           "type": "boolean"
+        },
+        "investigation": {
+          "$ref": "#/definitions/investigation_summary"
         }
       },
       "required": [
@@ -588,6 +604,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "investigation": {
+          "$ref": "#/definitions/investigation_summary"
+        },
         "case": {
           "$ref": "#/definitions/case_summary"
         },
