@@ -208,21 +208,12 @@
       "services/bug-hunt/dist/main.js",
       "services/bug-hunt/dist/migrate.js",
       "services/bug-hunt/dist/health.js",
-      "services/bug-hunt/dist/investigate.js",
-      "services/bug-hunt/dist/client.js",
       "services/bug-hunt/dist/verification-worker.js",
-      "services/bug-hunt/dist/verification-runner.js",
-      "services/bug-hunt/dist/verification-recipes.js",
-      "services/bug-hunt/runtime/qualification.mjs",
-      "services/bug-hunt/owner-rpc/helper.py",
-      "services/bug-hunt/owner-rpc/client.py"
+      "services/bug-hunt/dist/verification-runner.js"
     ],
     "smokeImports": [],
     "systemRequirements": [
-      "Node.js 24.22.1",
-      "Python 3 (stdlib only); accepted existing Codex credential owner",
-      "bubblewrap (host worker native sandbox and runner)",
-      "Private stdio Codex app-server with auth.command and dynamic tools"
+      "Node.js 24.22.1"
     ]
   },
   "deploy": {
