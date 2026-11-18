@@ -14,9 +14,11 @@ export function hermesTelegramBotUsername(value = process.env.BRAI_HERMES_TELEGR
   return username && /^[A-Za-z0-9_]{5,32}$/.test(username) ? username : null;
 }
 
-/** Включает экран наблюдения в DEV; Account выбирает личный административный или прежний общий источник. */
+/** Включает просмотр чатов в DEV и административный просмотр в RELEASE с личными профилями. */
 export function telegramObserverEnabled(): boolean {
-  return process.env.BRAI_ENVIRONMENT === "dev" && webAgentMode() === "hermes_telegram" && process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED !== "0";
+  if (webAgentMode() !== "hermes_telegram" || process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED === "0") return false;
+  return process.env.BRAI_ENVIRONMENT === "dev" ||
+    (process.env.BRAI_ENVIRONMENT === "release" && process.env.WEB_IDENTITY_MODE === "telegram");
 }
 
 /** Возвращает no-store 404 до обращения к выключенному DEV Agent. */
