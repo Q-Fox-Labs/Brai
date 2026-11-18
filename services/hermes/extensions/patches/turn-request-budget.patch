@@ -67,7 +67,7 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
  from agent.turn_scripted_prelude import Prelude, play_prelude
  # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
  # skewed phase mid-turn.
-@@ -1517,6 +1518,17 @@
+@@ -1517,6 +1518,19 @@
          except InterruptedError:
              if _run_phase(handle_api_interrupt, agent, s).action == "break":
                  return None
@@ -77,6 +77,8 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
 +            s.thinking_spinner = stop_thinking_spinner(agent, s.thinking_spinner)
 +            s._request_budget_error = str(api_error)
 +            s._request_budget_reason = api_error.reason
++            from agent.brai_turn_budget import failure_cause
++            s._request_budget_cause, s._request_budget_status = failure_cause(api_error)
 +            s._request_budget_delivered = settle_delivered_partial(agent, s.messages, s.current_turn_user_idx)
 +            s.final_response, _ = _with_delivered_partial(
 +                s._request_budget_error, s._request_budget_error, s._request_budget_delivered)
@@ -108,7 +110,7 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
              if _v.action == "continue":
                  continue
          except Exception as e:
-@@ -1699,6 +1712,14 @@
+@@ -1699,6 +1712,20 @@
          name: getattr(s, name)
          for name in inspect.signature(finalize_turn).parameters if name != "agent"
      })
@@ -116,8 +118,14 @@ diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
 +        result.update(error=s._request_budget_error, completed=False, failed=True, partial=True)
 +        reason = getattr(s, "_request_budget_reason", "retry_budget")
 +        result["brai_original_error"] = "TurnRequestBudgetExhausted: " + reason
-+        if reason in {"partial_emitted", "deadline"}:
-+            result["brai_failure_kind"] = "stream_drop" if reason == "partial_emitted" else "timeout"
++        cause = getattr(s, "_request_budget_cause", "")
++        if cause:
++            result["brai_original_error"] += "; cause=" + cause
++        status = getattr(s, "_request_budget_status", None)
++        if status is not None:
++            result["brai_http_status"] = status
++        if reason in {"partial_emitted", "deadline", "retry_limit"}:
++            result["brai_failure_kind"] = {"partial_emitted": "stream_drop", "deadline": "timeout", "retry_limit": "retry_limit"}[reason]
 +        if s._request_budget_delivered:
 +            result["brai_delivered_partial"] = s._request_budget_delivered
      if s._compression_timeout_exhausted:
@@ -291,7 +299,7 @@ diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,406 @@
 +# ABOUTME: Ограничивает дополнительные физические запросы одним пользовательским ходом.
 +# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
 +"""Общий бюджет Hermes: две дополнительные попытки, включая сжатие истории."""
@@ -330,6 +338,19 @@ new file mode 100644
 +        )
 +
 +
++def failure_cause(error):
++    """Вернуть только тип и HTTP-статус причины без текста запроса и секрета."""
++    seen = set()
++    current = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
++    while current is not None and id(current) not in seen:
++        seen.add(id(current))
++        if not isinstance(current, (TurnRequestBudgetExhausted, StopIteration)):
++            status = getattr(current, "status_code", None)
++            return type(current).__name__[:80], status if type(status) is int and 400 <= status <= 599 else None
++        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
++    return "", None
++
++
 +class TurnRequestBudget:
 +    """Владеть двумя дополнительными запросами на весь ход, включая worker threads."""
 +
@@ -362,7 +383,7 @@ new file mode 100644
 +                    reason="deadline", request_id=request_id, budget=self)
 +            if retry and (previous.emitted or self.spent >= 2):
 +                raise TurnRequestBudgetExhausted(
-+                    "Ответ провайдера прерван. Продолжите новым сообщением; история сохранена.",
++                    "Ответ провайдера прерван. Работа не завершена; история сохранена.",
 +                    reason="partial_emitted" if previous.emitted else "retry_limit",
 +                    request_id=request_id, budget=self,
 +                )
@@ -454,7 +475,7 @@ new file mode 100644
 +        with self.budget.lock:
 +            if self.emitted or self.budget.spent >= 2:
 +                raise TurnRequestBudgetExhausted(
-+                    "Ответ провайдера прерван. Продолжите новым сообщением; история сохранена.",
++                    "Ответ провайдера прерван. Работа не завершена; история сохранена.",
 +                    reason="partial_emitted" if self.emitted else "retry_limit",
 +                    request_id=self.request_id, budget=self.budget,
 +                )

@@ -257,6 +257,9 @@ class Worker:
                     generation = self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
                     self.delivery_journal.save_continuation(session_key, input_id, generation)
                 await runner.async_session_store.mark_resume_pending(session_key, 'brai_technical_failure')
+                logging.getLogger(__name__).info(
+                    'HERMES_FAILED_TURN_RECOVERY_MARKED session=%s binding=%s',
+                    session_key, input_id is not None and self.delivery_journal is not None)
 
         async def shape(result, source, history, entry, session_key, *args, **kwargs):
             guardrail = result.get('guardrail') if isinstance(result, dict) else None
@@ -343,6 +346,7 @@ class Worker:
                 event = MessageEvent(text='', message_type=MessageType.TEXT, source=source, internal=True)
                 runner._retain_background_task(asyncio.create_task(
                     self._resume_failed_turn(runner, adapter, event, entry.session_key, binding['input_id'])))
+                logging.getLogger(__name__).info('HERMES_FAILED_TURN_RECOVERY_STARTED session=%s', entry.session_key)
         except asyncio.CancelledError:
             raise
         except Exception as error:

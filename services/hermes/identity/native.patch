@@ -1006,15 +1006,18 @@ diff --git a/agent/redact.py b/agent/redact.py
      async def _session_housekeeping(self) -> None:
 --- a/gateway/return_notices.py
 +++ b/gateway/return_notices.py
-@@ -198,8 +198,12 @@
+@@ -198,8 +198,15 @@
          from gateway.run import _planned_restart_notification_path
 
          while self._running:
 -            if read_return_notices(_planned_restart_notification_path()) is not None:
 -                await self._replay_pending_planned_restart_notification()
 +            async with self._brai_release_source():
-+                if read_return_notices(_planned_restart_notification_path()) is not None:
-+                    await self._replay_pending_planned_restart_notification()
++                try:
++                    if read_return_notices(_planned_restart_notification_path()) is not None:
++                        await self._replay_pending_planned_restart_notification()
++                except Exception as error:
++                    logger.warning("Return notice remains pending error=%s", type(error).__name__)
 +                retry = getattr(self, "_brai_retry_failed_sessions", None)
 +                if callable(retry):
 +                    await retry()

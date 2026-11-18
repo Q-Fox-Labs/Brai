@@ -85,6 +85,34 @@ class PortableTurnBudgetTests(unittest.TestCase):
         self.assertEqual(physical.call_count, 3)
         self.assertEqual(self.state.spent, 2)
 
+    def test_retry_exhaustion_preserves_safe_cause_without_error_text(self):
+        class ProviderError(Exception):
+            status_code = 503
+        callback = self.budget.physical_callback(
+            Mock(side_effect=ProviderError('private request text')), {'api_request_id': 'same'})
+        for _ in range(2):
+            with self.assertRaises(ProviderError):
+                callback({})
+        with self.assertRaises(self.budget.TurnRequestBudgetExhausted) as raised:
+            callback({})
+        cause, status = self.budget.failure_cause(raised.exception)
+        self.assertEqual((cause, status), ('ProviderError', 503))
+        self.assertNotIn('private request text', cause)
+
+    def test_failure_cause_does_not_follow_suppressed_context(self):
+        class ProviderError(Exception):
+            status_code = 503
+        try:
+            try:
+                raise ValueError('unrelated')
+            except ValueError:
+                try:
+                    raise ProviderError('private') from None
+                except ProviderError as error:
+                    raise self.budget.TurnRequestBudgetExhausted('stop') from error
+        except self.budget.TurnRequestBudgetExhausted as error:
+            self.assertEqual(self.budget.failure_cause(error), ('ProviderError', 503))
+
     def test_nested_worker_does_not_reset_budget(self):
         @self.budget.turn_budget
         def nested():
@@ -470,6 +498,7 @@ class NativeTurnBudgetTests(unittest.TestCase):
             return value
         modules = {
             "agent": module("agent"),
+            "agent.brai_turn_budget": self.budget,
             "agent.turn_api_call": module("agent.turn_api_call", stop_thinking_spinner=api.stop_thinking_spinner),
             "agent.turn_recovery": module("agent.turn_recovery", **vars(recovery)),
             "agent.turn_truncation": module("agent.turn_truncation", collapse_continuation_trail=lambda *a, **kw: ""),
@@ -484,7 +513,7 @@ class NativeTurnBudgetTests(unittest.TestCase):
             if function is generic:
                 function()
             if function == "perform":
-                raise self.budget.TurnRequestBudgetExhausted("stopped")
+                raise self.budget.TurnRequestBudgetExhausted("stopped") from ConnectionError("private details")
             return types.SimpleNamespace(action="continue")
         native = native_nodes(
             self.engine, "agent/conversation_loop.py", {"_run_api_retry_loop"},
@@ -514,6 +543,8 @@ class NativeTurnBudgetTests(unittest.TestCase):
         with self.termination_helpers():
             self.assertIsNone(native._run_api_retry_loop(agent, state))
         self.assertEqual(state.final_response, "already visible\n\nstopped")
+        self.assertEqual(state._request_budget_cause, "ConnectionError")
+        self.assertIsNone(state._request_budget_status)
         self.assertTrue(state.failed)
         self.assertEqual(state.thinking_spinner, None)
         generic.assert_not_called()
