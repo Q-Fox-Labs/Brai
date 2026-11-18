@@ -331,7 +331,6 @@ class SystemTests(unittest.TestCase):
         self.assertTrue(config['streaming']['enabled'])
         self.assertTrue(config['display']['platforms']['telegram']['streaming'])
         self.assertTrue(config['display']['platforms']['telegram']['interim_assistant_messages'])
-        self.assertFalse(config['display']['platforms']['telegram']['long_running_notifications'])
         self.assertEqual(config['skills']['external_dirs'], ['/opt/brai-profile/system-skills/skills', '/opt/brai-profile/skills'])
         self.assertEqual(config['skills']['create_dir'], '/profiles/one/usercustom/userdata/skills')
         provider = config['tts']['providers']['silero']

@@ -133,8 +133,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         'browser': {'backend': 'browser-use'},
         'streaming': {'enabled': True, 'transport': 'auto'},
         'display': {'streaming': True, 'platforms': {'telegram': {
-            'streaming': True, 'interim_assistant_messages': True,
-            'long_running_notifications': False}}},
+            'streaming': True, 'interim_assistant_messages': True}}},
         'stt': stt_config(stt_model),
         'tts': {'provider': 'silero', 'providers': {'silero': {
             'type': 'command',

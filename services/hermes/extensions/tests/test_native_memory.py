@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет удаление файловой памяти на скомпонованном Hermes.
 # ABOUTME: Использует временные подмены зависимостей; MemOS и рабочие файлы не изменяет.
 import ast
+import importlib.util
 from contextlib import suppress
 import json
 import os
@@ -32,15 +33,31 @@ class DefaultsTests(unittest.TestCase):
         self.assertIs(settings['memory']['memory_enabled'], False)
         self.assertIs(settings['memory']['user_profile_enabled'], False)
         self.assertEqual(settings['memory']['nudge_interval'], 0)
-        self.assertEqual(settings['display']['memory_notifications'], 'off')
         # Имя группы memory нужно штатной инъекции инструментов внешнего provider.
         self.assertIn('memory', settings['platform_toolsets']['telegram'])
 
 
 @unittest.skipUnless(ENGINE, 'BRAI_NATIVE_ENGINE points to a composed pinned engine')
 class NativeMemoryTests(unittest.TestCase):
+    def test_telegram_progress_default_is_quiet_and_explicit_config_wins(self):
+        path = Path(ENGINE) / 'gateway/display_config.py'
+        spec = importlib.util.spec_from_file_location('brai_display_defaults_test', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        resolve = module.resolve_display_setting
+        self.assertIs(resolve({}, 'telegram', 'long_running_notifications'), False)
+        self.assertIs(resolve({'display': {'platforms': {'telegram': {'long_running_notifications': True}}}},
+                              'telegram', 'long_running_notifications'), True)
+        self.assertIs(resolve({}, 'discord', 'long_running_notifications'), True)
+
     def test_background_skill_and_memory_summaries_are_disabled(self):
-        settings = json.loads((ROOT / 'config/server-defaults.json').read_text())
+        tree = ast.parse((Path(ENGINE) / 'hermes_cli/config_defaults.py').read_text())
+        config = next(node.value for node in tree.body if isinstance(node, ast.Assign) and
+                      any(isinstance(target, ast.Name) and target.id == 'DEFAULT_CONFIG' for target in node.targets))
+        display = next(value for key, value in zip(config.keys, config.values) if isinstance(key, ast.Constant) and key.value == 'display')
+        notification = next(ast.literal_eval(value) for key, value in zip(display.keys, display.values)
+                            if isinstance(key, ast.Constant) and key.value == 'memory_notifications')
+        self.assertEqual(notification, 'off')
         defaults = tuple((name, default) for name, default in (
             ('action', '?'), ('target', 'memory'), ('content', ''), ('old_text', ''), ('name', ''),
             ('old_string', ''), ('new_string', '')))
@@ -57,7 +74,7 @@ class NativeMemoryTests(unittest.TestCase):
                     {'role': 'tool', 'tool_call_id': 'memory', 'content': json.dumps(
                         {'success': True, 'target': 'memory', 'message': 'Entry added'})}]
         self.assertEqual(review.summarize_background_review_actions(
-            messages, [], settings['display']['memory_notifications']), [])
+            messages, [], notification), [])
         self.assertEqual(len(review.summarize_background_review_actions(messages, [], 'on')), 2)
 
     def memory(self):

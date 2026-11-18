@@ -1590,3 +1590,27 @@ index e9819bc..800c70d 100644
          from gateway.run import _load_gateway_config, _platform_config_key
          _scfg = getattr(getattr(self, "config", None), "streaming", None)
          # #60671 — streaming TTS consumer is created on the outer event-loop thread before run_sync
+
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -859,7 +859,7 @@
+         # Background self-improvement notices in chat: "off" (review still runs) | "on" (generic "💾
+         # Memory updated") | "verbose" (content preview). Per-platform via
+         # display.platforms.<platform>.memory_notifications.
+-        "memory_notifications": "on",
++        "memory_notifications": "off",
+         # Gateway notices when a terminal(background=true) process finishes: "concise" (one line;
+         # failures append an output tail) | "all" (running updates + final raw output) | "result"
+         # (final raw only) | "error" (raw only on non-zero exit) | "off".
+
+--- a/gateway/display_config.py
++++ b/gateway/display_config.py
+@@ -51,7 +51,7 @@
+ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
+     # Mobile inbox: quiet tool_progress / busy-ack, but keep interim commentary and heartbeats so it
+     # doesn't look like "typing..." for 30 minutes.
+-    "telegram": {**_TIER_HIGH, "tool_progress": "off", "busy_ack_detail": False},
++    "telegram": {**_TIER_HIGH, "tool_progress": "off", "long_running_notifications": False, "busy_ack_detail": False},
+     "discord": {**_TIER_HIGH, "reasoning_style": "subtext"},  # "-# " subtext reads as metadata
+     # Slack: Bolt posts cannot be edited like CLI; "new"/"all" spam permanent lines.
+     "slack": {**_TIER_MEDIUM, "tool_progress": "off", "long_running_notifications": False, "busy_ack_detail": False},
