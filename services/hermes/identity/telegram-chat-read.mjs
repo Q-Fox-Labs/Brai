@@ -3,6 +3,7 @@
 import { join, isAbsolute } from 'node:path';
 
 const safe = value => Number.isSafeInteger(value) && value >= 0;
+const archiveBoundary = 2 ** 53;
 const ref = value => {
   if (!value || !/^[0-9a-f-]{36}$/i.test(value.artifactId) || typeof value.filename !== 'string' || typeof value.mimeType !== 'string') return null;
   return Object.fromEntries(['artifactId', 'filename', 'mimeType', 'sizeBytes', 'sha256', 'width', 'height'].filter(key => value[key] !== undefined).map(key => [key, value[key]]));
@@ -49,12 +50,13 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
       page = snapshot(target, db => {
         let before, after;
         if (cursor) {
-          const match = /^(before|changes):([0-9]+)$/.exec(cursor);
-          if (!match || !safe(Number(match[2]))) throw new Error('INVALID_CURSOR');
+          const match = /^(before|changes):(-?[0-9]+)$/.exec(cursor);
+          if (!match || !Number.isSafeInteger(Number(match[2])) ||
+             (match[1] === 'changes' && !safe(Number(match[2])))) throw new Error('INVALID_CURSOR');
           if (match[1] === 'before') before = Number(match[2]); else after = Number(match[2]);
         }
         if (operation === 'admin-chats-list') {
-          if (after !== undefined) throw new Error('INVALID_CURSOR');
+          if (after !== undefined || before < 0) throw new Error('INVALID_CURSOR');
           const rows = db.prepare(`SELECT chat,thread,MAX(id) AS last,
             (SELECT name FROM messages m WHERE m.chat=a.chat AND m.direction='in' ORDER BY id DESC LIMIT 1) AS name,
             (SELECT username FROM messages m WHERE m.chat=a.chat AND m.direction='in' ORDER BY id DESC LIMIT 1) AS username,
@@ -67,6 +69,9 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
         }
         const route = JSON.parse(id);
         if (!Array.isArray(route) || route.length !== 2 || route.some(value => typeof value !== 'string')) throw new Error('INVALID_CHAT');
+        const retired = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='retired_telegram_bot'").get() &&
+          db.prepare('SELECT 1 FROM retired_telegram_bot WHERE id=1').get());
+        if (before < 0 && !retired) throw new Error('INVALID_CURSOR');
         const through = db.prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM changes').get().seq;
         const rows = after === undefined
           ? db.prepare('SELECT * FROM messages WHERE chat=? AND thread=? AND CAST(telegram_id AS INTEGER)<? ORDER BY CAST(telegram_id AS INTEGER) DESC LIMIT ?').all(...route, before ?? Number.MAX_SAFE_INTEGER, limit + 1)
@@ -74,9 +79,11 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
         const selected = rows.slice(0, limit);
         const next = rows.length > limit ? (after === undefined ? 'before:' + selected.at(-1).telegram_id : 'changes:' + selected.at(-1).seq) : null;
         const updatesCursor = 'changes:' + (after === undefined || !next ? through : selected.at(-1).seq);
-        return { source: 'telegram', _changes: after !== undefined, messages: (after === undefined ? selected.reverse() : selected).map(row => ({
+        return { source: 'telegram', _changes: after !== undefined, _retired: retired, messages: (after === undefined ? selected.reverse() : selected).map(row => ({
           id: String(row.telegram_id), _seq: row.seq, role: row.direction === 'in' ? 'user' : 'assistant', text: row.text, createdAt: row.at || '',
-          authorName: row.name, authorUsername: row.username, telegramId: row.telegram_id, messageType: row.kind,
+          authorName: row.name, authorUsername: row.username,
+          telegramId: retired && Number(row.telegram_id) < 0 ? String(archiveBoundary + Number(row.telegram_id)) : row.telegram_id,
+          messageType: row.kind,
           editedAt: row.edited || null, deleted: row.deleted === 1, ...(row.rich && row.rich !== 'null' ? { richMessage: JSON.parse(row.rich) } : {}), attachments: JSON.parse(row.attachments).map(ref).filter(Boolean),
           attachmentState: 'none', chat: row.chat, thread: row.thread
         })), nextCursor: next, updatesCursor };
@@ -93,9 +100,11 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
     if (incoming.length) {
       try {
         snapshot({ ...profile, home: join(profile.home, 'brai-files') }, db => {
+          const liveFileAccount = 'release:' + profile.profileId + ':';
           const query = db.prepare(`SELECT ref FROM items WHERE artifact IS NOT NULL AND ref IS NOT NULL
             AND json_extract(source,'$.platform')='telegram' AND json_extract(source,'$.chat')=?
             AND json_extract(source,'$.thread') IN (?,?)
+            AND (?=0 OR (substr(COALESCE(json_extract(source,'$.account'),''),1,?)=?)=?)
             AND (json_extract(source,'$.messageId')=? OR (
               json_type(source,'$.messageId') IS NULL
               AND json_extract(source,'$.itemId') GLOB ?
@@ -105,7 +114,8 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
             // AIDEV-NOTE: Личный FileStore сохраняет message:attachment в itemId;
             // прежний общий gateway дополнительно сохранял messageId. Не связываем
             // файлы по имени, подписи, соседнему сообщению или ключу альбома.
-            for (const row of query.all(message.chat, message.thread, message.thread || '1', message.telegramId,
+            for (const row of query.all(message.chat, message.thread, message.thread || '1', Number(page._retired),
+              liveFileAccount.length, liveFileAccount, Number(Number(message.id) > 0), message.telegramId,
               message.telegramId + ':[0-9]*', message.telegramId)) {
               const file = ref(JSON.parse(row.ref));
               if (file && !message.attachments.some(item => item.artifactId === file.artifactId)) message.attachments.push(file);
@@ -124,6 +134,7 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
       if (page._changes) page.updatesCursor = page.nextCursor;
     }
     delete page._changes;
+    delete page._retired;
     for (const message of page.messages ?? []) delete message._seq;
     if (Buffer.byteLength(JSON.stringify(page)) > 900000) throw new Error('PAYLOAD_TOO_LARGE');
     return page;

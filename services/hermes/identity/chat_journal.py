@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import time
@@ -109,6 +110,33 @@ class IdentityJournal:
             db.execute('ALTER TABLE chat_pauses ADD COLUMN resume_after INTEGER NOT NULL DEFAULT 0')
             db.commit()
         return db
+
+    @staticmethod
+    def retire_bot(db, bot_id):
+        """Retain history in an offline journal copy before a different bot starts."""
+        if not isinstance(bot_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', bot_id):
+            raise ValueError('INVALID_RETIRED_BOT')
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('CREATE TABLE IF NOT EXISTS retired_telegram_bot (id INTEGER PRIMARY KEY CHECK(id=1), bot_id TEXT NOT NULL)')
+            previous = db.execute('SELECT bot_id FROM retired_telegram_bot WHERE id=1').fetchone()
+            if previous:
+                if previous[0] != bot_id:
+                    raise ValueError('RETIRED_BOT_ALREADY_BOUND')
+                return
+            # Message IDs are positive. The archive keeps order in the distinct
+            # negative range that JS can represent exactly. Row and change IDs stay stable.
+            boundary = 2**53
+            for (value,) in db.execute('SELECT telegram_id FROM messages'):
+                if not re.fullmatch(r'[1-9][0-9]{0,15}', value) or int(value) >= boundary:
+                    raise ValueError('INVALID_ORIGINAL_TELEGRAM_ID')
+            db.execute('UPDATE messages SET telegram_id=CAST(CAST(telegram_id AS INTEGER)-? AS TEXT)', (boundary,))
+            # The pause and its generation remain in effect. The old bot's number
+            # cutoffs and admissions cannot authorize or reject the new bot's messages.
+            db.execute('UPDATE chat_pauses SET discard_through=0')
+            db.execute('DELETE FROM chat_admissions')
+            db.execute('DELETE FROM chat_presentations')
+            db.execute('INSERT INTO retired_telegram_bot VALUES(1,?)', (bot_id,))
 
     @staticmethod
     def _chat_state(row):

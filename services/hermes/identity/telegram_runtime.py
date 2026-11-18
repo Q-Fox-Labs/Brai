@@ -319,7 +319,7 @@ class Resolver:
         for path in self.journal.root.glob('*/telegram.sqlite3'):
             with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages' AND type='table'").fetchone():
-                    chats.update(str(row[0]) for row in db.execute("SELECT DISTINCT chat FROM messages WHERE thread<>'' OR chat LIKE '-%'"))
+                    chats.update(str(row[0]) for row in db.execute("SELECT DISTINCT chat FROM messages WHERE CAST(telegram_id AS INTEGER)>0 AND (thread<>'' OR chat LIKE '-%')"))
         return {int(chat) for chat in chats if re.fullmatch(r'-?[1-9][0-9]*', chat)}
 
     async def _clear_command_scope(self, scope, key):
