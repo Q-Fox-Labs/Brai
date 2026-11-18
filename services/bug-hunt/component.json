@@ -199,7 +199,6 @@
       "services/bug-hunt/recipes",
       "services/bug-hunt/owner-rpc/helper.py",
       "services/bug-hunt/owner-rpc/client.py",
-      "services/bug-hunt/owner-rpc/openrpc.json",
       "services/bug-hunt/runtime",
       "services/bug-hunt/owner-rpc/README.md"
     ],
