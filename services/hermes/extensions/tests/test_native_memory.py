@@ -1,4 +1,4 @@
-# ABOUTME: Проверяет удаление файловой памяти на скомпонованном Hermes.
+# ABOUTME: Проверяет поведение памяти, фоновых уведомлений и поиска на скомпонованном Hermes.
 # ABOUTME: Использует временные подмены зависимостей; MemOS и рабочие файлы не изменяет.
 import ast
 import importlib.util
@@ -76,6 +76,42 @@ class NativeMemoryTests(unittest.TestCase):
         self.assertEqual(review.summarize_background_review_actions(
             messages, [], notification), [])
         self.assertEqual(len(review.summarize_background_review_actions(messages, [], 'on')), 2)
+
+    def test_search_only_provider_does_not_replace_extract_provider(self):
+        tree = ast.parse((Path(ENGINE) / 'tools/web_tools.py').read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_get_extract_backend')
+        scope = {'NOUS_MANAGED_PROVIDER': 'nous'}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), 'web_tools.py', 'exec'), scope)
+        for selections, backend, expected in [
+            ({}, 'codex-cli', 'firecrawl'),
+            ({'extract_backend': 'exa'}, 'codex-cli', 'exa'),
+            ({'extract_backend': 'nous'}, 'codex-cli', 'firecrawl'),
+            ({'backend': 'codex-cli'}, 'codex-cli', 'codex-cli'),
+            ({}, 'exa', 'exa'),
+        ]:
+            with self.subTest(selections=selections, backend=backend):
+                scope['_configured_backend'] = lambda key='backend': selections.get(key)
+                scope['_get_backend'] = lambda: backend
+                self.assertEqual(scope['_get_extract_backend'](), expected)
+
+    def test_review_notifications_default_off_and_explicit_setting_wins(self):
+        tree = ast.parse((Path(ENGINE) / 'gateway/run_turn_runner.py').read_text())
+        function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                        and n.name == '_wire_turn_agent_callbacks')
+        start = next(i for i, n in enumerate(function.body) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == 'mem_notif' for t in n.targets))
+        body = function.body[start:start + 3]
+        self.assertTrue(any(isinstance(t, ast.Attribute) and t.attr == 'memory_notifications'
+                            for t in body[-1].targets))
+        code = compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), 'review.py', 'exec')
+        for display, expected in [({}, 'off'), ({'memory_notifications': False}, 'off'),
+                                  ({'memory_notifications': True}, 'on'),
+                                  ({'memory_notifications': 'verbose'}, 'verbose')]:
+            with self.subTest(display=display):
+                agent = types.SimpleNamespace()
+                exec(code, {'ctx': types.SimpleNamespace(user_config={'display': display}), 'agent': agent})
+                self.assertEqual(agent.memory_notifications, expected)
+
 
     def memory(self):
         return functions('tools/memory_tool.py', {'get_builtin_memory_store_flags', 'memory_tool', 'check_memory_requirements'},

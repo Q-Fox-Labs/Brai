@@ -1614,3 +1614,29 @@ index e9819bc..800c70d 100644
      "discord": {**_TIER_HIGH, "reasoning_style": "subtext"},  # "-# " subtext reads as metadata
      # Slack: Bolt posts cannot be edited like CLI; "new"/"all" spam permanent lines.
      "slack": {**_TIER_MEDIUM, "tool_progress": "off", "long_running_notifications": False, "busy_ack_detail": False},
+--- a/tools/web_tools.py
++++ b/tools/web_tools.py
+@@ -188,7 +188,13 @@
+     """Backend for web_extract: ``web.extract_backend`` (strict, no probe) > ``web.backend`` > autodetect.
+     A ``nous`` pin is managed Firecrawl; the client picks the gateway route for that capability."""
+     pin = _configured_backend("extract_backend")
+-    return "firecrawl" if pin == NOUS_MANAGED_PROVIDER else pin or _get_backend()
++    if pin:
++        return "firecrawl" if pin == NOUS_MANAGED_PROVIDER else pin
++    backend = _get_backend()
++    # AIDEV-NOTE: Codex CLI supplies search only; keep explicit extract choices intact.
++    if backend == "codex-cli" and not _configured_backend():
++        return "firecrawl"
++    return backend
+ 
+ 
+ def _ddgs_package_importable() -> bool:
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1292,5 +1292,5 @@
+         mem_notif = (ctx.user_config.get("display") or {}).get("memory_notifications")
+         if isinstance(mem_notif, bool):
+             mem_notif = "on" if mem_notif else "off"
+-        agent.memory_notifications = str(mem_notif).lower() if mem_notif else "on"
++        agent.memory_notifications = str(mem_notif).lower() if mem_notif else "off"
+         agent.clarify_callback = self._clarify_callback_sync
