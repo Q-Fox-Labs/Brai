@@ -32,6 +32,46 @@ TOOL_POLICY = json.loads((Path(__file__).with_name('tool-policy.json')).read_tex
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
 
+# AIDEV-NOTE: В журнал попадают только заранее утверждённые категории; текст ошибки может содержать данные.
+_INGRESS_DENIAL_CODES = {
+    'Another turn active': 'turn_conflict',
+    'Turn unavailable': 'turn_unavailable',
+    'Owner input changed': 'input_changed',
+    'Telegram account binding changed': 'binding_changed',
+    'Telegram binding changed': 'binding_changed',
+    'Invitation required': 'identity_unavailable',
+    'Profile unavailable': 'profile_unavailable',
+    'Principal mismatch': 'principal_mismatch',
+    'Principal changed': 'principal_changed',
+    'Role unavailable': 'role_unavailable',
+    'Control rejected request': 'control_rejected',
+    'Login delivery state unavailable': 'receipt_store_unavailable',
+}
+_INGRESS_TRACE_KEY = os.urandom(32)
+
+
+def ingress_failure_details(method, params, error):
+    """Вернуть только безопасную категорию и привязки в пределах жизни broker."""
+    if method not in ('ingress.admit', 'ingress.close'):
+        return {}
+    detail = {}
+    if isinstance(error, PermissionError):
+        message = error.args[0] if len(error.args) == 1 and isinstance(error.args[0], str) else None
+        detail['ingress_reason'] = _INGRESS_DENIAL_CODES.get(message, 'permission_unknown')
+    diagnostic = getattr(error, 'diagnostic', None)
+    if isinstance(diagnostic, dict):
+        filtered = safe_failure(**{key: diagnostic.get(key) for key in ('reason', 'stage')})
+        detail['control_reason'] = filtered['reason']
+        detail['control_stage'] = filtered['stage']
+    subject = params.get('expectedUid') if method == 'ingress.admit' else params.get('uid')
+    turn = params.get('turnId')
+    for name, value in (('subject_ref', subject), ('turn_ref', turn), ('input_ref', params.get('inputId'))):
+        if type(value) is int and 0 < value < 10**20:
+            value = str(value)
+        if isinstance(value, str) and 0 < len(value) <= 128:
+            detail[name] = hashlib.blake2s(value.encode('utf-8', 'surrogatepass'), key=_INGRESS_TRACE_KEY, digest_size=8).hexdigest()
+    return detail
+
 
 def protected_json(path):
     """Прочитать неизменяемую операторскую конфигурацию без symlink."""
@@ -614,6 +654,9 @@ class Broker:
                 return profile
             uid = params.get('uid')
             turn = self.turns.get(uid)
+            # AIDEV-NOTE: Потерянный ответ на уже выполненный close допускает безопасный повтор.
+            if not turn and method == 'ingress.close':
+                return {'closed': True}
             if not turn or turn['turnId'] != params.get('turnId'):
                 raise PermissionError('Turn unavailable')
             if 'inputId' in params and params['inputId'] != turn['inputId']:
@@ -1060,7 +1103,8 @@ async def rpc_request(broker, uid, request):
                 # Только тип и errno: исходный текст может содержать ключ или данные владельца.
                 sys.stderr.write(json.dumps({'event': 'identity_request_failed', 'method': method,
                     'error': type(error).__name__, 'cause': type(cause).__name__,
-                    'errno': getattr(cause, 'errno', None)}) + '\n')
+                    'errno': getattr(cause, 'errno', None),
+                    **ingress_failure_details(method, params, error)}) + '\n')
                 response = rpc_error(identifier, -32001, 'Request unavailable')
                 data = getattr(error, 'diagnostic', None)
                 response['error']['data'] = (safe_failure(**{k: data.get(k) for k in ('reason', 'stage')})

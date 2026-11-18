@@ -294,6 +294,7 @@ class Resolver:
             self.mirror.reconcile_delivery = self.reconcile_delivery
         self.ready_profiles = set()
         self.bridges, self.turns = {}, {}
+        self.turn_locks = {}
         self.ledger = ledger if ledger is not None else RouteLedger()
         self.reply_outbox = None
         if self.mirror is not None and self.mirror.restartable:
@@ -494,6 +495,7 @@ class Resolver:
                     peer = await bridge.connect()
                     await peer.call('health', {'require_tools': True}, timeout=240)
                     self.ready_profiles.add(profile['uid'])
+                    await self.retry_pending_close(profile, bridge)
                     if self.mirror is not None and self.mirror.restartable:
                         turn = self.turns.get(profile['uid'])
                         if turn is not None and turn.get('delivery'):
@@ -571,6 +573,14 @@ class Resolver:
                 return False
         turn = self.turns.get(profile['uid'])
         return turn is None or turn['route'] == route
+
+    async def retry_pending_close(self, profile, bridge):
+        """Повторять лишь завершение хода, у которого нет активного dispatch/worker."""
+        async with self.turn_locks.setdefault(profile['uid'], asyncio.Lock()):
+            turn = self.turns.get(profile['uid'])
+            if (turn and turn.get('closePending') == (turn.get('inputId'), turn.get('workerTurnId'))
+                    and not bridge.dispatch_inflight and not bridge.known_turns):
+                await self._end(profile, turn.get('workerTurnId'))
 
     async def reconcile_delivery(self, profile, binding):
         """Сверить факт приёма worker после потерянного RPC receipt."""
@@ -701,6 +711,13 @@ class Resolver:
         return active
 
     async def prepare(self, profile, event):
+        async with self.turn_locks.setdefault(profile['uid'], asyncio.Lock()):
+            turn = self.turns.get(profile['uid'])
+            if turn and turn.get('closePending') == (turn.get('inputId'), turn.get('workerTurnId')):
+                await self._end(profile, turn.get('workerTurnId'))
+            return await self._prepare(profile, event)
+
+    async def _prepare(self, profile, event):
         """Допустить только личный чат владельца и скопировать его media в профиль."""
         if (getattr(event.source, 'chat_type', '') != 'dm'
                 or str(event.source.chat_id) != str(profile['telegramId'])):
@@ -735,6 +752,7 @@ class Resolver:
             'accountRefused': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
                 ('нет', 'отмена', 'не подтверждаю', 'не разрешаю', 'не подключай', 'не отвязывай'),
             **({'threadId': int(route[1])} if route[1] else {})})
+        turn.pop('closePending', None)
         self.ledger.admit(profile, route, turn['metadata'], str(event.message_id))
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
@@ -1180,14 +1198,30 @@ class Resolver:
 
     async def end(self, profile, worker_turn):
         """Погасить доверенное право входа после завершения соответствующего хода."""
+        async with self.turn_locks.setdefault(profile['uid'], asyncio.Lock()):
+            await self._end(profile, worker_turn)
+
+    async def _end(self, profile, worker_turn):
         uid = profile['uid']
         turn = self.turns.get(uid)
         if turn and turn.get('workerTurnId') == worker_turn:
-            self.turns.pop(uid, None)
+            input_id = turn.get('inputId')
             receipt = turn.get('questionReceipt') or {}
-            await broker_call('ingress.close', {'uid': uid, 'turnId': turn['id'],
-                **({'inputId': turn['inputId']} if turn.get('inputId') else {}),
-                **(receipt if receipt.get('inputId') == turn.get('inputId') else {})})
+            try:
+                closed = await broker_call('ingress.close', {'uid': uid, 'turnId': turn['id'],
+                    **({'inputId': input_id} if input_id else {}),
+                    **(receipt if receipt.get('inputId') == input_id else {})})
+                if not isinstance(closed, dict) or closed.get('closed') is not True:
+                    raise ConnectionError('Broker close receipt unavailable')
+            except BaseException:
+                if (self.turns.get(uid) is turn and turn.get('inputId') == input_id
+                        and turn.get('workerTurnId') == worker_turn):
+                    turn['closePending'] = (input_id, worker_turn)
+                raise
+            # AIDEV-NOTE: Новый input может поступить, пока broker подтверждает старый close.
+            if (self.turns.get(uid) is turn and turn.get('inputId') == input_id
+                    and turn.get('workerTurnId') == worker_turn):
+                self.turns.pop(uid, None)
 
 
 def create_resolver(adapter, runner):

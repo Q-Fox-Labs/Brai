@@ -967,6 +967,54 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             {'jsonrpc': '2.0', 'method': 'tools.list'})
         self.assertIsNone(notification)
 
+    async def test_ingress_denials_log_exact_safe_reason_without_payload(self):
+        import io
+        params = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
+                  'turnId': 'old-turn', 'inputId': 'a' * 64, 'expectedUid': WORKER_UID}
+        await self.broker.call(INGRESS_UID, 'ingress.admit', params)
+        scenarios = [
+            ('ingress.admit', {**params, 'turnId': 'new-turn', 'accountAnswer': 'PRIVATE CONTENT'}, 'turn_conflict'),
+            ('ingress.close', {'uid': WORKER_UID, 'turnId': 'wrong-turn', 'inputId': 'a' * 64}, 'turn_unavailable'),
+            ('ingress.close', {'uid': WORKER_UID, 'turnId': 'old-turn', 'inputId': 'b' * 64}, 'input_changed'),
+        ]
+        subjects = []
+        for method, values, reason in scenarios:
+            with self.subTest(reason=reason), mock.patch('sys.stderr', new_callable=io.StringIO) as logs:
+                response = await broker_module.rpc_request(self.broker, INGRESS_UID, {
+                    'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': values})
+                self.assertEqual(response['error']['code'], -32001)
+                record = json.loads(logs.getvalue())
+                self.assertEqual(record['ingress_reason'], reason)
+                self.assertNotIn('PRIVATE CONTENT', logs.getvalue())
+                self.assertNotIn(values['turnId'], logs.getvalue())
+                self.assertNotIn('111222', logs.getvalue())
+                self.assertEqual(len(record['turn_ref']), 16)
+                subjects.append(record['subject_ref'])
+        self.assertEqual(len(set(subjects)), 1)
+        self.assertEqual(self.broker.turns[WORKER_UID]['turnId'], 'old-turn')
+
+    async def test_unknown_permission_text_does_not_enter_ingress_logs(self):
+        import io
+        port = SimpleNamespace(call=mock.AsyncMock(side_effect=PermissionError('SECRET IN REJECTION')))
+        params = {'uid': WORKER_UID, 'turnId': 'test-turn'}
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as logs:
+            await broker_module.rpc_request(port, INGRESS_UID, {
+                'jsonrpc': '2.0', 'id': 1, 'method': 'ingress.close', 'params': params})
+            record = json.loads(logs.getvalue())
+        self.assertEqual(record['ingress_reason'], 'permission_unknown')
+        self.assertNotIn('SECRET', json.dumps(record))
+        self.assertNotIn('test-turn', json.dumps(record))
+
+    async def test_ingress_logging_survives_invalid_unicode(self):
+        import io
+        port = SimpleNamespace(call=mock.AsyncMock(side_effect=PermissionError('Turn unavailable')))
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as logs:
+            response = await broker_module.rpc_request(port, INGRESS_UID, {
+                'jsonrpc': '2.0', 'id': 1, 'method': 'ingress.close',
+                'params': {'uid': WORKER_UID, 'turnId': '\ud800'}})
+        self.assertEqual(response['error']['code'], -32001)
+        self.assertEqual(json.loads(logs.getvalue())['ingress_reason'], 'turn_unavailable')
+
     async def test_repeated_ingress_admit_preserves_suppression_and_request_id(self):
         self.control.role = 'creator'
         params = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True, 'turnId': 'same'}
