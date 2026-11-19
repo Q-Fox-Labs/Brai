@@ -7,7 +7,6 @@ import { createArtifactsPort, type ArtifactsPort } from './attachments.js';
 import { createCodex } from './codex.js';
 import { openReadState } from './read-state.js';
 import { createApplication, type Config } from './application.js';
-import { suggestTopic } from './title.js';
 import { subjects, bytes, limits } from '../contracts/index.mjs';
 import type { Command, EventEnvelope } from '../contracts/index.mjs';
 /** Запускает собственные подключения; рестарт agent не перезапускает app-server. */
@@ -116,33 +115,6 @@ export async function startAgent(config: Config) {
     void drain();
   }, artifactsPort, resultsPort, readState);
   const codes: Record<string, number> = { INVALID_ARGUMENT: 400, REQUEST_TOO_LARGE: 413, ITEM_TOO_LARGE: 413, STALE_GENERATION: 409, STALE_ITEM: 409, STALE_REQUEST: 409, OPERATION_CONFLICT: 409, CAPACITY_EXHAUSTED: 503, UPSTREAM_UNAVAILABLE: 503, TIMEOUT: 504, NOT_FOUND: 404, UNSUPPORTED: 501 };
-  // AIDEV-NOTE: Отдельный subject выдаётся только доверенному identity control;
-  // он не открывает вызывающему остальные команды Codex.
-  service.addEndpoint('topic-suggest', { subject: subjects.topicSuggest, handler: (_error, message) => {
-    void (async () => {
-      let admitted = false;
-      try {
-        if (message.data.length > limits.input) throw new Error('REQUEST_TOO_LARGE');
-        if (activeRequests >= limits.pending) throw new Error('CAPACITY_EXHAUSTED');
-        activeRequests++; admitted = true;
-        const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(message.data));
-        if (!input || typeof input !== 'object' || Array.isArray(input) ||
-            Object.keys(input).sort().join(',') !== 'icons,request' ||
-            typeof input.request !== 'string' || !input.request.trim() || !Array.isArray(input.icons) ||
-            !input.icons.length || input.icons.some((icon: any) => !icon ||
-              Object.keys(icon).sort().join(',') !== 'emoji,id' ||
-              typeof icon.id !== 'string' || !/^[0-9]+$/.test(icon.id) ||
-              typeof icon.emoji !== 'string' || !icon.emoji)) throw new Error('INVALID_ARGUMENT');
-        if (codex.status().connection !== 'connected' || codex.status().authorization !== 'ready') throw new Error('UPSTREAM_UNAVAILABLE');
-        const result = await suggestTopic(codex, input.request, input.icons);
-        message.respond(Buffer.from(JSON.stringify(result)));
-      } catch (error: any) {
-        const code = ['INVALID_ARGUMENT', 'REQUEST_TOO_LARGE', 'CAPACITY_EXHAUSTED'].includes(error?.message) ? error.message : 'UPSTREAM_UNAVAILABLE';
-        const h = headers(); h.set(ServiceErrorHeader, code); h.set(ServiceErrorCodeHeader, String(codes[code]));
-        message.respond(Buffer.from(JSON.stringify({ code, outcome: 'unknown' })), { headers: h });
-      } finally { if (admitted) activeRequests--; }
-    })();
-  } });
   service.addEndpoint('rpc', { subject: subjects.rpc, handler: (_error, message) => {
     void (async () => {
       let admitted = false;

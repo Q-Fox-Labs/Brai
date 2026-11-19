@@ -74,21 +74,6 @@ test('control hides publisher from worker and routes private artifact operation 
  await assert.rejects(privateCall(runtime,'artifacts.publish',{uid:1002,path:'/stage/1001/file',requestId:'r'}),/FORBIDDEN/);
 });
 
-test('topic suggestion requires live profile before and after generation',async()=>{
- const profile={userId:'u1',profileId:'p1',telegramId:'42',status:'active'};
- const registry=async()=>({version:1,profiles:{'1001':profile}});
- let generation=1, revoke=false;
- const authCall=async()=>({user:{id:'u1',profileId:'p1',telegramId:'42',status:revoke?'blocked':'active',role:'user',generation}});
- const control={perUserRuntime:async()=>({suggestTopic:async()=>({title:'Отпуск',iconId:'123'})})};
- const runtime={control,registry,authCall};
- const args={uid:1001,request:'Отпуск',icons:[{id:'123',emoji:'🏖️'}]};
- assert.deepEqual(await privateCall(runtime,'telegram.topic-suggest',args),{title:'Отпуск',iconId:'123'});
- control.perUserRuntime=async()=>({suggestTopic:async()=>{generation++;return {title:'Отпуск',iconId:'123'};}});
- await assert.rejects(privateCall(runtime,'telegram.topic-suggest',args),/FORBIDDEN/);
- revoke=true;
- await assert.rejects(privateCall(runtime,'telegram.topic-suggest',args),/FORBIDDEN/);
-});
-
 test('provisioning exposes only verified configuration without starting tools',async()=>{
  const f=fixture(),pending={...f.profile('1001'),status:'provisioning'};
  const data=await f.adapters.bootstrapFilesConfiguration(pending);

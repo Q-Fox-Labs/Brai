@@ -713,8 +713,16 @@ class Resolver:
             raise PermissionError('Only private Telegram chats are supported')
         uid = profile['uid']
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
+        topic_text = getattr(event, 'text', None)
+        if not isinstance(topic_text, str) or not topic_text.strip():
+            media_types = getattr(event, 'media_types', None) or []
+            kind = next((kind for kind in media_types if isinstance(kind, str)), '')
+            topic_text = ('Фотография' if kind.startswith('image/') else
+                          'Аудиосообщение' if kind.startswith('audio/') else
+                          'Видео' if kind.startswith('video/') else
+                          'Документ' if media_types else '')
         topic_first = (route[1] not in ('', '1') and self.ledger.metadata(profile, route) is None
-                       and isinstance(getattr(event, 'text', None), str) and bool(event.text.strip()))
+                       and bool(topic_text.strip()))
         turn = self.turns.get(uid)
         if turn and turn['route'] != route:
             raise PermissionError('Another conversation is active')
@@ -744,13 +752,6 @@ class Resolver:
                 ('нет', 'отмена', 'не подтверждаю', 'не разрешаю', 'не подключай', 'не отвязывай'),
             **({'threadId': int(route[1])} if route[1] else {})})
         self.ledger.admit(profile, route, turn['metadata'], str(event.message_id))
-        if topic_first:
-            task = asyncio.create_task(self._name_topic(profile, route, event.text, turn['chatGeneration']))
-            self.topic_tasks[route] = task
-            def forget(finished):
-                if self.topic_tasks.get(route) is finished:
-                    self.topic_tasks.pop(route, None)
-            task.add_done_callback(forget)
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
         data = {key: getattr(event, key) for key in fields if getattr(event, key, None) is not None}
@@ -772,6 +773,13 @@ class Resolver:
             replacements = dict(zip(all_paths, mapped))
             data['media_urls'] = [replacements[p] for p in paths]
             data['identity_inputs'] = [{**item, 'path': replacements[item['path']]} for item in inputs]
+        if topic_first:
+            task = asyncio.create_task(self._name_topic(profile, route, topic_text, turn['chatGeneration']))
+            self.topic_tasks[route] = task
+            def forget(finished):
+                if self.topic_tasks.get(route) is finished:
+                    self.topic_tasks.pop(route, None)
+            task.add_done_callback(forget)
         return data
 
     def cancel_topic_name(self, chat_id, thread_id):
@@ -793,13 +801,15 @@ class Resolver:
                 return
             result = await broker_call('ingress.topic-suggest', {
                 'uid': profile['uid'], 'telegramId': route[0],
-                'request': text, 'icons': icons}, timeout=90)
+                'request': text, 'icons': icons}, timeout=None)
             if (not isinstance(result, dict) or set(result) != {'title', 'iconId'}
                     or not isinstance(result['title'], str) or not result['title'].strip()
                     or len(result['title']) > 128 or any(c in result['title'] for c in '\r\n')
                     or result['iconId'] not in {icon['id'] for icon in icons}):
                 raise ValueError('Invalid topic suggestion')
-            await self._account(profile, route[0])
+            active = await self._account(profile, route[0])
+            if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
+                raise PermissionError('Owner authorization changed')
             self._chat_generation(profile, route, generation)
             if self.closed or self.ledger.metadata(profile, route) is None:
                 return

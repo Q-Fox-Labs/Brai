@@ -101,12 +101,46 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             await self.broker.call(WORKER_UID, 'ingress.topic-suggest', params)
         with self.assertRaises(PermissionError):
             await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', {**params, 'telegramId': '999999'})
-        with mock.patch.object(self.control, 'call', wraps=self.control.call) as calls:
-            await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', params)
-            self.assertEqual([call.args[0] for call in calls.await_args_list].count('telegram.topic-suggest'), 1)
+        with mock.patch.object(self.broker, 'generate_topic', new_callable=mock.AsyncMock,
+                               return_value={'title': 'Отпуск', 'iconId': '12'}) as generate:
+            result = await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', params)
+            self.assertEqual(result, {'title': 'Отпуск', 'iconId': '12'})
+            generate.assert_awaited_once_with(params['request'], params['icons'])
+        async def revoke(*_args):
+            self.profile['status'] = 'blocked'
+            return {'title': 'Отпуск', 'iconId': '12'}
+        with mock.patch.object(self.broker, 'generate_topic', side_effect=revoke):
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', params)
         self.profile['status'] = 'blocked'
         with self.assertRaises(PermissionError):
             await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', params)
+
+    async def test_topic_executor_checks_frames_and_returns_selected_icon(self):
+        program = '''import hashlib,json,sys
+frames=[json.loads(line) for line in sys.stdin]
+assert frames[0]['mode']=='topic' and frames[-1]['end'] is True
+assert all(frame['id']==frames[0]['id'] for frame in frames)
+value=json.loads(''.join(frame['text'] for frame in frames[1:-1]))
+assert value['request']=='Отпуск у моря' and value['icons'][1]['id']=='34'
+result=json.dumps({'title':'Отпуск у моря','iconId':'34'},ensure_ascii=False,separators=(',',':'))
+raw=result.encode()
+print(json.dumps({'status':'chunk','offset':0,'text':result},ensure_ascii=False))
+print(json.dumps({'status':'completed','totalBytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}))
+'''
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
+            script = Path(directory) / 'topic-fixture.py'
+            script.write_text(program)
+            self.broker.config.update(dialoguesSummaryCommand=[sys.executable, str(script)],
+                                      dialoguesSummaryConfigPath='/protected/config')
+            with mock.patch.object(broker_module, 'protected_json', return_value={}):
+                result = await self.broker.generate_topic('Отпуск у моря',
+                    [{'id': '12', 'emoji': '📅'}, {'id': '34', 'emoji': '🏖️'}])
+                script.write_text(program.replace("'iconId':'34'", "'iconId':'99'"))
+                with self.assertRaises(ValueError):
+                    await self.broker.generate_topic('Отпуск у моря',
+                        [{'id': '12', 'emoji': '📅'}, {'id': '34', 'emoji': '🏖️'}])
+            self.assertEqual(result, {'title': 'Отпуск у моря', 'iconId': '34'})
 
     async def test_trusted_authorization_distinguishes_denial_from_unavailability(self):
         for failure in (TimeoutError(), ConnectionError()):

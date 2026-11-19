@@ -1,7 +1,7 @@
 // ABOUTME: Задаёт закрытые команды и пределы публичной границы agent v3.
 // ABOUTME: Не импортирует исполнитель или Node; native payload проверяет владелец.
 import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
-export const subjects = { rpc: 'brai.agent.v3.rpc', event: 'brai.agent.v3.event', topicSuggest: 'brai.agent.v3.topic-suggest' };
+export const subjects = { rpc: 'brai.agent.v3.rpc', event: 'brai.agent.v3.event' };
 // AIDEV-NOTE: Внешний RPC ждёт bounded подготовку, reserve, native ACK и подтверждение, а не завершение хода.
 export const rpcTimeouts = { read: 10000, mutation: 90000 };
 export const limits = { frame: 1048576, input: 983040, images: 8, imageBytes: 655360, state: 524288, clients: 128, queue: 64, threads: 16, pending: 64, operations: 4096, request: 32768 };

@@ -93,6 +93,17 @@ class DeliveryRoutesTest(unittest.IsolatedAsyncioTestCase):
             await resolver.prepare(profile(), event)
         resolver._name_topic.assert_not_awaited()
 
+    async def test_first_photo_without_caption_uses_attachment_type(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        resolver._name_topic = AsyncMock()
+        event = NS(source=NS(chat_type='dm', chat_id=123, thread_id=7),
+                   text='', media_types=['image/jpeg'], message_id=55, message_type='photo')
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
+            await resolver.prepare(profile(), event)
+            await asyncio.gather(*resolver.topic_tasks.values())
+        self.assertEqual(resolver._name_topic.await_args.args[2], 'Фотография')
+
     async def test_topic_suggestion_updates_only_the_originating_active_account(self):
         bot = NS(get_forum_topic_icon_stickers=AsyncMock(return_value=[
             NS(custom_emoji_id='101', emoji='📅'), NS(custom_emoji_id='202', emoji='🏖️')]),
@@ -117,7 +128,8 @@ class DeliveryRoutesTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(resolver.close)
         resolver.ledger.admit(profile(), ('123', '7'), {'thread_id': '7'}, '55')
         for suggestion, active in [({'title': 'Тема', 'iconId': 'foreign'}, profile()),
-                                   ({'title': 'Тема', 'iconId': '101'}, profile(102))]:
+                                   ({'title': 'Тема', 'iconId': '101'}, profile(102)),
+                                   ({'title': 'Тема', 'iconId': '101'}, {**profile(), 'generation': 1})]:
             async def broker(method, params, **kwargs):
                 return suggestion if method == 'ingress.topic-suggest' else active
             with patch.object(runtime, 'broker_call', side_effect=broker):

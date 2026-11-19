@@ -347,6 +347,78 @@ class Broker:
             raise PermissionError('Service profile changed')
         return {'userId': profile['userId'], 'profileId': profile['profileId']}
 
+    async def generate_topic(self, request, icons):
+        """Через существующий изолированный исполнитель получить имя и ID значка."""
+        if (not isinstance(request, str) or not request.strip() or not isinstance(icons, list) or not icons
+                or any(not isinstance(icon, dict) or set(icon) != {'id', 'emoji'}
+                       or not isinstance(icon['id'], str) or not re.fullmatch(r'[0-9]+', icon['id'])
+                       or not isinstance(icon['emoji'], str) or not icon['emoji'] for icon in icons)):
+            raise ValueError('Invalid topic input')
+        command = self.config.get('dialoguesSummaryCommand')
+        config_path = self.config.get('dialoguesSummaryConfigPath')
+        if (not isinstance(command, list) or not command or not all(isinstance(x, str) and x for x in command)
+                or not Path(command[0]).is_absolute() or not isinstance(config_path, str)):
+            raise PermissionError('Topic executor unavailable')
+        protected_json(config_path)
+        identifier = uuid.uuid4().hex
+        text = json.dumps({'request': request, 'icons': icons}, ensure_ascii=False, separators=(',', ':'))
+        async with self.summary_lock:
+            child = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True, limit=65537,
+                env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'DIALOGUES_SUMMARY_CONFIG': config_path})
+            try:
+                frames = [{'id': identifier, 'mode': 'topic'}]
+                frames.extend({'id': identifier, 'text': text[i:i+8192]} for i in range(0, len(text), 8192))
+                frames.append({'id': identifier, 'end': True})
+                for frame in frames:
+                    raw = json.dumps(frame, ensure_ascii=False, separators=(',', ':')).encode() + b'\n'
+                    if len(raw) > 65536:
+                        raise ValueError('Invalid topic frame')
+                    child.stdin.write(raw)
+                    await child.stdin.drain()
+                child.stdin.close()
+                parts, offset, digest = [], 0, hashlib.sha256()
+                while True:
+                    raw = await child.stdout.readline()
+                    if len(raw) > 65536 or not raw.endswith(b'\n'):
+                        raise ValueError('Invalid topic result')
+                    part = json.loads(raw)
+                    if not isinstance(part, dict):
+                        raise ValueError('Invalid topic result')
+                    if part.get('status') == 'chunk':
+                        if set(part) != {'status', 'offset', 'text'} or part['offset'] != offset or not isinstance(part['text'], str):
+                            raise ValueError('Invalid topic chunk')
+                        encoded = part['text'].encode()
+                        offset += len(encoded)
+                        if offset > MAX_FRAME:
+                            raise ValueError('Invalid topic result')
+                        digest.update(encoded)
+                        parts.append(part['text'])
+                    elif part.get('status') == 'completed':
+                        if (set(part) != {'status', 'totalBytes', 'sha256'} or part['totalBytes'] != offset
+                                or part['sha256'] != digest.hexdigest() or await child.wait() != 0):
+                            raise ValueError('Invalid topic receipt')
+                        result = json.loads(''.join(parts))
+                        if (not isinstance(result, dict) or set(result) != {'title', 'iconId'}
+                                or not isinstance(result['title'], str) or not result['title'].strip()
+                                or len(result['title']) > 60 or any(c in result['title'] for c in '\r\n')
+                                or result['iconId'] not in {icon['id'] for icon in icons}):
+                            raise ValueError('Invalid topic selection')
+                        return result
+                    else:
+                        raise ValueError('Invalid topic result')
+            finally:
+                if child.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGTERM)
+                    try:
+                        await asyncio.wait_for(child.wait(), 20)
+                    except asyncio.TimeoutError:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(child.pid, signal.SIGKILL)
+                        await child.wait()
+
     async def stream_dialogues_summary(self, peer_uid, request, reader, writer):
         """Передать свёртку через ограниченные буферы; всё вычисление живёт в контейнере."""
         identifier = request.get('id')
@@ -572,12 +644,11 @@ class Broker:
             origin = await self.resolve(params['telegramId'])
             if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
                 raise PermissionError('Telegram account binding changed')
-            result = await self.control.call('telegram.topic-suggest', {
-                'uid': uid, 'request': params['request'], 'icons': params['icons']}, timeout=90)
+            result = await self.generate_topic(params['request'], params['icons'])
             active = await self.authorize(uid)
             origin = await self.resolve(params['telegramId'])
-            if (active['profileId'] != profile['profileId'] or origin['uid'] != uid
-                    or origin['profileId'] != profile['profileId']):
+            if (any(active.get(key) != profile.get(key) for key in ('userId', 'profileId', 'role', 'generation'))
+                    or origin['uid'] != uid or origin['profileId'] != profile['profileId']):
                 raise PermissionError('Telegram account binding changed')
             return result
         if method in ('ingress.admit', 'ingress.status', 'ingress.close', 'ingress.prepare', 'ingress.artifact') and ingress:
