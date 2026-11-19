@@ -69,22 +69,11 @@ export function validateLimits(value) {
       && (window.resetsAt === null || Number.isSafeInteger(window.resetsAt) && window.resetsAt >= 0);
   });
 }
-function validEnvelopeShape(value) {
-  const snapshot = value?.event?.snapshot;
-  if (!Array.isArray(snapshot?.items) || snapshot.items.length > 128 || !Array.isArray(snapshot.requests) || snapshot.requests.length > limits.pending || typeof snapshot.state !== 'string' || snapshot.thread?.id !== value.threadId) return false;
-  return value?.event?.type === 'STATE_SNAPSHOT' && snapshot && typeof value.projectId === 'string' && typeof value.threadId === 'string' && typeof value.generation === 'string' && typeof value.epoch === 'string' && Number.isSafeInteger(value.seq) && value.seq >= 0 && snapshot.projectId === value.projectId && snapshot.threadId === value.threadId && snapshot.generation === value.generation && snapshot.epoch === value.epoch && snapshot.seq === value.seq;
-}
 /** Проверяет внешнюю оболочку; EventSchema проверяется на AG-UI границе отдельно. */
 export function validateEnvelope(value) {
-  return validEnvelopeShape(value) && bytes(value) <= limits.frame;
-}
-/** Для разобранного JSON проверяет оба ограничения размера без лишнего подсчёта. */
-export function validateJSONEnvelope(value) {
-  if ('toJSON' in Object.prototype || 'toJSON' in Array.prototype) return validateEnvelope(value) && bytes(value.event.snapshot) <= limits.state;
-  if (!validEnvelopeShape(value)) return false;
-  const frameBytes = bytes(value);
-  // AIDEV-NOTE: JSON-снимок входит в оболочку; при большой оболочке проверяем снимок отдельно.
-  return frameBytes <= limits.frame && (frameBytes <= limits.state || bytes(value.event.snapshot) <= limits.state);
+  const snapshot = value?.event?.snapshot;
+  if (!Array.isArray(snapshot?.items) || snapshot.items.length > 128 || !Array.isArray(snapshot.requests) || snapshot.requests.length > limits.pending || typeof snapshot.state !== 'string' || snapshot.thread?.id !== value.threadId) return false;
+  return value?.event?.type === 'STATE_SNAPSHOT' && snapshot && typeof value.projectId === 'string' && typeof value.threadId === 'string' && typeof value.generation === 'string' && typeof value.epoch === 'string' && Number.isSafeInteger(value.seq) && value.seq >= 0 && snapshot.projectId === value.projectId && snapshot.threadId === value.threadId && snapshot.generation === value.generation && snapshot.epoch === value.epoch && snapshot.seq === value.seq && bytes(value) <= limits.frame;
 }
 
 /** Проверяет bounded снимок прочитанных итогов доверенного владельца. */

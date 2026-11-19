@@ -33,6 +33,4 @@ export declare function bytes(value: unknown): number;
 export declare function validateCommand(value: unknown): value is Command;
 export declare function validateLimits(value: unknown): value is AgentLimits;
 export declare function validateEnvelope(value: unknown): value is EventEnvelope;
-/** Принимает только разобранные JSON-данные; проверяет размеры оболочки и снимка. */
-export declare function validateJSONEnvelope(value: unknown): value is EventEnvelope;
 export declare function validateReadState(value: unknown): value is ReadState;

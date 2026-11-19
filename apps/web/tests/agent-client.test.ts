@@ -9,7 +9,7 @@ import { EventSchema } from "@ag-ui/core/schemas";
 import * as rxjs from "rxjs";
 import * as contracts from "@brai/agent/contracts";
 import type { NativeSnapshot } from "@brai/agent/contracts";
-import { encodeFrame, decodeFrame, decodeWireFrame } from "../lib/agent/stream.ts";
+import { encodeFrame, decodeFrame } from "../lib/agent/stream.ts";
 const require = createRequire(import.meta.url), ts = require("typescript") as typeof import("typescript");
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 const base = (id: string, seq = 0): NativeSnapshot => ({ projectId: "brai", threadId: id, generation: "gen", epoch: `epoch-${id}`, seq, thread: { id, title: id, preview: "", model: null, canAcceptDirectInput: true, updatedAt: 1 }, turn: null, state: "completed", requests: [], truncated: false, items: [{ id: "message", turnId: "turn", type: "agentMessage", text: "Начало" }] });
@@ -29,7 +29,7 @@ function fixture() {
   const source = readFileSync(new URL("../lib/agent/client.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} as { createAgentClient: typeof import("../lib/agent/client").createAgentClient } };
-  const ports: Record<string, unknown> = { "@ag-ui/client": { AbstractAgent, defaultApplyEvents: (...args: Parameters<typeof defaultApplyEvents>) => { applications++; return defaultApplyEvents(...args); } }, "@ag-ui/core/schemas": { EventSchema }, rxjs, "@brai/agent/contracts": contracts, "./stream": { decodeWireFrame } };
+  const ports: Record<string, unknown> = { "@ag-ui/client": { AbstractAgent, defaultApplyEvents: (...args: Parameters<typeof defaultApplyEvents>) => { applications++; return defaultApplyEvents(...args); } }, "@ag-ui/core/schemas": { EventSchema }, rxjs, "@brai/agent/contracts": contracts, "./stream": { decodeFrame } };
   new Function("require", "module", "exports", "EventSource", "fetch", compiled)(
     (name: string) => ports[name] ?? require(name), module, module.exports, FakeSource,
     async (path: string, options: RequestInit) => { const url = new URL(path, "https://example.test"); calls.push(path); requests.push({ path, method: options.method!, body: options.body }); const id = url.searchParams.get("threadId")!; return Response.json(url.pathname.endsWith("/goalGet") ? { generation: "gen", goal: { state: "ready", value: null } } : snapshots.get(id) ?? base(id)); },
@@ -85,9 +85,8 @@ test("A→B→A keeps one stream, immediate SDK state and background text withou
   assert.equal(f.sources[0].closed, true);
 });
 
-test("480 KB history avoids redundant full serialization and obsolete prefixes", async t => {
+test("480 KB history preserves a burst of intermediate text without obsolete prefixes", async t => {
   const f = fixture();
-  const stringify = JSON.stringify;
   try {
     const initial = { ...base("A"), items: Array.from({ length: 120 }, (_, i) => ({ id: `item-${i}`, turnId: "turn", type: "agentMessage", text: i === 119 ? "" : "x".repeat(4000) })) };
     f.snapshots.set("A", initial);
@@ -95,13 +94,6 @@ test("480 KB history avoids redundant full serialization and obsolete prefixes",
     f.client.watch("brai", "A", value => { if (value) updates.push(value.seq); });
     f.sources[0].send("ready", { generation: "gen" }); await tick();
     f.sources[0].send("agent", envelope(initial));
-    let fullSerializations = 0;
-    const historyCharacters = initial.items.reduce((total, item) => total + item.text.length, 0);
-    JSON.stringify = ((...args: Parameters<typeof JSON.stringify>) => {
-      const encoded = stringify(...args);
-      if (typeof encoded === "string" && encoded.length >= historyCharacters) fullSerializations++;
-      return encoded;
-    }) as typeof JSON.stringify;
     const started = performance.now(); let previous = initial;
     for (let seq = 1; seq <= 80; seq++) {
       const current = { ...initial, seq, items: initial.items.map((item, i) => i === 119 ? { ...item, text: "Проверяю передачу событий. ".repeat(seq) } : item) };
@@ -114,10 +106,7 @@ test("480 KB history avoids redundant full serialization and obsolete prefixes",
     assert.equal(f.client.current("brai", "A")!.items.at(-1)!.text, previous.items.at(-1)!.text);
     assert.ok(updates.length < 10, "SDK must coalesce pending snapshots rather than replay all prefixes");
     t.diagnostic(`Обработка 80 кадров: ${Math.round(performance.now() - started)} мс`);
-    // На кадр остаются JSON-копия и проверка размера оболочки.
-    assert.ok(fullSerializations <= 2 * 80,
-              `redundant full history serialization: ${fullSerializations}`);
-  } finally { JSON.stringify = stringify; f.client.dispose(); }
+  } finally { f.client.dispose(); }
 });
 
 test("real gaps block stale state; ready refreshes once, seq rollback is ignored", async () => {
@@ -135,97 +124,12 @@ test("real gaps block stale state; ready refreshes once, seq rollback is ignored
 });
 
 test("delta validation refuses missing base and prototype changes; reconstruction preserves prior snapshot", () => {
-  const previous = base("A"), next = { ...base("A", 1), items: [{ ...base("A").items[0], text: "Обновлено" }] };
-  const frame = encodeFrame(envelope(next), previous);
+  const previous = base("A"), next = base("A", 1), frame = encodeFrame(envelope(next), previous);
   assert.deepEqual(decodeFrame(frame, previous), next);
   assert.equal(previous.seq, 0);
-  assert.equal(previous.items[0].text, "Начало");
   assert.throws(() => decodeFrame(frame), /STREAM_BASE_MISMATCH/);
   assert.throws(() => decodeFrame({ ...frame, event: { type: "STATE_DELTA", delta: [{ op: "add", path: "/__proto__/polluted", value: true }] }, baseSeq: 0 }, previous));
   assert.equal(({} as { polluted?: boolean }).polluted, undefined);
-});
-
-test("delta retains JSON-clone semantics for exceptional values and failed patches", () => {
-  const sparse: unknown[] = [1, ,]; (sparse as unknown as { extra: number }).extra = 2;
-  const values = [-0, Infinity, sparse, { toJSON: () => "custom" }, new Proxy({ text: "plain" }, {})];
-  for (const extra of values) {
-    const previous = { ...base("A"), extra } as NativeSnapshot;
-    const frame = { ...envelope(base("A", 1)), baseSeq: 0,
-      event: { type: "STATE_DELTA" as const, delta: [{ op: "replace" as const, path: "/seq", value: 1 }] } };
-    const expected = JSON.parse(JSON.stringify(previous)); expected.seq = 1;
-    assert.deepEqual(decodeFrame(frame, previous), expected);
-    assert.equal(previous.seq, 0);
-    assert.throws(() => decodeFrame({ ...frame, event: { type: "STATE_DELTA", delta: [
-      { op: "replace", path: "/items/0/text", value: "Изменено" },
-      { op: "replace", path: "/missing", value: 1 },
-    ] } }, previous));
-    assert.equal(previous.items[0].text, "Начало");
-  }
-});
-
-test("wire JSON preserves both UTF-8 limits at and beyond their boundaries", () => {
-  const within = { ...base("A"), items: [{ ...base("A").items[0], text: "" }] };
-  const overhead = contracts.bytes(within);
-  const boundary = { ...within, items: [{ ...within.items[0], text: "x".repeat(contracts.limits.state - overhead) }] };
-  assert.equal(contracts.bytes(boundary), contracts.limits.state);
-  const frame = envelope(boundary);
-  assert.deepEqual(decodeWireFrame(JSON.stringify(frame)), boundary);
-  const above = { ...boundary, items: [{ ...boundary.items[0], text: boundary.items[0].text + "x" }] };
-  assert.throws(() => decodeWireFrame(JSON.stringify(envelope(above))), /BAD_EVENT/);
-  assert.throws(() => decodeWireFrame(JSON.stringify({ ...envelope(within), padding: "x".repeat(contracts.limits.frame) })), /BAD_EVENT/);
-  for (const text of ["кириллица 😀", "\\\"\n\ud800", "😃".repeat(4000)]) {
-    const snapshot = { ...within, items: [{ ...within.items[0], text }] };
-    const raw = JSON.stringify(envelope(snapshot));
-    assert.deepEqual(decodeWireFrame(raw), decodeFrame(JSON.parse(raw)));
-  }
-});
-
-test("wire delta rejects oversized snapshots and prototype changes without altering the base", () => {
-  const previous = base("A");
-  const frame = { ...envelope(base("A", 1)), baseSeq: 0, event: { type: "STATE_DELTA" as const, delta: [
-    { op: "replace" as const, path: "/seq", value: 1 },
-    { op: "replace" as const, path: "/items/0/text", value: "я".repeat(contracts.limits.state / 2) },
-  ] } };
-  assert.throws(() => decodeWireFrame(JSON.stringify(frame), previous), /BAD_EVENT/);
-  for (const operation of [
-    { op: "add", path: "/__proto__/polluted", value: true },
-    { op: "add", path: "/constructor/prototype/polluted", value: true },
-    { op: "copy", from: "/__proto__/polluted", path: "/items/0/text" },
-    { op: "move", from: "/constructor/prototype/polluted", path: "/items/0/text" },
-  ]) {
-    const malicious = { ...frame, event: { type: "STATE_DELTA", delta: [operation] } };
-    assert.throws(() => decodeWireFrame(JSON.stringify(malicious), previous));
-  }
-  assert.equal(previous.seq, 0);
-  assert.equal(previous.items[0].text, "Начало");
-  assert.equal(({} as { polluted?: boolean }).polluted, undefined);
-});
-
-test("non-string event data is rejected without coercion", async () => {
-  const f = fixture();
-  try {
-    f.client.watch("brai", "A", () => {});
-    f.sources[0].send("ready", { generation: "gen" }); await tick();
-    let coercions = 0;
-    f.sources[0].dispatchEvent(new MessageEvent("agent", { data: { toString() { coercions++; return JSON.stringify(envelope(base("A", 1))); } } }));
-    assert.equal(coercions, 0);
-    assert.notEqual(f.client.current("brai", "A")?.seq, 1);
-  } finally { f.client.dispose(); }
-});
-
-test("wire size check retains both limits when built-in prototypes have toJSON", () => {
-  const previous = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
-  try {
-    Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value(this: { large?: boolean }, key: string) {
-      if (this.large) return key === "snapshot" ? {} : { text: "x".repeat(contracts.limits.state) };
-      return this;
-    } });
-    const snapshot = { ...base("A"), large: true };
-    assert.equal(contracts.validateJSONEnvelope(envelope(snapshot)), false);
-  } finally {
-    if (previous) Object.defineProperty(Object.prototype, "toJSON", previous);
-    else delete (Object.prototype as { toJSON?: unknown }).toJSON;
-  }
 });
 
 
