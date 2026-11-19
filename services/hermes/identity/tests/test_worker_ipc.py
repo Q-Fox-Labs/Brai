@@ -350,6 +350,8 @@ class TelegramAccountsTest(unittest.IsolatedAsyncioTestCase):
                         'authorTelegramId': '123', 'workerSocket': '/unused'}
             if method == 'ingress.prepare':
                 return {'paths': []}
+            if method == 'ingress.close':
+                return {'closed': True}
             return {}
         adapter = SimpleNamespace()
         resolver = runtime.Resolver(adapter)
