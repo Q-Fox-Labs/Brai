@@ -76,6 +76,28 @@ test("download forwards the authorized descriptor and target to the stream adapt
  assert.deepEqual(await response.json(), { body: responseBody, id: "file" });
  assert.deepEqual(payload, { userId: "target", artifactId: "file", headers: { cookie: "session=actor", origin: "https://brai.test" } });
 });
+test("RELEASE streams ready files only after the standard owner-checked metadata read", async () => {
+ const environment = process.env.BRAI_ENVIRONMENT;
+ try {
+  process.env.BRAI_ENVIRONMENT = "release";
+  role = "admin"; serviceStatus = "";
+  const descriptor = { ownerId: "target", status: "ready", artifactId: "file", filename: "source.ogg", sizeBytes: 8, sha256: "b".repeat(64), mimeType: "audio/ogg" };
+  responseBody = descriptor;
+  const request = () => new Request("https://brai.test/api/admin?operation=admin-artifacts-download&userId=target&artifactId=file", { headers: { cookie: "session=actor" } });
+  const response = await mod.exports.GET(request());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { body: descriptor, id: "file" });
+  assert.equal(subject, "brai.hermes.identity.v1.admin-artifacts-get");
+  assert.deepEqual(payload, { userId: "target", artifactId: "file", headers: { cookie: "session=actor", origin: "https://brai.test" } });
+  responseBody = { ...descriptor, ownerId: "foreign" };
+  assert.equal((await mod.exports.GET(request())).status, 503);
+  responseBody = { ...descriptor, status: "pending" };
+  assert.equal((await mod.exports.GET(request())).status, 503);
+ } finally {
+  if (environment === undefined) delete process.env.BRAI_ENVIRONMENT;
+  else process.env.BRAI_ENVIRONMENT = environment;
+ }
+});
 test("NATS service errors preserve safe status before parsing non-JSON bodies", async () => {
  role = "admin";
  try {

@@ -3,8 +3,33 @@
 import {WebSocket} from 'ws';
 import {randomUUID} from 'node:crypto';
 import {DiaryFault,instructions,text} from './domain.mjs';
+function correctionInput(entry){
+ return JSON.stringify({rawText:text(entry.rawText),recordedAt:entry.audioInput.recordedAt,timezone:entry.audioInput.timezone,uploadedAt:entry.createdAt,...(entry.audioPart?{audioPart:entry.audioPart}:{})});
+}
+
+function correctionInstructions(entry){
+ return instructions+(entry.audioPart?' Это часть одной длинной записи. Не восстанавливай отсутствующие соседние слова догадкой. Если дата в этой части не указана, eventDate=null и dateEvidence=""; если явно неоднозначна, eventDate=null и объясни неоднозначность в dateEvidence.':' ');
+}
+
+/** Использует закрытый мост владельца Luna с той же блокировкой авторизации, что и Hermes. */
+async function correctThroughBridge(cfg,entry){
+ try {
+  const endpoint=new URL(cfg.bridgeUrl);
+  if(endpoint.protocol!=='http:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||endpoint.pathname!=='/v1/chat/completions'||!/^[a-f0-9]{64}$/.test(cfg.token))throw Error('LUNA_BRIDGE_CONFIG');
+  const response=await fetch(endpoint,{method:'POST',redirect:'error',signal:AbortSignal.timeout(180000),
+   headers:{'content-type':'application/json',authorization:'Bearer '+cfg.token},
+   body:JSON.stringify({model:'gpt-6-luna',messages:[{role:'system',content:correctionInstructions(entry)},{role:'user',content:correctionInput(entry)}],stream:false})});
+  if(!response.ok){await response.body?.cancel();throw Error('LUNA_BRIDGE_STATUS');}
+  const result=await response.json(),output=result?.choices?.[0]?.message?.content;
+  if(result.model!=='gpt-6-luna'||typeof output!=='string')throw Error('LUNA_BRIDGE_REPLY');
+  text(output);
+  return output;
+ }catch{throw new DiaryFault('LUNA_UNAVAILABLE',503);}
+}
+
 /** Создаёт изолированный вызов; socket/CWD задаёт только защищённая конфигурация. */
 export async function correctWithLuna(cfg,entry){
+ if(cfg.bridgeUrl)return correctThroughBridge(cfg,entry);
  const ws=new WebSocket(cfg.socketUrl,{maxPayload:4*1024*1024,handshakeTimeout:15000}),pending=new Map();let seq=0,thread,turn,active,timer;
  const fail=code=>new DiaryFault(code,503);
  const call=(method,params,ms=15000)=>new Promise((resolve,reject)=>{
@@ -38,12 +63,12 @@ export async function correctWithLuna(cfg,entry){
    features:{shell_tool:false,code_mode:false,code_mode_host:false,multi_agent:false,multi_agent_v2:false,apps:false,memories:false,view_image:false,image_generation:false,browser_use:false,computer_use:false,skill_search:false,tool_suggest:false,goals:false,sleep_tool:false}};
   for(const name of Object.keys(base?.mcp_servers??{}))overrides['mcp_servers.'+name+'.enabled']=false;
   for(const name of Object.keys(base?.plugins??{}))if(name!=='_default')overrides['plugins.'+name+'.enabled']=false;
-  const started=await call('thread/start',{model:'gpt-6-luna',allowProviderModelFallback:false,cwd:cfg.cwd,ephemeral:true,historyMode:'legacy',threadSource:'dialogues_summary',serviceName:'brai_diary',environments:[],dynamicTools:[],approvalPolicy:'never',sandbox:'read-only',baseInstructions:instructions+(entry.audioPart?' Это часть одной длинной записи. Не восстанавливай отсутствующие соседние слова догадкой. Если дата в этой части не указана, eventDate=null и dateEvidence=""; если явно неоднозначна, eventDate=null и объясни неоднозначность в dateEvidence.':' '),developerInstructions:'Только редактура текущего дневника и извлечение даты в строгий JSON. Никаких инструментов.',config:overrides});
+  const started=await call('thread/start',{model:'gpt-6-luna',allowProviderModelFallback:false,cwd:cfg.cwd,ephemeral:true,historyMode:'legacy',threadSource:'dialogues_summary',serviceName:'brai_diary',environments:[],dynamicTools:[],approvalPolicy:'never',sandbox:'read-only',baseInstructions:correctionInstructions(entry),developerInstructions:'Только редактура текущего дневника и извлечение даты в строгий JSON. Никаких инструментов.',config:overrides});
   thread=started.thread.id;
   if(started.model!=='gpt-6-luna'||started.thread.ephemeral!==true)throw fail('LUNA_ISOLATION_VIOLATION');
   const done=new Promise((resolve,reject)=>{active={resolve,reject,items:new Map()};timer=setTimeout(()=>reject(fail('LUNA_TIMEOUT')),180000);});
   void done.catch(()=>{});
-  const input=JSON.stringify({rawText:text(entry.rawText),recordedAt:entry.audioInput.recordedAt,timezone:entry.audioInput.timezone,uploadedAt:entry.createdAt,...(entry.audioPart?{audioPart:entry.audioPart}:{})});
+  const input=correctionInput(entry);
   const launched=await call('turn/start',{threadId:thread,model:'gpt-6-luna',effort:'medium',environments:[],clientUserMessageId:randomUUID(),input:[{type:'text',text:input}]});
   turn=launched.turn.id;const result=await done;
   if(result.id!==turn||result.status!=='completed')throw fail('LUNA_EXECUTION_FAILED');

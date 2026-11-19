@@ -30,36 +30,49 @@ export async function chatQuery<T>(operation: string, input: Record<string, stri
   if (input.source === "telegram" && (value as { source?: string }).source !== "telegram") throw new AdminChatError(503);
   return value;
 }
-/** Загружает все страницы профилей, сохраняя доступные чаты при отказе одного источника. */
-export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal): Promise<{ chats: AdminChat[]; unavailable: ChatOwner[] }> {
+type AdminChatList = { chats: AdminChat[]; unavailable: ChatOwner[] };
+
+/** Публикует доступные чаты по мере чтения страниц и сохраняет их при сбое отдельного профиля. */
+export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal, onProgress?: (value: AdminChatList) => void): Promise<AdminChatList> {
   const { users } = await chatQuery<{ users: ChatOwner[] }>("users-list", {}, signal);
   const owners: ChatOwner[] = users.filter(user => user.profileId);
-  const chats: AdminChat[] = [], unavailable: ChatOwner[] = [];
+  const chats = new Map(owners.map(owner => [owner.id, previous.filter(chat => chat.owner.id === owner.id).map(chat => ({ ...chat, owner }))]));
+  const unavailable: ChatOwner[] = [];
+  const snapshot = () => ({
+    chats: [...chats.values()].flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || adminChatKey(a).localeCompare(adminChatKey(b))),
+    unavailable: [...unavailable],
+  });
+  let nextOwner = 0;
   // AIDEV-NOTE: Ограничиваем число одновременно создаваемых снимков на стороне Hermes.
-  for (let offset = 0; offset < owners.length; offset += 3) {
-    await Promise.all(owners.slice(offset, offset + 3).map(async owner => {
-      const items: AdminChat[] = [];
+  await Promise.all(owners.slice(0, 3).map(async () => {
+    while (!signal.aborted && nextOwner < owners.length) {
+      const owner = owners[nextOwner++];
+      const cached = chats.get(owner.id) ?? [];
+      const items = new Map<string, AdminChat>();
       try {
         let cursor: string | null = null;
+        const visited = new Set<string>();
         do {
           const page: { items: Omit<AdminChat, "owner">[]; profiles?: TelegramProfile[]; nextCursor: string | null } = await chatQuery("admin-chats-list", { userId: owner.id, source: "telegram", ...(cursor ? { cursor } : {}) }, signal);
-          items.push(...page.items.map(item => {
+          for (const item of page.items) {
+            if (items.has(item.id)) continue;
             const profile = page.profiles?.find(profile => profile.telegramId === item.participant?.telegramId);
-            return { ...item, owner, participant: profile ? { ...item.participant, ...profile, name: profile.name || item.participant?.name || "" } : item.participant };
-          }));
+            items.set(item.id, { ...item, owner, participant: profile ? { ...item.participant, ...profile, name: profile.name || item.participant?.name || "" } : item.participant });
+          }
           cursor = page.nextCursor;
+          chats.set(owner.id, cursor ? [...items.values(), ...cached.filter(item => !items.has(item.id))] : [...items.values()]);
+          if (!signal.aborted) onProgress?.(snapshot());
+          if (cursor && visited.has(cursor)) throw new AdminChatError(503);
+          if (cursor) visited.add(cursor);
         } while (cursor);
-        const unique = new Map<string, AdminChat>();
-        for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item);
-        chats.push(...unique.values());
       } catch (error) {
         if (signal.aborted || error instanceof AdminChatError && [401, 403].includes(error.status)) throw error;
         unavailable.push(owner);
-        chats.push(...previous.filter(chat => chat.owner.id === owner.id).map(chat => ({ ...chat, owner })));
+        onProgress?.(snapshot());
       }
-    }));
-  }
-  return { chats: chats.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || adminChatKey(a).localeCompare(adminChatKey(b))), unavailable };
+    }
+  }));
+  return snapshot();
 }
 /** Открывает свежую страницу либо продолжает к более ранним сообщениям того же чата. */
 export async function readAdminChat(chat: AdminChat, signal: AbortSignal, cursor?: string): Promise<ChatPage> {
