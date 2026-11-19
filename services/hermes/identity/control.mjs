@@ -757,6 +757,22 @@ export async function privateCall(runtime, method, params) {
     return control.sendAccountUnlink(params);
   }
   if (method === 'tools.call') return control.invokeTool(params.uid, params.name, params.args);
+  if (method === 'telegram.topic-suggest') {
+    if (Object.keys(params).sort().join(',') !== 'icons,request,uid' || !Number.isSafeInteger(params.uid) || params.uid <= 0 ||
+        typeof params.request !== 'string' || !params.request.trim() || !Array.isArray(params.icons) || !params.icons.length ||
+        params.icons.some(icon => !object(icon) || Object.keys(icon).sort().join(',') !== 'emoji,id' ||
+          typeof icon.id !== 'string' || !/^[0-9]+$/.test(icon.id) || typeof icon.emoji !== 'string' || !icon.emoji)) throw new Error('INVALID_ARGUMENT');
+    const user = await privateCall(runtime, 'authorize', {uid: params.uid});
+    const data = await registry(), profile = data?.profiles?.[String(params.uid)];
+    if (!profile || profile.userId !== user.userId || profile.profileId !== user.profileId || profile.status !== 'active' ||
+        typeof control.perUserRuntime !== 'function') throw new Error('FORBIDDEN');
+    const ownerRuntime = await control.perUserRuntime({...profile, workerUid: params.uid, role: user.role});
+    if (typeof ownerRuntime?.suggestTopic !== 'function') throw new Error('SOURCE_UNAVAILABLE');
+    const result = await ownerRuntime.suggestTopic(params.request, params.icons);
+    const current = await privateCall(runtime, 'authorize', {uid: params.uid});
+    if (current.userId !== user.userId || current.profileId !== user.profileId || current.generation !== user.generation) throw new Error('FORBIDDEN');
+    return result;
+  }
   if (method === 'tools.list') {
     const user = await privateCall(runtime, 'permissions.bootstrap', { uid: params.uid });
     const data = await registry();

@@ -6,6 +6,34 @@
   },
   "defaultContentType": "application/json",
   "channels": {
+    "topicSuggest": {
+      "address": "brai.agent.v3.topic-suggest",
+      "messages": {
+        "request": {
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["request", "icons"],
+            "properties": {
+              "request": {"type": "string", "minLength": 1},
+              "icons": {"type": "array", "minItems": 1, "items": {
+                "type": "object", "additionalProperties": false, "required": ["id", "emoji"],
+                "properties": {"id": {"type": "string", "pattern": "^[0-9]+$"}, "emoji": {"type": "string", "minLength": 1}}
+              }}
+            }
+          }
+        }
+      }
+    },
+    "topicReplies": {
+      "address": null, "x-nats-reply-subject": "message.reply",
+      "messages": {
+        "response": {
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["title", "iconId"],
+            "properties": {"title": {"type": "string", "minLength": 1, "maxLength": 60}, "iconId": {"type": "string", "pattern": "^[0-9]+$"}}
+          }
+        }
+      }
+    },
     "rpc": {
       "address": "brai.agent.v3.rpc",
       "messages": {
@@ -52,6 +80,11 @@
     }
   },
   "operations": {
+    "suggestTopic": {
+      "action": "receive", "channel": {"$ref": "#/channels/topicSuggest"},
+      "messages": [{"$ref": "#/channels/topicSuggest/messages/request"}],
+      "reply": {"channel": {"$ref": "#/channels/topicReplies"}, "messages": [{"$ref": "#/channels/topicReplies/messages/response"}]}
+    },
     "request": {
       "action": "receive",
       "channel": {

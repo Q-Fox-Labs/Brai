@@ -76,7 +76,7 @@ test('OpenRPC inventory and references match private methods', async () => {
   assert.deepEqual(rpc.methods.map(item => item.name).sort(), [
     'identity.lifecycle-claim','identity.lifecycle-renew','identity.lifecycle-complete',
     'identity.get','identity.resolve','telegram.link','telegram.unlink','identity.link-redeem','identity.invite-redeem','identity.profile-ready','authorize','identity.revalidate','login.send',
-    'permissions.bootstrap','tools.list','tools.call','files.configuration','files.get','files.list','files.prepare','artifacts.publish','artifacts.fetch'
+    'permissions.bootstrap','tools.list','tools.call','files.configuration','files.get','files.list','files.prepare','artifacts.publish','artifacts.fetch','telegram.topic-suggest'
   ].sort());
   const visit = async (node, base, document) => {
     if (!node || typeof node !== 'object') return;

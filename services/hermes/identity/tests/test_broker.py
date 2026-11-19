@@ -94,6 +94,20 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.broker.login_state.close)
         self.broker.profiles = lambda: {WORKER_UID: self.profile}
 
+    async def test_topic_suggestion_requires_ingress_and_live_account_binding(self):
+        params = {'uid': WORKER_UID, 'telegramId': '111222',
+                  'request': 'Отпуск', 'icons': [{'id': '12', 'emoji': '🏖️'}]}
+        with self.assertRaises((PermissionError, ValueError)):
+            await self.broker.call(WORKER_UID, 'ingress.topic-suggest', params)
+        with self.assertRaises(PermissionError):
+            await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', {**params, 'telegramId': '999999'})
+        with mock.patch.object(self.control, 'call', wraps=self.control.call) as calls:
+            await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', params)
+            self.assertEqual([call.args[0] for call in calls.await_args_list].count('telegram.topic-suggest'), 1)
+        self.profile['status'] = 'blocked'
+        with self.assertRaises(PermissionError):
+            await self.broker.call(INGRESS_UID, 'ingress.topic-suggest', params)
+
     async def test_trusted_authorization_distinguishes_denial_from_unavailability(self):
         for failure in (TimeoutError(), ConnectionError()):
             with self.subTest(error=type(failure).__name__), mock.patch.object(

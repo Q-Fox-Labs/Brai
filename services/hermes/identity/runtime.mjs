@@ -110,12 +110,13 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
   if(existing?.signature===signature)return existing.promise;
   if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
   const promise=(async()=>{
-   let bugHunt;
+   let bugHunt, topicRequest;
    const runtime=await startLimited(async()=>{
    if(start)return start(tools);
    let runtime;
    {
     const ports=await openPorts(tools);
+    topicRequest=(request,icons)=>ports.request('brai.agent.v3.topic-suggest',{request,icons},undefined,90000);
     try{
     const history=createHistoryCatalog(ports.request.bind(ports));
     if(shared?.bugHunt?.enabled===true)bugHunt=createBugHuntCatalog(ports.request.bind(ports),{userId:entry.userId,profileId:entry.profileId});
@@ -142,6 +143,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    return runtime;
    });
    return {
+    async suggestTopic(request,icons){if(!topicRequest)invalid();return topicRequest(request,icons);},
     async listTools(){return [...(await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name)),...(bugHunt?.list()??[])];},
     async callTool(name,args,signal){
      if(phase==='provisioning')invalid();

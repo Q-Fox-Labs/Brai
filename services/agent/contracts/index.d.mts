@@ -25,7 +25,7 @@ export type ReadState = { marks: Record<string, string[]> };
 export type Action = "readState" | "readMark" | "projects" | "status" | "models" | "threads" | "create" | "open" | "turns" | "items" | "activities" | "item" | "start" | "steer" | "interrupt" | "answer" | "archive" | "goalGet" | "goalSet" | "goalClear";
 export type Command = { action: Action; ownerId?: string; messageId?: string; lastMessageAt?: number; agentMode?: AgentMode; objective?: string; status?: "active" | "paused"; tokenBudget?: number | null; permissionMode?: PermissionMode; model?: string; effort?: string; projectId?: string; threadId?: string; generation?: string; operationId?: string; turnId?: string; expectedTurnId?: string; requestId?: string; text?: string; attachments?: ReferenceAttachment[]; answer?: unknown; cursor?: string; itemId?: string; itemIds?: string[] };
 export type ErrorResponse = { code: string; outcome: "not-sent" | "unknown" | "query" };
-export declare const subjects: { rpc: string; event: string };
+export declare const subjects: { rpc: string; event: string; topicSuggest: string };
 export declare const rpcTimeouts: { read: number; mutation: number };
 export declare const limits: { frame: number; input: number; images: number; imageBytes: number; state: number; clients: number; queue: number; threads: number; pending: number; operations: number; request: number };
 export declare const commandSchema: object;

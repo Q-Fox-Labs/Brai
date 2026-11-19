@@ -2,7 +2,7 @@
 // ABOUTME: Fake Codex воспроизводит ранние события, отказ, timeout и disconnect без моделей.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nameThread } from '../dist/title.js';
+import { nameThread, suggestTopic } from '../dist/title.js';
 import { createApplication } from '../dist/application.js';
 function fixture(options = {}) {
   const calls = [], listeners = new Set(); let generation = 'g1', name = options.name ?? null, reads = 0;
@@ -49,6 +49,25 @@ function fixture(options = {}) {
   return { port, calls, listeners, finish, send, name: () => name };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+test('topic suggestion uses one isolated Luna request and returns the selected Telegram icon', async () => {
+  const f = fixture({ output: JSON.stringify({ title: 'Отпуск у моря', icon: 1 }) });
+  const icons = [{ id: '101', emoji: '📅' }, { id: '202', emoji: '🏖️' }];
+  assert.deepEqual(await suggestTopic(f.port, 'Хочу отпуск у моря', icons), { title: 'Отпуск у моря', iconId: '202' });
+  const turn = f.calls.find(call => call.method === 'turn/start');
+  assert.deepEqual(JSON.parse(turn.params.input[0].text), { request: 'Хочу отпуск у моря', icons: ['📅', '🏖️'] });
+  assert.deepEqual(turn.params.outputSchema.properties.icon.enum, [0, 1]);
+  assert.equal(f.calls.some(call => call.method === 'thread/read' || call.method === 'thread/name/set'), false);
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.equal(f.calls.at(-1).method, 'thread/unsubscribe');
+});
+test('topic suggestion rejects unknown icons and malformed model selection', async () => {
+  await assert.rejects(suggestTopic(fixture().port, 'test', []), /TITLE_INVALID_ICONS/);
+  for (const icon of [-1, 2, '0', null]) {
+    const f = fixture({ output: JSON.stringify({ title: 'Название', icon }) });
+    await assert.rejects(suggestTopic(f.port, 'test', [{ id: '1', emoji: '📅' }, { id: '2', emoji: '🏖️' }]), /TITLE_INVALID_RESULT/);
+    assert.equal(f.calls.at(-1).method, 'thread/unsubscribe');
+  }
+});
 test('one Luna request saves a semantic title and cleans its ephemeral conversation; early events are retained', async () => {
   const f = fixture();
   assert.equal(await nameThread(f.port, 'main', 'Пожалуйста, посмотри проект и настрой уведомления'), 'Настроить уведомления');

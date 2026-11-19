@@ -561,6 +561,25 @@ class Broker:
                         return await self.resolve(str(params['telegramId']))
                     await asyncio.sleep(2)
                 raise TimeoutError('Invitation provisioning pending')
+        if method == 'ingress.topic-suggest' and ingress:
+            if (set(params) != {'uid', 'telegramId', 'request', 'icons'}
+                    or type(params['uid']) is not int or not isinstance(params['request'], str)
+                    or not params['request'].strip() or not isinstance(params['icons'], list)
+                    or not isinstance(params['telegramId'], str)):
+                raise ValueError('Invalid topic suggestion')
+            uid = params['uid']
+            profile = await self.authorize(uid)
+            origin = await self.resolve(params['telegramId'])
+            if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
+                raise PermissionError('Telegram account binding changed')
+            result = await self.control.call('telegram.topic-suggest', {
+                'uid': uid, 'request': params['request'], 'icons': params['icons']}, timeout=90)
+            active = await self.authorize(uid)
+            origin = await self.resolve(params['telegramId'])
+            if (active['profileId'] != profile['profileId'] or origin['uid'] != uid
+                    or origin['profileId'] != profile['profileId']):
+                raise PermissionError('Telegram account binding changed')
+            return result
         if method in ('ingress.admit', 'ingress.status', 'ingress.close', 'ingress.prepare', 'ingress.artifact') and ingress:
             if method == 'ingress.admit':
                 profile = await self.resolve(params.get('telegramId'))
@@ -929,6 +948,7 @@ PARAMETERS = {
     'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'accountAnswer', 'expectedUid', 'accountRefused'}),
+    'ingress.topic-suggest': ({'uid', 'telegramId', 'request', 'icons'}, set()),
     'ingress.status': ({'uid', 'turnId'}, {'inputId'}),
     'ingress.close': ({'uid', 'turnId'}, {'questionMessageId', 'inputId', 'accountOfferId'}),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
