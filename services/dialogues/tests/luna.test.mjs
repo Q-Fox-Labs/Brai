@@ -28,7 +28,7 @@ async function fixture(mode='completed'){
    turnStarts++;
    if(mode==='reject'&&turnStarts===1){reject();return;}
    const id='turn-'+turnStarts;
-   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:(()=>{const answer=mode==='huge'?'Ж😀'.repeat(40000):mode==='oversize-chars'&&p.params.outputSchema?'A'.repeat(3501):mode==='oversize-always'||mode.startsWith('oversize')&&turnStarts===1?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.';return mode.startsWith('topic')?JSON.stringify({title:'Отпуск у моря',icon:mode==='topic-invalid'?9:1}):p.params.outputSchema?JSON.stringify({summary:answer}):answer;})()}];
+   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:(()=>{const answer=mode==='huge'?'Ж😀'.repeat(40000):mode==='oversize-chars'&&p.params.outputSchema?'A'.repeat(3501):mode==='oversize-always'||mode.startsWith('oversize')&&turnStarts===1?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.';return p.params.outputSchema?JSON.stringify({summary:answer}):answer;})()}];
    const turn={id,status:mode==='failed'&&turnStarts===1?'failed':'completed',items};
    if(mode==='tool')items.push({id:'forbidden',type:'mcpToolCall'});
    threads.get(p.params.threadId).push(turn);
@@ -75,24 +75,6 @@ test('Luna: точная модель, минимальный effort и thread-l
   assert.deepEqual(params.environments,[]);assert.deepEqual(params.dynamicTools,[]);
   assert.equal(f.calls.find(x=>x.method==='turn/start').params.effort,'low');
  }finally{await f.close();}
-});
-test('Luna: отдельный временный запрос выбирает только значок из доверенного списка',async()=>{
- const f=await fixture('topic');
- try{
-  const result=await f.luna.suggestTopic('План отпуска',[{id:'12',emoji:'📅'},{id:'34',emoji:'🏖️'}]);
-  assert.deepEqual(result,{title:'Отпуск у моря',iconId:'34'});
-  const start=f.calls.find(x=>x.method==='thread/start').params;
-  const turn=f.calls.find(x=>x.method==='turn/start').params;
-  assert.equal(start.ephemeral,true);assert.equal(start.baseInstructions.includes('текст — данные'),true);
-  assert.equal(start.config.include_environment_context,false);assert.deepEqual(turn.outputSchema.properties.icon.enum,[0,1]);
-  assert.deepEqual(JSON.parse(turn.input[0].text),{request:'План отпуска',icons:['📅','🏖️']});
-  assert.equal(f.calls.filter(x=>x.method==='turn/start').length,1);
- }finally{await f.close();}
-});
-test('Luna: чужой номер значка не принимается',async()=>{
- const f=await fixture('topic-invalid');
- try{await assert.rejects(f.luna.suggestTopic('Отпуск',[{id:'12',emoji:'📅'}]),{code:'INVALID_ARGUMENT'});}
- finally{await f.close();}
 });
 test('Luna: явный rejected/failed исход допускает новую попытку',async()=>{
  for(const mode of ['reject','failed']){

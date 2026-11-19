@@ -2500,3 +2500,94 @@ class NativeContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='topic-test-')
+        config = mod.Config('123', Path(self.tmp.name) / 'brai-telegram', '/test/trusted.mjs',
+                            '/usr/local/bin/node', str(Path(self.tmp.name) / 'results'))
+        self.plugin = mod.TelegramPlugin(config, FakeBridge())
+        self.plugin.loop = asyncio.get_running_loop()
+        self.plugin._name_topic = AsyncMock()
+        self.chat, self.user = NS(id=123, type='private'), NS(id=123)
+
+    async def asyncTearDown(self):
+        self.plugin.close()
+        await asyncio.sleep(0)
+        self.tmp.cleanup()
+
+    def message(self, thread=77, **kwargs):
+        return NS(message_thread_id=thread, **kwargs)
+
+    async def test_first_message_claimed_once_and_existing_named_topics_ignored(self):
+        self.plugin._topic_update(self.message(forum_topic_created=NS(is_name_implicit=True)), self.chat, self.user, False)
+        text = self.message(text='План отпуска')
+        self.plugin._topic_update(text, self.chat, self.user, False)
+        self.plugin._topic_update(text, self.chat, self.user, False)
+        await asyncio.sleep(0)
+        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
+        self.plugin._topic_update(self.message(88, forum_topic_created=NS(is_name_implicit=False)), self.chat, self.user, False)
+        self.plugin._topic_update(self.message(88, text='Сохранить название'), self.chat, self.user, False)
+        self.plugin._topic_update(self.message(99, text='Старая тема'), self.chat, self.user, False)
+        await asyncio.sleep(0)
+        self.assertEqual(self.plugin._name_topic.await_count, 1)
+
+    async def test_creation_service_message_id_is_topic_id_when_thread_missing(self):
+        self.plugin._topic_update(NS(message_id=77, forum_topic_created=NS(is_name_implicit=True)), self.chat, self.user, False)
+        self.plugin._topic_update(self.message(text='План отпуска'), self.chat, self.user, False)
+        await asyncio.sleep(0)
+        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
+
+    async def test_manual_edit_cancels_inflight_and_photo_gets_label(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def slow(*args):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        self.plugin._name_topic = slow
+        self.plugin._topic_update(self.message(forum_topic_created=NS(api_kwargs={'is_name_implicit': True})), self.chat, self.user, False)
+        self.plugin._topic_update(self.message(photo=['fixture']), self.chat, self.user, False)
+        await entered.wait()
+        self.plugin._topic_update(self.message(forum_topic_edited=NS(name='Моё название')), self.chat, self.user, False)
+        await cancelled.wait()
+        self.assertFalse(self.plugin.tokens.claim_implicit_topic('123', '77'))
+
+    async def test_guard_schedules_topic_without_waiting_and_refuses_other_owners(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow(*args):
+            entered.set()
+            await release.wait()
+        self.plugin._name_topic = slow
+        class Stop(Exception): pass
+        telegram = ModuleType('telegram')
+        ext = ModuleType('telegram.ext')
+        ext.ApplicationHandlerStop = Stop
+        chat = NS(id=123, type='private')
+        user = NS(id=123, is_bot=False)
+        def update(message, sender=user):
+            return NS(effective_chat=chat, effective_user=sender, effective_message=message, message=message)
+        with patch.dict(sys.modules, {'telegram': telegram, 'telegram.ext': ext}):
+            await self.plugin.guard(update(self.message(forum_topic_created=NS(is_name_implicit=True))), None)
+            await self.plugin.guard(update(self.message(text='План отпуска')), None)
+            await entered.wait()
+            self.assertFalse(release.is_set())
+            with self.assertRaises(Stop):
+                await self.plugin.guard(update(self.message(88, text='Чужой запрос'), NS(id=456, is_bot=False)), None)
+            release.set()
+            await asyncio.gather(*tuple(self.plugin.topic_tasks.values()))
+
+    async def test_existing_sqlite_backup_restores_topic_claim_without_overwriting_tokens(self):
+        self.plugin.tokens.new_implicit_topic('123', '77')
+        backup = sqlite3.connect(':memory:')
+        with self.plugin.tokens._connect() as source:
+            source.backup(backup)
+        self.assertEqual(backup.execute("SELECT state FROM implicit_topics WHERE chat_id='123' AND thread_id='77'").fetchone(), ('pending',))
+        self.assertIsNotNone(backup.execute("SELECT name FROM sqlite_master WHERE name='tokens'").fetchone())
+        restored = sqlite3.connect(str(Path(self.tmp.name) / 'restored.sqlite3'))
+        backup.backup(restored)
+        self.assertEqual(restored.execute("SELECT state FROM implicit_topics WHERE chat_id='123' AND thread_id='77'").fetchone(), ('pending',))
+        self.assertIsNotNone(restored.execute("SELECT name FROM sqlite_master WHERE name='tokens'").fetchone())
+        restored.close()
+        backup.close()

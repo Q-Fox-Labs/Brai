@@ -280,6 +280,9 @@ class Tokens:
                 content TEXT NOT NULL, source_json TEXT NOT NULL, PRIMARY KEY(owner,move_id))""")
             db.execute("""CREATE TABLE IF NOT EXISTS input_notices (
                 chat_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(chat_id,message_id))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS implicit_topics (
+                chat_id TEXT NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL,
+                PRIMARY KEY(chat_id,thread_id))""")
             notice_columns = {row[1] for row in db.execute("PRAGMA table_info(input_notices)")}
             for name, declaration in (
                     ("state", "TEXT NOT NULL DEFAULT 'unknown'"), ("owner", "TEXT NOT NULL DEFAULT ''"),
@@ -299,6 +302,21 @@ class Tokens:
                 yield db
         finally:
             db.close()
+
+    def new_implicit_topic(self, chat_id, thread_id):
+        """Сохранить только подтверждённое Telegram автоматическое название новой темы."""
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO implicit_topics VALUES (?,?,'pending')", (str(chat_id), str(thread_id)))
+
+    def claim_implicit_topic(self, chat_id, thread_id):
+        with self._connect() as db:
+            return db.execute("UPDATE implicit_topics SET state='claimed' WHERE chat_id=? AND thread_id=? AND state='pending'",
+                              (str(chat_id), str(thread_id))).rowcount == 1
+
+    def cancel_implicit_topic(self, chat_id, thread_id):
+        with self._connect() as db:
+            db.execute("UPDATE implicit_topics SET state='cancelled' WHERE chat_id=? AND thread_id=?",
+                       (str(chat_id), str(thread_id)))
 
     def claim_input_notice(self, chat_id, message_id, route=None, now=None):
         """Атомарно занять попытку; повторы ограничены маршрутом, сроком и пятью попытками."""
@@ -550,6 +568,7 @@ class TelegramPlugin:
         self._stop_outgoing_observer = None
         self.tasks = set()
         self.cleanup_tasks = {}
+        self.topic_tasks = {}
         self.handlers = []
         self.closed = False
         self.active_callbacks = set()
@@ -867,6 +886,11 @@ class TelegramPlugin:
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
         original = getattr(update, "message", None) or getattr(update, "edited_message", None)
+        if original is not None and str(getattr(chat, 'type', '')) == 'private' and not self.config.identity_worker:
+            try:
+                self._topic_update(original, chat, user, getattr(update, 'edited_message', None) is not None)
+            except Exception as error:
+                logging.getLogger(__name__).warning('BRAI_TELEGRAM_TOPIC_ADMISSION_FAILED error=%s', type(error).__name__)
         if self.journal is not None and original is not None:
             try:
                 await asyncio.to_thread(self.journal.incoming, original, chat, user)
@@ -888,6 +912,70 @@ class TelegramPlugin:
                         "owner": self.config.owner, "user_id": str(user.id), "chat_type": str(chat.type),
                         "thread_id": str(getattr(original, "message_thread_id", None) or "")})
                 raise ApplicationHandlerStop
+
+    def _topic_update(self, message, chat, user, edited):
+        """Только автоматическая тема и первое новое сообщение владельца."""
+        created = getattr(message, 'forum_topic_created', None)
+        thread = getattr(message, 'message_thread_id', None)
+        if thread is None and created is not None:
+            # Telegram identifies a new topic by its creation service message ID.
+            thread = getattr(message, 'message_id', None)
+        if type(thread) is not int or thread <= 1:
+            return
+        route = (str(chat.id), str(thread))
+        if getattr(message, 'forum_topic_edited', None) is not None:
+            self.tokens.cancel_implicit_topic(*route)
+            pending = self.topic_tasks.get(route)
+            if pending:
+                pending.cancel()
+            return
+        if created is not None:
+            implicit = getattr(created, 'is_name_implicit', None)
+            if implicit is None:
+                implicit = (getattr(created, 'api_kwargs', None) or {}).get('is_name_implicit')
+            if implicit is True:
+                self.tokens.new_implicit_topic(*route)
+            return
+        if edited:
+            return
+        text = getattr(message, 'text', None) or getattr(message, 'caption', None)
+        if not text:
+            kind = next((label for field, label in (('photo', 'Фотография'), ('voice', 'Голосовое сообщение'),
+                ('audio', 'Аудиозапись'), ('video', 'Видео'), ('document', 'Документ')) if getattr(message, field, None)), None)
+            text = kind or ''
+        if not isinstance(text, str) or not text.strip() or not self.tokens.claim_implicit_topic(*route):
+            return
+        task = self.loop.create_task(self._name_topic(route, str(user.id), text))
+        self.topic_tasks[route] = task
+        self.tasks.add(task)
+        def finished(done):
+            self.tasks.discard(done)
+            if self.topic_tasks.get(route) is done:
+                self.topic_tasks.pop(route, None)
+        task.add_done_callback(finished)
+
+    async def _name_topic(self, route, user_id, text):
+        try:
+            path = Path(__file__).resolve().parent / 'topic_names.py'
+            spec = importlib.util.spec_from_file_location('_brai_telegram_topic_names', path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError('TOPIC_NAMER_UNAVAILABLE')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            bot = self.bot
+            stickers = await bot.get_forum_topic_icon_stickers()
+            icons = [{'id': str(item.custom_emoji_id), 'emoji': item.emoji} for item in stickers
+                     if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
+            if not icons:
+                return
+            result = await module.suggest(text, icons)
+            if (self.closed or self.bot is not bot or not self._route_matches(route[0], 'private', user_id)
+                    or result.get('iconId') not in {icon['id'] for icon in icons}):
+                return
+            await bot.edit_forum_topic(chat_id=int(route[0]), message_thread_id=int(route[1]),
+                                       name=result['title'], icon_custom_emoji_id=result['iconId'])
+        except Exception as error:
+            logging.getLogger(__name__).warning('BRAI_TELEGRAM_TOPIC_FAILED error=%s', type(error).__name__)
 
     async def _send_input_notice(self, row):
         """Отправить только один доказанно допустимый fixed-text ответ в сохранённый маршрут."""

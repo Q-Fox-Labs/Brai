@@ -193,8 +193,6 @@ async def admit_update(update, adapter):
                 await asyncio.to_thread(mirror.inbox.markblocked, before, adapter._bot.id, update.update_id)
                 snapshot['state'] = 'binding_changed'
                 return False
-        if resolver is not None and getattr(message, 'forum_topic_edited', None) is not None:
-            resolver.cancel_topic_name(str(chat.id), str(getattr(message, 'message_thread_id', None) or ''))
         if resolver is not None and resolver.journal is not None:
             try:
                 await asyncio.to_thread(resolver.journal.incoming, profile, message, chat, user)
@@ -310,7 +308,6 @@ class Resolver:
         self.control_locks = {}
         self.command_menu_lock = asyncio.Lock()
         self.cleared_command_menus = set()
-        self.topic_tasks = {}
         self.closed = False
         self.retired = False
 
@@ -468,9 +465,6 @@ class Resolver:
         if self.closed:
             return
         self.closed = True
-        for task in self.topic_tasks.values():
-            task.cancel()
-        await asyncio.gather(*self.topic_tasks.values(), return_exceptions=True)
         if self.journal is not None and self.journal.restore is not None:
             self.journal.restore()
         if _resolvers.get(id(self.adapter)) is self:
@@ -713,16 +707,6 @@ class Resolver:
             raise PermissionError('Only private Telegram chats are supported')
         uid = profile['uid']
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
-        topic_text = getattr(event, 'text', None)
-        if not isinstance(topic_text, str) or not topic_text.strip():
-            media_types = getattr(event, 'media_types', None) or []
-            kind = next((kind for kind in media_types if isinstance(kind, str)), '')
-            topic_text = ('Фотография' if kind.startswith('image/') else
-                          'Аудиосообщение' if kind.startswith('audio/') else
-                          'Видео' if kind.startswith('video/') else
-                          'Документ' if media_types else '')
-        topic_first = (route[1] not in ('', '1') and self.ledger.metadata(profile, route) is None
-                       and bool(topic_text.strip()))
         turn = self.turns.get(uid)
         if turn and turn['route'] != route:
             raise PermissionError('Another conversation is active')
@@ -773,51 +757,7 @@ class Resolver:
             replacements = dict(zip(all_paths, mapped))
             data['media_urls'] = [replacements[p] for p in paths]
             data['identity_inputs'] = [{**item, 'path': replacements[item['path']]} for item in inputs]
-        if topic_first:
-            task = asyncio.create_task(self._name_topic(profile, route, topic_text, turn['chatGeneration']))
-            self.topic_tasks[route] = task
-            def forget(finished):
-                if self.topic_tasks.get(route) is finished:
-                    self.topic_tasks.pop(route, None)
-            task.add_done_callback(forget)
         return data
-
-    def cancel_topic_name(self, chat_id, thread_id):
-        """При ручном изменении не заменять его запоздавшим ответом модели."""
-        task = self.topic_tasks.get((chat_id, thread_id))
-        if task is not None:
-            task.cancel()
-
-    async def _name_topic(self, profile, route, text, generation):
-        """Назвать только исходную тему; ошибка не влияет на основной пользовательский ход."""
-        try:
-            bot = getattr(self.adapter, '_bot', None)
-            if bot is None or not route[1].isdecimal() or not route[0].isdecimal():
-                return
-            stickers = await bot.get_forum_topic_icon_stickers()
-            icons = [{'id': str(item.custom_emoji_id), 'emoji': item.emoji} for item in stickers
-                     if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
-            if not icons:
-                return
-            result = await broker_call('ingress.topic-suggest', {
-                'uid': profile['uid'], 'telegramId': route[0],
-                'request': text, 'icons': icons}, timeout=None)
-            if (not isinstance(result, dict) or set(result) != {'title', 'iconId'}
-                    or not isinstance(result['title'], str) or not result['title'].strip()
-                    or len(result['title']) > 128 or any(c in result['title'] for c in '\r\n')
-                    or result['iconId'] not in {icon['id'] for icon in icons}):
-                raise ValueError('Invalid topic suggestion')
-            active = await self._account(profile, route[0])
-            if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
-                raise PermissionError('Owner authorization changed')
-            self._chat_generation(profile, route, generation)
-            if self.closed or self.ledger.metadata(profile, route) is None:
-                return
-            if await bot.edit_forum_topic(chat_id=int(route[0]), message_thread_id=int(route[1]),
-                                          name=result['title'], icon_custom_emoji_id=result['iconId']) is not True:
-                raise ValueError('Unconfirmed topic update')
-        except Exception as error:
-            _logger.warning('telegram_topic_title_failed error=%s', type(error).__name__)
 
     def authorize_delivery(self, profile, action, payload):
         """Подтвердить маршрут и принадлежность reply/edit по доверенному журналу."""

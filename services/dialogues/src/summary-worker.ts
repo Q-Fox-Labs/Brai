@@ -11,15 +11,11 @@ try{
  const stat=lstatSync(path);
  if(!stat.isFile()||stat.uid!==0||(stat.mode&0o027)||!(stat.mode&0o400))throw new Error('UNSAFE_CONFIG');
  const cfg=JSON.parse(readFileSync(path,'utf8'));
- const parts:string[]=[];let ended=false,mode:'summary'|'topic'='summary',started=false;
+ const parts:string[]=[];let ended=false;
  const lines=createInterface({input:process.stdin,crlfDelay:Infinity});
  for await(const line of lines){
   if(Buffer.byteLength(line)>65536)throw new Error('FRAME_TOO_LARGE');
   const value=JSON.parse(line);
-  if(!started&&Object.keys(value).sort().join(',')==='id,mode'&&value.mode==='topic'){
-   mode='topic';started=true;continue;
-  }
-  started=true;
   if(value.end===true&&Object.keys(value).sort().join(',')==='end,id'){ended=true;break;}
   if(Object.keys(value).sort().join(',')!=='id,text'||typeof value.text!=='string')throw new Error('INVALID_INPUT');
   parts.push(value.text);
@@ -28,13 +24,7 @@ try{
  if(!ended)throw new Error('INPUT_INCOMPLETE');
  const luna=createLuna(cfg.socketUrl,cfg.cwd);
  let result:string;
- try{
-  if(mode==='topic'){
-   const input=JSON.parse(parts.join(''));
-   if(!input||Object.keys(input).sort().join(',')!=='icons,request')throw new Error('INVALID_INPUT');
-   result=JSON.stringify(await luna.suggestTopic(input.request,input.icons));
-  }else result=await luna.run(parts.join(''),{},async()=>{});
- }
+ try{result=await luna.run(parts.join(''),{},async()=>{});}
  finally{await luna.close();parts.length=0;}
  const send=async(value:unknown)=>{if(!process.stdout.write(JSON.stringify(value)+'\n'))await once(process.stdout,'drain');};
  let bytes=0;const hash=createHash('sha256');

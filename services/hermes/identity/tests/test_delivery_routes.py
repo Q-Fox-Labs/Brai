@@ -1,6 +1,5 @@
 # ABOUTME: Проверяет фоновые доставки, callback ownership и поздние ответы.
 # ABOUTME: Реальный журнал прав используется без Telegram и Auth сети.
-import asyncio
 import os
 from pathlib import Path
 import sys
@@ -51,91 +50,6 @@ class LedgerTest(unittest.TestCase):
 
 
 class DeliveryRoutesTest(unittest.IsolatedAsyncioTestCase):
-    async def test_first_message_schedules_one_suggestion_without_waiting(self):
-        resolver = runtime.Resolver(NS())
-        self.addAsyncCleanup(resolver.close)
-        started, release = asyncio.Event(), asyncio.Event()
-        async def suggest(*args):
-            started.set()
-            await release.wait()
-        resolver._name_topic = AsyncMock(side_effect=suggest)
-        def event(message_id, thread):
-            return NS(source=NS(chat_type='dm', chat_id=123, thread_id=thread),
-                      text='Планы на отпуск', message_id=message_id, message_type='text')
-        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
-            result = await resolver.prepare(profile(), event(55, 7))
-            self.assertEqual(result['text'], 'Планы на отпуск')
-            await started.wait()
-            await resolver.prepare(profile(), event(56, 7))
-            self.assertEqual(resolver._name_topic.await_count, 1)
-            release.set()
-            await asyncio.gather(*resolver.topic_tasks.values())
-
-    async def test_manual_topic_edit_cancels_only_matching_pending_suggestion(self):
-        resolver = runtime.Resolver(NS())
-        self.addAsyncCleanup(resolver.close)
-        first = asyncio.create_task(asyncio.Event().wait())
-        second = asyncio.create_task(asyncio.Event().wait())
-        resolver.topic_tasks[('123', '7')] = first
-        resolver.topic_tasks[('123', '8')] = second
-        resolver.cancel_topic_name('123', '7')
-        await asyncio.gather(first, return_exceptions=True)
-        self.assertTrue(first.cancelled())
-        self.assertFalse(second.cancelled())
-
-    async def test_general_chat_does_not_schedule_suggestion(self):
-        resolver = runtime.Resolver(NS())
-        self.addAsyncCleanup(resolver.close)
-        resolver._name_topic = AsyncMock()
-        event = NS(source=NS(chat_type='dm', chat_id=123, thread_id=None),
-                   text='Привет', message_id=55, message_type='text')
-        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
-            await resolver.prepare(profile(), event)
-        resolver._name_topic.assert_not_awaited()
-
-    async def test_first_photo_without_caption_uses_attachment_type(self):
-        resolver = runtime.Resolver(NS())
-        self.addAsyncCleanup(resolver.close)
-        resolver._name_topic = AsyncMock()
-        event = NS(source=NS(chat_type='dm', chat_id=123, thread_id=7),
-                   text='', media_types=['image/jpeg'], message_id=55, message_type='photo')
-        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
-            await resolver.prepare(profile(), event)
-            await asyncio.gather(*resolver.topic_tasks.values())
-        self.assertEqual(resolver._name_topic.await_args.args[2], 'Фотография')
-
-    async def test_topic_suggestion_updates_only_the_originating_active_account(self):
-        bot = NS(get_forum_topic_icon_stickers=AsyncMock(return_value=[
-            NS(custom_emoji_id='101', emoji='📅'), NS(custom_emoji_id='202', emoji='🏖️')]),
-            edit_forum_topic=AsyncMock(return_value=True))
-        resolver = runtime.Resolver(NS(_bot=bot))
-        self.addAsyncCleanup(resolver.close)
-        resolver.ledger.admit(profile(), ('123', '7'), {'thread_id': '7'}, '55')
-        async def broker(method, params, **kwargs):
-            if method == 'ingress.topic-suggest':
-                self.assertEqual(params['request'], 'Отпуск у моря')
-                return {'title': 'Отпуск у моря', 'iconId': '202'}
-            return profile()
-        with patch.object(runtime, 'broker_call', side_effect=broker):
-            await resolver._name_topic(profile(), ('123', '7'), 'Отпуск у моря', 0)
-        bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=7,
-                                                      name='Отпуск у моря', icon_custom_emoji_id='202')
-
-    async def test_topic_suggestion_rejects_foreign_icon_and_revoked_account(self):
-        bot = NS(get_forum_topic_icon_stickers=AsyncMock(return_value=[NS(custom_emoji_id='101', emoji='📅')]),
-                 edit_forum_topic=AsyncMock(return_value=True))
-        resolver = runtime.Resolver(NS(_bot=bot))
-        self.addAsyncCleanup(resolver.close)
-        resolver.ledger.admit(profile(), ('123', '7'), {'thread_id': '7'}, '55')
-        for suggestion, active in [({'title': 'Тема', 'iconId': 'foreign'}, profile()),
-                                   ({'title': 'Тема', 'iconId': '101'}, profile(102)),
-                                   ({'title': 'Тема', 'iconId': '101'}, {**profile(), 'generation': 1})]:
-            async def broker(method, params, **kwargs):
-                return suggestion if method == 'ingress.topic-suggest' else active
-            with patch.object(runtime, 'broker_call', side_effect=broker):
-                await resolver._name_topic(profile(), ('123', '7'), 'текст', 0)
-        bot.edit_forum_topic.assert_not_awaited()
-
     async def test_owner_proactive_send_uses_persistent_route_without_input_turn(self):
         adapter = NS(send=AsyncMock(return_value={'success': True, 'message_id': '200'}))
         resolver = runtime.Resolver(adapter)
