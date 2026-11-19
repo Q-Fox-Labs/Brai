@@ -118,6 +118,7 @@
 | `browser_vault_save_login` | Да | Да | Да | Нет |
 | `browser_vault_unlock` | Да | Да | Да | Нет |
 | `browser_vision` | Да | Да | Да | Да, ограниченные аргументы |
+| `mcp__kitesurf__kitesurf` | При установке | При установке | При установке | При установке, ограниченные аргументы |
 | `clarify` | Да | Да | Да | Нет |
 | `computer_use` | Да | Да | Да | Нет |
 | `cronjob_manage` | Да | Да | Да | Нет |

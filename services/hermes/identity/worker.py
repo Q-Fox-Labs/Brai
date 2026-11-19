@@ -1110,13 +1110,21 @@ async def run(config_path):
     install_policy()
     relay = await start_relay(egress, port=18080)
     browser_relay = None
+    kitesurf_relay = None
     try:
         browser_egress = os.environ.get('BRAI_IDENTITY_BROWSER_EGRESS')
         if browser_egress:
             if browser_egress != '/run/brai-profile/browser-egress.sock':
                 raise ValueError('Invalid browser egress socket')
             browser_relay = await start_relay(browser_egress, port=18081)
+        kitesurf_cdp = os.environ.get('BRAI_KITESURF_CDP')
+        if kitesurf_cdp:
+            if kitesurf_cdp != '/run/brai-profile/kitesurf/cdp.sock':
+                raise ValueError('Invalid Kitesurf CDP socket')
+            kitesurf_relay = await start_relay(kitesurf_cdp, port=19366)
     except BaseException:
+        if browser_relay is not None:
+            await close_relay(browser_relay)
         await close_relay(relay)
         raise
     stop = asyncio.Event()
@@ -1135,6 +1143,8 @@ async def run(config_path):
         await asyncio.gather(exited, return_exceptions=True)
         if browser_relay is not None:
             await close_relay(browser_relay)
+        if kitesurf_relay is not None:
+            await close_relay(kitesurf_relay)
         await close_relay(relay)
     if worker.exit_code:
         raise SystemExit(worker.exit_code)

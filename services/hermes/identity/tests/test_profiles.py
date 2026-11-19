@@ -34,6 +34,17 @@ class ProfileTests(unittest.TestCase):
                                model='fixture-model')
         self.assertIn('brai-telegram', value['plugins']['enabled'])
 
+    def test_kitesurf_is_separate_and_requires_explicit_profile_preparation(self):
+        profile = self.profile()
+        defaults = native_profile(profile, instructions_root='/software/instructions', model='fixture-model')
+        self.assertNotIn('kitesurf', defaults['mcp_servers'])
+        for role in ('creator', 'admin', 'user', 'guest'):
+            configured = native_profile({**profile, 'role': role}, instructions_root='/software/instructions',
+                                        model='fixture-model', kitesurf=True)
+            self.assertIn('kitesurf', configured['mcp_servers'])
+            self.assertIn('Chrome', configured['agent']['system_prompt'])
+            self.assertIn('Kitesurf', configured['agent']['system_prompt'])
+
     def test_native_mcp_launcher_excludes_script_and_user_sitecustomize(self):
         source = Path(__file__).resolve().parents[2] / 'identity'
         with tempfile.TemporaryDirectory() as temporary:

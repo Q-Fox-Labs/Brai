@@ -43,7 +43,8 @@
     "browser_press",
     "browser_get_images",
     "browser_vision",
-    "browser_dialog"
+    "browser_dialog",
+    "mcp__kitesurf__kitesurf"
   ],
   "adminTools": [
     "local_ai_models_install",

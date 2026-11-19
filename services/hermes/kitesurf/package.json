@@ -1,0 +1,13 @@
+{
+  "name": "@brai/kitesurf-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "miniflare": "5.20260911.1-alpha",
+    "undici": "7.30.1"
+  },
+  "devDependencies": {
+    "@bazel/bazelisk": "1.28.1",
+    "pnpm": "9.15.4"
+  }
+}

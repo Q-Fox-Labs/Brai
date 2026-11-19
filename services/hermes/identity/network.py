@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
+import socket
 import time
 import uuid
 
@@ -149,6 +151,11 @@ async def _main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     server = await start_relay(args.socket, args.port)
+    notify = os.environ.get('NOTIFY_SOCKET')
+    if notify:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as channel:
+            channel.connect(('\0' + notify[1:]) if notify.startswith('@') else notify)
+            channel.sendall(b'READY=1')
     async with server:
         await server.serve_forever()
 

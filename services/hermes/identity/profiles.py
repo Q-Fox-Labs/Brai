@@ -119,9 +119,12 @@ def stt_config(model):
                           'output_format': 'txt', 'normalize': False, 'timeout': 200}}}
 
 
-def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_model=None, dialogues=False):
+def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_model=None, dialogues=False,
+                   kitesurf=False):
     """Создать нейтральную конфигурацию без bot token и общих credentials."""
     _path(instructions_root)
+    if type(kitesurf) is not bool:
+        raise ValueError('Invalid Kitesurf configuration')
     if not isinstance(model, str) or not model or len(model) > 200 or any(ord(c) < 32 for c in model):
         raise ValueError('Explicit operator model is required')
     home = profile['home']
@@ -165,6 +168,16 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
     role = profile.get('role', 'user')
     if role not in ('creator','admin','user','guest'):
         raise ValueError('Unknown role')
+    if kitesurf:
+        config['mcp_servers']['kitesurf'] = {
+            'command': '/usr/bin/python3',
+            'args': ['-s', '-P', '-B', instructions_root + '/services/hermes/identity/kitesurf_client.py'],
+            'env': {'PYTHONPATH': instructions_root + '/services/hermes'},
+        }
+        config['agent']['system_prompt'] += (
+            ' Выбирай браузер самостоятельно: Kitesurf подходит для открытых страниц '
+            'и простых задач, browser_* управляют Chrome и подходят для сложных '
+            'сайтов и сохранённых входов. У браузеров отдельные сессии.')
     config['agent']['system_prompt'] += {
         'creator': ' Ваша роль — создатель. Административные возможности доступны; исполнитель разработки появится на этапе 2. Нового серверного доступа эта роль не даёт.',
         'admin': ' Ваша роль — администратор. Отдельный Docker администратора ещё не установлен.',
@@ -221,11 +234,14 @@ def profile_for_user(user, *, profile_root):
 
 def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
                 broker_socket, egress_socket, memory_socket, instance='dev',
-                site_packages=None, instructions_root=None, system_skills_root=None, skill_script_dirs=()):
+                site_packages=None, instructions_root=None, system_skills_root=None, skill_script_dirs=(),
+                kitesurf_socket=None):
     """Задать отдельные UID и сеть, открыв лишь личный home и read-only software."""
     for value in (profile['home'], engine_root, runtime_root, python,
                   broker_socket, egress_socket, memory_socket):
         _path(value)
+    if kitesurf_socket is not None:
+        _path(kitesurf_socket)
     if site_packages is not None:
         _path(site_packages)
     if instructions_root is not None:
@@ -252,6 +268,8 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         raise ValueError('Invalid profile account')
     prefix = 'brai-hermes-' + instance + '-identity-'
     browser = 'brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service'
+    kite = 'brai-hermes-' + instance + '-kitesurf-' + profile['profileId'] + '.service'
+    kite_net = 'brai-hermes-' + instance + '-kitesurf-net-' + profile['profileId'] + '.service'
     python_root = str(PurePosixPath(python).parent.parent)
     python_name = PurePosixPath(python).name
     # AIDEV-NOTE: SDK telegram должен разрешаться раньше локального каталога адаптера telegram.
@@ -262,6 +280,8 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'After=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
         'Requires=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
         'After=' + browser, 'Requires=' + browser, 'BindsTo=' + browser,
+        *(['After=' + kite + ' ' + kite_net, 'Wants=' + kite + ' ' + kite_net]
+          if kitesurf_socket else []),
         'JoinsNamespaceOf=' + browser,
         '[Service]', 'Type=simple', 'User=' + user, 'Group=' + user,
         'WorkingDirectory=' + home + '/workspace',
@@ -292,6 +312,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=BRAI_IDENTITY_BROKER=/run/brai-profile/control.sock',
         'Environment=BRAI_IDENTITY_MEMORY=/run/brai-profile/memory.sock',
         'Environment=BRAI_IDENTITY_EGRESS=/run/brai-profile/egress.sock',
+        *(['Environment=BRAI_KITESURF_CDP=/run/brai-profile/kitesurf/cdp.sock'] if kitesurf_socket else []),
         'Environment=BRAI_IDENTITY_INGRESS_UID=' + str(ingress_uid),
         'Environment=BRAI_IDENTITY_USER_ID=' + profile['userId'],
         'Environment=BRAI_IDENTITY_TELEGRAM_ID=' + profile['telegramId'],
@@ -321,6 +342,8 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'BindReadOnlyPaths=' + broker_socket + ':/run/brai-profile/control.sock',
         'BindReadOnlyPaths=' + memory_socket + ':/run/brai-profile/memory.sock',
         'BindReadOnlyPaths=' + egress_socket + ':/run/brai-profile/egress.sock',
+        *(['BindReadOnlyPaths=-' + str(PurePosixPath(kitesurf_socket).parent) + ':/run/brai-profile/kitesurf']
+          if kitesurf_socket else []),
         *(['BindReadOnlyPaths=' + egress_socket + '.browser:/run/brai-profile/browser-egress.sock',
            'BindReadOnlyPaths=' + runtime_root + '/services/hermes/identity/browser-defaults.json:/opt/brai-profile/browser-defaults.json']
           if profile.get('role') == 'guest' else []),
