@@ -4,7 +4,7 @@ import { AbstractAgent, defaultApplyEvents } from "@ag-ui/client";
 import type { BaseEvent } from "@ag-ui/core";
 import { EventSchema } from "@ag-ui/core/schemas";
 import { Subject, type Observable } from "rxjs";
-import { decodeFrame, type StreamFrame } from "./stream";
+import { decodeWireFrame, type StreamFrame } from "./stream";
 import { bytes, limits, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
 import type { AgentLimits, Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog, GoalProjection, ReadState } from "@brai/agent/contracts";
 type Page<T> = { generation: string; data: T[]; nextCursor: string | null };
@@ -183,12 +183,14 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
     next.addEventListener("agent", raw => {
       if (source !== next || disposed || !connected) return;
       try {
-        const frame = JSON.parse((raw as MessageEvent).data) as StreamFrame;
+        const data = (raw as MessageEvent).data;
+        if (typeof data !== "string") throw new Error("BAD_EVENT");
+        const frame = JSON.parse(data) as StreamFrame;
         if (frame.generation !== generation) throw new Error("BAD_EVENT");
         const key = `${frame.projectId}:${frame.threadId}`, old = bases.get(key);
         if (old && old.generation === frame.generation && old.epoch === frame.epoch && frame.seq <= old.seq) return;
         // AIDEV-NOTE: База wire живёт и до выбора чата; GETopen может быть новее отправленного SSE.
-        const snapshot = decodeFrame(frame, old);
+        const snapshot = decodeWireFrame(data, old);
         bases.delete(key); bases.set(key, snapshot);
         if (bases.size > limits.threads) bases.delete(bases.keys().next().value!);
         const chat = chats.get(key);

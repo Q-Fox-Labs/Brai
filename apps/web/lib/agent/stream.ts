@@ -2,10 +2,11 @@
 // ABOUTME: Проверяет исходную базу RFC6902; пропущенная база требует нового open.
 import jsonPatch, { type Operation } from "fast-json-patch";
 import { EventSchema } from "@ag-ui/core/schemas";
-import { bytes, limits, validateEnvelope } from "@brai/agent/contracts";
+import { bytes, limits, validateEnvelope, validateJSONEnvelope } from "@brai/agent/contracts";
 import type { EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 type DeltaFrame = Omit<EventEnvelope, "event"> & { baseSeq: number; event: { type: "STATE_DELTA"; delta: Operation[] } };
 export type StreamFrame = EventEnvelope | DeltaFrame;
+
 /** Полный снимок начинает epoch; следующие кадры несут только изменившиеся поля. */
 export function encodeFrame(value: EventEnvelope, previous?: NativeSnapshot): StreamFrame {
   if (!previous || previous.generation !== value.generation || previous.epoch !== value.epoch) return value;
@@ -17,8 +18,15 @@ export function encodeFrame(value: EventEnvelope, previous?: NativeSnapshot): St
 }
 /** Возвращает проверенный полный снимок. Несовпадение базы не допускает частичного применения. */
 export function decodeFrame(value: StreamFrame, previous?: NativeSnapshot | null): NativeSnapshot {
+  return decode(value, previous, false);
+}
+/** Разбирает исходный JSON-кадр; значения delta не содержат JS-объектов с поведением. */
+export function decodeWireFrame(raw: string, previous?: NativeSnapshot | null): NativeSnapshot {
+  return decode(JSON.parse(raw) as StreamFrame, previous, true);
+}
+function decode(value: StreamFrame, previous: NativeSnapshot | null | undefined, fromJSON: boolean): NativeSnapshot {
   if (value.event?.type === "STATE_SNAPSHOT") {
-    if (!validateEnvelope(value) || bytes(value.event.snapshot) > limits.state) throw new Error("BAD_EVENT");
+    if (fromJSON ? !validateJSONEnvelope(value) : !validateEnvelope(value) || bytes(value.event.snapshot) > limits.state) throw new Error("BAD_EVENT");
     EventSchema.parse(value.event);
     return value.event.snapshot;
   }
@@ -27,6 +35,6 @@ export function decodeFrame(value: StreamFrame, previous?: NativeSnapshot | null
   EventSchema.parse(value.event);
   const snapshot = jsonPatch.applyPatch(previous, value.event.delta, true, false, true).newDocument as NativeSnapshot;
   const envelope = { projectId: value.projectId, threadId: value.threadId, generation: value.generation, epoch: value.epoch, seq: value.seq, event: { type: "STATE_SNAPSHOT", snapshot } };
-  if (!validateEnvelope(envelope) || bytes(snapshot) > limits.state) throw new Error("BAD_EVENT");
+  if (fromJSON ? !validateJSONEnvelope(envelope) : !validateEnvelope(envelope) || bytes(snapshot) > limits.state) throw new Error("BAD_EVENT");
   return snapshot;
 }
