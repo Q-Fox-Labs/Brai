@@ -49,6 +49,10 @@ class Denied(ValueError):
     """Отказ области или формы запроса, безопасный для возврата клиенту."""
 
 
+class UnconfirmedWrite(RuntimeError):
+    """MemOS не вернул подтверждение записи."""
+
+
 class VerifiedSpool:
     """Закрытый временный файл с квотой и ограничением числа одновременных чтений."""
 
@@ -453,7 +457,10 @@ class Boundary:
                 # add не обладает exactly-once: не повторяем после неизвестного ответа.
                 result = client.request(path, payload)
             rows = result.get('data')
-            if (not isinstance(rows, list) or not rows
+            if rows == []:
+                # Writer сверит event ID перед повтором, в том числе после потерянного ответа.
+                raise UnconfirmedWrite
+            if (not isinstance(rows, list)
                     or any(not isinstance(row, dict) or row.get('cube_id') != physical
                            or not isinstance(row.get('memory_id'), str) or not row['memory_id']
                            for row in rows)):
@@ -758,6 +765,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise Denied('PROFILE_CHANGED')
         except Denied as error:
             status, payload = 403, json.dumps({'error': str(error)}).encode()
+        except UnconfirmedWrite:
+            status, payload = 503, b'{"error":"MEMORY_WRITE_UNCONFIRMED"}'
         except (ValueError, KeyError, TypeError):
             status, payload = 400, b'{"error":"INVALID_ARGUMENT"}'
         except Exception:
