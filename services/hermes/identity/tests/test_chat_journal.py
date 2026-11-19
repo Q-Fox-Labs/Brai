@@ -55,21 +55,22 @@ class JournalTest(unittest.IsolatedAsyncioTestCase):
     async def test_retired_bot_history_keeps_original_writes_isolated(self):
         user = NS(full_name='Tester', username='tester')
         self.journal.incoming(A, message(7, 'Old bot'), NS(id=123), user)
-        self.journal.record_presentation(A, ('123', ''), 7, 0)
+        archived_id = str(7 - 2**53)
         db = self.journal.database(A)
         try:
             with db:
-                db.execute("INSERT INTO chat_pauses VALUES('123','',1,8,1,7,0)")
-            self.journal.retire_bot(db, '10001')
-            self.journal.retire_bot(db, '10001')
-            with self.assertRaisesRegex(ValueError, 'RETIRED_BOT_ALREADY_BOUND'):
-                self.journal.retire_bot(db, '10002')
-            self.assertEqual(tuple(db.execute('SELECT paused,generation,recovery_blocked,discard_through FROM chat_pauses').fetchone()),
-                             (1, 8, 1, 0))
+                # Recreate a journal already converted by the offline operator.
+                db.execute('CREATE TABLE retired_telegram_bot (id INTEGER PRIMARY KEY CHECK(id=1), bot_id TEXT NOT NULL)')
+                db.execute("INSERT INTO retired_telegram_bot VALUES(1,'10001')")
+                db.execute("UPDATE messages SET telegram_id=? WHERE telegram_id='7'", (archived_id,))
+                db.execute("INSERT INTO chat_pauses VALUES('123','',1,8,1,0,0)")
             self.assertIsNone(self.journal.presentation_generation(A, ('123', ''), 7))
             self.journal.incoming(A, message(7, 'New bot'), NS(id=123), user)
+            self.assertEqual(tuple(db.execute('SELECT paused,generation,recovery_blocked,discard_through FROM chat_pauses').fetchone()),
+                             (1, 8, 1, 0))
             self.assertEqual([(row['telegram_id'], row['text']) for row in self.rows()],
-                             [(str(7 - 2**53), 'Old bot'), ('7', 'New bot')])
+                             [(archived_id, 'Old bot'), ('7', 'New bot')])
+            self.assertEqual(db.execute('SELECT bot_id FROM retired_telegram_bot WHERE id=1').fetchone()[0], '10001')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM changes').fetchone()[0], 2)
         finally:
             db.close()
