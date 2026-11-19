@@ -482,10 +482,40 @@ class Broker:
             os.close(fd)
             raise
 
-    async def call(self, peer_uid, method, params):
+    async def browser_lifecycle(self, uid, pid, action):
+        """Управлять только Chrome вызывающего личного RELEASE worker."""
+        if (self.config.get('registryPath') != '/etc/brai-release/identity/registry.json'
+                or uid in (0, self.config['ingressUid']) or not pid or action not in ('start', 'stop')):
+            raise PermissionError('Browser lifecycle is unavailable')
+        profile = self.profiles().get(uid)
+        if profile is None:
+            raise PermissionError('Browser owner is unavailable')
+        profile_id = str(uuid.UUID(profile['profileId']))
+        worker = 'brai-hermes-release-user-' + profile_id + '.service'
+        browser = 'brai-hermes-release-browser-' + profile_id + '.service'
+        if action == 'start':
+            authorized = await self.authorize(uid)
+            if authorized['profileId'] != profile_id:
+                raise PermissionError('Browser owner changed')
+        process = await asyncio.create_subprocess_exec(
+            '/usr/bin/systemctl', 'show', '--property=MainPID', '--value', worker,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        output, _ = await process.communicate()
+        if process.returncode or output.strip() != str(pid).encode():
+            raise PermissionError('Browser requester is not the worker service')
+        process = await asyncio.create_subprocess_exec(
+            '/usr/bin/systemctl', action, '--job-mode=fail', browser,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        if await process.wait():
+            raise RuntimeError('Browser service transition failed')
+        return {}
+
+    async def call(self, peer_uid, method, params, *, peer_pid=None):
         """Принять один запрос; worker никогда не выбирает собственный UID или owner."""
         if not isinstance(params, dict):
             raise ValueError('Invalid params')
+        if method == 'browser.lifecycle':
+            return await self.browser_lifecycle(peer_uid, peer_pid, params['action'])
         # Вызов закрепляется до первой авторизации/ожидания, не по более позднему turn.
         request_turn = self.turns.get(peer_uid)
         ingress = peer_uid == self.config['ingressUid']
@@ -922,6 +952,7 @@ class Broker:
 
 # Только именованные параметры; worker никогда не передаёт свой UID или owner.
 PARAMETERS = {
+    'browser.lifecycle': ({'action'}, set()),
     'authorize': ({'uid'}, set()),
     'dialogues.authorize': (set(), set()),
     'identity.resolve': ({'telegramId'}, set()),
@@ -1035,7 +1066,7 @@ def validate_params(method, params):
             uuid.UUID(item['artifactId'])
 
 
-async def rpc_request(broker, uid, request):
+async def rpc_request(broker, uid, request, *, pid=None):
     """Обслужить один JSON-RPC вызов или notification с неизменным peer UID."""
     valid_id = isinstance(request, dict) and ('id' not in request or request['id'] is None or type(request['id']) in (str, int, float))
     if (not isinstance(request, dict) or request.get('jsonrpc') != '2.0'
@@ -1053,7 +1084,8 @@ async def rpc_request(broker, uid, request):
             response = rpc_error(identifier, -32602, 'Invalid params')
         else:
             try:
-                result = await broker.call(uid, method, params)
+                identity = {'peer_pid': pid} if method == 'browser.lifecycle' else {}
+                result = await broker.call(uid, method, params, **identity)
                 response = {'jsonrpc': '2.0', 'id': identifier, 'result': result}
             except Exception as error:
                 cause = error.__cause__ or error
@@ -1074,19 +1106,19 @@ def _invalid_constant(value):
     raise ValueError('Invalid JSON constant')
 
 
-async def rpc_frame(broker, uid, raw):
+async def rpc_frame(broker, uid, raw, *, pid=None):
     """Принять один NDJSON frame; bounded batch исполняется последовательно."""
     try:
         request = json.loads(raw, parse_constant=_invalid_constant)
     except (ValueError, UnicodeError):
         return rpc_error(None, -32700, 'Parse error')
     if not isinstance(request, list):
-        return await rpc_request(broker, uid, request)
+        return await rpc_request(broker, uid, request, pid=pid)
     if not 1 <= len(request) <= 16:
         return rpc_error(None, -32600, 'Invalid Request')
     responses = []
     for item in request:
-        response = await rpc_request(broker, uid, item)
+        response = await rpc_request(broker, uid, item, pid=pid)
         if response is not None:
             responses.append(response)
     return responses or None
@@ -1147,7 +1179,7 @@ async def serve(config):
                 sys.stderr.write(json.dumps({'event': 'identity_connection_rejected', 'code': 'CAPACITY', 'personal': personal_only}) + '\n')
                 return
             async with budget:
-                uid = struct.unpack('3i', writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1]
+                pid, uid, _ = struct.unpack('3i', writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                 raw = await asyncio.wait_for(reader.readline(), 5)
                 if len(raw) > (8192 if personal_only else MAX_FRAME) or not raw.endswith(b'\n'):
                     raise ValueError('Frame too large')
@@ -1163,7 +1195,7 @@ async def serve(config):
                 if isinstance(header, dict) and header.get('method') == 'ingress.open-artifact':
                     await artifact_response(broker, uid, header, writer)
                     return
-                response = await rpc_frame(broker, uid, raw)
+                response = await rpc_frame(broker, uid, raw, pid=pid)
                 if response is None:
                     return
                 encoded = json.dumps(response, ensure_ascii=False).encode() + b'\n'

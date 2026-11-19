@@ -54,6 +54,8 @@ class Worker:
         self.chat_dispatches = {}
         self.chat_interactive = {}
         self.chat_locks = {}
+        self.browser = None
+        self.browser_recoveries = set()
         self.peer_lock = asyncio.Lock()
         self.runtime_stop_lock = asyncio.Lock()
         self.runtime_stopped = False
@@ -65,6 +67,15 @@ class Worker:
         self.output_lock = asyncio.Lock()
         from .release_native import NativeRelease
         self.release = NativeRelease(self)
+
+    def browser_working(self):
+        tasks = getattr(self.adapter, '_session_tasks', {}).values()
+        return (any(self.chat_dispatches.values()) or any(self.chat_interactive.values())
+                or bool(self.browser_recoveries) or any(not task.done() for task in tasks))
+
+    def browser_task_ended(self):
+        if self.browser is not None:
+            self.browser.task_ended()
 
     async def serve_connection(self, reader, writer):
         """Разрешить health-наблюдателя без захвата основного duplex канала."""
@@ -205,6 +216,18 @@ class Worker:
         self.adapter = make_adapter(config, Platform.TELEGRAM, peer, self.publish_file)
         self.adapter.gateway_runner = self.runner
         self.adapter._brai_delivery_journal = self.delivery_journal
+        if self.browser is not None:
+            resume = getattr(self.runner, '_run_startup_resume_event', None)
+            if callable(resume):
+                async def resume_with_browser(*args, **kwargs):
+                    task = asyncio.current_task()
+                    self.browser_recoveries.add(task)
+                    try:
+                        return await resume(*args, **kwargs)
+                    finally:
+                        self.browser_recoveries.discard(task)
+                        self.browser_task_ended()
+                self.runner._run_startup_resume_event = resume_with_browser
         self.runner._is_user_authorized_for_source = lambda source, **kwargs: (
             source.platform == Platform.TELEGRAM and str(source.user_id) == self.telegram_id
             and not source.is_bot)
@@ -648,6 +671,7 @@ class Worker:
                 delivery_scope.reset(token)
         finally:
             self.chat_interactive[route].discard(active)
+            self.browser_task_ended()
 
     async def dispatch_status(self, owner, delivery_id, input_digest):
         """Сверить прежний приём после разрыва RPC без повторного исполнения."""
@@ -853,6 +877,7 @@ class Worker:
             return {'accepted': bool(message._gateway_accepted), 'turn_id': token}
         finally:
             self.chat_dispatches[route] -= 1
+            self.browser_task_ended()
             delivery_scope.reset(scope_token)
             if typing is not None:
                 typing.cancel()
@@ -869,6 +894,7 @@ class Worker:
             replacement.add_done_callback(lambda next_done: self._turn_finished(token, next_done))
             return
         self.active.pop(token, None)
+        self.browser_task_ended()
         if self.delivery_journal is not None and not done.cancelled() and done.exception() is None:
             self.delivery_journal.complete_turn(token)
         self.turn_scopes.pop(token, None)
@@ -1116,7 +1142,13 @@ async def run(config_path):
             if browser_egress != '/run/brai-profile/browser-egress.sock':
                 raise ValueError('Invalid browser egress socket')
             browser_relay = await start_relay(browser_egress, port=18081)
+        if os.environ.get('BRAI_IDENTITY_BROWSER_ON_DEMAND') == '1':
+            from .browser_demand import BrowserDemand
+            worker.browser = BrowserDemand(worker.browser_working)
+            await worker.browser.open()
     except BaseException:
+        if browser_relay is not None:
+            await close_relay(browser_relay)
         await close_relay(relay)
         raise
     stop = asyncio.Event()
@@ -1133,6 +1165,8 @@ async def run(config_path):
     finally:
         exited.cancel()
         await asyncio.gather(exited, return_exceptions=True)
+        if worker.browser is not None:
+            await worker.browser.close()
         if browser_relay is not None:
             await close_relay(browser_relay)
         await close_relay(relay)
