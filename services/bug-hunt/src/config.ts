@@ -10,7 +10,7 @@ import {type VerificationPolicy} from "./verification.js";
 export interface Config {
  databaseURL:string;installationId:string;cursorKey:string;
  nats:{servers:string[];user?:string;password?:string;credsFile?:string;inboxPrefix:string};
- mcp:{host:string;port:number;allowedHosts:string[];allowedOrigins:string[];principalsFile:string;maxConnections:number};
+ mcp:{host:string;port:number;allowedHosts:string[];allowedOrigins:string[];principalsFile:string;maxConnections:number;investigators?:string[]};
  verification?:VerificationPolicy;
  verificationRuntime?:unknown;
  processing?:ProcessingConfig;
@@ -34,6 +34,8 @@ export function config():Config {
  !Array.isArray(cfg.mcp.allowedHosts)||!cfg.mcp.allowedHosts.length||!Array.isArray(cfg.mcp.allowedOrigins)||
  typeof cfg.mcp.principalsFile!=="string"||!positive(cfg.mcp.maxConnections)||cfg.mcp.maxConnections>32||
  !positive(cfg.maxReports)||cfg.maxReports>1000000||!positive(cfg.reportsPerMinute)||cfg.reportsPerMinute>6000||!positive(cfg.maxDatabaseBytes)||cfg.maxDatabaseBytes<16777216||typeof cfg.artifactsEnabled!=="boolean")throw new Error("INVALID_CONFIG");
+ if (cfg.mcp.investigators !== undefined && (!Array.isArray(cfg.mcp.investigators) ||
+   !cfg.mcp.investigators.every((actor:unknown)=>typeof actor === "string" && /^codex:[a-zA-Z0-9_-]+$/.test(actor)))) throw new Error("INVALID_CONFIG");
  cfg.processing=processingConfig(cfg.processing);
  return cfg;
 }
