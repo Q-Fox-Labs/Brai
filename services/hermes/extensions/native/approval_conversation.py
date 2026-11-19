@@ -403,7 +403,7 @@ def _result(status, message, **extra):
     result={"approved":False,"status":status,"outcome":status,"message":message,
             "user_summary":message,"user_consent":False,**extra}
     scope=_scope.get()
-    if scope and status not in {"needs_information", "unrelated_action"}:
+    if scope and status not in {"needs_information", "unrelated_action", "policy_denied"}:
         scope.notice=result
     return result
 
@@ -484,7 +484,7 @@ def _gate(command, description="", *, cwd=None, backend=None):
     if review["decision"]=="unrelated":
         return _result("unrelated_action", "Действие не относится к текущему поручению. Продолжи поручение без этого действия.")
     if review["decision"]=="deny":
-        return _result("policy_denied",review["reason"])
+        return _result("policy_denied", "Действие отклонено. Продолжи поручение доступными инструментами.")
     if not review["effects_known"]:
         return _result("needs_information","Действие не выполнено: сначала изучи затрагиваемые данные и код доступными инструментами. Не спрашивай разрешение на неизвестные последствия.")
     if review["decision"]=="allow":
@@ -531,7 +531,7 @@ def halt_if_needed(agent,result):
         data=_result("needs_consent",scope.pending["question"])
     if not scope or not isinstance(data,dict):
         return
-    if data.get("status") not in {"needs_consent","review_unavailable","execution_unknown","consent_changed","denied","policy_denied","consent_pending","execution_already_completed"}:
+    if data.get("status") not in {"needs_consent","review_unavailable","execution_unknown","consent_changed","denied","consent_pending","execution_already_completed"}:
         return
     from agent.tool_guardrails import ToolGuardrailDecision
     agent._set_tool_guardrail_halt(ToolGuardrailDecision(
