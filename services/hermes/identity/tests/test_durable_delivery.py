@@ -500,20 +500,24 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(getattr(queued.message, kind).file_unique_id, value['file_unique_id'])
 
     async def test_service_topic_creation_is_handled_without_worker_dispatch(self):
-        raw = update(7).to_dict()
-        raw['message'].pop('text')
-        raw['message']['forum_topic_created'] = {'name': 'Fixture', 'icon_color': 7322096}
-        item = Update.de_json(raw, self.bot)
-        self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
-        self.inbox.capture(PROFILE, item, 123)
-        self.mirror.register_snapshot('123:7', {'state': 'known', 'profile': PROFILE})
-        self.mirror.enter('123:7', item)
-        self.assertFalse(await self.mirror.classify('123:7', item))
-        self.assertFalse(self.mirror.finish('123:7', {'completed': True}))
-        await self.mirror.recovery_tasks['123:7']
-        self.assertEqual(self.inbox.observe(PROFILE, 123, 7)['state'], 'handled')
-        self.assertEqual(self.transport.observe(123, 7)['state'], 'handled')
-        self.assertEqual(self.mirror.snapshots, {})
+        for ident, restartable in ((7, True), (8, False)):
+            with self.subTest(restartable=restartable):
+                self.inbox.restartable = self.mirror.restartable = restartable
+                raw = update(ident).to_dict()
+                raw['message'].pop('text')
+                raw['message']['forum_topic_created'] = {'name': 'Fixture', 'icon_color': 7322096}
+                item = Update.de_json(raw, self.bot)
+                self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+                self.inbox.capture(PROFILE, item, 123)
+                key = f'123:{ident}'
+                self.mirror.register_snapshot(key, {'state': 'known', 'profile': PROFILE})
+                self.mirror.enter(key, item)
+                self.assertFalse(await self.mirror.classify(key, item))
+                self.assertFalse(self.mirror.finish(key, {'completed': True}))
+                await self.mirror.recovery_tasks[key]
+                self.assertEqual(self.inbox.observe(PROFILE, 123, ident)['state'], 'handled')
+                self.assertEqual(self.transport.observe(123, ident)['state'], 'handled')
+                self.assertEqual(self.mirror.snapshots, {})
 
     async def test_frontend_completion_before_rpc_does_not_ack_input(self):
         item = self.capture()
