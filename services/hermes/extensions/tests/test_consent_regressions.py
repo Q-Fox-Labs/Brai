@@ -90,6 +90,24 @@ class ConsentRegressions(unittest.TestCase):
                     self.assertTrue(consent.gate('read report')['approved'])
                     review.assert_called_once()
 
+    def test_unrelated_terminal_action_leaves_voice_turn_running_without_consent(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        consent = fixture.consent
+        review = {**fixture.REVIEW, 'decision': 'unrelated'}
+        agent = SimpleNamespace(_set_tool_guardrail_halt=Mock())
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'Озвучь новый стих', '1') as scope:
+            with consent.tool_scope('terminal', {'command': 'read-conversation-cache'}, 'read'):
+                with patch.object(consent, 'review_action', return_value=review):
+                    result = consent.gate('read-conversation-cache')
+                    consent.halt_if_needed(agent, result)
+            self.assertEqual(result['status'], 'unrelated_action')
+            self.assertFalse(result['approved'])
+            self.assertIsNone(self.store.query(scope.key))
+            self.assertIsNone(scope.notice)
+            self.assertIsNone(scope.pending)
+        agent._set_tool_guardrail_halt.assert_not_called()
+
     def test_reviewer_reads_requests_arriving_after_turn_started(self):
         import json
         import sys
