@@ -5,6 +5,7 @@ from contextlib import suppress
 import json
 import logging
 import re
+from urllib.request import ProxyHandler, build_opener
 
 from .network import CONNECT_TIMEOUT, MAX_CONNECTIONS, _duplex, close_relay
 from .tool_client import broker_call
@@ -143,21 +144,12 @@ class BrowserDemand:
     @staticmethod
     async def _graceful_exit():
         import websockets
+        def debugger_url():
+            opener = build_opener(ProxyHandler({}))
+            with opener.open(f'http://127.0.0.1:{CHROME_PORT}/json/version', timeout=CONNECT_TIMEOUT) as response:
+                return json.load(response)['webSocketDebuggerUrl']
         async with asyncio.timeout(CONNECT_TIMEOUT):
-            try:
-                reader, writer = await asyncio.open_connection('127.0.0.1', CHROME_PORT)
-            except ConnectionRefusedError:
-                return
-            try:
-                writer.write(b'GET /json/version HTTP/1.0\r\nHost: localhost\r\n\r\n')
-                await writer.drain()
-                headers, body = (await reader.read()).split(b'\r\n\r\n', 1)
-                if not headers.startswith(b'HTTP/1.0 200 ') and not headers.startswith(b'HTTP/1.1 200 '):
-                    raise ValueError('Chrome version endpoint unavailable')
-                url = json.loads(body)['webSocketDebuggerUrl']
-            finally:
-                writer.close()
-                await writer.wait_closed()
+            url = await asyncio.to_thread(debugger_url)
             endpoint = re.fullmatch(r'ws://(?:localhost|127\.0\.0\.1)(?::[0-9]+)?(/devtools/browser/[0-9a-f-]+)', url)
             if endpoint is None:
                 raise ValueError('Invalid Chrome debugger endpoint')
