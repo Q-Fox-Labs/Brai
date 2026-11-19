@@ -43,13 +43,14 @@ def number(value, name):
 
 
 DEV_RESTART_ADMISSION = 1
+RELEASE_RESTART_ADMISSION = 1
 
 
 class UpdateInbox:
     """Проверенные profile и Telegram actor задаёт вызывающий Auth owner."""
     def __init__(self, journal):
         self.journal = journal
-        self.restartable = os.environ.get('BRAI_IDENTITY_INSTANCE') == 'dev'
+        self.restartable = os.environ.get('BRAI_IDENTITY_INSTANCE') in ('dev', 'release')
 
     def install_v2(self, profile):
         """Add versioned metadata without rewriting or deleting legacy rows."""

@@ -298,7 +298,9 @@ class Resolver:
         self.reply_outbox = None
         if self.mirror is not None and self.mirror.restartable:
             from .reply_outbox import ReplyOutbox
-            self.reply_outbox = ReplyOutbox(self.ledger.db, self._deliver_saved_reply)
+            self.reply_outbox = ReplyOutbox(
+                self.ledger.db, self._deliver_saved_reply,
+                retry_unknown=os.environ.get('BRAI_IDENTITY_INSTANCE') != 'release')
         self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None
@@ -562,7 +564,8 @@ class Resolver:
         """Ожидать реальную готовность и свободную тему без отклонения сообщения."""
         if profile['uid'] not in self.ready_profiles:
             return False
-        if self.mirror is not None and self.mirror.restartable:
+        if (self.mirror is not None and self.mirror.restartable
+                and os.environ.get('BRAI_IDENTITY_INSTANCE') == 'dev'):
             try:
                 status = await broker_call('ingress.input-ready', {})
             except (ConnectionError, TimeoutError, OSError, RpcError):

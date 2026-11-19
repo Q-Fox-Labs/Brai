@@ -690,10 +690,10 @@ class Worker:
             return self._delivery_status(delivery_id, input_digest)
 
     def _enable_delivery(self):
-        """Trusted DEV ingress включает протокол без изменения прежних личных unit-файлов."""
+        """Доверенный ingress включает протокол без изменения прежних личных unit-файлов."""
         if self.delivery_journal is None:
             if (os.environ.get('BRAI_IDENTITY_MODE') != 'worker'
-                    or os.environ.get('BRAI_IDENTITY_INSTANCE') not in (None, '', 'dev')):
+                    or os.environ.get('BRAI_IDENTITY_INSTANCE') not in (None, '', 'dev', 'release')):
                 raise RpcError(-32602, 'Durable delivery unavailable')
             from .delivery_journal import DeliveryJournal
             self.delivery_journal = DeliveryJournal(Path(os.environ['HERMES_HOME']) / 'identity-delivery.sqlite3', self.user_id)
