@@ -78,7 +78,9 @@ class BrowserDemandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(timer.cancelled())
         self.assertEqual(self.commands, ['start'])
         self.working = False
-        self.browser.task_ended()
+        # Native background work can finish without a Telegram callback.
+        self.browser.busy_check.cancel()
+        self.browser._check_work()
         self.browser.idle_timer.cancel()
         self.browser._idle_elapsed()
         await self.browser.cleanup

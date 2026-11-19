@@ -70,8 +70,16 @@ class Worker:
 
     def browser_working(self):
         tasks = getattr(self.adapter, '_session_tasks', {}).values()
-        return (any(self.chat_dispatches.values()) or any(self.chat_interactive.values())
-                or bool(self.browser_recoveries) or any(not task.done() for task in tasks))
+        if (any(self.chat_dispatches.values()) or any(self.chat_interactive.values())
+                or self.browser_recoveries or any(not task.done() for task in tasks)
+                or any(not task.done() for task in self.release.tasks)):
+            return True
+        if not self.activation.is_set():
+            return False
+        from cron.scheduler import get_running_job_ids
+        from tools.async_delegation import active_count
+        return bool(get_running_job_ids() or active_count()
+                    or any(getattr(self.runner, '_running_agents', {}).values()))
 
     def browser_task_ended(self):
         if self.browser is not None:

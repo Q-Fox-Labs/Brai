@@ -23,6 +23,7 @@ class BrowserDemand:
         self.slots = asyncio.Semaphore(MAX_CONNECTIONS)
         self.started = False
         self.idle_timer = None
+        self.busy_check = None
         self.cleanup = None
         self.server = None
         self.closing = False
@@ -31,19 +32,32 @@ class BrowserDemand:
         self.server = await asyncio.start_server(self._serve, '127.0.0.1', CDP_PORT)
 
     def task_ended(self):
-        if (not self.closing and self.started and self.idle_timer is None and not self.working()
+        if (not self.closing and self.started and self.idle_timer is None
                 and (self.cleanup is None or self.cleanup.done())):
             loop = asyncio.get_running_loop()
-            self.idle_timer = loop.call_later(BROWSER_IDLE_SECONDS, self._idle_elapsed)
+            if self.working():
+                # Native cron and background jobs may end outside dispatch callbacks.
+                if self.busy_check is None:
+                    self.busy_check = loop.call_later(1, self._check_work)
+            else:
+                self._cancel_busy_check()
+                self.idle_timer = loop.call_later(BROWSER_IDLE_SECONDS, self._idle_elapsed)
+
+    def _check_work(self):
+        self.busy_check = None
+        self.task_ended()
 
     def _idle_elapsed(self):
         self.idle_timer = None
-        if not self.working():
+        if self.working():
+            self.task_ended()
+        else:
             self.cleanup = asyncio.create_task(self._stop_if_idle())
 
     async def close(self):
         self.closing = True
         self._cancel_idle()
+        self._cancel_busy_check()
         await close_relay(self.server)
         if self.cleanup is not None:
             await self.cleanup
@@ -54,6 +68,11 @@ class BrowserDemand:
             self.idle_timer.cancel()
             self.idle_timer = None
 
+    def _cancel_busy_check(self):
+        if self.busy_check is not None:
+            self.busy_check.cancel()
+            self.busy_check = None
+
     async def _command(self, action):
         await asyncio.to_thread(broker_call, 'browser.lifecycle', {'action': action})
 
@@ -62,12 +81,14 @@ class BrowserDemand:
             if not self.working():
                 raise ConnectionError('No Hermes task owns this browser request')
             self._cancel_idle()
+            self.task_ended()
             if self.started:
                 try:
                     return await asyncio.open_connection('127.0.0.1', CHROME_PORT)
                 except OSError:
                     pass
             self.started = True
+            self.task_ended()
             await self._command('start')
             async with asyncio.timeout(30):
                 while True:
@@ -100,7 +121,11 @@ class BrowserDemand:
 
     async def _stop_if_idle(self):
         async with self.lock:
-            if not self.started or self.working():
+            if not self.started:
+                return
+            if self.working():
+                self.cleanup = None
+                self.task_ended()
                 return
             try:
                 await self._graceful_exit()
