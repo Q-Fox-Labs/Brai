@@ -345,6 +345,24 @@ class WorkerReceiptsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.worker.adapter._brai_delivery_journal, self.worker.delivery_journal)
 
 
+class ReleaseDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_release_uses_owned_outbox_and_skips_the_dev_release_gate(self):
+        from identity import telegram_runtime
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+                os.environ, {'BRAI_IDENTITY_INSTANCE': 'release'}):
+            journal = IdentityJournal(Path(folder) / 'chats')
+            resolver = telegram_runtime.Resolver(NS(_bot=None), journal=journal)
+            self.assertTrue(resolver.mirror.restartable)
+            self.assertIsNotNone(resolver.reply_outbox)
+            with patch.object(telegram_runtime, 'broker_call', new_callable=AsyncMock) as broker:
+                self.assertFalse(await resolver.input_ready(PROFILE, ('42', '')))
+                resolver.ready_profiles.add(PROFILE['uid'])
+                self.assertTrue(await resolver.input_ready(PROFILE, ('42', '')))
+                resolver.turns[PROFILE['uid']] = {'route': ('42', '123')}
+                self.assertFalse(await resolver.input_ready(PROFILE, ('42', '')))
+                broker.assert_not_called()
+
+
 class PumpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -800,6 +818,30 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.deliver.await_count, 2)
         self.assertIsNone(self.outbox.result(second))
         self.assertTrue(self.outbox.result(other)['success'])
+
+    async def test_release_retries_confirmed_refusal_after_reconnect(self):
+        outbox = ReplyOutbox(self.db, self.deliver, retry_unknown=False)
+        outbox.enqueue(IDENT, 'owner', {'text': 'Готовый ответ'})
+        self.deliver.side_effect = [
+            {'success': False, 'retryable': True, 'error': 'send_path_degraded'},
+            {'success': True, 'message_id': '101'},
+        ]
+        await outbox.flush()
+        self.assertFalse(outbox.result(IDENT)['success'])
+        restarted = ReplyOutbox(self.db, self.deliver, retry_unknown=False)
+        await restarted.flush()
+        await restarted.flush()
+        self.assertEqual(restarted.result(IDENT)['message_id'], '101')
+        self.assertEqual(self.deliver.await_count, 2)
+
+    async def test_release_preserves_unknown_external_attempt_without_duplicate(self):
+        outbox = ReplyOutbox(self.db, self.deliver, retry_unknown=False)
+        outbox.enqueue(IDENT, 'owner', {'text': 'Готовый ответ'})
+        self.db.execute("UPDATE reply_outbox SET state='sending'")
+        await outbox.flush()
+        await outbox.flush()
+        self.deliver.assert_not_awaited()
+        self.assertEqual(outbox.result(IDENT)['error_kind'], 'delivery_unknown')
 
     async def test_lost_ack_after_sending_is_retried_but_explicit_forbidden_is_not(self):
         self.outbox.enqueue(IDENT, 'owner', {'text': 'saved'})

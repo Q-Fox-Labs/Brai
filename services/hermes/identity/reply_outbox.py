@@ -2,13 +2,15 @@
 # ABOUTME: Повторяет доставку байтов, а не модель или действия пользователя; права проверяет порт отправки.
 import asyncio
 import json
+import logging
 from .delivery_journal import canonical, DeliveryJournal
 
 
 class ReplyOutbox:
     """Очередь принадлежит ingress; одна блокировка на владельца сохраняет порядок его ответов."""
-    def __init__(self, db, deliver):
+    def __init__(self, db, deliver, *, retry_unknown=True):
         self.db, self.deliver = db, deliver
+        self.retry_unknown = retry_unknown
         self.locks = {}
         db.execute('''CREATE TABLE IF NOT EXISTS reply_outbox (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
@@ -44,20 +46,30 @@ class ReplyOutbox:
         return self.db.execute("UPDATE reply_outbox SET state='pending' WHERE id=? AND state='blocked' AND receipt=?",
                                (ident, row[3])).rowcount == 1
 
+    @staticmethod
+    def _unknown_delivery():
+        logging.getLogger(__name__).warning('TELEGRAM_OUTBOX_DELIVERY_UNCONFIRMED')
+        return {'success': False, 'retryable': False,
+                'error': 'Telegram delivery outcome unknown', 'error_kind': 'delivery_unknown'}
+
     async def flush_owner(self, owner):
         """Отправить сохранённые ответы по порядку; один отказ не блокирует других владельцев."""
         async with self.locks.setdefault(owner, asyncio.Lock()):
-            rows = self.db.execute("SELECT id,body FROM reply_outbox WHERE owner=? AND state IN ('pending','sending') ORDER BY seq", (owner,)).fetchall()
-            for ident, raw in rows:
-                self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
-                try:
-                    result = await self.deliver(json.loads(raw))
-                except PermissionError:
-                    result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    result = {'success': False, 'retryable': True, 'error': 'Delivery pending'}
+            rows = self.db.execute("SELECT id,body,state FROM reply_outbox WHERE owner=? AND state IN ('pending','sending') ORDER BY seq", (owner,)).fetchall()
+            for ident, raw, previous in rows:
+                if previous == 'sending' and not self.retry_unknown:
+                    result = self._unknown_delivery()
+                else:
+                    self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
+                    try:
+                        result = await self.deliver(json.loads(raw))
+                    except PermissionError:
+                        result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
+                                  if self.retry_unknown else self._unknown_delivery())
                 sent = result.get('success') is True and bool(result.get('message_id'))
                 blocked = result.get('retryable') is False
                 state = 'sent' if sent else 'blocked' if blocked else 'pending'

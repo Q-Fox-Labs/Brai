@@ -108,6 +108,24 @@ class ConsentRegressions(unittest.TestCase):
             self.assertIsNone(scope.pending)
         agent._set_tool_guardrail_halt.assert_not_called()
 
+    def test_policy_denial_keeps_reviewer_reason_out_of_tool_and_chat(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        consent = fixture.consent
+        review = {**fixture.REVIEW, 'decision': 'deny', 'reason': 'Служебное объяснение'}
+        agent = SimpleNamespace(_set_tool_guardrail_halt=Mock())
+        with consent.turn_scope(self.db, fixture.source(), 'session', 'Перескажи диалог', '1') as scope:
+            with consent.tool_scope('execute_code', {'code': 'read-all-dialogues'}, 'read'):
+                with patch.object(consent, 'review_action', return_value=review):
+                    result = consent.gate('read-all-dialogues')
+                    consent.halt_if_needed(agent, result)
+            self.assertFalse(result['approved'])
+            self.assertEqual(result['status'], 'policy_denied')
+            self.assertNotIn(review['reason'], str(result))
+            self.assertIsNone(scope.notice)
+            self.assertIsNone(scope.pending)
+        agent._set_tool_guardrail_halt.assert_not_called()
+
     def test_reviewer_reads_requests_arriving_after_turn_started(self):
         import json
         import sys

@@ -79,6 +79,18 @@ def protected_config(path):
     return value
 
 
+def install_managed_stt(path):
+    """Load provisioned Brai voice settings even when the personal config is older."""
+    if not path.is_file():
+        return
+    stt = protected_config(path).get('stt', {})
+    provider = stt.get('providers', {}).get('brai_local_ai', {})
+    if (stt.get('enabled') is True and stt.get('provider') == 'brai_local_ai'
+            and provider.get('type') == 'command'):
+        from tools import transcription_tools
+        transcription_tools._load_stt_config = lambda: deepcopy(stt)
+
+
 def protect_config_readers(config, accepted):
     """Закрепить обычные и raw readers SDK за одним доверенным guest/staged config."""
     for name in ('load_config', 'load_config_readonly', 'read_raw_config',
@@ -275,6 +287,8 @@ def install(*, cold_start=False):
     _guest = _role == 'guest'
     _suspended = _guest or state.get('backgroundsSuspended') is True
     install_worker_watchdog()
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+        install_managed_stt(Path('/opt/brai-profile/profile-config.json'))
     if _guest or state.get('staged') is True:
         product = Path(__file__).resolve().parents[1]
         restrict_exclusive_plugins(product)

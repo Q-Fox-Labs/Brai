@@ -258,7 +258,7 @@ class MemoryGatewayBoundaryTests(unittest.TestCase):
 
     def test_add_rejects_foreign_or_incomplete_receipts(self):
         body = {'writable_cube_ids': ['main'], 'messages': [{'role': 'user', 'content': 'test'}]}
-        for data in (None, {}, [], [None],
+        for data in (None, {}, [None],
                      [{'cube_id': 'profile-b__main', 'memory_id': 'foreign'}],
                      [{'cube_id': 'main', 'memory_id': 'unqualified'}],
                      [{'cube_id': 'profile-a__main', 'memory_id': ''}],
@@ -268,6 +268,26 @@ class MemoryGatewayBoundaryTests(unittest.TestCase):
             with self.subTest(data=data), patch.object(FakeClient, 'request', return_value={'code': 200, 'data': data}):
                 with self.assertRaisesRegex(Denied, 'UPSTREAM_SCOPE_MISMATCH'):
                     self.call(body, path='/product/add')
+
+    def test_add_without_committed_ids_is_retryable(self):
+        socket_path = str(TEMP_ROOT / ('unconfirmed-' + str(os.getpid()) + '.sock'))
+        server = Server(socket_path, self.boundary, admin=False)
+        self.addCleanup(Path(socket_path).unlink, missing_ok=True)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        body = {'writable_cube_ids': ['main'], 'messages': [{'role': 'user', 'content': 'test'}]}
+        try:
+            with patch.object(FakeClient, 'request', return_value={'code': 200, 'data': []}):
+                response = self._request(socket_path, '/product/add', body)
+            headers, payload = response.split(b'\r\n\r\n', 1)
+            self.assertIn(b' 503 ', headers.split(b'\r\n', 1)[0])
+            self.assertEqual(json.loads(payload), {'error': 'MEMORY_WRITE_UNCONFIRMED'})
+            response = self._request(socket_path, '/product/add', body)
+            self.assertIn(b' 200 ', response.split(b'\r\n', 1)[0])
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
+            server.server_close()
 
     def test_shared_logical_reads_stay_in_physical_profile(self):
         self.registry[B_UID] = {**PROFILE_B, 'cubes': ['main']}

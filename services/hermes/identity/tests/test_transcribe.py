@@ -126,5 +126,29 @@ class TranscriptionTests(unittest.TestCase):
             stt_config({'modelId': 'incomplete'})
 
 
+class ManagedVoiceSettingsTests(unittest.TestCase):
+    def test_accepted_command_overrides_disabled_legacy_stt_without_writing_config(self):
+        from pathlib import Path
+        import sys
+        from types import ModuleType
+        from unittest.mock import patch
+        from identity import native_policy
+
+        tools = ModuleType('tools')
+        tools.transcription_tools = ModuleType('tools.transcription_tools')
+        tools.transcription_tools._load_stt_config = lambda: {'enabled': False}
+        expected = {'enabled': True, 'provider': 'brai_local_ai',
+                    'providers': {'brai_local_ai': {'type': 'command'}}}
+        with patch.object(Path, 'is_file', return_value=True), patch.object(
+                native_policy, 'protected_config', return_value={'stt': expected}), patch.dict(
+                sys.modules, {'tools': tools}):
+            native_policy.install_managed_stt(Path('/operator/profile-config.json'))
+            loaded = tools.transcription_tools._load_stt_config()
+            self.assertEqual(loaded, expected)
+            loaded['enabled'] = False
+            self.assertTrue(tools.transcription_tools._load_stt_config()['enabled'])
+
+
+
 if __name__ == '__main__':
     unittest.main()
