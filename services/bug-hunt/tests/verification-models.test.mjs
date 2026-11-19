@@ -23,9 +23,16 @@ function fixture(options={}){
   if(method==="mcpServerStatus/list")return {data:options.openMcp?[{name:"synthetic",runtimeStatus:"ready"}]:[],nextCursor:null};
   if(method==="thread/start"){if(options.lostThreadAck)throw new VF("NATIVE_RPC_TIMEOUT","unknown");return {thread:{id:"own-thread"},sandbox:{type:"readOnly"},approvalPolicy:"never"};}
   if(method==="turn/start"){
+   options.onTurn?.();
    if(options.lostTurnAck)throw new VF("NATIVE_RPC_TIMEOUT","unknown");
    if(options.quiet)return {turn:{id:"own-turn"}};
    setTimeout(()=>{
+    if(options.ephemeral){
+     emit({method:"item/completed",params:{threadId:"own-thread",turnId:"own-turn",item:{type:"agentMessage",phase:"commentary",text:"progress"}}});
+     emit({method:"item/completed",params:{threadId:"own-thread",turnId:"own-turn",item:{type:"agentMessage",phase:"finalAnswer",text:'{"verdict":"insufficient_evidence"}'}}});
+     emit({method:"turn/completed",params:{threadId:"own-thread",turn:{id:"own-turn",status:"completed"}}});
+     return;
+    }
     emit({id:91,method:"item/tool/call",params:{threadId:"foreign-thread",turnId:"own-turn",callId:"foreign",tool:"evidence_list",arguments:{}}});
     emit({id:92,method:"item/tool/call",params:{threadId:"own-thread",turnId:"foreign-turn",callId:"foreign-turn",tool:"evidence_list",arguments:{}}});
     for(let n=0;n<200;n++)emit({method:"item/agentMessage/delta",params:{threadId:"own-thread",turnId:"own-turn",delta:"partial"}});
@@ -37,11 +44,11 @@ function fixture(options={}){
   }
   if(method==="thread/turns/list")return {data:[{id:"own-turn",status:interrupted?"interrupted":options.pending?"inProgress":options.failed?"failed":"completed",items:[{type:"agentMessage",text:'{"verdict":"insufficient_evidence"}'}]}],nextCursor:null};
   if(method==="turn/interrupt"){if(options.lostInterrupt)throw new VF("NATIVE_RPC_TIMEOUT","unknown");interrupted=true;return {};}
-  if(method==="thread/archive")return {};
+  if(method==="thread/archive"||method==="thread/unsubscribe")return {};
   throw Error("Unexpected RPC "+method);
  }};
  const dispatch={tools:()=>[{type:"function",function:{name:"evidence_list",parameters:{type:"object",properties:{},required:[],additionalProperties:false}}}],call:async()=>{tools++;options.onTool?.(tools);return {items:[]};},reserve:async()=>{reserves++;},allowed:options.allowed??(async()=>true),...(options.remainingMs?{remainingMs:options.remainingMs}:{})};
- return {executor:codexExecutor(profile,dispatch,rpc),calls,sent,get tools(){return tools;},get reserves(){return reserves;},get closed(){return closed;}};
+ return {executor:codexExecutor(profile,dispatch,rpc,{ephemeral:options.ephemeral}),calls,sent,get tools(){return tools;},get reserves(){return reserves;},get closed(){return closed;}};
 }
 test("native full tool request is scoped, delta and foreign requests have no effect",async()=>{
  const f=fixture(),states=[];const cp=await f.executor.startStep(intent(),async x=>states.push(structuredClone(x)));
@@ -52,6 +59,14 @@ test("native full tool request is scoped, delta and foreign requests have no eff
 });
 test("lost thread or turn ACK stays unknown and inspect never starts another resource",async()=>{
  for(const option of ["lostThreadAck","lostTurnAck"]){const f=fixture({[option]:true}),i=intent();const cp=await f.executor.startStep(i,async()=>{});assert.equal(cp.state,"unknown");const before=f.calls.filter(p=>p.method.endsWith("/start")).length;await f.executor.inspectStep(i,cp,async()=>{});assert.equal(f.calls.filter(p=>p.method.endsWith("/start")).length,before);}
+});
+test("ephemeral Codex session returns the final notification without persistent history",async()=>{
+ const f=fixture({ephemeral:true}),cp=await f.executor.startStep(intent(),async()=>{});
+ assert.equal(cp.state,"completed");
+ assert.deepEqual(cp.result,{verdict:"insufficient_evidence"});
+ assert.equal(f.calls.find(p=>p.method==="thread/start").params.ephemeral,true);
+ assert.equal(f.calls.some(p=>["thread/turns/list","thread/archive"].includes(p.method)),false);
+ assert.deepEqual(f.calls.at(-1),{method:"thread/unsubscribe",params:{threadId:"own-thread"}});
 });
 test("missing subscription auth has no model start and no Providers path",async()=>{
  const f=fixture({noAuth:true});const cp=await f.executor.startStep(intent(),async()=>{});assert.equal(cp.state,"blocked");assert.equal(f.calls.filter(p=>p.method.endsWith("/start")).length,0);assert.equal(f.reserves,0);
@@ -182,7 +197,7 @@ test("native turn still obeys a shorter remaining attempt budget",async()=>{
  assert.ok(Date.parse(cp.native.call_deadline_at)>=initial+5000);
 });
 test("native quiet turn notices revoked policy before its long deadline",{timeout:2000},async()=>{
- let checks=0;const f=fixture({quiet:true,allowed:async()=>++checks<3}),i=intent();
+ let revoked=false;const f=fixture({quiet:true,onTurn:()=>{revoked=true;},allowed:async()=>!revoked}),i=intent();
  i.deadline_at=new Date(Date.now()+900000).toISOString();
  const cp=await f.executor.startStep(i,async()=>{});
  assert.equal(cp.state,"failed");assert.equal(cp.code,"POLICY_REVOKED");assert.equal(f.tools,0);

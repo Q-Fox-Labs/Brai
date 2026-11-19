@@ -6,7 +6,7 @@ import {pathToFileURL} from "node:url";
 import {Pool} from "pg";
 import {connect,credsAuthenticator,type NatsConnection} from "nats";
 import {config as loadConfig,processingConfig,approvedProjection,type Config} from "./config.js";
-import {Fault,failure,limits,type Operation,type Principal} from "./contracts.js";
+import {Fault,failure,limits,type Operation,type Principal,type ReportInput} from "./contracts.js";
 import {createHandlers} from "./domain.js";
 import {createStore} from "./storage.js";
 import {createGate,type WorkContext} from "./load.js";
@@ -83,6 +83,22 @@ export async function startRuntime(cfg=loadConfig()){
     console.log(JSON.stringify({service:"bug-hunt",operation:op,outcome,duration_ms:Date.now()-start,request_id_sha256:typeof (input as any)?.request_id==="string"?createHash("sha256").update((input as any).request_id).digest("hex"):undefined}));
    }
   };
+  const executeAgent=async(op:Operation,p:Principal,input:unknown,ctx:WorkContext)=>{
+   const store=makeStore(ctx.deadlineAt);
+   if(op==="get") {
+    const core=createHandlers({store:{...store,get:store.getWithInvestigation},evidence:(owner,ids)=>evidence(owner,ids,ctx)});
+    return core.invoke(op,p,input);
+   }
+   const value=await execute(op,p,input,ctx);
+   if(op!=="report")return value;
+   const receipt=value as {case_id:string};
+   try {
+    return {...receipt,investigation:await store.investigationForReport(p,receipt.case_id,input as ReportInput)};
+   } catch {
+    // AIDEV-NOTE: После commit сбой дополнительного чтения не отменяет уже принятую запись.
+    return {...receipt,investigation:{state:"unavailable",applicability:"none"}};
+   }
+  };
   const makeSystemStore=(deadlineAt?:number)=>createSystemStore(pool,{installationId:cfg.installationId,cursorKey:cfg.cursorKey,maxDatabaseBytes:cfg.maxDatabaseBytes,deadlineAt});
   const systemStore=makeSystemStore();
   const verificationPolicies=policyReader(()=>(refreshFromFile?loadConfig():cfg).verification);
@@ -130,6 +146,7 @@ export async function startRuntime(cfg=loadConfig()){
       }
       if(!input||Array.isArray(input)||Object.keys(input).some(k=>!["context","input"].includes(k))||!("context" in input)||!("input" in input))throw new Fault("INVALID_ARGUMENT");
       const p=await natsPrincipal(wire,input.context);
+      if(p.source==="hermes"&&(endpoint==="report"||endpoint==="get"))return executeAgent(endpoint,p,input.input,ctx);
       return execute(endpoint==="operator-list"?"list":endpoint as Operation,p,input.input,ctx,endpoint==="operator-list");
      },mutation).then(value=>msg.respond(Buffer.from(JSON.stringify(value))),error=>{
       const dto=failure(error,mutation);msg.respondError(statusCodes[dto.code],dto.code,Buffer.from(JSON.stringify(dto)));
@@ -185,7 +202,12 @@ export async function startRuntime(cfg=loadConfig()){
     },mutation).then(value=>msg.respond(Buffer.from(JSON.stringify(value))),error=>{const dto=verificationFailure(error,mutation);msg.respondError(statusCodes[dto.code]??400,dto.code,Buffer.from(JSON.stringify(dto)));});
    }});
   }
-  mcp=await startMcp(cfg.mcp,gate,authorization=>codexPrincipal(wire,cfg.mcp.principalsFile,authorization),execute,executeSystem,executeVerification);
+  mcp=await startMcp(cfg.mcp,gate,authorization=>codexPrincipal(wire,cfg.mcp.principalsFile,authorization),executeAgent,executeSystem,executeVerification,async(op,p,input,ctx)=>{
+   if (p.source!=="codex" || !cfg.mcp.investigators?.includes(p.actorId)) throw new Fault("FORBIDDEN");
+   const store=makeStore(ctx.deadlineAt);
+   if(op==="claim")return store.claimInvestigation(p,input);
+   return store.finishInvestigation(p,op,input);
+  });
   let stopping:Promise<void>|undefined;
   return {pool,backgroundPool,nc,service,systemService,systemStore,processingStore,verificationStore,verificationPolicies,processor,mcp,counters,
    stop(){return stopping??=(async()=>{gate.stop();await processor!.stop();await Promise.all([service!.stop(),systemService!.stop(),verificationService!.stop(),mcp!.close()]);await gate.drain();await nc!.drain();await Promise.all([pool.end(),backgroundPool.end()]);})();}};

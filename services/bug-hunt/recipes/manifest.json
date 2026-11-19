@@ -18,6 +18,12 @@
       "version": "1",
       "harness": "lifecycle.mjs",
       "scope": "explicit fault fixture, no shared services"
+    },
+    {
+      "id": "reviewer-role",
+      "version": "1",
+      "harness": "reviewer-role.mjs",
+      "scope": "actual compiled natsPrincipal with synthetic Auth and clock boundaries"
     }
   ],
   "generatedScriptsAllowed": false,

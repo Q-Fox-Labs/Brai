@@ -11,13 +11,14 @@ import type {Config} from "./config.js";
 import type {WorkContext,createGate} from "./load.js";
 
 import {verificationTools,verificationFailure,type VerificationOperation} from "./verification-api.js";
+import {investigationSchemas} from "./investigation-contract.js";
 
 const agentGuide=JSON.parse(readFileSync(new URL("../contracts/agent-guide.json",import.meta.url),"utf8"));
 export const agentInstructions:string=agentGuide.reminder;
 export const toolDefinitions=[
  {name:"bug_hunt_help",description:"Как зарегистрировать наблюдение: правила и пример.",inputSchema:agentGuide.inputSchema,annotations:{readOnlyHint:true,idempotentHint:true}},
- {name:"bug_hunt_report",description:"Зарегистрировать наблюдение о сбое; сначала прочитай bug_hunt_help.",inputSchema:schemas.report},
- {name:"bug_hunt_get",description:"Прочитать доступную карточку и ограниченную страницу ручных решений. Чужая и отсутствующая карточки неразличимы.",inputSchema:schemas.get},
+ {name:"bug_hunt_report",description:"Зарегистрировать наблюдение о сбое и получить применимый известный итог. Сначала прочитай bug_hunt_help.",inputSchema:schemas.report},
+ {name:"bug_hunt_get",description:"Прочитать карточку, итог расследования и страницу ручных решений. Чужая и отсутствующая карточки неразличимы.",inputSchema:schemas.get},
  {name:"bug_hunt_list",description:"Прочитать свою страницу наблюдений с фиксированными фильтрами.",inputSchema:schemas.list},
 ];
 export const systemToolDefinitions=[
@@ -28,11 +29,17 @@ export const systemToolDefinitions=[
  {name:"bug_hunt_groups_get",description:"Прочитать ограниченную страницу участников своей группы.",inputSchema:systemSchemas["groups-get"]},
 ].map(tool=>({...tool,annotations:{readOnlyHint:true,idempotentHint:true}}));
 type SystemExecute=(op:SystemOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
+type Investigate = (op: keyof typeof investigationSchemas,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
+const investigationTools = [
+ {name:"bug_hunt_investigation_claim",operation:"claim",description:"Взять указанную или следующую собственную карточку на диагностику только чтением."},
+ {name:"bug_hunt_investigation_complete",operation:"complete",description:"Сохранить итог выданного задания и отметить карточку обработанной."},
+ {name:"bug_hunt_investigation_fail",operation:"fail",description:"Зафиксировать сбой выданного задания без вывода о проблеме."},
+] as const;
 type VerificationExecute=(op:VerificationOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 type Execute=(op:Operation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 /** Запускает stateless listener с закрытой проверкой credential и ограниченными ресурсами. */
-export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute,executeVerification?:VerificationExecute){
- const definitions=[...toolDefinitions,...(executeSystem?systemToolDefinitions:[]),...(executeVerification?verificationTools.map(({operation,...tool})=>tool):[])];
+export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute,executeVerification?:VerificationExecute,investigate?:Investigate){
+ const baseDefinitions=[...toolDefinitions,...(executeSystem?systemToolDefinitions:[]),...(executeVerification?verificationTools.map(({operation,...tool})=>tool):[])];
  let connections=0;
  const http=createServer(async(req,res)=>{
   if(req.url!=="/mcp"||req.method!=="POST"){res.writeHead(req.url==="/mcp"?405:404).end();return;}
@@ -45,6 +52,8 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
   try{
    await gate.run(async ctx=>{
     const p=await authenticate(req.headers.authorization);
+    const canInvestigate=investigate && config.investigators?.includes(p.actorId);
+    const definitions=canInvestigate ? [...baseDefinitions,...investigationTools.map(({operation,...tool})=>({...tool,inputSchema:investigationSchemas[operation]}))] : baseDefinitions;
     const declared=Number(req.headers["content-length"]??0);
     if(declared>limits.requestBytes+4096)throw new Fault("REQUEST_TOO_LARGE");
     const chunks:Buffer[]=[];let size=0;
@@ -66,13 +75,14 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
      try {
       const systemOp=found.name.slice("bug_hunt_".length).replaceAll("_","-") as SystemOperation;
       const verification=verificationTools.find(tool=>tool.name===found.name);
-      const value=verification&&executeVerification?await executeVerification(verification.operation,p,request.params.arguments??{},ctx):systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
+      const diagnostic=investigationTools.find(tool=>tool.name===found.name);
+      const value=diagnostic&&canInvestigate?await investigate(diagnostic.operation,p,request.params.arguments??{},ctx):verification&&executeVerification?await executeVerification(verification.operation,p,request.params.arguments??{},ctx):systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
        ?await executeSystem(systemOp,p,request.params.arguments??{},ctx)
        :await execute(op,p,request.params.arguments??{},ctx);
       const result={content:[],structuredContent:value as Record<string,unknown>};
       if(Buffer.byteLength(JSON.stringify({jsonrpc:"2.0",id:body.id,result}))>limits.responseBytes)throw new Fault("RESULT_TOO_LARGE");
       return result;
-     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(verificationTools.some(tool=>tool.name===found.name)?verificationFailure(error,found.name==="bug_hunt_verification_run"):systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"))}]};}
+     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(verificationTools.some(tool=>tool.name===found.name)?verificationFailure(error,found.name==="bug_hunt_verification_run"):systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"||investigationTools.some(tool=>tool.name===found.name)))}]};}
     });
     await server.connect(transport);
     await transport.handleRequest(req,res,body);
