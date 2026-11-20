@@ -329,6 +329,7 @@
       "apps/web/tests/game-core-presentation.test.ts",
       "apps/web/tests/goals-readonly.test.ts",
       "apps/web/tests/goals-tree.test.ts",
+      "apps/web/tests/health.test.ts",
       "apps/web/tests/history.test.ts",
       "apps/web/tests/hub.test.ts",
       "apps/web/tests/markdown.test.ts",
