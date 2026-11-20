@@ -569,6 +569,7 @@ class TelegramPlugin:
         self.tasks = set()
         self.cleanup_tasks = {}
         self.topic_tasks = {}
+        self.topic_socket = os.environ.get('BRAI_TELEGRAM_TOPIC_SOCKET')
         self.handlers = []
         self.closed = False
         self.active_callbacks = set()
@@ -886,7 +887,8 @@ class TelegramPlugin:
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
         original = getattr(update, "message", None) or getattr(update, "edited_message", None)
-        if original is not None and str(getattr(chat, 'type', '')) == 'private' and not self.config.identity_worker:
+        if (self.topic_socket and original is not None and not self.config.identity_worker
+                and getattr(chat, 'type', None) == 'private' and self._route_matches(chat.id, 'private', user.id)):
             try:
                 self._topic_update(original, chat, user, getattr(update, 'edited_message', None) is not None)
             except Exception as error:
@@ -968,7 +970,7 @@ class TelegramPlugin:
                      if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
             if not icons:
                 return
-            result = await module.suggest(text, icons)
+            result = await module.suggest(self.topic_socket, text, icons)
             if (self.closed or self.bot is not bot or not self._route_matches(route[0], 'private', user_id)
                     or result.get('iconId') not in {icon['id'] for icon in icons}):
                 return

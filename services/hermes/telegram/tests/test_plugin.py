@@ -2498,9 +2498,6 @@ class NativeContractTests(unittest.TestCase):
         self.assertEqual(paths, [("/tmp/Голос сообщение.ogg", True)])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='topic-test-')
@@ -2508,6 +2505,7 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
                             '/usr/local/bin/node', str(Path(self.tmp.name) / 'results'))
         self.plugin = mod.TelegramPlugin(config, FakeBridge())
         self.plugin.loop = asyncio.get_running_loop()
+        self.plugin.topic_socket = '/run/brai-dialogues-topics/suggest.sock'
         self.plugin._name_topic = AsyncMock()
         self.chat, self.user = NS(id=123, type='private'), NS(id=123)
 
@@ -2591,3 +2589,7 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(restored.execute("SELECT name FROM sqlite_master WHERE name='tokens'").fetchone())
         restored.close()
         backup.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

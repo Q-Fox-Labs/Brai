@@ -3,11 +3,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
+import {createConnection} from 'node:net';
 import {WebSocketServer} from 'ws';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createLuna} from '../dist/luna.js';
+import {startTopicSocket} from '../dist/topic-socket.js';
 
 async function fixture(mode='completed'){
  // AIDEV-NOTE: Unix socket должен помещаться в системный sun_path независимо от длины worktree.
@@ -28,7 +30,9 @@ async function fixture(mode='completed'){
    turnStarts++;
    if(mode==='reject'&&turnStarts===1){reject();return;}
    const id='turn-'+turnStarts;
-   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:(()=>{const answer=mode==='huge'?'Ж😀'.repeat(40000):mode==='oversize-chars'&&p.params.outputSchema?'A'.repeat(3501):mode==='oversize-always'||mode.startsWith('oversize')&&turnStarts===1?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.';return p.params.outputSchema?JSON.stringify({summary:answer}):answer;})()}];
+   const summary=mode==='huge'?'Ж😀'.repeat(40000):mode.startsWith('oversize')?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.';
+   const output=p.params.outputSchema ? JSON.stringify({title:'План отпуска',icon:mode==='bad-icon'?2:1}) : summary;
+   const items=[{id:'native-user-item',type:'userMessage'},{id:'answer',type:'agentMessage',phase:'final_answer',text:output}];
    const turn={id,status:mode==='failed'&&turnStarts===1?'failed':'completed',items};
    if(mode==='tool')items.push({id:'forbidden',type:'mcpToolCall'});
    threads.get(p.params.threadId).push(turn);
@@ -51,8 +55,48 @@ async function fixture(mode='completed'){
  }));
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(path,resolve);});
  const luna=createLuna('ws+unix:'+path+':/','/tmp');
- return {luna,calls,replies,get starts(){return turnStarts;},async close(){await luna.close();for(const x of wss.clients)x.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});}};
+ return {luna,calls,replies,dir,url:'ws+unix:'+path+':/',get starts(){return turnStarts;},async close(){await luna.close();for(const x of wss.clients)x.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});}};
 }
+
+function suggest(path, input) {
+ return new Promise((resolve,reject)=>{
+  const connection=createConnection(path,()=>connection.end(JSON.stringify(input)));
+  let response='';
+  connection.setEncoding('utf8').on('data',chunk=>{response+=chunk;});
+  connection.once('end',()=>resolve(JSON.parse(response)));
+  connection.once('error',reject);
+ });
+}
+
+test('Telegram topic socket keeps ephemeral structured requests separate from summaries', async()=>{
+ const f=await fixture('early');
+ const path=join(f.dir,'topics.sock');
+ const close=await startTopicSocket(path,f.url,'/tmp');
+ try {
+  assert.deepEqual(await suggest(path,{request:'Отпуск',icons:['🔧','🏖️'],chatId:'123'}),{error:'TOPIC_SUGGESTION_FAILED'});
+  assert.equal(f.starts,0);
+  const [topic,summary]=await Promise.all([suggest(path,{request:'Отпуск',icons:['🔧','🏖️']}),f.luna.probe()]);
+  assert.deepEqual(topic,{title:'План отпуска',icon:1});
+  assert.equal(summary.completed,true);
+  const call=f.calls.find(x=>x.method==='turn/start'&&x.params.outputSchema).params;
+  assert.deepEqual(call.outputSchema.properties.icon.enum,[0,1]);
+  assert.equal(call.effort,'low');
+  assert.deepEqual(JSON.parse(call.input[0].text),{request:'Отпуск',icons:['🔧','🏖️']});
+  const threads=f.calls.filter(x=>x.method==='thread/start');
+  assert.equal(threads.length,2);
+  assert.ok(threads.every(x=>x.params.ephemeral&&x.params.dynamicTools.length===0));
+  assert.ok(threads.some(x=>x.params.config.include_environment_context===false));
+ } finally {await close();await f.close();}
+});
+
+test('Telegram topic socket rejects an icon outside the supplied catalogue', async()=>{
+ const f=await fixture('bad-icon');
+ const path=join(f.dir,'topics.sock');
+ const close=await startTopicSocket(path,f.url,'/tmp');
+ try {
+  assert.deepEqual(await suggest(path,{request:'Отпуск',icons:['🔧','🏖️']}),{error:'TOPIC_SUGGESTION_FAILED'});
+ } finally {await close();await f.close();}
+});
 test('Luna: потерянный временный запрос повторяется без чтения истории',async()=>{
  const f=await fixture('unknown');let state={};
  try{
