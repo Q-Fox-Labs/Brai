@@ -40,7 +40,11 @@ async function handle(request: Request) {
   }
   const nc = await natsConnection();
   if (operation === "admin-personal-get") return Response.json(await readAdminPersonal(nc, headers, input));
-  const reply = await nc.request(`${bridge ? "brai.hermes.identity.v1" : "brai.auth.v2"}.${operation}`, Buffer.from(JSON.stringify(bridge ? { ...input, headers } : { headers, body: input })), { timeout: 10000 });
+  // RELEASE Control reaches the file store from the host. Web streams from its own
+  // configured Docker origin after Control checks the artifact owner and audits the read.
+  const releaseDownload = operation === "admin-artifacts-download" && process.env.BRAI_ENVIRONMENT === "release";
+  const subjectOperation = releaseDownload ? "admin-artifacts-get" : operation;
+  const reply = await nc.request(`${bridge ? "brai.hermes.identity.v1" : "brai.auth.v2"}.${subjectOperation}`, Buffer.from(JSON.stringify(bridge ? { ...input, headers } : { headers, body: input })), { timeout: 10000 });
   const serviceError = reply.headers?.get("Nats-Service-Error"), serviceStatus = reply.headers?.get("Nats-Service-Error-Code");
   if (reply.headers?.has("Nats-Service-Error") || reply.headers?.has("Nats-Service-Error-Code")) {
    const codes: Record<string, string> = { "400": "INVALID_ARGUMENT", "401": "UNAUTHORIZED", "403": "FORBIDDEN", "404": "NOT_FOUND", "413": "PAYLOAD_TOO_LARGE", "503": "SOURCE_UNAVAILABLE" };
@@ -50,7 +54,14 @@ async function handle(request: Request) {
   if (operation === "admin-artifacts-download" && reply.data.byteLength > 710000) throw new Error("BAD_REPLY");
   const result = JSON.parse(Buffer.from(reply.data).toString()) as { status: number; body: unknown; setCookies: string[] };
   if (!Number.isInteger(result.status) || result.status < 200 || result.status > 599 || !Array.isArray(result.setCookies) || !result.setCookies.every(item => typeof item === "string" && !/[\r\n]/.test(item))) throw new Error("BAD_REPLY");
-  if (operation === "admin-artifacts-download" && result.status === 200) return await adminDownload(result.body, input.artifactId, request.signal, preview === "1", request.headers.get("range"));
+  if (operation === "admin-artifacts-download" && result.status === 200) {
+   if (releaseDownload) {
+    const artifact = result.body as { ownerId?: unknown; status?: unknown; sizeBytes?: unknown } | null;
+    if (artifact?.ownerId !== input.userId || artifact?.status !== "ready") throw new GatewayError(503, "SOURCE_UNAVAILABLE");
+    if (typeof artifact.sizeBytes === "number" && artifact.sizeBytes > 2 * 1024 ** 3) throw new GatewayError(413, "PAYLOAD_TOO_LARGE");
+   }
+   return await adminDownload(result.body, input.artifactId, request.signal, preview === "1", request.headers.get("range"));
+  }
   return authResponse(result);
  } catch (error) { return failure(error instanceof GatewayError ? error : new GatewayError(503, "ADMIN_UNAVAILABLE")); }
 }

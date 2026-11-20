@@ -406,7 +406,7 @@
     },
     {
       "name": "ingress.close",
-      "description": "Trusted ingress-only release of the exact registered turn.",
+      "description": "Trusted ingress-only release of the exact registered turn. Closing an absent turn is an idempotent no-op; an existing different turn or input is rejected.",
       "paramStructure": "by-name",
       "params": [
         {

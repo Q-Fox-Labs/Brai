@@ -3,6 +3,7 @@
 """Подключение вызывается доверенным ingress после нативной проверки отправителя."""
 import asyncio
 import errno
+import logging
 import os
 from pathlib import Path
 import socket
@@ -96,16 +97,25 @@ class Bridge:
     async def _dispatch_scope(self):
         self.dispatch_inflight += 1
         scope = {'turn_id': None, 'handing_off': False}
+        failed = False
         try:
             yield scope
+        except BaseException:
+            failed = True
+            raise
         finally:
             self.dispatch_inflight -= 1
             if self.dispatch_inflight == 0:
-                for finished in list(self.early_ends & self.known_turns):
-                    self.early_ends.remove(finished)
-                    await self._close_turn(finished)
-                if scope['turn_id'] is None and not scope['handing_off'] and not self.known_turns and self.on_turn_end is not None:
-                    await self.on_turn_end(None)
+                try:
+                    for finished in list(self.early_ends & self.known_turns):
+                        self.early_ends.remove(finished)
+                        await self._close_turn(finished)
+                    if scope['turn_id'] is None and not scope['handing_off'] and not self.known_turns and self.on_turn_end is not None:
+                        await self.on_turn_end(None)
+                except Exception as error:
+                    if not failed:
+                        raise
+                    logging.getLogger(__name__).warning('identity_ingress_cleanup_failed error=%s', type(error).__name__)
 
     async def dispatch(self, event):
         """Отправить ранее допущенное событие без общего transcript/history."""

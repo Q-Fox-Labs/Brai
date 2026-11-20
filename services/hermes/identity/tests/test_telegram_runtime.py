@@ -752,10 +752,186 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.send.await_args.kwargs['metadata'],
                          {'thread_id': '77', 'direct_messages_topic_id': 42})
 
+    async def test_failed_close_keeps_broker_turn_for_next_voice_input(self):
+        """Повтор после неизвестного исхода close не создаёт чужой новый turn."""
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        registered = {**profile(), 'profileId': 'profile', 'status': 'active'}
+        broker = Broker({'ingressUid': 995}, NS())
+        from identity.broker import LoginDeliveryState
+        broker.login_state = LoginDeliveryState(':memory:')
+        self.addCleanup(broker.login_state.close)
+        broker.resolve = AsyncMock(return_value=registered)
+        close_failed = False
+        async def broker_rpc(method, params, **kwargs):
+            nonlocal close_failed
+            if method == 'ingress.close' and not close_failed:
+                close_failed = True
+                raise ConnectionError('synthetic interrupted close')
+            return await broker.call(995, method, params)
+        incoming = event()
+        incoming.media_urls, incoming._brai_identity_inputs = [], []
+        incoming.source.thread_id = '77'
+        with patch.object(runtime, 'broker_call', side_effect=broker_rpc):
+            await resolver.prepare(registered, incoming)
+            original = resolver.turns[101]['id']
+            with self.assertRaises(ConnectionError):
+                await resolver.end(registered, None)
+            self.assertEqual(resolver.turns[101]['id'], original)
+            incoming.message_id, incoming.text = '56', ''
+            incoming.message_type = NS(value='voice')
+            prepared = await resolver.prepare(registered, incoming)
+            self.assertEqual(prepared['message_type'], 'voice')
+            self.assertNotEqual(broker.turns[101]['turnId'], original)
+            self.assertEqual(broker.turns[101]['turnId'], resolver.turns[101]['id'])
+            await resolver.end(registered, None)
+        self.assertNotIn(101, broker.turns)
+        self.assertNotIn(101, resolver.turns)
+
+    async def test_unconfirmed_close_retains_the_turn(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        turn = {'id': 'current', 'route': ('123', ''), 'inputId': 'a' * 64}
+        resolver.turns[101] = turn
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
+            with self.assertRaisesRegex(ConnectionError, 'close receipt'):
+                await resolver.end(profile(), None)
+        self.assertIs(resolver.turns[101], turn)
+
+    async def test_lost_close_receipt_is_retried_without_new_user_message(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        registered = {**profile(), 'profileId': 'profile', 'status': 'active'}
+        broker = Broker({'ingressUid': 995}, NS())
+        from identity.broker import LoginDeliveryState
+        broker.login_state = LoginDeliveryState(':memory:')
+        self.addCleanup(broker.login_state.close)
+        broker.resolve = AsyncMock(return_value=registered)
+        lost = False
+        async def broker_rpc(method, params, **kwargs):
+            nonlocal lost
+            result = await broker.call(995, method, params)
+            if method == 'ingress.close' and not lost:
+                lost = True
+                raise ConnectionError('synthetic lost response')
+            return result
+        incoming = event()
+        incoming.media_urls, incoming._brai_identity_inputs = [], []
+        bridge = NS(dispatch_inflight=0, known_turns=set())
+        with patch.object(runtime, 'broker_call', side_effect=broker_rpc):
+            await resolver.prepare(registered, incoming)
+            with self.assertRaises(ConnectionError):
+                await resolver.end(registered, None)
+            self.assertNotIn(101, broker.turns)
+            self.assertIn(101, resolver.turns)
+            bridge.dispatch_inflight = 1
+            await resolver.retry_pending_close(registered, bridge)
+            self.assertIn(101, resolver.turns)
+            bridge.dispatch_inflight = 0
+            await resolver.retry_pending_close(registered, bridge)
+            self.assertNotIn(101, resolver.turns)
+            incoming.source.thread_id = '77'
+            await resolver.prepare(registered, incoming)
+            self.assertEqual(resolver.turns[101]['route'], ('123', '77'))
+
+    async def test_cancelled_close_is_pending_and_retryable(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        resolver.turns[101] = {'id': 'current', 'route': ('123', ''), 'inputId': 'a' * 64}
+        entered = asyncio.Event()
+        async def broker_rpc(method, params, **kwargs):
+            entered.set()
+            await asyncio.Future()
+        with patch.object(runtime, 'broker_call', side_effect=broker_rpc):
+            closing = asyncio.create_task(resolver.end(profile(), None))
+            await entered.wait()
+            closing.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await closing
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'closed': True})):
+            await resolver.retry_pending_close(profile(), NS(dispatch_inflight=0, known_turns=set()))
+        self.assertNotIn(101, resolver.turns)
+
+    async def test_unresolved_close_blocks_new_admission_without_losing_old_input(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        turn = {'id': 'current', 'route': ('123', ''), 'inputId': 'a' * 64,
+                'closePending': ('a' * 64, None)}
+        resolver.turns[101] = turn
+        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=ConnectionError('offline'))) as calls:
+            with self.assertRaises(ConnectionError):
+                await resolver.prepare(profile(), event())
+        self.assertEqual(calls.await_count, 1)
+        self.assertEqual(calls.await_args.args[0], 'ingress.close')
+        self.assertEqual(turn['closePending'], ('a' * 64, None))
+        self.assertEqual(turn['inputId'], 'a' * 64)
+
+    async def test_supervisor_retries_close_without_user_input(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        resolver.turns[101] = {'id': 'current', 'route': ('123', ''), 'inputId': 'a' * 64,
+                               'closePending': ('a' * 64, None)}
+        closed = asyncio.Event()
+        async def broker_rpc(method, params, **kwargs):
+            if method == 'ingress.profiles':
+                return {'profiles': [profile()]}
+            self.assertEqual(method, 'ingress.close')
+            closed.set()
+            return {'closed': True}
+        bridge = NS(connect=AsyncMock(return_value=NS(call=AsyncMock())),
+                    dispatch_inflight=0, known_turns=set())
+        with patch.object(runtime, 'broker_call', side_effect=broker_rpc), patch.object(resolver, '_bridge', return_value=bridge):
+            supervisor = asyncio.create_task(resolver._supervise())
+            await asyncio.wait_for(closed.wait(), 2)
+            supervisor.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await supervisor
+        self.assertNotIn(101, resolver.turns)
+
+    async def test_delayed_close_receipt_does_not_discard_new_input(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def broker_rpc(method, params, **kwargs):
+            if method == 'ingress.close':
+                entered.set()
+                await release.wait()
+                return {'closed': True}
+            return {}
+        incoming = event()
+        incoming.media_urls, incoming._brai_identity_inputs = [], []
+        with patch.object(runtime, 'broker_call', side_effect=broker_rpc):
+            await resolver.prepare(profile(), incoming)
+            closing = asyncio.create_task(resolver.end(profile(), None))
+            await entered.wait()
+            incoming.message_id, incoming.text = '56', 'new input'
+            preparing = asyncio.create_task(resolver.prepare(profile(), incoming))
+            release.set()
+            await closing
+            prepared = await preparing
+            self.assertEqual(prepared['text'], 'new input')
+            self.assertEqual(prepared['delivery_scope'], resolver.turns[101]['id'])
+
+    async def test_cleanup_error_does_not_hide_original_admission_error(self):
+        async def bad_prepare(_):
+            raise PermissionError('synthetic admission error')
+        async def bad_end(_):
+            raise PermissionError('synthetic cleanup error')
+        bridge = Bridge('owner', '123', 101, '/unused', AsyncMock(), bad_prepare, on_turn_end=bad_end)
+        bridge.connect = AsyncMock(return_value=NS())
+        incoming = event()
+        incoming.source.platform = NS(value='telegram')
+        incoming.source.user_id, incoming.source.is_bot = '123', False
+        with self.assertLogs('identity.ingress', 'WARNING') as records:
+            with self.assertRaisesRegex(PermissionError, 'synthetic admission error'):
+                await bridge.dispatch(incoming)
+        self.assertIn('identity_ingress_cleanup_failed', '\n'.join(records.output))
+        self.assertNotIn('synthetic cleanup error', '\n'.join(records.output))
+
     async def test_old_completion_during_new_dispatch_cannot_close_new_turn(self):
         resolver = runtime.Resolver(NS())
         async def broker(method, params, **kwargs):
-            return profile() if method == 'identity.resolve' else {}
+            return profile() if method == 'identity.resolve' else {'closed': True} if method == 'ingress.close' else {}
         incoming = event()
         incoming.media_urls, incoming._brai_identity_inputs = [], []
         incoming.source.user_id, incoming.source.is_bot = '123', False
@@ -790,7 +966,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 return profile()
             if method == 'ingress.admit' and preparing_second:
                 await bridge.turn_ended('owner', 'first')
-            return {}
+            return {'closed': True} if method == 'ingress.close' else {}
         incoming = event()
         incoming.media_urls, incoming._brai_identity_inputs = [], []
         incoming.source.user_id, incoming.source.is_bot = '123', False
@@ -865,7 +1041,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         incoming = event()
         incoming.source.platform = NS(value='telegram')
         incoming.source.user_id, incoming.source.is_bot = '123', False
-        with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'closed': True})) as broker:
             with self.assertRaisesRegex(ValueError, 'Media rejected'):
                 await bridge.dispatch(incoming)
         self.assertEqual(resolver.turns, {})

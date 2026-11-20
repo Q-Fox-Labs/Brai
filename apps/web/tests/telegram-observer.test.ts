@@ -97,6 +97,14 @@ test("наблюдение доступно всем сессиям DEV, фай�
     process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED = "1"; process.env.BRAI_ENVIRONMENT = "prod";
     assert.equal((await module.exports.observerGet(new Request("https://dev.test/api/telegram-observer/chats"))).status, 404);
     assert.equal((await module.exports.observerFileAuth(auth())).status, 404);
+    process.env.BRAI_ENVIRONMENT = "release";
+    assert.equal(telegramObserverEnabled(), false);
+    process.env.WEB_IDENTITY_MODE = "telegram";
+    assert.equal(telegramObserverEnabled(), true);
+    assert.equal((await module.exports.observerGet(new Request("https://app.test/api/telegram-observer/chats"))).status, 404);
+    assert.equal((await module.exports.observerFileAuth(auth())).status, 404);
+    process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED = "0";
+    assert.equal(telegramObserverEnabled(), false);
   } finally {
     for (const key of keys) if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
   }

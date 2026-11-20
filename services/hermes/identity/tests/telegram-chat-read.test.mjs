@@ -6,6 +6,47 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createChatRead, Control } from '../control.mjs';
+import { createTelegramChatRead } from '../telegram-chat-read.mjs';
+
+test('retired and current bot messages with the same ID read only their own files', async () => {
+ const journal = new DatabaseSync(':memory:');
+ const files = new DatabaseSync(':memory:');
+ const pid = '11111111-1111-4111-8111-111111111111';
+ try {
+  journal.exec(`CREATE TABLE messages(id INTEGER PRIMARY KEY,chat TEXT,thread TEXT,telegram_id TEXT,direction TEXT,name TEXT,username TEXT,text TEXT,at TEXT,edited TEXT,kind TEXT,attachments TEXT,deleted INTEGER);
+  CREATE TABLE changes(seq INTEGER PRIMARY KEY,message INTEGER);
+  CREATE TABLE retired_telegram_bot(id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL);
+  INSERT INTO retired_telegram_bot VALUES(1,'229901');
+  INSERT INTO messages VALUES(1,'123','','-9007199254740985','in','Tester','','Previous bot',NULL,NULL,'photo','[]',0);
+  INSERT INTO messages VALUES(2,'123','','7','in','Tester','','Current bot',NULL,NULL,'photo','[]',0);
+  INSERT INTO changes VALUES(1,1),(2,2);`);
+  files.exec('CREATE TABLE items(artifact TEXT,ref TEXT,source TEXT,position INT)');
+  for (const [index,account] of [pid + ':', 'release:' + pid + ':'].entries()) {
+   const artifactId = `22222222-2222-4222-8222-22222222222${index}`;
+   files.prepare('INSERT INTO items VALUES(?,?,?,?)').run(artifactId,
+    JSON.stringify({artifactId,filename:'photo.jpg',mimeType:'image/jpeg'}),
+    JSON.stringify({platform:'telegram',account,chat:'123',thread:'',itemId:'7:0'}),0);
+  }
+  const read = createTelegramChatRead({root:'/journals',uid:1033,
+   snapshot: (profile, fn, options) => {
+    if (options.databaseName !== 'files.sqlite') return fn(journal);
+    assert.equal(profile.home, '/profile/workspace/files');
+    return fn(files);
+   }});
+  const request = {operation:'admin-chats-get',profile:{profileId:pid,home:'/profile'},id:'["123",""]',limit:1};
+  const active = await read(request);
+  const older = await read({...request,cursor:active.nextCursor});
+  assert.deepEqual([active.messages[0].text, older.messages[0].text], ['Current bot','Previous bot']);
+  assert.deepEqual([active.messages[0].telegramId, older.messages[0].telegramId], ['7','7']);
+  assert.notEqual(active.messages[0].id, older.messages[0].id);
+  assert.deepEqual(active.messages[0].attachments.map(file => file.artifactId), ['22222222-2222-4222-8222-222222222221']);
+  assert.deepEqual(older.messages[0].attachments.map(file => file.artifactId), ['22222222-2222-4222-8222-222222222220']);
+  const latest = await read({...request,cursor:'changes:1'});
+  assert.deepEqual(latest.messages.map(message => message.text), ['Current bot']);
+ } finally {
+  files.close(); journal.close();
+ }
+});
 
 test('Telegram source preserves exact text and media; changes update old messages without a model fallback', async () => {
  mkdirSync(join(process.cwd(),'tmp'),{recursive:true});

@@ -1,6 +1,7 @@
 // ABOUTME: Проверяет объединение профилей и восстановление живой переписки после разрыва.
 // ABOUTME: Использует синтетические ответы существующего HTTP API без реальных пользователей.
 import assert from "node:assert/strict";
+import { setImmediate } from "node:timers/promises";
 import { test } from "node:test";
 import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, selectedChatUnavailable, type AdminChat, type ChatMessage } from "../app/agent/admin-chat-client.ts";
 const chat: AdminChat = { id: "same", title: "Чат", updatedAt: "2026-11-08T00:00:00Z", owner: { id: "u1", name: "Анна", profileId: "p1" } };
@@ -28,6 +29,28 @@ test("all owners and Telegram pages stay distinct; one failed profile keeps its 
   assert.ok(requests.filter(q=>q.searchParams.get("operation")==="admin-chats-list").every(q=>q.searchParams.get("source")==="telegram"));
   assert.equal(requests.filter(q=>q.searchParams.get("userId")==="u1").length,2);
  } finally { globalThis.fetch=saved; }
+});
+test("a stalled profile does not hide chats from other profiles", async () => {
+ const saved = globalThis.fetch;
+ const slowOwner = {id:"slow",name:"Медленный профиль",profileId:"p2"};
+ const slow = Promise.withResolvers<Response>();
+ const progress: AdminChat[][] = [];
+ globalThis.fetch = (async (input: string | URL | Request) => {
+  const query = new URL(String(input), "https://fixture.test").searchParams;
+  if (query.get("operation") === "users-list") return Response.json({users:[slowOwner,chat.owner]});
+  if (query.get("userId") === slowOwner.id) return slow.promise;
+  return Response.json({source:"telegram",items:[{id:chat.id,title:chat.title,updatedAt:chat.updatedAt}],nextCursor:null});
+ }) as typeof fetch;
+ const pending = loadAdminChats([],new AbortController().signal,value=>progress.push(value.chats));
+ try {
+  await setImmediate();
+  assert.deepEqual(progress.at(-1)?.map(adminChatKey),[adminChatKey(chat)]);
+ } finally {
+  slow.resolve(new Response("",{status:503}));
+  await pending;
+  globalThis.fetch=saved;
+ }
+ assert.deepEqual((await pending).unavailable,[slowOwner]);
 });
 test("reconnect recovers more than fifty new messages without a gap and owner never comes from message text", async () => {
  const saved = globalThis.fetch; let calls=0;

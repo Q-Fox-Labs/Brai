@@ -11,7 +11,7 @@ import tempfile
 import threading
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram import Bot, Update, User
 from identity.chat_journal import IdentityJournal
@@ -155,6 +155,32 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.runner._hmwa_shape_agent_response({'failed': False, 'completed': True}, self.source, [], self.entry, 'session')
         self.assertIsNone(self.worker.delivery_journal.continuation('session'))
 
+    async def test_interrupted_stream_and_exhausted_retries_resume_without_followup(self):
+        from identity.scope import input_delivery
+        for code in ('stream_drop', 'retry_limit'):
+            with self.subTest(code=code):
+                self.slot.turn.agent = None
+                self.tasks.clear()
+                self.entry.resume_pending = False
+                self.worker.delivery_journal.clear_continuation('session')
+                self.runner._run_startup_resume_event.reset_mock()
+                token = input_delivery.set(IDENT)
+                try:
+                    with self.assertLogs('identity.worker', 'INFO') as records:
+                        await self.runner._hmwa_shape_agent_response(
+                            {'failed': True, 'partial': True, 'error': 'interrupted',
+                             'brai_failure_kind': code}, self.source, [], self.entry, 'session')
+                        with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+                            await self.worker._retry_failed_sessions()
+                            await self.worker._retry_failed_sessions()
+                    await asyncio.gather(*self.tasks)
+                finally:
+                    input_delivery.reset(token)
+                self.runner._run_startup_resume_event.assert_awaited_once()
+                self.assertEqual(len(self.tasks), 1)
+                self.assertIn('HERMES_FAILED_TURN_RECOVERY_MARKED session=session binding=True', '\n'.join(records.output))
+                self.assertIn('HERMES_FAILED_TURN_RECOVERY_STARTED session=session', '\n'.join(records.output))
+
     async def test_pause_or_changed_chat_generation_prevents_automatic_resume(self):
         self.worker.delivery_journal.save_continuation('session', IDENT, 3)
         self.entry.resume_pending, self.entry.resume_reason = True, 'brai_technical_failure'
@@ -215,7 +241,7 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             input_delivery.reset(token)
 
-    async def test_existing_native_watcher_starts_saved_work_without_new_message(self):
+    async def test_native_watcher_recovers_even_when_return_notice_is_broken(self):
         """Проверить связку поставляемого native watcher, журнала и worker scheduler."""
         root = Path(self.tmp.name) / 'native'
         target = root / 'gateway/return_notices.py'
@@ -231,7 +257,7 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                        cwd=root, check=True, capture_output=True)
         node = next(node for node in ast.walk(ast.parse(target.read_text()))
                     if isinstance(node, ast.AsyncFunctionDef) and node.name == '_return_notice_watcher')
-        scope = {'read_return_notices': lambda path: None}
+        scope = {'read_return_notices': Mock(side_effect=ValueError('broken notice')), 'logger': Mock()}
         async def tick(_):
             fake._running = False
         scope['asyncio'] = NS(sleep=tick)
@@ -249,6 +275,7 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await scope['_return_notice_watcher'](fake)
             await asyncio.gather(*self.tasks)
         self.runner._run_startup_resume_event.assert_awaited_once()
+        scope['logger'].warning.assert_called_once_with('Return notice remains pending error=%s', 'ValueError')
 
 
 
@@ -500,20 +527,24 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(getattr(queued.message, kind).file_unique_id, value['file_unique_id'])
 
     async def test_service_topic_creation_is_handled_without_worker_dispatch(self):
-        raw = update(7).to_dict()
-        raw['message'].pop('text')
-        raw['message']['forum_topic_created'] = {'name': 'Fixture', 'icon_color': 7322096}
-        item = Update.de_json(raw, self.bot)
-        self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
-        self.inbox.capture(PROFILE, item, 123)
-        self.mirror.register_snapshot('123:7', {'state': 'known', 'profile': PROFILE})
-        self.mirror.enter('123:7', item)
-        self.assertFalse(await self.mirror.classify('123:7', item))
-        self.assertFalse(self.mirror.finish('123:7', {'completed': True}))
-        await self.mirror.recovery_tasks['123:7']
-        self.assertEqual(self.inbox.observe(PROFILE, 123, 7)['state'], 'handled')
-        self.assertEqual(self.transport.observe(123, 7)['state'], 'handled')
-        self.assertEqual(self.mirror.snapshots, {})
+        for ident, restartable in ((7, True), (8, False)):
+            with self.subTest(restartable=restartable):
+                self.inbox.restartable = self.mirror.restartable = restartable
+                raw = update(ident).to_dict()
+                raw['message'].pop('text')
+                raw['message']['forum_topic_created'] = {'name': 'Fixture', 'icon_color': 7322096}
+                item = Update.de_json(raw, self.bot)
+                self.transport.capture_batch([(item, {'state': 'known', 'profile': PROFILE})], 123)
+                self.inbox.capture(PROFILE, item, 123)
+                key = f'123:{ident}'
+                self.mirror.register_snapshot(key, {'state': 'known', 'profile': PROFILE})
+                self.mirror.enter(key, item)
+                self.assertFalse(await self.mirror.classify(key, item))
+                self.assertFalse(self.mirror.finish(key, {'completed': True}))
+                await self.mirror.recovery_tasks[key]
+                self.assertEqual(self.inbox.observe(PROFILE, 123, ident)['state'], 'handled')
+                self.assertEqual(self.transport.observe(123, ident)['state'], 'handled')
+                self.assertEqual(self.mirror.snapshots, {})
 
     async def test_frontend_completion_before_rpc_does_not_ack_input(self):
         item = self.capture()

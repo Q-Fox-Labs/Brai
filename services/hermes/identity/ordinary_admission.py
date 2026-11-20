@@ -543,8 +543,10 @@ class Mirror:
                 self.input_routes[uid] = route
                 # Handing-off начинается только перед реальным worker RPC.
                 return False
-            if getattr(getattr(update, 'message', None), 'forum_topic_created', None):
-                self.service_updates[key] = update
+        if getattr(getattr(update, 'message', None), 'forum_topic_created', None):
+            # Native handles this Telegram event without dispatching a worker.
+            # Both inbox modes need the terminal ingress receipt.
+            self.service_updates[key] = update
         if self.transport is not None:
             await asyncio.to_thread(self.transport.transition, self.bot_id, update.update_id, 'captured','handing_off')
         await asyncio.to_thread(self.inbox.claim_for_delivery, profile, self.bot_id, update.update_id,

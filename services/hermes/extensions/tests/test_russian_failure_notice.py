@@ -77,6 +77,12 @@ class FailureNoticeTest(unittest.TestCase):
             self.assertIn(f'Код: `{code}`', text)
             self.assertNotIn(self.notice._UNKNOWN, text)
 
+    def test_retry_exhaustion_and_unknown_offer_continue_without_claiming_cause(self):
+        text = self.render('unknown', result={'brai_failure_kind': 'retry_limit'})
+        self.assertIn('Код: `retry_limit`', text)
+        self.assertIn('Если работа не возобновилась, напишите «Продолжай»', text)
+        self.assertIn('напишите «Продолжай»', self.render('unknown'))
+
     def test_native_service_messages_are_russian_and_keep_old_history(self):
         import os
         candidate = os.environ.get('HERMES_TEST_CANDIDATE')

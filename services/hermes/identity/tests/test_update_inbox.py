@@ -66,6 +66,27 @@ class InboxTests(unittest.TestCase):
         result=self.inbox.claim_for_delivery(PROFILE,123,0)
         self.assertEqual(result['update']['update_id'],0)
 
+    def test_saved_voice_can_be_handed_off_once_without_telegram(self):
+        # Форма и метаданные сохранённого события, идентификаторы и file_id синтетические.
+        raw={'update_id':1,'message':{'message_id':1,'date':1,
+             'chat':{'id':42,'type':'private'},
+             'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+             'message_thread_id':77,
+             'voice':{'file_id':'synthetic-file','file_unique_id':'synthetic-unique',
+                      'duration':16,'file_size':88645,'mime_type':'audio/ogg'}}}
+        self.inbox.capture(PROFILE,Update.de_json(raw,Bot('123:abc')),'123')
+        self.assertEqual(self.inbox.observe(PROFILE,'123',1)['state'],'captured')
+        claimed=self.inbox.claim_for_delivery(PROFILE,'123',1)
+        restored=Update.de_json(claimed['update'],Bot('123:abc'))
+        self.assertEqual((restored.effective_message.message_thread_id,
+                          restored.effective_message.voice.duration,
+                          restored.effective_message.voice.file_size), (77,16,88645))
+        # Фиктивная квитанция worker: сетевых вызовов и скачивания аудио здесь нет.
+        self.inbox.markaccepted(PROFILE,'123',1,{'accepted':True,'turn_id':'synthetic-turn'})
+        self.assertEqual(self.inbox.observe(PROFILE,'123',1)['state'],'accepted')
+        with self.assertRaisesRegex(ValueError,'NOT_REPLAYABLE'):
+            self.inbox.claim_for_delivery(PROFILE,'123',1)
+
     def test_held_order_original_json_and_operation_binding(self):
         for ident in (3,1,2):
             self.capture(ident)
