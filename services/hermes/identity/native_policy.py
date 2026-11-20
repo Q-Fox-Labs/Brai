@@ -11,6 +11,7 @@ import stat
 from .tool_client import broker_call
 
 _installed = False
+_managed_stt = False
 _guest = False
 _role = None
 _suspended = False
@@ -80,15 +81,17 @@ def protected_config(path):
 
 
 def install_managed_stt(path):
-    """Load provisioned Brai voice settings even when the personal config is older."""
+    """Select the admitted command provider and report whether it enabled STT."""
     if not path.is_file():
-        return
+        return False
     stt = protected_config(path).get('stt', {})
     provider = stt.get('providers', {}).get('brai_local_ai', {})
     if (stt.get('enabled') is True and stt.get('provider') == 'brai_local_ai'
             and provider.get('type') == 'command'):
         from tools import transcription_tools
         transcription_tools._load_stt_config = lambda: deepcopy(stt)
+        return True
+    return False
 
 
 def protect_config_readers(config, accepted):
@@ -273,13 +276,13 @@ def install_executor_guard():
 
 def install(*, cold_start=False):
     """Закрепить гостевой startup и общий guard registry до обнаружения инструментов."""
-    global _installed, _guest, _role, _suspended, _startup_state
+    global _installed, _guest, _role, _suspended, _startup_state, _managed_stt
     state = broker_call('permissions.bootstrap', {})
     if _installed:
         if state.get('role') != _role:
             raise PermissionError('Runtime role changed')
         _startup_state = state
-        return
+        return _managed_stt
     _startup_state = state
     if state.get('role') not in ('creator','admin','user','guest'):
         raise PermissionError('Доступ не подтверждён')
@@ -288,7 +291,7 @@ def install(*, cold_start=False):
     _suspended = _guest or state.get('backgroundsSuspended') is True
     install_worker_watchdog()
     if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
-        install_managed_stt(Path('/opt/brai-profile/profile-config.json'))
+        _managed_stt = install_managed_stt(Path('/opt/brai-profile/profile-config.json'))
     if _guest or state.get('staged') is True:
         product = Path(__file__).resolve().parents[1]
         restrict_exclusive_plugins(product)
@@ -399,6 +402,7 @@ def install(*, cold_start=False):
         GatewayRunner._start_recover_previous_run = prepared_recovery
         GatewayRunner._start_finish_wiring = prepared_finish
         GatewayRunner._start_spawn_background_watchers = prepared_watchers
+    return _managed_stt
 
 
 def prepared_principal():
