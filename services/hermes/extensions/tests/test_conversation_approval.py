@@ -58,7 +58,7 @@ def branding_module():
     return module
 
 
-REVIEW={"decision":"needs_consent","effects_known":True,"target":"Папка Поездка","consequences":"Фотографии будут удалены без возможности восстановления.","reason":"Удаление не было поручено."}
+REVIEW={"decision":"needs_consent","effects_known":True,"risk":"destructive","target":"Папка Поездка","consequences":"Фотографии будут удалены без возможности восстановления.","reason":"Удаляются ценные данные."}
 
 class ConsentTests(unittest.TestCase):
     def setUp(self):
@@ -188,6 +188,12 @@ class ConsentTests(unittest.TestCase):
         row=self.prepare()
         self.assertEqual(self.store.answer(self.scope.key,"alice","11","да",time.time()+1),"stale")
         self.assertEqual(self.store.query(self.scope.key)["status"],"pending")
+
+    def test_reply_to_original_request_after_delivery_is_accepted(self):
+        row=self.prepare()
+        self.store.delivered(row["id"],"10")
+        self.assertEqual(self.store.answer(self.scope.key,"alice","11","Да",time.time()+1,row["input_id"]),"authorized")
+
     def test_only_same_owner_scope_and_current_question(self):
         row=self.prepare()
         self.store.delivered(row["id"],"10")
@@ -293,7 +299,7 @@ class ConsentTests(unittest.TestCase):
         self.assertNotEqual(consent._hash(after),consent._hash(consent.descriptor_for(command,cwd=str(Path(self.temp.name).parent),backend="local")))
     def test_screenshot_style_python_is_allowed_without_question(self):
         with consent.turn_scope(self.db,source(),"session","Посмотри погоду и посчитай температуру","1"),consent.tool_scope("terminal",{"command":"python -c 'print((38-32)*5/9)'"},"tool-1"):
-            with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow"}):
+            with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow","risk":"routine"}):
                 result=consent.gate("python -c 'print((38-32)*5/9)'")
         self.assertTrue(result["approved"])
         self.assertIsNone(self.store.query(self.scope.key))
@@ -462,7 +468,7 @@ class ConsentTests(unittest.TestCase):
 
     def test_plugin_rewrite_of_autoallowed_operation_stops_before_dispatch(self):
         with consent.turn_scope(self.db,source(),"session","Посчитай","1"),consent.tool_scope("plugin",{"command":"calculate"},"run"):
-            with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow"}):
+            with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow","risk":"routine"}):
                 self.assertTrue(consent.gate("calculate")["approved"])
             self.assertEqual(consent.update_arguments({"command":"delete"})["status"],"consent_changed")
 
@@ -512,6 +518,26 @@ class ConsentTests(unittest.TestCase):
         with consent.turn_scope(self.db,source(),"session","Проверь папку","1"),consent.tool_scope("terminal",{},"tool"):
             with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow","effects_known":False}):
                 self.assertEqual(consent.gate("opaque")["status"],"needs_information")
+
+    def test_only_substantial_known_risk_creates_a_question(self):
+        cases = [
+            ("allow", "routine", True, None),
+            ("needs_consent", "routine", True, "needs_information"),
+            ("needs_consent", "internal_history", True, "unrelated_action"),
+            ("needs_consent", "unknown", False, "needs_information"),
+            ("allow", "destructive", True, "needs_consent"),
+        ]
+        for decision, risk, effects_known, status in cases:
+            with self.subTest(decision=decision, risk=risk):
+                review={**REVIEW,"decision":decision,"risk":risk,"effects_known":effects_known}
+                with consent.turn_scope(self.db,source(),"session","Удали всё","1") as scope:
+                    with consent.tool_scope("execute_code",{"code":"operation"},risk):
+                        with patch.object(consent,"review_action",return_value=review):
+                            result=consent.gate("operation")
+                    self.assertEqual(result.get("status"),status)
+                    self.assertEqual(result["approved"],status is None)
+                    self.assertEqual(scope.pending is not None,status=="needs_consent")
+        self.assertEqual(self.store.query(self.scope.key)["status"],"pending")
 
     def test_unknown_operation_cannot_be_retried_by_a_new_message(self):
         args={"command":"remove trip"}
