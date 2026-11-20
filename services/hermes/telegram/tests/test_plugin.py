@@ -12,6 +12,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from types import ModuleType, SimpleNamespace as NS
 import unittest
@@ -2518,22 +2519,27 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
     def message(self, thread=77, **kwargs):
         return NS(message_thread_id=thread, **kwargs)
 
+    async def submit(self, message):
+        task = self.plugin._topic_update(message, self.chat, self.user, False)
+        if task is not None:
+            await task
+
     async def test_first_message_claimed_once_and_existing_named_topics_ignored(self):
-        self.plugin._topic_update(self.message(forum_topic_created=NS(is_name_implicit=True)), self.chat, self.user, False)
+        await self.submit(self.message(forum_topic_created=NS(is_name_implicit=True)))
         text = self.message(text='План отпуска')
-        self.plugin._topic_update(text, self.chat, self.user, False)
-        self.plugin._topic_update(text, self.chat, self.user, False)
+        await self.submit(text)
+        await self.submit(text)
         await asyncio.sleep(0)
         self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
-        self.plugin._topic_update(self.message(88, forum_topic_created=NS(is_name_implicit=False)), self.chat, self.user, False)
-        self.plugin._topic_update(self.message(88, text='Сохранить название'), self.chat, self.user, False)
-        self.plugin._topic_update(self.message(99, text='Старая тема'), self.chat, self.user, False)
+        await self.submit(self.message(88, forum_topic_created=NS(is_name_implicit=False)))
+        await self.submit(self.message(88, text='Сохранить название'))
+        await self.submit(self.message(99, text='Старая тема'))
         await asyncio.sleep(0)
         self.assertEqual(self.plugin._name_topic.await_count, 1)
 
     async def test_creation_service_message_id_is_topic_id_when_thread_missing(self):
-        self.plugin._topic_update(NS(message_id=77, forum_topic_created=NS(is_name_implicit=True)), self.chat, self.user, False)
-        self.plugin._topic_update(self.message(text='План отпуска'), self.chat, self.user, False)
+        await self.submit(NS(message_id=77, forum_topic_created=NS(is_name_implicit=True)))
+        await self.submit(self.message(text='План отпуска'))
         await asyncio.sleep(0)
         self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
 
@@ -2546,10 +2552,10 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 cancelled.set()
         self.plugin._name_topic = slow
-        self.plugin._topic_update(self.message(forum_topic_created=NS(api_kwargs={'is_name_implicit': True})), self.chat, self.user, False)
-        self.plugin._topic_update(self.message(photo=['fixture']), self.chat, self.user, False)
+        await self.submit(self.message(forum_topic_created=NS(api_kwargs={'is_name_implicit': True})))
+        await self.submit(self.message(photo=['fixture']))
         await entered.wait()
-        self.plugin._topic_update(self.message(forum_topic_edited=NS(name='Моё название')), self.chat, self.user, False)
+        await self.submit(self.message(forum_topic_edited=NS(name='Моё название')))
         await cancelled.wait()
         self.assertFalse(self.plugin.tokens.claim_implicit_topic('123', '77'))
 
@@ -2576,6 +2582,32 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
                 await self.plugin.guard(update(self.message(88, text='Чужой запрос'), NS(id=456, is_bot=False)), None)
             release.set()
             await asyncio.gather(*tuple(self.plugin.topic_tasks.values()))
+
+    async def test_non_text_first_content_is_claimed_in_update_order(self):
+        for thread, field, label in ((77, 'sticker', 'Стикер'), (88, 'location', 'Геопозиция'), (99, 'venue', 'Место')):
+            updates = [self.message(thread, forum_topic_created=NS(is_name_implicit=True)),
+                       self.message(thread, **{field: True}), self.message(thread, text='Второе сообщение')]
+            await asyncio.gather(*(self.plugin._topic_update(message, self.chat, self.user, False) for message in updates))
+            self.plugin._name_topic.assert_awaited_with(('123', str(thread)), '123', label)
+        self.assertEqual(self.plugin._name_topic.await_count, 3)
+
+    async def test_blocked_sqlite_does_not_delay_update_handler(self):
+        entered = asyncio.Event()
+        release = threading.Event()
+
+        def claim(*args):
+            self.plugin.loop.call_soon_threadsafe(entered.set)
+            release.wait(2)
+            return False
+
+        with patch.object(self.plugin.tokens, 'claim_implicit_topic', side_effect=claim):
+            task = self.plugin._topic_update(self.message(text='Вход'), self.chat, self.user, False)
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                await task
 
     async def test_existing_sqlite_backup_restores_topic_claim_without_overwriting_tokens(self):
         self.plugin.tokens.new_implicit_topic('123', '77')
@@ -2631,9 +2663,10 @@ class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
             await writer.wait_closed()
 
     async def test_exact_name_uses_no_generator_and_replay_is_rejected(self):
-        ticket = self.authorize({'title': 'План отпуска'})['args']['_topicTicket']
-        self.assertEqual(await self.redeem(ticket), {'ok': True, 'title': 'План отпуска'})
-        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name='План отпуска')
+        title = '  План отпуска  '
+        ticket = self.authorize({'title': title})['args']['_topicTicket']
+        self.assertEqual(await self.redeem(ticket), {'ok': True, 'title': title})
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name=title)
         self.bot.get_forum_topic_icon_stickers.assert_not_awaited()
         self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
 
@@ -2670,6 +2703,28 @@ class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.observe_agent_move(mod.RENAME_TOOL, session_id='active', tool_call_id='call-1')
         self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
         self.bot.edit_forum_topic.assert_not_awaited()
+
+    async def test_slow_manual_generation_does_not_block_another_topic(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def suggest(bot, text):
+            if text == 'Ручной запрос':
+                started.set()
+                await release.wait()
+                return {'title': 'Ручное имя', 'iconId': '12'}
+            return {'title': 'Автоматическое имя', 'iconId': '13'}
+
+        self.plugin._suggest_topic_name = suggest
+        ticket = self.authorize({'text': 'Ручной запрос'})['args']['_topicTicket']
+        manual = asyncio.create_task(self.redeem(ticket))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(self.plugin._name_topic(('123', '88'), '123', 'Автоматический запрос'), 2)
+            self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=88,
+                                                              name='Автоматическое имя', icon_custom_emoji_id='13')
+        finally:
+            release.set()
+            self.assertEqual((await manual)['title'], 'Ручное имя')
 
 
 if __name__ == "__main__":

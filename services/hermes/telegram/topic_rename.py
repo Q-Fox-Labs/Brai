@@ -9,6 +9,7 @@ import socket
 import stat
 import threading
 import unicodedata
+from weakref import WeakValueDictionary
 
 
 class TopicRenameError(Exception):
@@ -21,10 +22,9 @@ def rename_arguments(args):
     key, value = next(iter(args.items()))
     if not isinstance(value, str) or not value.strip():
         raise TopicRenameError('INVALID_ARGUMENT')
-    value = value.strip()
     if key == 'title' and (len(value) > 128 or any(unicodedata.category(char) in {'Cc', 'Cs', 'Zl', 'Zp'} for char in value)):
         raise TopicRenameError('INVALID_ARGUMENT')
-    return {key: value}
+    return {key: value if key == 'title' else value.strip()}
 
 
 class RenamePort:
@@ -37,7 +37,14 @@ class RenamePort:
         self.grants = {}
         self.server = None
         self.inode = None
-        self.edit_lock = asyncio.Lock()
+        self.edit_locks = WeakValueDictionary()
+
+    def edit_lock(self, route):
+        lock = self.edit_locks.get(route)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.edit_locks[route] = lock
+        return lock
 
     def grant(self, call_id, context, args):
         ticket = secrets.token_urlsafe(32)
@@ -91,7 +98,7 @@ class RenamePort:
             if grant is None:
                 raise TopicRenameError('TOPIC_RENAME_CONTEXT_REQUIRED')
             _, context, args = grant
-            async with self.edit_lock:
+            async with self.edit_lock((context['chat_id'], context['thread_id'])):
                 result = await self.apply(context, args, lambda: not reader.at_eof())
         except TopicRenameError as error:
             result = {'ok': False, 'code': str(error)}
