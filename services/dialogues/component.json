@@ -52,6 +52,7 @@
       "services/dialogues/src/exchange.ts",
       "services/dialogues/src/jobs.ts",
       "services/dialogues/src/luna.ts",
+      "services/dialogues/src/topic-socket.ts",
       "services/dialogues/src/isolation-cli.ts",
       "services/dialogues/src/summary-worker.ts",
       "services/dialogues/src/personal-summary.ts",

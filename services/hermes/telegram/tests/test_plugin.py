@@ -12,6 +12,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from types import ModuleType, SimpleNamespace as NS
 import unittest
@@ -2396,12 +2397,13 @@ class NativeContractTests(unittest.TestCase):
             self.assertTrue(plugin.call_args.kwargs["injection_ready"]())
             manager.has_gateway_message_injector = False
             self.assertFalse(plugin.call_args.kwargs["injection_ready"]())
-            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "post_tool_call", "on_session_end", "agent_loop_stopped", "tool", "tool", "tool", "unload"])
-            self.assertTrue(calls[8][1]["is_async"])
-            self.assertIs(calls[8][1]["handler"], plugin.return_value.request_confirmation)
-            self.assertIn("Never invent IDs", calls[8][1]["schema"]["description"])
-            self.assertIs(calls[9][1]["handler"], plugin.return_value.submit_feedback)
-            self.assertIs(calls[10][1]["handler"], plugin.return_value.submit_result)
+            self.assertEqual([name for name, _ in calls], ["factory", "pre_tool_call", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "post_tool_call", "on_session_end", "agent_loop_stopped", "tool", "tool", "tool", "unload"])
+            self.assertIs(calls[1][1], plugin.return_value.authorize_topic_rename)
+            self.assertTrue(calls[9][1]["is_async"])
+            self.assertIs(calls[9][1]["handler"], plugin.return_value.request_confirmation)
+            self.assertIn("Never invent IDs", calls[9][1]["schema"]["description"])
+            self.assertIs(calls[10][1]["handler"], plugin.return_value.submit_feedback)
+            self.assertIs(calls[11][1]["handler"], plugin.return_value.submit_result)
         manifest = (REPO / "services/hermes/telegram/plugin.yaml").read_text()
         for name in ("brai_telegram_request_confirmation", "brai_telegram_submit_feedback", "brai_telegram_submit_result",
                      "pre_gateway_dispatch", "transform_llm_output", "post_tool_call", "on_session_end", "agent_loop_stopped"):
@@ -2496,6 +2498,233 @@ class NativeContractTests(unittest.TestCase):
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), env)
         paths, _ = env["extract_media"]('[[audio_as_voice]]\nMEDIA:"/tmp/Голос сообщение.ogg"\n')
         self.assertEqual(paths, [("/tmp/Голос сообщение.ogg", True)])
+
+
+class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='topic-test-')
+        config = mod.Config('123', Path(self.tmp.name) / 'brai-telegram', '/test/trusted.mjs',
+                            '/usr/local/bin/node', str(Path(self.tmp.name) / 'results'))
+        self.plugin = mod.TelegramPlugin(config, FakeBridge())
+        self.plugin.loop = asyncio.get_running_loop()
+        self.plugin.topic_socket = '/run/brai-dialogues-topics/suggest.sock'
+        self.plugin._name_topic = AsyncMock()
+        self.chat, self.user = NS(id=123, type='private'), NS(id=123)
+
+    async def asyncTearDown(self):
+        self.plugin.close()
+        await asyncio.sleep(0)
+        self.tmp.cleanup()
+
+    def message(self, thread=77, **kwargs):
+        return NS(message_thread_id=thread, **kwargs)
+
+    async def submit(self, message):
+        task = self.plugin._topic_update(message, self.chat, self.user, False)
+        if task is not None:
+            await task
+
+    async def test_first_message_claimed_once_and_existing_named_topics_ignored(self):
+        await self.submit(self.message(forum_topic_created=NS(is_name_implicit=True)))
+        text = self.message(text='План отпуска')
+        await self.submit(text)
+        await self.submit(text)
+        await asyncio.sleep(0)
+        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
+        await self.submit(self.message(88, forum_topic_created=NS(is_name_implicit=False)))
+        await self.submit(self.message(88, text='Сохранить название'))
+        await self.submit(self.message(99, text='Старая тема'))
+        await asyncio.sleep(0)
+        self.assertEqual(self.plugin._name_topic.await_count, 1)
+
+    async def test_creation_service_message_id_is_topic_id_when_thread_missing(self):
+        await self.submit(NS(message_id=77, forum_topic_created=NS(is_name_implicit=True)))
+        await self.submit(self.message(text='План отпуска'))
+        await asyncio.sleep(0)
+        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
+
+    async def test_manual_edit_cancels_inflight_and_photo_gets_label(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def slow(*args):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        self.plugin._name_topic = slow
+        await self.submit(self.message(forum_topic_created=NS(api_kwargs={'is_name_implicit': True})))
+        await self.submit(self.message(photo=['fixture']))
+        await entered.wait()
+        await self.submit(self.message(forum_topic_edited=NS(name='Моё название')))
+        await cancelled.wait()
+        self.assertFalse(self.plugin.tokens.claim_implicit_topic('123', '77'))
+
+    async def test_guard_schedules_topic_without_waiting_and_refuses_other_owners(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow(*args):
+            entered.set()
+            await release.wait()
+        self.plugin._name_topic = slow
+        class Stop(Exception): pass
+        telegram = ModuleType('telegram')
+        ext = ModuleType('telegram.ext')
+        ext.ApplicationHandlerStop = Stop
+        chat = NS(id=123, type='private')
+        user = NS(id=123, is_bot=False)
+        def update(message, sender=user):
+            return NS(effective_chat=chat, effective_user=sender, effective_message=message, message=message)
+        with patch.dict(sys.modules, {'telegram': telegram, 'telegram.ext': ext}):
+            await self.plugin.guard(update(self.message(forum_topic_created=NS(is_name_implicit=True))), None)
+            await self.plugin.guard(update(self.message(text='План отпуска')), None)
+            await entered.wait()
+            self.assertFalse(release.is_set())
+            with self.assertRaises(Stop):
+                await self.plugin.guard(update(self.message(88, text='Чужой запрос'), NS(id=456, is_bot=False)), None)
+            release.set()
+            await asyncio.gather(*tuple(self.plugin.topic_tasks.values()))
+
+    async def test_non_text_first_content_is_claimed_in_update_order(self):
+        for thread, field, label in ((77, 'sticker', 'Стикер'), (88, 'location', 'Геопозиция'), (99, 'venue', 'Место')):
+            updates = [self.message(thread, forum_topic_created=NS(is_name_implicit=True)),
+                       self.message(thread, **{field: True}), self.message(thread, text='Второе сообщение')]
+            await asyncio.gather(*(self.plugin._topic_update(message, self.chat, self.user, False) for message in updates))
+            self.plugin._name_topic.assert_awaited_with(('123', str(thread)), '123', label)
+        self.assertEqual(self.plugin._name_topic.await_count, 3)
+
+    async def test_blocked_sqlite_does_not_delay_update_handler(self):
+        entered = asyncio.Event()
+        release = threading.Event()
+
+        def claim(*args):
+            self.plugin.loop.call_soon_threadsafe(entered.set)
+            release.wait(2)
+            return False
+
+        with patch.object(self.plugin.tokens, 'claim_implicit_topic', side_effect=claim):
+            task = self.plugin._topic_update(self.message(text='Вход'), self.chat, self.user, False)
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                await task
+
+    async def test_existing_sqlite_backup_restores_topic_claim_without_overwriting_tokens(self):
+        self.plugin.tokens.new_implicit_topic('123', '77')
+        backup = sqlite3.connect(':memory:')
+        with self.plugin.tokens._connect() as source:
+            source.backup(backup)
+        self.assertEqual(backup.execute("SELECT state FROM implicit_topics WHERE chat_id='123' AND thread_id='77'").fetchone(), ('pending',))
+        self.assertIsNotNone(backup.execute("SELECT name FROM sqlite_master WHERE name='tokens'").fetchone())
+        restored = sqlite3.connect(str(Path(self.tmp.name) / 'restored.sqlite3'))
+        backup.backup(restored)
+        self.assertEqual(restored.execute("SELECT state FROM implicit_topics WHERE chat_id='123' AND thread_id='77'").fetchone(), ('pending',))
+        self.assertIsNotNone(restored.execute("SELECT name FROM sqlite_master WHERE name='tokens'").fetchone())
+        restored.close()
+        backup.close()
+
+
+class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='topic-rename-', dir='/tmp')
+        self.root = Path(self.tmp.name)
+        config = mod.Config('123', self.root / 'brai-telegram', '/test/trusted.mjs',
+                            '/usr/local/bin/node', str(self.root / 'results'), game_core_enabled=False)
+        self.plugin = mod.TelegramPlugin(config, FakeBridge())
+        self.plugin.enable_topic_rename()
+        self.bot = NS(edit_forum_topic=AsyncMock(return_value=True),
+                      get_forum_topic_icon_stickers=AsyncMock(return_value=[NS(custom_emoji_id='12', emoji='🏖️')]))
+        self.plugin.bot = self.bot
+        self.plugin.topic_socket = str(self.root / 'dialogues.sock')
+        self.entry = NS(session_id='active', origin=NS(platform='telegram', user_id='123',
+            chat_id='123', chat_type='private', thread_id='77'))
+        self.plugin.session_store = NS(lookup_by_session_key=lambda key: self.entry if key == 'telegram:77' else None)
+        self.context = {f'HERMES_SESSION_{key}': value for key, value in {
+            'PLATFORM': 'telegram', 'CHAT_ID': '123', 'CHAT_TYPE': 'private', 'USER_ID': '123',
+            'THREAD_ID': '77', 'KEY': 'telegram:77', 'ID': 'active', 'MESSAGE_ID': '81'}.items()}
+        await self.plugin.topic_rename.start()
+
+    async def asyncTearDown(self):
+        self.plugin.topic_rename.close()
+        self.tmp.cleanup()
+
+    def authorize(self, args, session='active'):
+        with patch.dict(sys.modules, {'gateway.session_context': NS(get_session_env=lambda key: self.context.get(key, ''))}):
+            return self.plugin.authorize_topic_rename(mod.RENAME_TOOL, args, session_id=session, tool_call_id='call-1')
+
+    async def redeem(self, ticket):
+        reader, writer = await asyncio.open_unix_connection(self.plugin.topic_rename.path)
+        try:
+            writer.write((ticket + '\n').encode())
+            await writer.drain()
+            return json.loads(await reader.readline())
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_exact_name_uses_no_generator_and_replay_is_rejected(self):
+        title = '  План отпуска  '
+        ticket = self.authorize({'title': title})['args']['_topicTicket']
+        self.assertEqual(await self.redeem(ticket), {'ok': True, 'title': title})
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name=title)
+        self.bot.get_forum_topic_icon_stickers.assert_not_awaited()
+        self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+
+    async def test_generated_name_uses_same_dialogues_socket_and_keeps_icon(self):
+        async def respond(reader, writer):
+            self.captured = json.loads(await reader.read())
+            writer.write(json.dumps({'title': 'Пляжный отпуск', 'icon': 0}).encode())
+            await writer.drain()
+            writer.close()
+
+        async with await asyncio.start_unix_server(respond, path=self.plugin.topic_socket):
+            ticket = self.authorize({'text': 'Маршрут и отели у моря'})['args']['_topicTicket']
+            self.assertEqual((await self.redeem(ticket))['title'], 'Пляжный отпуск')
+        self.assertEqual(self.captured, {'request': 'Маршрут и отели у моря', 'icons': ['🏖️']})
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name='Пляжный отпуск')
+
+    async def test_refuses_injected_route_or_changed_session(self):
+        for args in ({'title': 'Название', 'thread_id': 88}, {'title': 'Имя', 'text': 'Описание'}, {'title': 'X\nY'}):
+            self.assertEqual(self.authorize(args)['action'], 'block')
+        self.assertEqual(self.authorize({'title': 'Имя'}, session='wrong')['action'], 'block')
+        ticket = self.authorize({'title': 'Имя'})['args']['_topicTicket']
+        self.entry.origin.thread_id = '88'
+        self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+        self.assertEqual(self.authorize({'title': 'Имя'})['action'], 'block')
+        self.bot.edit_forum_topic.assert_not_awaited()
+
+    async def test_no_active_topic_and_missing_generator_fail_without_mutation(self):
+        self.context['HERMES_SESSION_THREAD_ID'] = self.entry.origin.thread_id = '1'
+        self.assertEqual(self.authorize({'title': 'Имя'})['action'], 'block')
+        self.context['HERMES_SESSION_THREAD_ID'] = self.entry.origin.thread_id = '77'
+        self.plugin.topic_socket = None
+        self.assertEqual(self.authorize({'text': 'Описание'})['action'], 'block')
+        ticket = self.authorize({'title': 'Имя'})['args']['_topicTicket']
+        self.plugin.observe_agent_move(mod.RENAME_TOOL, session_id='active', tool_call_id='call-1')
+        self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+        self.bot.edit_forum_topic.assert_not_awaited()
+
+    async def test_slow_manual_generation_does_not_block_another_topic(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def suggest(bot, text):
+            if text == 'Ручной запрос':
+                started.set()
+                await release.wait()
+                return {'title': 'Ручное имя', 'iconId': '12'}
+            return {'title': 'Автоматическое имя', 'iconId': '13'}
+
+        self.plugin._suggest_topic_name = suggest
+        ticket = self.authorize({'text': 'Ручной запрос'})['args']['_topicTicket']
+        manual = asyncio.create_task(self.redeem(ticket))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(self.plugin._name_topic(('123', '88'), '123', 'Автоматический запрос'), 2)
+            self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=88,
+                                                              name='Автоматическое имя', icon_custom_emoji_id='13')
+        finally:
+            release.set()
+            self.assertEqual((await manual)['title'], 'Ручное имя')
 
 
 if __name__ == "__main__":
