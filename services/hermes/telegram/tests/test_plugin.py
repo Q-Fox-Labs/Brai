@@ -2396,12 +2396,13 @@ class NativeContractTests(unittest.TestCase):
             self.assertTrue(plugin.call_args.kwargs["injection_ready"]())
             manager.has_gateway_message_injector = False
             self.assertFalse(plugin.call_args.kwargs["injection_ready"]())
-            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "post_tool_call", "on_session_end", "agent_loop_stopped", "tool", "tool", "tool", "unload"])
-            self.assertTrue(calls[8][1]["is_async"])
-            self.assertIs(calls[8][1]["handler"], plugin.return_value.request_confirmation)
-            self.assertIn("Never invent IDs", calls[8][1]["schema"]["description"])
-            self.assertIs(calls[9][1]["handler"], plugin.return_value.submit_feedback)
-            self.assertIs(calls[10][1]["handler"], plugin.return_value.submit_result)
+            self.assertEqual([name for name, _ in calls], ["factory", "pre_tool_call", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "post_tool_call", "on_session_end", "agent_loop_stopped", "tool", "tool", "tool", "unload"])
+            self.assertIs(calls[1][1], plugin.return_value.authorize_topic_rename)
+            self.assertTrue(calls[9][1]["is_async"])
+            self.assertIs(calls[9][1]["handler"], plugin.return_value.request_confirmation)
+            self.assertIn("Never invent IDs", calls[9][1]["schema"]["description"])
+            self.assertIs(calls[10][1]["handler"], plugin.return_value.submit_feedback)
+            self.assertIs(calls[11][1]["handler"], plugin.return_value.submit_result)
         manifest = (REPO / "services/hermes/telegram/plugin.yaml").read_text()
         for name in ("brai_telegram_request_confirmation", "brai_telegram_submit_feedback", "brai_telegram_submit_result",
                      "pre_gateway_dispatch", "transform_llm_output", "post_tool_call", "on_session_end", "agent_loop_stopped"):
@@ -2589,6 +2590,86 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(restored.execute("SELECT name FROM sqlite_master WHERE name='tokens'").fetchone())
         restored.close()
         backup.close()
+
+
+class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='topic-rename-', dir='/tmp')
+        self.root = Path(self.tmp.name)
+        config = mod.Config('123', self.root / 'brai-telegram', '/test/trusted.mjs',
+                            '/usr/local/bin/node', str(self.root / 'results'), game_core_enabled=False)
+        self.plugin = mod.TelegramPlugin(config, FakeBridge())
+        self.plugin.enable_topic_rename()
+        self.bot = NS(edit_forum_topic=AsyncMock(return_value=True),
+                      get_forum_topic_icon_stickers=AsyncMock(return_value=[NS(custom_emoji_id='12', emoji='🏖️')]))
+        self.plugin.bot = self.bot
+        self.plugin.topic_socket = str(self.root / 'dialogues.sock')
+        self.entry = NS(session_id='active', origin=NS(platform='telegram', user_id='123',
+            chat_id='123', chat_type='private', thread_id='77'))
+        self.plugin.session_store = NS(lookup_by_session_key=lambda key: self.entry if key == 'telegram:77' else None)
+        self.context = {f'HERMES_SESSION_{key}': value for key, value in {
+            'PLATFORM': 'telegram', 'CHAT_ID': '123', 'CHAT_TYPE': 'private', 'USER_ID': '123',
+            'THREAD_ID': '77', 'KEY': 'telegram:77', 'ID': 'active', 'MESSAGE_ID': '81'}.items()}
+        await self.plugin.topic_rename.start()
+
+    async def asyncTearDown(self):
+        self.plugin.topic_rename.close()
+        self.tmp.cleanup()
+
+    def authorize(self, args, session='active'):
+        with patch.dict(sys.modules, {'gateway.session_context': NS(get_session_env=lambda key: self.context.get(key, ''))}):
+            return self.plugin.authorize_topic_rename(mod.RENAME_TOOL, args, session_id=session, tool_call_id='call-1')
+
+    async def redeem(self, ticket):
+        reader, writer = await asyncio.open_unix_connection(self.plugin.topic_rename.path)
+        try:
+            writer.write((ticket + '\n').encode())
+            await writer.drain()
+            return json.loads(await reader.readline())
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_exact_name_uses_no_generator_and_replay_is_rejected(self):
+        ticket = self.authorize({'title': 'План отпуска'})['args']['_topicTicket']
+        self.assertEqual(await self.redeem(ticket), {'ok': True, 'title': 'План отпуска'})
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name='План отпуска')
+        self.bot.get_forum_topic_icon_stickers.assert_not_awaited()
+        self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+
+    async def test_generated_name_uses_same_dialogues_socket_and_keeps_icon(self):
+        async def respond(reader, writer):
+            self.captured = json.loads(await reader.read())
+            writer.write(json.dumps({'title': 'Пляжный отпуск', 'icon': 0}).encode())
+            await writer.drain()
+            writer.close()
+
+        async with await asyncio.start_unix_server(respond, path=self.plugin.topic_socket):
+            ticket = self.authorize({'text': 'Маршрут и отели у моря'})['args']['_topicTicket']
+            self.assertEqual((await self.redeem(ticket))['title'], 'Пляжный отпуск')
+        self.assertEqual(self.captured, {'request': 'Маршрут и отели у моря', 'icons': ['🏖️']})
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name='Пляжный отпуск')
+
+    async def test_refuses_injected_route_or_changed_session(self):
+        for args in ({'title': 'Название', 'thread_id': 88}, {'title': 'Имя', 'text': 'Описание'}, {'title': 'X\nY'}):
+            self.assertEqual(self.authorize(args)['action'], 'block')
+        self.assertEqual(self.authorize({'title': 'Имя'}, session='wrong')['action'], 'block')
+        ticket = self.authorize({'title': 'Имя'})['args']['_topicTicket']
+        self.entry.origin.thread_id = '88'
+        self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+        self.assertEqual(self.authorize({'title': 'Имя'})['action'], 'block')
+        self.bot.edit_forum_topic.assert_not_awaited()
+
+    async def test_no_active_topic_and_missing_generator_fail_without_mutation(self):
+        self.context['HERMES_SESSION_THREAD_ID'] = self.entry.origin.thread_id = '1'
+        self.assertEqual(self.authorize({'title': 'Имя'})['action'], 'block')
+        self.context['HERMES_SESSION_THREAD_ID'] = self.entry.origin.thread_id = '77'
+        self.plugin.topic_socket = None
+        self.assertEqual(self.authorize({'text': 'Описание'})['action'], 'block')
+        ticket = self.authorize({'title': 'Имя'})['args']['_topicTicket']
+        self.plugin.observe_agent_move(mod.RENAME_TOOL, session_id='active', tool_call_id='call-1')
+        self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+        self.bot.edit_forum_topic.assert_not_awaited()
 
 
 if __name__ == "__main__":

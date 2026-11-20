@@ -30,6 +30,17 @@ RPC_TIMEOUT = 15
 OUTPUT_TIMEOUT = 20
 HUMAN_OUTPUT_REQUIRED = "Для этого действия нужны настоящие результаты работы человека. Кнопка решения их не создаёт; сначала выполните работу и сохраните её результаты штатным способом."
 FAILURE = "Операция Brai не подтверждена. Проверьте состояние и явно запросите новую кнопку."
+RENAME_TOOL = 'mcp__brai__telegram_rename_current_topic'
+
+
+def _topic_module(name):
+    path = Path(__file__).resolve().with_name(name + '.py')
+    spec = importlib.util.spec_from_file_location('_brai_telegram_' + name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('TOPIC_MODULE_UNAVAILABLE')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _observer_source(config, name):
@@ -570,6 +581,7 @@ class TelegramPlugin:
         self.cleanup_tasks = {}
         self.topic_tasks = {}
         self.topic_socket = os.environ.get('BRAI_TELEGRAM_TOPIC_SOCKET')
+        self.topic_rename = None
         self.handlers = []
         self.closed = False
         self.active_callbacks = set()
@@ -616,6 +628,10 @@ class TelegramPlugin:
         for task in self.tasks:
             task.cancel()
         self.loop, self.bot, self.adapter = asyncio.get_running_loop(), app.bot, adapter
+        if self.topic_rename:
+            task = self.loop.create_task(self._start_topic_rename())
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
         self.notice_wakeup = asyncio.Event()
         guard = TypeHandler(Update, self.guard)
         app.add_handler(guard, group=-100)
@@ -729,6 +745,8 @@ class TelegramPlugin:
         self.closed = True
 
         def cleanup():
+            if self.topic_rename:
+                self.topic_rename.close()
             if self._stop_outgoing_observer:
                 self._stop_outgoing_observer()
                 self._stop_outgoing_observer = None
@@ -926,10 +944,7 @@ class TelegramPlugin:
             return
         route = (str(chat.id), str(thread))
         if getattr(message, 'forum_topic_edited', None) is not None:
-            self.tokens.cancel_implicit_topic(*route)
-            pending = self.topic_tasks.get(route)
-            if pending:
-                pending.cancel()
+            self._cancel_automatic_topic_name(route)
             return
         if created is not None:
             implicit = getattr(created, 'is_name_implicit', None)
@@ -956,28 +971,95 @@ class TelegramPlugin:
                 self.topic_tasks.pop(route, None)
         task.add_done_callback(finished)
 
+    def _cancel_automatic_topic_name(self, route):
+        self.tokens.cancel_implicit_topic(*route)
+        pending = self.topic_tasks.get(route)
+        if pending:
+            pending.cancel()
+
+    async def _suggest_topic_name(self, bot, text):
+        if not self.topic_socket:
+            raise BridgeError('TOPIC_GENERATOR_UNAVAILABLE')
+        stickers = await bot.get_forum_topic_icon_stickers()
+        icons = [{'id': str(item.custom_emoji_id), 'emoji': item.emoji} for item in stickers
+                 if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
+        if not icons:
+            raise BridgeError('TOPIC_GENERATOR_UNAVAILABLE')
+        return await _topic_module('topic_names').suggest(self.topic_socket, text, icons)
+
     async def _name_topic(self, route, user_id, text):
         try:
-            path = Path(__file__).resolve().parent / 'topic_names.py'
-            spec = importlib.util.spec_from_file_location('_brai_telegram_topic_names', path)
-            if spec is None or spec.loader is None:
-                raise RuntimeError('TOPIC_NAMER_UNAVAILABLE')
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
             bot = self.bot
-            stickers = await bot.get_forum_topic_icon_stickers()
-            icons = [{'id': str(item.custom_emoji_id), 'emoji': item.emoji} for item in stickers
-                     if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
-            if not icons:
-                return
-            result = await module.suggest(self.topic_socket, text, icons)
-            if (self.closed or self.bot is not bot or not self._route_matches(route[0], 'private', user_id)
-                    or result.get('iconId') not in {icon['id'] for icon in icons}):
-                return
-            await bot.edit_forum_topic(chat_id=int(route[0]), message_thread_id=int(route[1]),
-                                       name=result['title'], icon_custom_emoji_id=result['iconId'])
+            result = await self._suggest_topic_name(bot, text)
+            if self.topic_rename:
+                async with self.topic_rename.edit_lock:
+                    await self._apply_automatic_topic_name(bot, route, user_id, result)
+            else:
+                await self._apply_automatic_topic_name(bot, route, user_id, result)
         except Exception as error:
             logging.getLogger(__name__).warning('BRAI_TELEGRAM_TOPIC_FAILED error=%s', type(error).__name__)
+
+    async def _apply_automatic_topic_name(self, bot, route, user_id, result):
+        if self.closed or self.bot is not bot or not self._route_matches(route[0], 'private', user_id):
+            return
+        await bot.edit_forum_topic(chat_id=int(route[0]), message_thread_id=int(route[1]),
+                                   name=result['title'], icon_custom_emoji_id=result['iconId'])
+
+    def enable_topic_rename(self):
+        self.topic_rename_api = _topic_module('topic_rename')
+        self.topic_rename = self.topic_rename_api.RenamePort(
+            self.config.state_dir / 'rename-topic.sock', self._apply_topic_rename)
+
+    async def _start_topic_rename(self):
+        try:
+            await self.topic_rename.start()
+        except Exception:
+            self.topic_rename.close()
+            logging.getLogger(__name__).warning('BRAI_TELEGRAM_RENAME_PORT_UNAVAILABLE')
+
+    def authorize_topic_rename(self, tool_name='', args=None, session_id='', tool_call_id='', **kwargs):
+        """Привязать MCP-вызов к текущему trusted turn до выхода из процесса Hermes."""
+        if tool_name != RENAME_TOOL:
+            return None
+        try:
+            values = self.topic_rename_api.rename_arguments(args)
+            context = self._tool_context({'session_id': session_id})
+            if (not tool_call_id or not re.fullmatch(r'[1-9][0-9]*', context['message_id'] or '')
+                    or not re.fullmatch(r'[1-9][0-9]*', context['thread_id'] or '') or context['thread_id'] == '1'):
+                raise BridgeError('TOPIC_RENAME_CONTEXT_REQUIRED')
+            if self.closed or self.topic_rename.server is None:
+                raise BridgeError('TOPIC_RENAME_UNAVAILABLE')
+            if 'text' in values and not self.topic_socket:
+                raise BridgeError('TOPIC_GENERATOR_UNAVAILABLE')
+        except self.topic_rename_api.TopicRenameError:
+            return {'action': 'block', 'message': 'Передай либо готовый заголовок title, либо описание темы text.'}
+        except BridgeError as error:
+            message = 'Переименование доступно в текущей теме Telegram.'
+            if str(error) == 'TOPIC_GENERATOR_UNAVAILABLE':
+                message = 'Генератор Диалогов недоступен. Можно применить готовый заголовок.'
+            elif str(error) == 'TOPIC_RENAME_UNAVAILABLE':
+                message = 'Сервис переименования темы недоступен.'
+            return {'action': 'block', 'message': message}
+        return {'action': 'modify', 'args': {'_topicTicket': self.topic_rename.grant(tool_call_id, context, values)}}
+
+    async def _apply_topic_rename(self, context, args, connected):
+        bot = self.bot
+        error = self.topic_rename_api.TopicRenameError
+        route = (context['chat_id'], context['thread_id'])
+        if self.closed or bot is None or not connected() or not self._session_matches({**context, 'owner': self.config.owner}):
+            raise error('TOPIC_RENAME_CONTEXT_REQUIRED')
+        title = args.get('title')
+        if title is None:
+            try:
+                title = (await self._suggest_topic_name(bot, args['text']))['title']
+            except Exception:
+                raise error('TOPIC_GENERATOR_UNAVAILABLE') from None
+        if self.closed or self.bot is not bot or not connected() or not self._session_matches({**context, 'owner': self.config.owner}):
+            raise error('TOPIC_RENAME_CONTEXT_REQUIRED')
+        self._cancel_automatic_topic_name(route)
+        if await bot.edit_forum_topic(chat_id=int(route[0]), message_thread_id=int(route[1]), name=title) is not True:
+            raise error('TOPIC_RENAME_UNCONFIRMED')
+        return {'ok': True, 'title': title}
 
     async def _send_input_notice(self, row):
         """Отправить только один доказанно допустимый fixed-text ответ в сохранённый маршрут."""
@@ -1106,6 +1188,9 @@ class TelegramPlugin:
 
     def observe_agent_move(self, tool_name="", args=None, result=None, session_id="", status="", **kwargs):
         """Persist exact successful agent claims and clear observed terminal attempts."""
+        if self.topic_rename and tool_name == RENAME_TOOL:
+            self.topic_rename.revoke(session_id, kwargs.get('tool_call_id', ''))
+            return
         if not self.config.game_core_enabled:
             return
         entry = self._owner_session(session_id)
@@ -1183,6 +1268,8 @@ class TelegramPlugin:
         """Recover stopped claims, preserving successful turns that yielded to a reviewer."""
         if _platform(platform) != "telegram":
             return
+        if self.topic_rename:
+            self.topic_rename.revoke(session_id)
         if (completed is True and failed is not True and interrupted is not True
                 and isinstance(session_id, str) and session_id):
             try:
@@ -1962,7 +2049,9 @@ def register(ctx):
     if worker:
         sys.modules['_brai_identity_human'].attach = plugin.attach_identity_worker
     else:
+        plugin.enable_topic_rename()
         ctx.register_telegram_handler(plugin.factory)
+        ctx.register_hook('pre_tool_call', plugin.authorize_topic_rename)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)
     ctx.register_hook("transform_llm_output", plugin.outgoing)
     ctx.register_hook("transform_tool_result", plugin.tool_result)

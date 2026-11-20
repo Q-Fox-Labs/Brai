@@ -17,13 +17,13 @@ test('identity worker accepts only Root-bound private routes for its canonical o
 });
 
 
-test('native Telegram topic title keeps its route and validates the Dialogues reply', { timeout: 15000 }, () => {
+test('native Telegram topic naming and requested renames keep the verified route', { timeout: 15000 }, () => {
   const cwd = fileURLToPath(new URL('../telegram/tests/', import.meta.url));
   const result = spawnSync('python3', [
-    '-B', '-m', 'unittest', 'test_plugin.ImplicitTopicTests', 'test_topic_names.TopicSocketTests', '-v',
+    '-B', '-m', 'unittest', 'test_plugin.ImplicitTopicTests', 'test_plugin.ManualTopicRenameTests', 'test_topic_names.TopicSocketTests', '-v',
   ], { cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /Ran 7 tests\b/);
+  assert.match(result.stderr, /Ran 11 tests\b/);
   assert.doesNotMatch(result.stderr, /\bskipped\b/i);
 });

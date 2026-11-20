@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -367,6 +368,41 @@ test('настоящий MCP SDK передаёт tool catalogue и ошибки
     const forbidden = await client.callTool({ name: 'actions.complete', arguments: {} });
     assert.equal(forbidden.isError, true);
   } finally { await client.close(); await service.close(); }
+});
+
+test('MCP переименование передаёт шлюзу только допуск текущего native вызова', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'brai-rename-'));
+  const path = join(directory, 'topic.sock');
+  const actual = [];
+  const peer = createTcpServer(socket => {
+    socket.once('data', bytes => {
+      actual.push(bytes.toString('utf8').trim());
+      socket.end(JSON.stringify({ ok: true, title: 'План отпуска' }) + '\n');
+    });
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const service = await serveTools({ tools: [], close: async () => {} }, serverTransport, path);
+  const client = new Client({ name: 'topic-test', version: '1' });
+  try {
+    await new Promise((resolve, reject) => peer.once('error', reject).listen(path, resolve));
+    await client.connect(clientTransport);
+    const name = 'telegram_rename_current_topic';
+    const [tool] = (await client.listTools()).tools;
+    assert.equal(tool.name, name);
+    assert.deepEqual(Object.keys(tool.inputSchema.properties), ['title', 'text']);
+    const denied = await client.callTool({ name, arguments: { title: 'Другой заголовок', threadId: 99 } });
+    assert.equal(denied.isError, true);
+    assert.deepEqual(actual, []);
+    const ticket = 'a'.repeat(43);
+    const renamed = await client.callTool({ name, arguments: { title: 'План отпуска', _topicTicket: ticket } });
+    assert.deepEqual(renamed.structuredContent, { ok: true, title: 'План отпуска' });
+    assert.deepEqual(actual, [ticket]);
+  } finally {
+    await client.close();
+    await service.close();
+    if (peer.listening) await new Promise(resolve => peer.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('Hermes MCP сохраняет диагностику только GameCore planning без автоматического повтора', async () => {
