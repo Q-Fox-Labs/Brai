@@ -40,7 +40,7 @@ class NativeConsentTests(unittest.TestCase):
         from tools.mcp_tool_handlers import _render_call_tool_result
         tool = 'mcp__brai__publish_file'
         args = {'path':str(Path(self.temp.name)/'report.xlsx'), 'requestId':'fixture'}
-        review = {'decision':'needs_consent','effects_known':True,
+        review = {'decision':'needs_consent','effects_known':True,'risk':'sensitive_disclosure',
             'target':'Отчёт','consequences':'Файл будет опубликован.','reason':'Нужно согласие.'}
         store = consent.Store(self.db)
         key = consent.conversation_key(self.source)
@@ -116,7 +116,7 @@ class NativeConsentTests(unittest.TestCase):
                     for call in agent.stream_delta_callback.call_args_list),1)
 
     def test_gate_precedes_every_legacy_transport(self):
-        review={"decision":"needs_consent","effects_known":True,"target":"Папка Поездка","consequences":"Фотографии будут удалены без восстановления.","reason":"Удаление не поручалось."}
+        review={"decision":"needs_consent","effects_known":True,"risk":"destructive","target":"Папка Поездка","consequences":"Фотографии будут удалены без восстановления.","reason":"Удаление не поручалось."}
         with patch.object(consent,"review_action",return_value=review),patch.object(approval,"_await_gateway_decision",side_effect=AssertionError("legacy wait")),patch.object(approval,"_present_with_selected_transport",side_effect=AssertionError("legacy UI")):
             with consent.turn_scope(self.db,self.source,"test-session","Подготовь список одежды","1"),consent.tool_scope("terminal",{"command":"python -c 'print(1)'"},"tool"):
                 for spec in (approval._COMMAND_GATE,approval._EXECUTE_CODE_GATE,approval._ACTION_GATE):
@@ -127,7 +127,7 @@ class NativeConsentTests(unittest.TestCase):
         row=consent.Store(self.db).query(consent.conversation_key(self.source))
         self.assertEqual(row["status"],"pending")
     def test_smart_allow_does_not_create_pending_record(self):
-        with patch.object(consent,"review_action",return_value={"decision":"allow","effects_known":True}):
+        with patch.object(consent,"review_action",return_value={"decision":"allow","effects_known":True,"risk":"routine"}):
             with consent.turn_scope(self.db,self.source,"test-session","Посчитай","1"),consent.tool_scope("terminal",{},"tool"):
                 self.assertTrue(self.invoke()["approved"])
         self.assertIsNone(consent.Store(self.db).query(consent.conversation_key(self.source)))

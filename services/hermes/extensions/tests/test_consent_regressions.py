@@ -86,7 +86,7 @@ class ConsentRegressions(unittest.TestCase):
         self.prepare()
         with consent.turn_scope(self.db, fixture.source(), 'session', 'Покажи изменения', '11'):
             with consent.tool_scope('read_file', {'path':'report'}, 'read'):
-                with patch.object(consent, 'review_action', return_value={'decision':'allow','effects_known':True}) as review:
+                with patch.object(consent, 'review_action', return_value={'decision':'allow','effects_known':True,'risk':'routine'}) as review:
                     self.assertTrue(consent.gate('read report')['approved'])
                     review.assert_called_once()
 
@@ -94,7 +94,7 @@ class ConsentRegressions(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
         consent = fixture.consent
-        review = {**fixture.REVIEW, 'decision': 'unrelated'}
+        review = {**fixture.REVIEW, 'decision': 'needs_consent', 'risk': 'internal_history'}
         agent = SimpleNamespace(_set_tool_guardrail_halt=Mock())
         with consent.turn_scope(self.db, fixture.source(), 'session', 'Озвучь новый стих', '1') as scope:
             with consent.tool_scope('terminal', {'command': 'read-conversation-cache'}, 'read'):
@@ -189,7 +189,7 @@ class ConsentRegressions(unittest.TestCase):
             _transcribe_pending_audio_event_once=transcribe,
             _delivery_adapter_for=lambda _: None)
         reply = asyncio.run(fixture.consent.gateway_input_prepared(runner, event, event))
-        self.assertIn('не относится', reply)
+        self.assertIn('на сообщение с вопросом ниже', reply)
         self.assertEqual(self.store.query(self.scope.key)['status'], 'pending')
 
     def test_pause_during_voice_echo_prevents_authorization(self):
