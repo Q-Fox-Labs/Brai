@@ -195,10 +195,11 @@ class Worker:
         self.lifecycle_error = None
         self.runtime_stopped = False
         os.environ['HERMES_EXEC_ASK'] = '1'
+        managed_stt = False
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             self._install_telegram_profile()
             from .native_policy import install
-            install(cold_start=self.release.cold_start)
+            managed_stt = install(cold_start=self.release.cold_start)
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
@@ -206,6 +207,8 @@ class Worker:
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             from .native_policy import revalidate_startup
             revalidate_startup()
+        if managed_stt:
+            self.runner.config.stt_enabled = True
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
         self.tools_ready = False

@@ -127,7 +127,7 @@ class TranscriptionTests(unittest.TestCase):
 
 
 class ManagedVoiceSettingsTests(unittest.TestCase):
-    def test_accepted_command_overrides_disabled_legacy_stt_without_writing_config(self):
+    def test_accepted_command_reports_managed_stt_and_overrides_tool_config(self):
         from pathlib import Path
         import sys
         from types import ModuleType
@@ -142,11 +142,19 @@ class ManagedVoiceSettingsTests(unittest.TestCase):
         with patch.object(Path, 'is_file', return_value=True), patch.object(
                 native_policy, 'protected_config', return_value={'stt': expected}), patch.dict(
                 sys.modules, {'tools': tools}):
-            native_policy.install_managed_stt(Path('/operator/profile-config.json'))
+            self.assertTrue(native_policy.install_managed_stt(Path('/operator/profile-config.json')))
             loaded = tools.transcription_tools._load_stt_config()
             self.assertEqual(loaded, expected)
             loaded['enabled'] = False
             self.assertTrue(tools.transcription_tools._load_stt_config()['enabled'])
+
+    def test_unconfigured_profile_does_not_enable_managed_stt(self):
+        from unittest.mock import patch
+        from identity import native_policy
+
+        with patch.object(Path, 'is_file', return_value=True), patch.object(
+                native_policy, 'protected_config', return_value={'stt': {'enabled': False}}):
+            self.assertFalse(native_policy.install_managed_stt(Path('/operator/profile-config.json')))
 
 
 

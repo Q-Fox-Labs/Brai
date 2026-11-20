@@ -687,6 +687,20 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 await worker.stop_runtime()
 
+    async def test_worker_applies_managed_stt_to_the_runner_config(self):
+        from identity import native_policy
+
+        for managed_stt in (True, False):
+            with self.subTest(managed_stt=managed_stt), patch.dict(
+                    os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules), patch.object(
+                    native_policy, 'install', return_value=managed_stt), patch.object(
+                    native_policy, 'revalidate_startup'), patch('identity.images.install_shared_provider'):
+                worker = await self.worker()
+                try:
+                    self.assertIs(getattr(worker.runner.config, 'stt_enabled', False), managed_stt)
+                finally:
+                    await worker.stop_runtime()
+
     async def test_partial_bootstrap_runner_is_stopped(self):
         worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
         worker.runner = NS(stop=AsyncMock())
