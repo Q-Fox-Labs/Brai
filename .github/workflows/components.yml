@@ -32,6 +32,16 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends bubblewrap
+          # Ubuntu 24.04 restricts capabilities inside unprivileged user namespaces.
+          # Admit only bubblewrap, which keeps the test process isolated.
+          sudo apparmor_parser -r <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile brai-components-bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          /usr/bin/bwrap --unshare-user --unshare-net --ro-bind / / -- /usr/bin/true
       - name: Verify component tooling
         run: node --test --test-isolation=none deploy/components/*.test.mjs
       - name: Validate component graph and documentation
