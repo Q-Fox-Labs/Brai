@@ -42,6 +42,7 @@ jobs:
           }
           PROFILE
           /usr/bin/bwrap --unshare-user --unshare-net --ro-bind / / -- /usr/bin/true
+          sudo install -D -m 0755 "$(command -v node)" /usr/local/libexec/brai-dev-release/check-tools/bin/node
       - name: Verify component tooling
         run: node --test --test-isolation=none deploy/components/*.test.mjs
       - name: Validate component graph and documentation
