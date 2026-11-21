@@ -144,16 +144,17 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
    : {...resultSchema,properties:{description:properties.description},required:["description"]};
   const modelInput = {observation:job.projection,diagnostics,output_schema};
   const response = await executor.startStep({id:job.investigation_id,scope:{investigation_id:job.investigation_id,owner_id:"",installation_id:""},phase:"investigator",executor:"codex_app_server",config_hash:sourceRef,model:resolveSol(ready.models,ready.catalog_revision),deadline_at:null,input:modelInput,input_hash:sha(canonical(modelInput))},async checkpoint=>{
-   if (checkpoint.state==="dispatching" && !dispatching) {
+   // AIDEV-NOTE: Thread setup has no model call. This field is saved immediately before turn/start.
+   if (checkpoint.state==="dispatching" && Object.hasOwn(checkpoint.native,"call_deadline_at") && !dispatching) {
     if(recordDispatch) await finish("dispatch");
     dispatching=true;
     onDispatch?.();
    }
   });
   if (response.state!=="completed") {
+   if (!dispatching) return await finish("fail");
    if (response.state==="unknown") throw new Error("INVESTIGATION_OUTCOME_UNKNOWN");
-   if (dispatching) return await finish("complete",invalidModelResult);
-   return await finish("fail");
+   return await finish("complete",invalidModelResult);
   }
   if (!response.result || typeof response.result!=="object" || Array.isArray(response.result)) {
    return await finish("complete",invalidModelResult);
