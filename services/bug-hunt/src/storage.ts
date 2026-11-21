@@ -99,7 +99,7 @@ export function createStore(pool:Pool,options:Options) {
   if(!found.rowCount)throw new Fault("NOT_FOUND");
   return found.rows[0];
  };
- async function appendDiagnostic(db:PoolClient,p:Principal,operation:"diagnostic-job"|"diagnostic-result",id:string,record:Record<string,unknown>) {
+ async function appendDiagnostic(db:PoolClient,p:Principal,operation:"diagnostic-job"|"diagnostic-result"|"diagnostic-dispatch",id:string,record:Record<string,unknown>) {
   await db.query(`INSERT INTO verification_mutation(installation_id,owner_id,actor_id,operation,request_id,input_hash,result)
     VALUES($1,$2,$3,$4,$5,$6,$7::jsonb || jsonb_build_object('at',clock_timestamp()))`,
    [installationId,p.ownerId,p.actorId,operation,id,digest(record),JSON.stringify(record)]);
@@ -110,7 +110,7 @@ export function createStore(pool:Pool,options:Options) {
     ORDER BY created_at DESC,id DESC LIMIT 1`,[installationId,row.owner_id,row.id,row.revision]);
   const current = state.rows[0];
   if (current?.state === "completed") return {...dates(current),state:"processed",applicability:"investigated"};
-  const processing = current?.state === "running" ? "running" : current?.state === "failed" ? "failed" : "pending";
+  const processing = ["running","failed","outcome_unknown"].includes(current?.state) ? current.state : "pending";
   const signature = exactSignature(installationId,row.owner_id,observation);
   if (row.review_state === "archived") return {state:processing, applicability:"none"};
   const known = signature && await db.query(`${diagnosticRows} SELECT i.id,i.case_id,i.result,i.finished_at
@@ -220,7 +220,7 @@ export function createStore(pool:Pool,options:Options) {
    const specified = claimedVersions.filter(key=>row.observation[key]?.trim() && row.observation[key].trim().toLowerCase() !== "unknown");
    const sameVersion = specified.length > 0 && specified.every(key=>row.observation[key] === result?.scope[key]);
    const state = result ? "completed" : "failed";
-   const signature = sameVersion && result?.verdict !== "insufficient_evidence" ? exactSignature(installationId,p.ownerId,row.observation) : null;
+   const signature = sameVersion && result?.verdict !== "insufficient_evidence" ? exactSignature(installationId,row.owner_id,row.observation) : null;
    await appendDiagnostic(db,{...p,ownerId:row.owner_id},"diagnostic-result",row.id,{state,result,signature_hash:signature?.hash??null,signature_canonical:signature?.canonical??null});
    return {investigation_id:row.id,case_id:row.case_id,state};
   });
@@ -260,6 +260,22 @@ export function createStore(pool:Pool,options:Options) {
     },investigation:await investigation(db,row,observation)};
    },true);
   },
+  /** Отмечает границу внешнего эффекта до запуска модели. */
+  async markInvestigationDispatch(p:Principal,request:unknown) {
+   if(!p.installationInvestigator)throw new Fault("FORBIDDEN");
+   validateInvestigation("dispatch",request);
+   const input=request as Fail;
+   return mutation(p,"diagnostic-dispatch",input,async db=>{
+    const job=await db.query(`${diagnosticRows} SELECT i.owner_id,i.state,c.revision,i.case_revision
+      FROM diagnostics i JOIN bug_case c ON c.id=i.case_id AND c.owner_id=i.owner_id AND c.installation_id=$1
+      WHERE i.id=$3 AND i.actor_id=$4 AND c.review_state<>'archived' FOR UPDATE OF c`,[installationId,null,input.investigation_id,p.actorId]);
+    const row=job.rows[0];
+    if(!row)throw new Fault("NOT_FOUND");
+    if(row.state!=="running" || row.revision!==row.case_revision)throw new Fault("REVISION_CONFLICT");
+    await appendDiagnostic(db,{...p,ownerId:row.owner_id},"diagnostic-dispatch",input.investigation_id,{state:"dispatching"});
+    return {state:"dispatching"};
+   });
+  },
   /** Под блокировкой единственного обработчика закрывает его прерванные пакетные попытки. */
   async recoverInvestigationBatch(p:Principal,request:unknown) {
    if(!p.installationInvestigator)throw new Fault("FORBIDDEN");
@@ -270,16 +286,23 @@ export function createStore(pool:Pool,options:Options) {
     const recovered=await db.query(`INSERT INTO verification_mutation
       (installation_id,owner_id,actor_id,operation,request_id,input_hash,result)
       SELECT job.installation_id,job.owner_id,job.actor_id,'diagnostic-result',job.request_id,$3,
-             jsonb_build_object('state','failed','result',NULL,'code','BATCH_INTERRUPTED','at',clock_timestamp())
+             jsonb_build_object('state',CASE WHEN dispatched.request_id IS NULL THEN 'failed' ELSE 'outcome_unknown' END,
+               'result',NULL,'code',CASE WHEN dispatched.request_id IS NULL THEN 'BATCH_INTERRUPTED' ELSE 'BATCH_OUTCOME_UNKNOWN' END,
+               'at',clock_timestamp())
       FROM verification_mutation job
+      LEFT JOIN verification_mutation dispatched ON
+        (dispatched.installation_id,dispatched.owner_id,dispatched.actor_id,dispatched.request_id)=
+        (job.installation_id,job.owner_id,job.actor_id,job.request_id)
+        AND dispatched.operation='diagnostic-dispatch'
       WHERE job.installation_id=$1 AND job.actor_id=$2 AND job.operation='diagnostic-job' AND job.result ? 'batch_id'
         AND NOT EXISTS (
           SELECT 1 FROM verification_mutation done WHERE
           (done.installation_id,done.owner_id,done.actor_id,done.request_id)=(job.installation_id,job.owner_id,job.actor_id,job.request_id)
           AND done.operation='diagnostic-result'
         )
-      ON CONFLICT DO NOTHING`,[installationId,p.actorId,digest({code:"BATCH_INTERRUPTED"})]);
-    return {recovered:recovered.rowCount??0};
+      ON CONFLICT DO NOTHING RETURNING result->>'state' AS state`,[installationId,p.actorId,digest(input)]);
+    return {recovered:recovered.rows.filter(row=>row.state==="failed").length,
+     outcome_unknown:recovered.rows.filter(row=>row.state==="outcome_unknown").length};
    });
   },
   async claimInvestigation(p:Principal,request:unknown) {
@@ -295,7 +318,7 @@ export function createStore(pool:Pool,options:Options) {
       WHERE c.installation_id=$1 AND ($2::text IS NULL OR c.owner_id=$2) AND c.review_state <> 'archived'
         AND ($3::uuid IS NULL OR c.id=$3) AND ($4::text IS NULL OR c.component_id=$4)
         AND NOT EXISTS (SELECT 1 FROM diagnostics i WHERE i.case_id=c.id
-          AND i.case_revision=c.revision AND i.state IN ('running','completed'))
+          AND i.case_revision=c.revision AND i.state IN ('running','completed','outcome_unknown'))
       ORDER BY (SELECT max(i.finished_at) FROM diagnostics i WHERE i.case_id=c.id
         AND i.case_revision=c.revision AND i.state='failed') NULLS FIRST,
         c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.installationInvestigator?null:p.ownerId,input.case_id??null,input.component??null]);

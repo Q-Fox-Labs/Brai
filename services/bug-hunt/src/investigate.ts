@@ -9,7 +9,7 @@ import {canonical} from "./contracts.js";
 import {resultSchema,validateInvestigation} from "./investigation-contract.js";
 import {codexExecutor,type NativeProfile} from "./verification-models.js";
 import {diagnosticWindows,runBatch,snapshotQueue,type DiagnosticInput} from "./investigation-batch.js";
-import {investigatorOwnerBlock,type NativeProcessProfile} from "./verification-native.js";
+import {investigatorOwnerBlock,nativeProcessRpc,type NativeProcessProfile} from "./verification-native.js";
 import {resolveSol,VerificationFault} from "./verification.js";
 
 const sha = (value:string) => createHash("sha256").update(value).digest("hex");
@@ -22,6 +22,21 @@ async function isolate(native:NativeProcessProfile):Promise<NativeProcessProfile
  const args=native.launcher.args.map(arg=>arg===root || arg===root+"/.codex" || arg===native.catalogPath
   ? stateRoot+arg.slice(root.length) : arg);
  return {...native,stateRoot,catalogPath:stateRoot+"/model-catalog.json",launcher:{...native.launcher,args}};
+}
+
+/** Проверяет доступ к каталогу Codex до первого захвата, без вызова модели. */
+async function probeCatalog(native:NativeProcessProfile):Promise<string|null> {
+ let isolated:NativeProcessProfile|undefined;
+ try{
+  isolated=await isolate(native);
+  await nativeProcessRpc(isolated,{}).prepare!();
+  return null;
+ }catch(error){
+  return error instanceof VerificationFault&&error.code==="NATIVE_AUTH_REJECTED"?
+   "NATIVE_AUTH_REJECTED":"INVESTIGATOR_CATALOG_UNAVAILABLE";
+ }finally{
+  if(isolated) await rm(isolated.stateRoot,{recursive:true,force:true});
+ }
 }
 
 async function main() {
@@ -50,6 +65,8 @@ async function main() {
  try {
   await client.connect(transport);
   const invoke = (operation:string,args:Record<string,unknown>) => call("investigation_"+operation,args);
+  let catalogCheck:Promise<string|null>|undefined;
+  const checkProvider=async()=>await investigatorOwnerBlock(native) ?? await (catalogCheck??=probeCatalog(native));
   if (action==="recover") {
    if(config.installation_queue!==true) throw new Error("INVESTIGATOR_INSTALLATION_QUEUE_REQUIRED");
    console.log(JSON.stringify(await invoke("recover",{request_id:randomUUID()})));
@@ -57,7 +74,7 @@ async function main() {
   }
   if (action==="claim") {
    validateInvestigation("claim",input);
-   const blocked=await investigatorOwnerBlock(native);
+   const blocked=await checkProvider();
    if (blocked) throw new VerificationFault(blocked);
    console.log(JSON.stringify(await invoke("claim",input)));
    return;
@@ -68,7 +85,7 @@ async function main() {
    return;
   }
   if (action==="batch") {
-   const outcome=await runBatch(call,input.snapshot,input.diagnostic_batch,input.parallelism,()=>investigatorOwnerBlock(native),async(job,facts,onDispatch)=>{
+   const outcome=await runBatch(call,input.snapshot,input.diagnostic_batch,input.parallelism,checkProvider,async(job,facts,onDispatch)=>{
     let isolated:NativeProcessProfile|undefined;
     try {
      isolated=await isolate(native);
@@ -77,7 +94,8 @@ async function main() {
      return "failed";
     }
     try {
-     return String((await resolve(job,facts,isolated,invoke,onDispatch)).state);
+     return String((await resolve(job,facts,isolated,invoke,
+      onDispatch,config.installation_queue===true)).state);
     } finally {
      await rm(isolated.stateRoot,{recursive:true,force:true});
     }
@@ -96,12 +114,18 @@ async function main() {
 }
 
 async function resolve(job:{investigation_id:string;component:string|null;projection:unknown},diagnostics:DiagnosticInput,native:NativeProcessProfile,
- invoke:(operation:string,args:Record<string,unknown>)=>Promise<Record<string,unknown>>,onDispatch?:()=>void) {
+ invoke:(operation:string,args:Record<string,unknown>)=>Promise<Record<string,unknown>>,
+ onDispatch?:()=>void,recordDispatch=false) {
  const request_id=randomUUID();
  const finish = (operation:string,result?:unknown) => invoke(operation,{request_id,investigation_id:job.investigation_id,...(result===undefined?{}:{result})});
  if (diagnostics?.component!==(job.component??"unknown")) return await finish("fail");
  const available="facts" in diagnostics;
  if (available && !Array.isArray(diagnostics.facts)) return await finish("fail");
+ // AIDEV-NOTE: Журнал без связанного события и текущий health не доказывают исход проверки.
+ const hasDirectEvidence=available && diagnostics.facts.some(fact=>{
+  const event=(fact as {event_matches?:Record<string,{count?:number}>})?.event_matches?.["error_code+correlation_id"];
+  return typeof event?.count==="number" && event.count>0;
+ });
  const sourceRef=native.sourceRef;
  const profile:NativeProfile = {process:native,generation:job.investigation_id,cwd:native.stateRoot,filesystem_isolation_verified:true,tool_policy_version:"no-environment-scoped-tools-v2"};
  const executor = codexExecutor(profile,{tools:()=>[],call:async()=>{throw new VerificationFault("TOOL_FORBIDDEN");},reserve:async()=>{},allowed:async()=>true},undefined,{instructions,ephemeral:true});
@@ -110,12 +134,13 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
   const ready = await executor.preflight();
   if (!ready.ready) throw new Error("CODEX_UNAVAILABLE");
   const {properties} = resultSchema;
-  const output_schema = available
+  const output_schema = hasDirectEvidence
    ? {...resultSchema,properties:{verdict:properties.verdict,description:properties.description,advice:{anyOf:[properties.advice,{type:"null"}]}},required:["verdict","description","advice"]}
    : {...resultSchema,properties:{description:properties.description},required:["description"]};
   const modelInput = {observation:job.projection,diagnostics,output_schema};
   const response = await executor.startStep({id:job.investigation_id,scope:{investigation_id:job.investigation_id,owner_id:"",installation_id:""},phase:"investigator",executor:"codex_app_server",config_hash:sourceRef,model:resolveSol(ready.models,ready.catalog_revision),deadline_at:null,input:modelInput,input_hash:sha(canonical(modelInput))},async checkpoint=>{
-   if (checkpoint.state==="dispatching") {
+   if (checkpoint.state==="dispatching" && !dispatching) {
+    if(recordDispatch) await finish("dispatch");
     dispatching=true;
     onDispatch?.();
    }
@@ -126,10 +151,11 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
   }
   const answer = response.result as Record<string,unknown>;
   // AIDEV-NOTE: Описание очевидца помогает сформулировать проверку. Без прочитанных фактов оно не подтверждает исход.
-  const result = available
-   ? {verdict:answer.verdict,description:answer.description,...(answer.advice?{advice:answer.advice}:{}),scope:diagnostics.current_scope,
-      evidence:diagnostics.facts.map(fact=>({source:"ansible:read_brai_bug_hunt_diagnostics",observed_at:diagnostics.observed_at,fact:JSON.stringify({since:diagnostics.since,until:diagnostics.until,fact})}))}
-   : {verdict:"insufficient_evidence",description:answer.description,scope:{},evidence:[]};
+  const evidence=available ? diagnostics.facts.map(fact=>({source:"ansible:read_brai_bug_hunt_diagnostics",
+   observed_at:diagnostics.observed_at,fact:JSON.stringify({since:diagnostics.since,until:diagnostics.until,fact})})) : [];
+  const result = hasDirectEvidence && available && Object.keys(diagnostics.current_scope).length
+   ? {verdict:answer.verdict,description:answer.description,...(answer.advice?{advice:answer.advice}:{}),scope:diagnostics.current_scope,evidence}
+   : {verdict:"insufficient_evidence",description:answer.description,scope:{},evidence};
   validateInvestigation("complete",{request_id,investigation_id:job.investigation_id,result});
   return await finish("complete",result);
  } catch(error) {
@@ -139,7 +165,7 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
 }
 
 try {await main();} catch (error) {
- const codes=["INVESTIGATOR_OWNER_SOURCE_CHANGED","INVESTIGATOR_OWNER_UNAVAILABLE","OWNER_OUTCOME_UNKNOWN"];
+ const codes=["INVESTIGATOR_OWNER_SOURCE_CHANGED","INVESTIGATOR_OWNER_UNAVAILABLE","OWNER_OUTCOME_UNKNOWN","NATIVE_AUTH_REJECTED","INVESTIGATOR_CATALOG_UNAVAILABLE"];
  console.error(error instanceof VerificationFault && codes.includes(error.code)?error.code:"BUG_HUNT_INVESTIGATOR_FAILED");
  process.exitCode=1;
 }

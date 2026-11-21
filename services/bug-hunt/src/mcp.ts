@@ -32,6 +32,7 @@ export const systemToolDefinitions=[
 type SystemExecute=(op:SystemOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 type Investigate = (op: keyof typeof investigationSchemas,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 const installationInvestigationTools = [
+ {name:"bug_hunt_investigation_dispatch",operation:"dispatch",description:"Записать начало внешней операции расследования."},
  {name:"bug_hunt_investigation_recover",operation:"recover",description:"Закрыть незавершённые попытки прежнего цикла под блокировкой обработчика."},
  {name:"bug_hunt_investigation_list",operation:"list",description:"Прочитать страницу технической очереди среды."},
  {name:"bug_hunt_investigation_card",operation:"card",description:"Прочитать состояние и технические признаки карточки очереди."},
@@ -44,7 +45,8 @@ const investigationTools = [
 type VerificationExecute=(op:VerificationOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 type Execute=(op:Operation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 /** Запускает stateless listener с закрытой проверкой credential и ограниченными ресурсами. */
-export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute,executeVerification?:VerificationExecute,investigate?:Investigate){
+export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof createGate>,authenticate:(authorization:string|undefined)=>Promise<Principal>,execute:Execute,executeSystem?:SystemExecute,executeVerification?:VerificationExecute,investigate?:Investigate,
+ readInvestigatorDigest=()=>config.installationInvestigatorSha256){
  const baseDefinitions=[...toolDefinitions,...(executeSystem?systemToolDefinitions:[]),...(executeVerification?verificationTools.map(({operation,...tool})=>tool):[])];
  let connections=0;
  const http=createServer(async(req,res)=>{
@@ -58,8 +60,8 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
   try{
    await gate.run(async ctx=>{
     const authorization=req.headers.authorization;
-    const digest=config.installationInvestigatorSha256;
-    const isInvestigator=!!digest && authorization?.startsWith("Bearer ") &&
+    const digest=readInvestigatorDigest();
+    const isInvestigator=!!digest && /^[a-f0-9]{64}$/.test(digest) && authorization?.startsWith("Bearer ") &&
      authorization.length<=512 && timingSafeEqual(createHash("sha256").update(authorization.slice(7)).digest(),Buffer.from(digest,"hex"));
     const p:Principal=isInvestigator ?
      {ownerId:"",actorId:"service:bug-hunt-investigator",source:"codex",reviewer:false,installationInvestigator:true} :

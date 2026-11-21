@@ -205,11 +205,16 @@ export async function startRuntime(cfg=loadConfig()){
   mcp=await startMcp(cfg.mcp,gate,authorization=>codexPrincipal(wire,cfg.mcp.principalsFile,authorization),executeAgent,executeSystem,executeVerification,async(op,p,input,ctx)=>{
    if (p.source!=="codex" || (!p.installationInvestigator && !cfg.mcp.investigators?.includes(p.actorId))) throw new Fault("FORBIDDEN");
    const store=makeStore(ctx.deadlineAt);
+   if(op==="dispatch")return store.markInvestigationDispatch(p,input);
    if(op==="recover")return store.recoverInvestigationBatch(p,input);
    if(op==="list")return store.listInvestigationQueue(p,input);
    if(op==="card")return store.readInvestigationCard(p,input);
    if(op==="claim")return store.claimInvestigation(p,input);
    return store.finishInvestigation(p,op,input);
+  },()=>{
+   if(!refreshFromFile)return cfg.mcp.installationInvestigatorSha256;
+   try{return loadConfig().mcp.installationInvestigatorSha256;}
+   catch{return undefined;}
   });
   let stopping:Promise<void>|undefined;
   return {pool,backgroundPool,nc,service,systemService,systemStore,processingStore,verificationStore,verificationPolicies,processor,mcp,counters,
