@@ -19,11 +19,12 @@ test("snapshot reads each page with the same cutoff and preserves an event windo
   }
   const id=input.case_id;
   return {case:card(id),report:{observation:{component_id:"hermes",client_occurred_at:early}},
-   investigation:{state:id==="c"?"running":"pending",applicability:"none"}};
+   investigation:{state:id==="c"?"outcome_unknown":"pending",applicability:"none"}};
  };
  const snapshot=await snapshotQueue(call,at);
  assert.deepEqual(read,[at.toISOString(),at.toISOString()]);
  assert.equal(snapshot.examined,3);
+ assert.equal(snapshot.outcome_unknown,1);
  assert.deepEqual(snapshot.candidates.map(card=>card.id),["a","b"]);
  assert.deepEqual(diagnosticWindows(snapshot),[
   {id:"a",component:"hermes",since:"2026-11-16T00:00:00Z",until:"2026-11-17T01:02:03Z"},
@@ -36,7 +37,7 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
   {id:"a",signature:"same"},{id:"repeat",signature:"same"},{id:"b"},{id:"c"},
   {id:"unsupported",component:"nats"},{id:"read-failed",component:"agent"},{id:"unknown",component:"unknown"},{id:"changed"},
  ].map(card=>({revision:1,component:"hermes",...card}));
- const snapshot={as_of:"now",examined:candidates.length,candidates};
+ const snapshot={as_of:"now",examined:candidates.length+1,candidates,outcome_unknown:1};
  const known=new Set();
  const completed=[];
  const started=[];
@@ -82,7 +83,7 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
  assert.equal(missing.verdict,"insufficient_evidence");
  assert.match(missing.description,/операции.*время события.*строка журнала/);
  assert.ok(providerChecks>1);
- assert.deepEqual(outcome,{as_of:"now",examined:8,candidates:8,reused:1,completed:4,completed_without_diagnostics:3,failed:1,skipped:1,unresolved:1,blocked:0,model_started:5,model_peak:2,blocked_code:null});
+ assert.deepEqual(outcome,{as_of:"now",examined:9,candidates:8,reused:1,completed:4,completed_without_diagnostics:3,failed:1,skipped:1,unresolved:2,blocked:0,model_started:5,model_peak:2,blocked_code:null});
 });
 
 

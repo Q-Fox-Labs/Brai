@@ -121,6 +121,9 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
  if (diagnostics?.component!==(job.component??"unknown")) return await finish("fail");
  const available="facts" in diagnostics;
  if (available && !Array.isArray(diagnostics.facts)) return await finish("fail");
+ const invalidModelResult={verdict:"insufficient_evidence",scope:{},evidence:[],
+  description:"Запрос был отправлен, но итог модели не прошёл проверку. Для вывода нужны результаты проверки операции или пригодный ответ модели.",
+ };
  const commit=available?diagnostics.current_scope?.commit_sha:undefined;
  // AIDEV-NOTE: Состояние текущей службы нельзя приписать старому событию.
  const verifiedScope=commit && /^[a-f0-9]{40}$/.test(commit) && available && diagnostics.facts.some(fact=>{
@@ -149,7 +152,11 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
   });
   if (response.state!=="completed") {
    if (response.state==="unknown") throw new Error("INVESTIGATION_OUTCOME_UNKNOWN");
+   if (dispatching) return await finish("complete",invalidModelResult);
    return await finish("fail");
+  }
+  if (!response.result || typeof response.result!=="object" || Array.isArray(response.result)) {
+   return await finish("complete",invalidModelResult);
   }
   const answer = response.result as Record<string,unknown>;
   // AIDEV-NOTE: Описание очевидца помогает сформулировать проверку. Без прочитанных фактов оно не подтверждает исход.
@@ -158,7 +165,8 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
   const result = hasDirectEvidence && answer.verdict==="confirmed"
    ? {verdict:answer.verdict,description:answer.description,...(answer.advice?{advice:answer.advice}:{}),scope:verifiedScope,evidence}
    : {verdict:"insufficient_evidence",description:answer.description,scope:{},evidence};
-  validateInvestigation("complete",{request_id,investigation_id:job.investigation_id,result});
+  try {validateInvestigation("complete",{request_id,investigation_id:job.investigation_id,result});}
+  catch {return await finish("complete",invalidModelResult);}
   return await finish("complete",result);
  } catch(error) {
   if (!dispatching) return await finish("fail");

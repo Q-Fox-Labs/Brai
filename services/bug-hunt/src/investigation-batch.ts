@@ -18,7 +18,7 @@ type Facts = Window & {current_scope:DiagnosticResult["scope"]; observed_at:stri
 export type DiagnosticInput = Facts | (Window & {unavailable:"no_reader"|"read_failed"|"not_collected"});
 type DiagnosticBatch = {diagnostics:Record<string,Facts>; failed_components:string[]; components_without_reader:string[]};
 type Candidate = Window & {id:string; revision:number; signature:string|null; known:boolean};
-type Snapshot = {as_of:string; examined:number; candidates:Candidate[]};
+type Snapshot = {as_of:string; examined:number; outcome_unknown?:number; candidates:Candidate[]};
 type Resolve = (job:Job,diagnostics:DiagnosticInput,onDispatch:()=>void)=>Promise<string>;
 const second = (date:Date)=>date.toISOString().slice(0,19)+"Z";
 
@@ -41,10 +41,12 @@ export async function snapshotQueue(call:CallTool, now:Date, selected?:string[])
  const selectedIds=selected && new Set(selected);
  const candidates:Candidate[]=[];
  let examined=0;
+ let unknown=0;
  for (const card of cards) {
   if (card.review_state==="archived" || (selectedIds && !selectedIds.has(card.id))) continue;
   const detail=await get(call,card.id);
   examined++;
+  if (detail.investigation.state==="outcome_unknown") unknown++;
   if (!waiting(detail)) continue;
   const observedAt="hints" in detail?detail.hints.client_occurred_at:detail.report.observation.client_occurred_at;
   const signature="hints" in detail?detail.hints.signature:
@@ -61,7 +63,7 @@ export async function snapshotQueue(call:CallTool, now:Date, selected?:string[])
    since:second(new Date(historical?occurred:registered)),until:second(historical?new Date(registered):now),
    known:detail.investigation.applicability==="exact" && !!detail.investigation.result});
  }
- return {as_of,examined,candidates};
+ return {as_of,examined,outcome_unknown:unknown,candidates};
 }
 
 /** Returns windows for pending cards that have no exact prior result. Ansible owns reader selection. */
@@ -86,7 +88,7 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,batch:DiagnosticB
  const queue=[...groups.values()].values();
  const withoutReader=new Set(batch.components_without_reader);
  const failedReaders=new Set(batch.failed_components);
- const counts={reused:0,completed:0,completed_without_diagnostics:0,failed:0,skipped:0,unresolved:0,blocked:0,model_started:0,model_peak:0};
+ const counts={reused:0,completed:0,completed_without_diagnostics:0,failed:0,skipped:0,unresolved:snapshot.outcome_unknown??0,blocked:0,model_started:0,model_peak:0};
  let modelActive=0;
  let providerCheck:Promise<string|null>|undefined;
  let blockedCode:string|null=null;
