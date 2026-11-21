@@ -121,11 +121,13 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
  if (diagnostics?.component!==(job.component??"unknown")) return await finish("fail");
  const available="facts" in diagnostics;
  if (available && !Array.isArray(diagnostics.facts)) return await finish("fail");
- // AIDEV-NOTE: Журнал без связанного события и текущий health не доказывают исход проверки.
- const hasDirectEvidence=available && diagnostics.facts.some(fact=>{
-  const event=(fact as {event_matches?:Record<string,{count?:number}>})?.event_matches?.["error_code+correlation_id"];
-  return typeof event?.count==="number" && event.count>0;
- });
+ const commit=available?diagnostics.current_scope?.commit_sha:undefined;
+ // AIDEV-NOTE: Состояние текущей службы нельзя приписать старому событию.
+ const verifiedScope=commit && /^[a-f0-9]{40}$/.test(commit) && available && diagnostics.facts.some(fact=>{
+  const event=(fact as {event_matches?:Record<string,{count?:number;commit_sha?:string}>})?.event_matches?.["error_code+correlation_id+commit_sha"];
+  return event?.commit_sha===commit && typeof event.count==="number" && event.count>0;
+ }) ? {commit_sha:commit} : {};
+ const hasDirectEvidence=Boolean(verifiedScope.commit_sha);
  const sourceRef=native.sourceRef;
  const profile:NativeProfile = {process:native,generation:job.investigation_id,cwd:native.stateRoot,filesystem_isolation_verified:true,tool_policy_version:"no-environment-scoped-tools-v2"};
  const executor = codexExecutor(profile,{tools:()=>[],call:async()=>{throw new VerificationFault("TOOL_FORBIDDEN");},reserve:async()=>{},allowed:async()=>true},undefined,{instructions,ephemeral:true});
@@ -135,7 +137,7 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
   if (!ready.ready) throw new Error("CODEX_UNAVAILABLE");
   const {properties} = resultSchema;
   const output_schema = hasDirectEvidence
-   ? {...resultSchema,properties:{verdict:properties.verdict,description:properties.description,advice:{anyOf:[properties.advice,{type:"null"}]}},required:["verdict","description","advice"]}
+   ? {...resultSchema,properties:{verdict:{enum:["confirmed","insufficient_evidence"]},description:properties.description,advice:{anyOf:[properties.advice,{type:"null"}]}},required:["verdict","description","advice"]}
    : {...resultSchema,properties:{description:properties.description},required:["description"]};
   const modelInput = {observation:job.projection,diagnostics,output_schema};
   const response = await executor.startStep({id:job.investigation_id,scope:{investigation_id:job.investigation_id,owner_id:"",installation_id:""},phase:"investigator",executor:"codex_app_server",config_hash:sourceRef,model:resolveSol(ready.models,ready.catalog_revision),deadline_at:null,input:modelInput,input_hash:sha(canonical(modelInput))},async checkpoint=>{
@@ -153,8 +155,8 @@ async function resolve(job:{investigation_id:string;component:string|null;projec
   // AIDEV-NOTE: Описание очевидца помогает сформулировать проверку. Без прочитанных фактов оно не подтверждает исход.
   const evidence=available ? diagnostics.facts.map(fact=>({source:"ansible:read_brai_bug_hunt_diagnostics",
    observed_at:diagnostics.observed_at,fact:JSON.stringify({since:diagnostics.since,until:diagnostics.until,fact})})) : [];
-  const result = hasDirectEvidence && available && Object.keys(diagnostics.current_scope).length
-   ? {verdict:answer.verdict,description:answer.description,...(answer.advice?{advice:answer.advice}:{}),scope:diagnostics.current_scope,evidence}
+  const result = hasDirectEvidence && answer.verdict==="confirmed"
+   ? {verdict:answer.verdict,description:answer.description,...(answer.advice?{advice:answer.advice}:{}),scope:verifiedScope,evidence}
    : {verdict:"insufficient_evidence",description:answer.description,scope:{},evidence};
   validateInvestigation("complete",{request_id,investigation_id:job.investigation_id,result});
   return await finish("complete",result);

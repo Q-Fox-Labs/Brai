@@ -124,7 +124,7 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,batch:DiagnosticB
    await call("investigation_complete",{request_id:randomUUID(),investigation_id:job.investigation_id,result:{
     verdict:"insufficient_evidence",
     description:"Нужны обезличенное описание операции, ожидаемый и фактический результат, время события и строка журнала или результат проверки, где видно расхождение.",
-    scope:missingDiagnostics?{}:diagnostics.current_scope,evidence:[],
+    scope:{},evidence:[],
    }});
    return missingDiagnostics?"completed_without_diagnostics":"completed";
   }
