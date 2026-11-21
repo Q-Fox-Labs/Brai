@@ -95,7 +95,9 @@ diagnostic details. Parse/invalid/method/params имеют стандартны�
 `https://chatgpt.com/backend-api/codex`, `sourceRef` — SHA-256 принятого
 `providerSourceReceipt`. `ready` означает свежий snapshot без pending/unknown.
 `code` — `READY`, `CODEX_OWNER_ACCESS_EXPIRED`, `OWNER_OUTCOME_UNKNOWN` или
-фиксированная ошибка. Status не очищает неизвестный исход.
+фиксированная ошибка. `OWNER_RECOVERY_READY` означает свежий access с другим отпечатком
+после незавершённой попытки. При этом `ready` остаётся false, пока resolve не
+проверит данные на стороне owner. Status не очищает неизвестный исход.
 
 `credentials.resolve({expectedBinding?: string})` возвращает:
 
@@ -152,8 +154,8 @@ lock; штатный finally завершает/убивает CLI. Новых �
 запрещён. Допускается только `owner.resolve(read_only=True)` и только свежий access
 с SHA, отличным от baseline intent. Такой read-only успех снимает unknown.
 Новый inode или новая expiry при прежнем access сами по себе не восстанавливают
-допуск. Read-only проверку восстановления вызывает resolve; status лишь сообщает
-`ready:false, code:OWNER_OUTCOME_UNKNOWN`.
+допуск. Read-only проверку восстановления вызывает resolve; status сообщает
+`OWNER_RECOVERY_READY` только после появления нового свежего доступа.
 
 Разрыв клиента не отменяет локальный owner вызов. SIGTERM/SIGINT закрывает
 admission/listener и каналы peers, ждёт уже начатые local calls и

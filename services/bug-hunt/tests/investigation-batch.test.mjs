@@ -58,7 +58,7 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
   throw Error("unexpected "+operation);
  };
  const sources={diagnostics:{a:facts,b:facts,c:facts},components_without_reader:["nats","unknown"],failed_components:["agent"]};
- const outcome=await runBatch(call,snapshot,sources,2,async()=>{providerChecks++;},async (job,diagnostic,onDispatch)=>{
+ const outcome=await runBatch(call,snapshot,sources,2,async()=>{providerChecks++;return null;},async (job,diagnostic,onDispatch)=>{
   onDispatch();
   const id=job.investigation_id;
   started.push(id);
@@ -82,5 +82,35 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
  assert.equal(missing.verdict,"insufficient_evidence");
  assert.match(missing.description,/операции.*время события.*строка журнала/);
  assert.equal(providerChecks,1);
- assert.deepEqual(outcome,{as_of:"now",examined:8,candidates:8,reused:1,completed:4,completed_without_diagnostics:3,failed:1,skipped:1,unresolved:1,model_started:5,model_peak:2});
+ assert.deepEqual(outcome,{as_of:"now",examined:8,candidates:8,reused:1,completed:4,completed_without_diagnostics:3,failed:1,skipped:1,unresolved:1,blocked:0,model_started:5,model_peak:2,blocked_code:null});
+});
+
+
+test("a shared authorization block leaves model work unclaimed and reports the cause once",async()=>{
+ const caseFor=id=>({id,revision:1,review_state:"new",owner_id:"owner"});
+ const entries=["a","b","known"];
+ const snapshot={as_of:"now",examined:entries.length,candidates:entries.map(id=>({id,revision:1,component:"hermes",known:id==="known"}))};
+ const claims=[];
+ let providerChecks=0;
+ const call=async (operation,args)=>{
+  const id=args.case_id;
+  if (operation==="get") return {case:caseFor(id),report:{observation:{title:"Safe description"}},
+   investigation:{state:"pending",applicability:id==="known"?"exact":"none",result:id==="known"?fixed:undefined}};
+  if (operation==="investigation_claim") {
+   claims.push(id);
+   return {state:"running",replayed:false,investigation_id:id,case_revision:1};
+  }
+  assert.equal(operation,"investigation_complete");
+  assert.deepEqual(args.result,fixed);
+  return {state:"completed"};
+ };
+ const outcome=await runBatch(call,snapshot,{diagnostics:{},components_without_reader:[],failed_components:[]},2,
+  async()=>{providerChecks++;return "OWNER_OUTCOME_UNKNOWN";},
+  async()=>assert.fail("no model should run"));
+ assert.equal(providerChecks,1);
+ assert.deepEqual(claims,["known"]);
+ assert.equal(outcome.blocked,2);
+ assert.equal(outcome.blocked_code,"OWNER_OUTCOME_UNKNOWN");
+ assert.equal(outcome.unresolved,0);
+ assert.equal(outcome.reused,1);
 });

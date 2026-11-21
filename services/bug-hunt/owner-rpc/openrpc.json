@@ -19,7 +19,7 @@
           "required": ["ready", "code", "binding", "accountId", "expiresAt", "baseUrl", "sourceRef"],
           "properties": {
             "ready": {"type": "boolean"},
-            "code": {"type": "string", "enum": ["READY", "OWNER_OUTCOME_UNKNOWN", "CODEX_OWNER_ACCESS_EXPIRED", "CODEX_OWNER_REJECTED", "CODEX_OWNER_UNAVAILABLE", "HELPER_BINDING_CHANGED", "HELPER_STOPPING", "HELPER_REJECTED"]},
+            "code": {"type": "string", "enum": ["READY", "OWNER_RECOVERY_READY", "OWNER_OUTCOME_UNKNOWN", "CODEX_OWNER_ACCESS_EXPIRED", "CODEX_OWNER_REJECTED", "CODEX_OWNER_UNAVAILABLE", "HELPER_BINDING_CHANGED", "HELPER_STOPPING", "HELPER_REJECTED"]},
             "binding": {"type": ["string", "null"], "description": "Opaque persisted observation epoch; null when snapshot is unavailable."},
             "accountId": {"type": ["string", "null"]},
             "expiresAt": {"type": ["integer", "null"], "description": "Unix seconds."},

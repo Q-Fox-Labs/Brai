@@ -63,7 +63,7 @@ export function diagnosticWindows(snapshot:Snapshot) {
 
 /** Uses the requested concurrency across distinct signatures, claiming work immediately before dispatch. */
 export async function runBatch(call:CallTool,snapshot:Snapshot,batch:DiagnosticBatch,parallelism:number,
-  checkProvider:()=>Promise<void>,resolve:Resolve) {
+  checkProvider:()=>Promise<string|null>,resolve:Resolve) {
  if (!Number.isSafeInteger(parallelism) || parallelism<1) throw new Error("INVALID_INVESTIGATION_PARALLELISM");
  const groups=new Map<string,Candidate[]>();
  for (const card of snapshot.candidates) {
@@ -75,15 +75,22 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,batch:DiagnosticB
  const queue=[...groups.values()].values();
  const withoutReader=new Set(batch.components_without_reader);
  const failedReaders=new Set(batch.failed_components);
- const counts={reused:0,completed:0,completed_without_diagnostics:0,failed:0,skipped:0,unresolved:0,model_started:0,model_peak:0};
+ const counts={reused:0,completed:0,completed_without_diagnostics:0,failed:0,skipped:0,unresolved:0,blocked:0,model_started:0,model_peak:0};
  let modelActive=0;
- let providerCheck:Promise<void>|undefined;
+ let providerCheck:Promise<string|null>|undefined;
+ let blockedCode:string|null=null;
  async function run(card:Candidate) {
   const detail=await get(call,card.id);
   if (!waiting(detail) || detail.case.revision!==card.revision) return "skipped";
   const known=detail.investigation.applicability==="exact" && detail.investigation.result;
   const observation=detail.report.observation;
-  if (!known && prepareExternalProjection(observation,[detail.case.owner_id])) await (providerCheck??=checkProvider());
+  if (!known && prepareExternalProjection(observation,[detail.case.owner_id])) {
+   const block=await (providerCheck??=checkProvider());
+   if (block) {
+    blockedCode=block;
+    return "blocked";
+   }
+  }
   const job=await call("investigation_claim",{request_id:randomUUID(),case_id:card.id}) as unknown as Job;
   if (job.state!=="running" || job.replayed) return "skipped";
   if (job.case_revision!==card.revision) {
@@ -136,5 +143,5 @@ export async function runBatch(call:CallTool,snapshot:Snapshot,batch:DiagnosticB
   }
  }
  await Promise.all(Array.from({length:Math.min(parallelism,groups.size)},work));
- return {as_of:snapshot.as_of,examined:snapshot.examined,candidates:snapshot.candidates.length,...counts};
+ return {as_of:snapshot.as_of,examined:snapshot.examined,candidates:snapshot.candidates.length,...counts,blocked_code:blockedCode};
 }
