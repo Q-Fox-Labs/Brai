@@ -8,7 +8,7 @@ import {tmpdir} from "node:os";
 import path from "node:path";
 import {once} from "node:events";
 import {createServer,Socket} from "node:net";
-import {nativeProcessRpc,projectNativeCatalog,credentialCall} from "../dist/verification-native.js";
+import {nativeProcessRpc,projectNativeCatalog,credentialCall,investigatorOwnerBlock} from "../dist/verification-native.js";
 import {codexExecutor,nativeThreadConfig} from "../dist/verification-models.js";
 const catalog=()=>({etag:"fixture",models:[{slug:"gpt-6.1-sol",visibility:"list",tool_mode:"code_mode_only",context_window:500000,effective_context_window_percent:95,supported_reasoning_levels:[{effort:"low"},{effort:"high"}],unknown_future_metadata:{preserve:true}},{slug:"gpt-9-sol-preview",visibility:"list",tool_mode:"code_mode_only",context_window:1,supported_reasoning_levels:[{effort:"high"}]}]});
 const sourceRef="a".repeat(64),bearer="PRIVATE_ACCESS_NEVER_PERSIST_"+Math.random();
@@ -116,4 +116,30 @@ test("credential RPC waits for owner reply without a client socket timeout or an
 });
 test("stdio RPC applies no additional payload cap to valid native responses",async t=>{
  const f=await fixture(t);await f.rpc.prepare();await f.rpc.connect();const result=await f.rpc.call("large/fixture",{});assert.equal(result.text.length,4194305);
+});
+
+
+test("an unknown shared credential is reconciled before claim only against its fresh binding",async()=>{
+ const profile={credentialSocket:"/private/owner.sock",sourceRef};
+ const status={...owner(),ready:false,code:"OWNER_OUTCOME_UNKNOWN",binding:"a".repeat(32)};
+ const calls=[];
+ const request=async(socket,method,params)=>{
+  assert.equal(socket,profile.credentialSocket);
+  calls.push({method,params});
+  return method==="status"?status:{...status,ready:true,code:"READY",access:bearer};
+ };
+ assert.equal(await investigatorOwnerBlock(profile,request),null);
+ assert.deepEqual(calls,[{method:"status",params:undefined},{method:"resolve",params:{expectedBinding:status.binding}}]);
+ for(const selection of [{expiresAt:0},{sourceRef:"foreign"},{binding:"wrong"},{expiresAt:undefined}]) {
+  await investigatorOwnerBlock(profile,async(_,method)=>{
+   assert.equal(method,"status");
+   return {...status,...selection};
+  });
+ }
+ assert.equal(await investigatorOwnerBlock(profile,async(_,method)=>{
+  if(method==="status")return status;
+  throw Error("Synthetic unknown");
+ }),"OWNER_OUTCOME_UNKNOWN");
+ assert.equal(await investigatorOwnerBlock(profile,async(_,method)=>method==="status"?status:{...status,accountId:"other"}),
+  "OWNER_OUTCOME_UNKNOWN");
 });

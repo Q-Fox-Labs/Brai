@@ -10,7 +10,7 @@ export const schemas = schemaDocument.definitions as Record<"report"|"get"|"list
 export type Operation = keyof typeof schemas;
 export type ReviewState = "new" | "triaged" | "archived";
 export type Source = "codex" | "hermes" | "web";
-export interface Principal { ownerId: string; actorId: string; source: Source; reviewer: boolean }
+export interface Principal { ownerId: string; actorId: string; source: Source; reviewer: boolean; installationInvestigator?: true }
 export interface Observation {
  title:string; operation:string; expected:string; observed:string; component_id?:string;
  steps?:string|null; component_version?:string|null; commit_sha?:string|null; deployment_revision?:string|null;

@@ -13,6 +13,7 @@ const installationId = 'diagnostic-fixture';
 const principal = {ownerId:'one',actorId:'codex:fixture-one',source:'codex',reviewer:false};
 const other = {...principal,ownerId:'two',actorId:'codex:fixture-two'};
 const noEvidence = async()=>{};
+const service = {ownerId:'',actorId:'service:bug-hunt-investigator',source:'codex',reviewer:false,installationInvestigator:true};
 
 test('diagnostic result, exact reuse, isolation, replay and restore', {skip:!fixture}, async()=>{
  assert.match(fixture,/^[0-9]+$/);
@@ -63,6 +64,37 @@ test('diagnostic result, exact reuse, isolation, replay and restore', {skip:!fix
   assert.equal((await store.investigationForReport(principal,changed.case_id,changedInput)).applicability,'none');
   const foreign = await store.report(other,{...input,request_id:randomUUID()},noEvidence);
   assert.equal((await store.investigationForReport(other,foreign.case_id,input)).applicability,'none');
+  await assert.rejects(store.listInvestigationQueue(principal,{}),{code:'FORBIDDEN'});
+  await assert.rejects(store.readInvestigationCard(other,{case_id:foreign.case_id}),{code:'FORBIDDEN'});
+  const serviceQueue=await store.listInvestigationQueue(service,{limit:50});
+  assert.ok(serviceQueue.items.some(row=>row.id===foreign.case_id));
+  assert.ok(serviceQueue.items.some(row=>row.id===receipt.case_id));
+  assert.ok(serviceQueue.items.every(row=>!('owner_id' in row) && !('title' in row)));
+  const foreignDetail=await store.readInvestigationCard(service,{case_id:foreign.case_id});
+  assert.equal(foreignDetail.hints.has_projection,true);
+  assert.equal('report' in foreignDetail,false);
+  const sharedJob=await store.claimInvestigation(service,{request_id:randomUUID(),case_id:foreign.case_id});
+  assert.equal(sharedJob.state,'running');
+  const sharedFinish={...finish,request_id:randomUUID(),investigation_id:sharedJob.investigation_id};
+  await assert.rejects(store.finishInvestigation(other,'complete',sharedFinish),{code:'NOT_FOUND'});
+  assert.equal((await store.finishInvestigation(service,'complete',sharedFinish)).state,'completed');
+  assert.equal((await store.getWithInvestigation(other,{case_id:foreign.case_id})).investigation.state,'processed');
+  await assert.rejects(store.getWithInvestigation(principal,{case_id:foreign.case_id}),{code:'NOT_FOUND'});
+  const orphan=await store.report(other,{...input,request_id:randomUUID()},noEvidence);
+  const interrupted=await store.claimInvestigation(service,{request_id:randomUUID(),case_id:orphan.case_id,batch_id:randomUUID()});
+  const recovery={request_id:randomUUID()};
+  await assert.rejects(store.recoverInvestigationBatch(principal,recovery),{code:'FORBIDDEN'});
+  assert.equal((await store.recoverInvestigationBatch(service,recovery)).recovered,1);
+  assert.equal((await store.recoverInvestigationBatch(service,recovery)).replayed,true);
+  assert.equal((await store.recoverInvestigationBatch(service,{request_id:randomUUID()})).recovered,0);
+  assert.equal((await store.getWithInvestigation(other,{case_id:orphan.case_id})).investigation.state,'failed');
+  await assert.rejects(store.finishInvestigation(service,'complete',{...finish,request_id:randomUUID(),investigation_id:interrupted.investigation_id}),
+   {code:'REVISION_CONFLICT'});
+  const reattempt=await store.claimInvestigation(service,{request_id:randomUUID(),case_id:orphan.case_id,batch_id:randomUUID()});
+  assert.notEqual(reattempt.investigation_id,interrupted.investigation_id);
+  assert.equal((await store.getWithInvestigation(other,{case_id:foreign.case_id})).investigation.state,'processed');
+
+
   const competing = await store.claimInvestigation(principal,{request_id:randomUUID(),case_id:changed.case_id});
   await store.review({...other,reviewer:true},{request_id:randomUUID(),case_id:changed.case_id,expected_revision:1,review_state:'archived',explanation:'Manual decision'});
   await assert.rejects(store.finishInvestigation(principal,'complete',{...finish,request_id:randomUUID(),investigation_id:competing.investigation_id}),{code:'REVISION_CONFLICT'});

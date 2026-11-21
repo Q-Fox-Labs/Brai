@@ -10,7 +10,7 @@ import {type VerificationPolicy} from "./verification.js";
 export interface Config {
  databaseURL:string;installationId:string;cursorKey:string;
  nats:{servers:string[];user?:string;password?:string;credsFile?:string;inboxPrefix:string};
- mcp:{host:string;port:number;allowedHosts:string[];allowedOrigins:string[];principalsFile:string;maxConnections:number;investigators?:string[]};
+ mcp:{host:string;port:number;allowedHosts:string[];allowedOrigins:string[];principalsFile:string;maxConnections:number;investigators?:string[];installationInvestigatorSha256?:string};
  verification?:VerificationPolicy;
  verificationRuntime?:unknown;
  processing?:ProcessingConfig;
@@ -36,6 +36,10 @@ export function config():Config {
  !positive(cfg.maxReports)||cfg.maxReports>1000000||!positive(cfg.reportsPerMinute)||cfg.reportsPerMinute>6000||!positive(cfg.maxDatabaseBytes)||cfg.maxDatabaseBytes<16777216||typeof cfg.artifactsEnabled!=="boolean")throw new Error("INVALID_CONFIG");
  if (cfg.mcp.investigators !== undefined && (!Array.isArray(cfg.mcp.investigators) ||
    !cfg.mcp.investigators.every((actor:unknown)=>typeof actor === "string" && /^codex:[a-zA-Z0-9_-]+$/.test(actor)))) throw new Error("INVALID_CONFIG");
+ if (cfg.mcp.installationInvestigatorSha256!==undefined &&
+     (typeof cfg.mcp.installationInvestigatorSha256!=="string" || !/^[a-f0-9]{64}$/.test(cfg.mcp.installationInvestigatorSha256))) {
+  throw new Error("INVALID_CONFIG");
+ }
  cfg.processing=processingConfig(cfg.processing);
  return cfg;
 }

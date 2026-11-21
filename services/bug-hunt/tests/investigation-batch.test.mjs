@@ -81,7 +81,7 @@ test("batch bounds model overlap, handles exact repeats and leaves unknown outco
  const missing=completed.find(([id])=>id==="unknown")[1];
  assert.equal(missing.verdict,"insufficient_evidence");
  assert.match(missing.description,/операции.*время события.*строка журнала/);
- assert.equal(providerChecks,1);
+ assert.ok(providerChecks>1);
  assert.deepEqual(outcome,{as_of:"now",examined:8,candidates:8,reused:1,completed:4,completed_without_diagnostics:3,failed:1,skipped:1,unresolved:1,blocked:0,model_started:5,model_peak:2,blocked_code:null});
 });
 
@@ -113,4 +113,25 @@ test("a shared authorization block leaves model work unclaimed and reports the c
  assert.equal(outcome.blocked_code,"OWNER_OUTCOME_UNKNOWN");
  assert.equal(outcome.unresolved,0);
  assert.equal(outcome.reused,1);
+});
+
+
+test("loss of authorization mid-batch blocks the next claim",async()=>{
+ const claims=[];
+ const candidates=["first","later"].map(id=>({id,revision:1,component:"hermes"}));
+ const call=async(operation,args)=>{
+  if(operation==="get")return {case:{id:args.case_id,revision:1,review_state:"new",owner_id:"owner"},
+   hints:{has_projection:true},investigation:{state:"pending",applicability:"none"}};
+  assert.equal(operation,"investigation_claim");
+  claims.push(args.case_id);
+  return {state:"running",replayed:false,investigation_id:args.case_id,case_revision:1,projection:"safe"};
+ };
+ let checks=0;
+ const outcome=await runBatch(call,{as_of:"now",examined:2,candidates},
+  {diagnostics:{},components_without_reader:[],failed_components:[]},1,
+  async()=>++checks===1 ? null : "OWNER_OUTCOME_UNKNOWN",async()=>"completed");
+ assert.deepEqual(claims,["first"]);
+ assert.equal(outcome.blocked,1);
+ assert.equal(outcome.blocked_code,"OWNER_OUTCOME_UNKNOWN");
+ assert.equal(outcome.completed,1);
 });

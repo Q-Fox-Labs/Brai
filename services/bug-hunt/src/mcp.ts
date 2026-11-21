@@ -1,6 +1,7 @@
 // ABOUTME: Предоставляет справку и пользовательские инструменты через stateless Streamable HTTP.
 // ABOUTME: Аутентификация выполняется заново для каждого запроса; review модели не предоставляется.
 import {createServer} from "node:http";
+import {createHash,timingSafeEqual} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {Server} from "@modelcontextprotocol/sdk/server/index.js";
 import {StreamableHTTPServerTransport} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -30,6 +31,11 @@ export const systemToolDefinitions=[
 ].map(tool=>({...tool,annotations:{readOnlyHint:true,idempotentHint:true}}));
 type SystemExecute=(op:SystemOperation,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
 type Investigate = (op: keyof typeof investigationSchemas,p:Principal,input:unknown,ctx:WorkContext)=>Promise<unknown>;
+const installationInvestigationTools = [
+ {name:"bug_hunt_investigation_recover",operation:"recover",description:"Закрыть незавершённые попытки прежнего цикла под блокировкой обработчика."},
+ {name:"bug_hunt_investigation_list",operation:"list",description:"Прочитать страницу технической очереди среды."},
+ {name:"bug_hunt_investigation_card",operation:"card",description:"Прочитать состояние и технические признаки карточки очереди."},
+] as const;
 const investigationTools = [
  {name:"bug_hunt_investigation_claim",operation:"claim",description:"Взять указанную или следующую собственную карточку на диагностику только чтением."},
  {name:"bug_hunt_investigation_complete",operation:"complete",description:"Сохранить итог выданного задания и отметить карточку обработанной."},
@@ -51,9 +57,18 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
   res.once("close",finish);
   try{
    await gate.run(async ctx=>{
-    const p=await authenticate(req.headers.authorization);
-    const canInvestigate=investigate && config.investigators?.includes(p.actorId);
-    const definitions=canInvestigate ? [...baseDefinitions,...investigationTools.map(({operation,...tool})=>({...tool,inputSchema:investigationSchemas[operation]}))] : baseDefinitions;
+    const authorization=req.headers.authorization;
+    const digest=config.installationInvestigatorSha256;
+    const isInvestigator=!!digest && authorization?.startsWith("Bearer ") &&
+     authorization.length<=512 && timingSafeEqual(createHash("sha256").update(authorization.slice(7)).digest(),Buffer.from(digest,"hex"));
+    const p:Principal=isInvestigator ?
+     {ownerId:"",actorId:"service:bug-hunt-investigator",source:"codex",reviewer:false,installationInvestigator:true} :
+     await authenticate(authorization);
+    const diagnosticTools=!investigate ? [] : p.installationInvestigator
+     ? [...installationInvestigationTools,...investigationTools]
+     : config.investigators?.includes(p.actorId) ? investigationTools : [];
+    const publicTools=p.installationInvestigator ? [] : baseDefinitions;
+    const definitions=[...publicTools,...diagnosticTools.map(({operation,...tool})=>({...tool,inputSchema:investigationSchemas[operation]}))];
     const declared=Number(req.headers["content-length"]??0);
     if(declared>limits.requestBytes+4096)throw new Fault("REQUEST_TOO_LARGE");
     const chunks:Buffer[]=[];let size=0;
@@ -75,14 +90,14 @@ export async function startMcp(config:Config["mcp"],gate:ReturnType<typeof creat
      try {
       const systemOp=found.name.slice("bug_hunt_".length).replaceAll("_","-") as SystemOperation;
       const verification=verificationTools.find(tool=>tool.name===found.name);
-      const diagnostic=investigationTools.find(tool=>tool.name===found.name);
-      const value=diagnostic&&canInvestigate?await investigate(diagnostic.operation,p,request.params.arguments??{},ctx):verification&&executeVerification?await executeVerification(verification.operation,p,request.params.arguments??{},ctx):systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
+      const diagnostic=diagnosticTools.find(tool=>tool.name===found.name);
+      const value=diagnostic&&investigate?await investigate(diagnostic.operation,p,request.params.arguments??{},ctx):verification&&executeVerification?await executeVerification(verification.operation,p,request.params.arguments??{},ctx):systemToolDefinitions.some(tool=>tool.name===found.name)&&executeSystem
        ?await executeSystem(systemOp,p,request.params.arguments??{},ctx)
        :await execute(op,p,request.params.arguments??{},ctx);
       const result={content:[],structuredContent:value as Record<string,unknown>};
       if(Buffer.byteLength(JSON.stringify({jsonrpc:"2.0",id:body.id,result}))>limits.responseBytes)throw new Fault("RESULT_TOO_LARGE");
       return result;
-     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(verificationTools.some(tool=>tool.name===found.name)?verificationFailure(error,found.name==="bug_hunt_verification_run"):systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"||investigationTools.some(tool=>tool.name===found.name)))}]};}
+     }catch(error){return {isError:true,content:[{type:"text",text:JSON.stringify(verificationTools.some(tool=>tool.name===found.name)?verificationFailure(error,found.name==="bug_hunt_verification_run"):systemToolDefinitions.some(tool=>tool.name===found.name)?systemFailure(error):failure(error,op==="report"||diagnosticTools.some(tool=>tool.name===found.name)))}]};}
     });
     await server.connect(transport);
     await transport.handleRequest(req,res,body);

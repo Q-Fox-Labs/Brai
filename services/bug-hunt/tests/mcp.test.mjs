@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createConnection} from 'node:net';
+import {createHash} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -102,5 +103,33 @@ test('stdio and terminal reach the same MCP endpoint with an ordinary principal'
   assert.deepEqual(calls,[{op:'get',actor:'codex:fixture'},{op:'get',actor:'codex:fixture'}]);
  } finally {
   await stdio.close();await runtime.close();gate.stop();await gate.drain();await rm(dir,{recursive:true,force:true});
+ }
+});
+
+
+test('installation credential only exposes technical queue operations',async()=>{
+ const gate=createGate(),hosts=[],token='fixture-installation-worker';
+ const runtime=await startMcp({
+  host:'127.0.0.1',port:0,allowedHosts:hosts,allowedOrigins:[],principalsFile:'/unused',maxConnections:4,
+  installationInvestigatorSha256:createHash('sha256').update(token).digest('hex'),
+ },gate,async authorization=>{
+  assert.equal(authorization,'Bearer user');
+  return {ownerId:'one',actorId:'codex:user',source:'codex',reviewer:false};
+ },async()=>({public:true}),undefined,undefined,async(operation,principal)=>({operation,service:principal.installationInvestigator}));
+ hosts.push(new URL(runtime.url).host);
+ const connect=async credential=>{
+  const client=new Client({name:'fixture',version:'1.0.0'});
+  await client.connect(new StreamableHTTPClientTransport(new URL(runtime.url),{requestInit:{headers:{authorization:'Bearer '+credential}}}));
+  return client;
+ };
+ const worker=await connect(token),user=await connect('user');
+ const card_id='c03ea2bf-3c00-4d3e-9b15-3170d5528e2b';
+ try{
+  assert.equal((await worker.callTool({name:'bug_hunt_get',arguments:{case_id:card_id}})).isError,true);
+  assert.equal((await user.callTool({name:'bug_hunt_investigation_card',arguments:{case_id:card_id}})).isError,true);
+  assert.deepEqual((await worker.callTool({name:'bug_hunt_investigation_card',arguments:{case_id:card_id}})).structuredContent,
+   {operation:'card',service:true});
+ }finally{
+  await worker.close();await user.close();await runtime.close();gate.stop();await gate.drain();
  }
 });

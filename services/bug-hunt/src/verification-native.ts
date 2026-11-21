@@ -30,10 +30,54 @@ export function credentialCall(socketPath:string,method:"status"|"resolve",param
   const finish=(error?:Error,value?:any)=>{if(done)return;done=true;socket.destroy();error?no(error):yes(value);};
   socket.setEncoding("utf8");
   socket.on("connect",()=>socket.write(JSON.stringify({jsonrpc:"2.0",id,method:"credentials."+method,params})+"\n"));
-  socket.on("data",chunk=>{data+=chunk;const end=data.indexOf("\n");if(end<0)return;try{const packet=JSON.parse(data.slice(0,end));if(packet.jsonrpc!=="2.0"||packet.id!==id||packet.error||!packet.result)throw Error();finish(undefined,packet.result);}catch{finish(new VF("NATIVE_CREDENTIAL_UNAVAILABLE"));}});
+  socket.on("data",chunk=>{
+   data+=chunk;
+   const end=data.indexOf("\n");
+   if(end<0)return;
+   try {
+    const packet=JSON.parse(data.slice(0,end));
+    if(packet.jsonrpc!=="2.0"||packet.id!==id)throw Error();
+    if(packet.error?.code===-32000&&packet.error.message==="OWNER_OUTCOME_UNKNOWN"){
+     finish(new VF("OWNER_OUTCOME_UNKNOWN"));
+    }else if(packet.error||!packet.result)throw Error();
+    else finish(undefined,packet.result);
+   }catch{finish(new VF("NATIVE_CREDENTIAL_UNAVAILABLE"));}
+  });
   socket.on("error",()=>finish(new VF("NATIVE_CREDENTIAL_UNAVAILABLE")));
   socket.on("close",()=>finish(new VF("NATIVE_CREDENTIAL_UNAVAILABLE")));
  });
+}
+/** Проверяет общего owner до захвата карточки. Неопределённую попытку сверяет только по свежей привязке. */
+export async function investigatorOwnerBlock(profile:NativeProcessProfile,request=credentialCall):Promise<string|null> {
+ let status:NativeCredential;
+ try {
+  status=await request(profile.credentialSocket,"status");
+ } catch {
+  return "INVESTIGATOR_OWNER_UNAVAILABLE";
+ }
+ if(status.sourceRef!==profile.sourceRef) return "INVESTIGATOR_OWNER_SOURCE_CHANGED";
+ if(status.ready===true) return null;
+ if(status.code==="CODEX_OWNER_ACCESS_EXPIRED"){
+  try {
+   const resolved=await request(profile.credentialSocket,"resolve");
+   assertCredential(resolved,profile);
+   return resolved.accountId===status.accountId ? null : "INVESTIGATOR_OWNER_SOURCE_CHANGED";
+  } catch(error) {
+   return error instanceof VF && error.code==="OWNER_OUTCOME_UNKNOWN" ? error.code : "INVESTIGATOR_OWNER_UNAVAILABLE";
+  }
+ }
+ if(status.code!=="OWNER_OUTCOME_UNKNOWN") return "INVESTIGATOR_OWNER_UNAVAILABLE";
+ if(!/^[a-f0-9]{32}$/.test(status.binding??"") || !Number.isFinite(status.expiresAt) || status.expiresAt<=Date.now()/1000+120 || !status.accountId) {
+  return "OWNER_OUTCOME_UNKNOWN";
+ }
+ try {
+  // AIDEV-NOTE: При записанном unknown helper сам разрешает только чтение и проверяет новый access.
+  const resolved=await request(profile.credentialSocket,"resolve",{expectedBinding:status.binding});
+  assertCredential(resolved,profile);
+  return resolved.binding===status.binding && resolved.accountId===status.accountId ? null : "OWNER_OUTCOME_UNKNOWN";
+ } catch {
+  return "OWNER_OUTCOME_UNKNOWN";
+ }
 }
 /** Проецирует только tool_mode выбранной stable Sol; все прочие catalog metadata сохраняются. */
 export function projectNativeCatalog(catalog:Json){

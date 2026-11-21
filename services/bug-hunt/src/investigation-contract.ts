@@ -2,7 +2,7 @@
 // ABOUTME: Полномочия и состояние карточки проверяет сервер, а не модель.
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
-import {Fault, limits, validUnicode} from "./contracts.js";
+import {Fault, limits, schemas, validUnicode} from "./contracts.js";
 
 const uuid = {type: "string", format: "uuid"};
 const text = {type: "string", minLength: 1, pattern: "\\S"};
@@ -19,7 +19,10 @@ export const resultSchema = object({
 }, ["verdict", "description", "evidence", "scope"]);
 
 export const investigationSchemas = {
- claim: object({request_id: uuid, case_id: uuid, component: {enum:["agent","hermes"]}}, ["request_id"]),
+ list: schemas.list,
+ card: object({case_id: uuid}),
+ recover: object({request_id: uuid}),
+ claim: object({request_id: uuid, batch_id: uuid, case_id: uuid, component: {enum:["agent","hermes"]}}, ["request_id"]),
  complete: object({request_id: uuid, investigation_id: uuid, result: resultSchema}),
  fail: object({request_id: uuid, investigation_id: uuid}),
 };
@@ -31,13 +34,16 @@ export type DiagnosticResult = {
  scope: Partial<Record<"component_version" | "commit_sha" | "deployment_revision", string>>;
  advice?: {kind: "correct_path" | "workaround" | "stop"; text: string};
 };
-export type Claim = {request_id: string; case_id?: string; component?: "agent"|"hermes"};
+export type Claim = {request_id: string; batch_id?:string; case_id?: string; component?: "agent"|"hermes"};
 export type Complete = {request_id: string; investigation_id: string; result: DiagnosticResult};
 export type Fail = {request_id: string; investigation_id: string};
 
 const ajv = new Ajv.default();
 addFormats.default(ajv);
 const validators = {
+ list: ajv.compile(investigationSchemas.list),
+ card: ajv.compile(investigationSchemas.card),
+ recover: ajv.compile(investigationSchemas.recover),
  claim: ajv.compile(investigationSchemas.claim),
  complete: ajv.compile(investigationSchemas.complete),
  fail: ajv.compile(investigationSchemas.fail),

@@ -250,14 +250,8 @@ class CredentialState:
             try:
                 require(not self.stopping, 'HELPER_STOPPING')
                 value = self._snapshot()
-                fresh = value['expires_at'] > time.time() + 120
-                attempt = self.state['attempt']
-                if attempt:
-                    # AIDEV-NOTE: Допуск к resolve восстанавливает связь только через read-only сверку.
-                    recovered = fresh and self.state['observed']['accessHash'] != attempt['beforeAccessHash']
-                    code = 'OWNER_RECOVERY_READY' if recovered else 'OWNER_OUTCOME_UNKNOWN'
-                else:
-                    code = 'READY' if fresh else 'CODEX_OWNER_ACCESS_EXPIRED'
+                code = ('OWNER_OUTCOME_UNKNOWN' if self.state['attempt'] else
+                        'READY' if value['expires_at'] > time.time() + 120 else 'CODEX_OWNER_ACCESS_EXPIRED')
                 return {**self._metadata(value), 'ready': code == 'READY', 'code': code}
             except Exception as error:
                 if self.state['observed'] is not None:

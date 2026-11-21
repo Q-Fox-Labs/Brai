@@ -2,7 +2,7 @@
 // ABOUTME: Транзакционные блокировки сохраняют атомарность повторов и конкурентного разбора.
 import {createHash,createHmac,randomUUID,timingSafeEqual} from "node:crypto";
 import type {Pool,PoolClient} from "pg";
-import {Fault,canonical,type Principal,type Observation,type ReportInput,type GetInput} from "./contracts.js";
+import {Fault,canonical,type Principal,type Observation,type ReportInput,type GetInput,type ListInput} from "./contracts.js";
 import {enqueueProcessing} from "./processing-store.js";
 import {assertReviewTransition,type Store} from "./domain.js";
 import {exactSignature,prepareExternalProjection} from "./projection.js";
@@ -15,7 +15,7 @@ const columns="id,owner_id,installation_id,title,component_id,source,review_stat
 // AIDEV-NOTE: Отдельные операции в существующем append-only журнале сохраняют
 // диагностику без DDL. Изменения сериализует тот же transaction lock, что и квитанции.
 const diagnosticRows=`WITH diagnostics AS (
- SELECT job.request_id::uuid AS id, job.actor_id,
+ SELECT job.request_id::uuid AS id, job.actor_id, job.owner_id,
         (job.result->>'case_id')::uuid AS case_id,
         (job.result->>'case_revision')::int AS case_revision,
         (job.result->>'at')::timestamptz AS created_at,
@@ -26,7 +26,7 @@ const diagnosticRows=`WITH diagnostics AS (
    ON (done.installation_id,done.owner_id,done.actor_id,done.request_id) =
       (job.installation_id,job.owner_id,job.actor_id,job.request_id)
    AND done.operation='diagnostic-result'
- WHERE job.installation_id=$1 AND job.owner_id=$2 AND job.operation='diagnostic-job'
+ WHERE job.installation_id=$1 AND ($2::text IS NULL OR job.owner_id=$2) AND job.operation='diagnostic-job'
 )`;
 function dates(row:Record<string,any>):Record<string,any> {
  return Object.fromEntries(Object.entries(row).map(([k,v])=>[k,v instanceof Date?v.toISOString():v]));
@@ -204,9 +204,13 @@ export function createStore(pool:Pool,options:Options) {
   const input = request as Complete|Fail;
   return mutation(p,"diagnostic-"+operation,input,async db=>{
    const found = await db.query(`${diagnosticRows} SELECT i.*,c.revision,c.review_state,r.observation FROM diagnostics i
-     JOIN bug_case c ON c.id=i.case_id JOIN report r ON r.case_id=c.id
+     JOIN bug_case c ON c.id=i.case_id AND c.owner_id=i.owner_id AND c.installation_id=$1
+     JOIN LATERAL (
+       SELECT observation FROM report r WHERE r.case_id=c.id AND r.owner_id=c.owner_id AND r.installation_id=c.installation_id
+       ORDER BY r.registered_at,r.id LIMIT 1
+     ) r ON true
      WHERE i.id=$3 AND i.actor_id=$4 FOR UPDATE OF c`,
-    [installationId,p.ownerId,input.investigation_id,p.actorId]);
+    [installationId,p.installationInvestigator?null:p.ownerId,input.investigation_id,p.actorId]);
    if (!found.rowCount) throw new Fault("NOT_FOUND");
    const row = found.rows[0];
    if (row.state !== "running") throw new Fault("REVISION_CONFLICT");
@@ -217,7 +221,7 @@ export function createStore(pool:Pool,options:Options) {
    const sameVersion = specified.length > 0 && specified.every(key=>row.observation[key] === result?.scope[key]);
    const state = result ? "completed" : "failed";
    const signature = sameVersion && result?.verdict !== "insufficient_evidence" ? exactSignature(installationId,p.ownerId,row.observation) : null;
-   await appendDiagnostic(db,p,"diagnostic-result",row.id,{state,result,signature_hash:signature?.hash??null,signature_canonical:signature?.canonical??null});
+   await appendDiagnostic(db,{...p,ownerId:row.owner_id},"diagnostic-result",row.id,{state,result,signature_hash:signature?.hash??null,signature_canonical:signature?.canonical??null});
    return {investigation_id:row.id,case_id:row.case_id,state};
   });
  }
@@ -226,24 +230,82 @@ export function createStore(pool:Pool,options:Options) {
    return transaction(async db=>investigation(db,await lookup(db,p,caseId),input.observation),true);
   },
   getWithInvestigation(p:Principal,input:GetInput) {return store.get(p,input,true);},
+  /** Возвращает служебную страницу без заголовков, владельцев и исходных наблюдений. */
+  async listInvestigationQueue(p:Principal,request:unknown) {
+   if(!p.installationInvestigator)throw new Fault("FORBIDDEN");
+   validateInvestigation("list",request);
+   const {items,next_cursor}=await store.list(p,request as ListInput,true);
+   return {items:items.map(({id,component_id,revision,review_state,registered_at})=>({
+    id,component_id,revision,review_state,registered_at,
+   })),next_cursor};
+  },
+  /** Читает только признаки для планирования. Проекция выдаётся после захвата карточки. */
+  async readInvestigationCard(p:Principal,request:unknown) {
+   if(!p.installationInvestigator)throw new Fault("FORBIDDEN");
+   validateInvestigation("card",request);
+   const {case_id}=request as Pick<GetInput,"case_id">;
+   return transaction(async db=>{
+    const row=await lookup(db,{...p,reviewer:true},case_id);
+    const reports=await db.query("SELECT observation FROM report WHERE case_id=$1 AND owner_id=$2 AND installation_id=$3 ORDER BY registered_at,id LIMIT 1",
+      [row.id,row.owner_id,installationId]);
+    if(!reports.rowCount)throw new Fault("NOT_FOUND");
+    const observation:Observation=reports.rows[0].observation;
+    const {id,component_id,review_state,revision}=row;
+    return {case:{id,component_id,review_state,revision},hints:{
+     has_projection:!!prepareExternalProjection(observation,[row.owner_id]),
+     signature:exactSignature(installationId,row.owner_id,observation)?.hash??null,
+     client_occurred_at:observation.client_occurred_at??null,
+     ...(/^[A-Z][A-Z0-9_:.\-]{2,95}$/.test(observation.error_code??"")?{error_code:observation.error_code}:{}),
+     ...(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(observation.run_id??"")?{correlation_id:observation.run_id}:{}),
+    },investigation:await investigation(db,row,observation)};
+   },true);
+  },
+  /** Под блокировкой единственного обработчика закрывает его прерванные пакетные попытки. */
+  async recoverInvestigationBatch(p:Principal,request:unknown) {
+   if(!p.installationInvestigator)throw new Fault("FORBIDDEN");
+   validateInvestigation("recover",request);
+   const input=request as {request_id:string};
+   return mutation(p,"diagnostic-recover",input,async db=>{
+    // AIDEV-NOTE: Старые задания без batch_id требуют адресной проверки их владельцем.
+    const recovered=await db.query(`INSERT INTO verification_mutation
+      (installation_id,owner_id,actor_id,operation,request_id,input_hash,result)
+      SELECT job.installation_id,job.owner_id,job.actor_id,'diagnostic-result',job.request_id,$3,
+             jsonb_build_object('state','failed','result',NULL,'code','BATCH_INTERRUPTED','at',clock_timestamp())
+      FROM verification_mutation job
+      WHERE job.installation_id=$1 AND job.actor_id=$2 AND job.operation='diagnostic-job' AND job.result ? 'batch_id'
+        AND NOT EXISTS (
+          SELECT 1 FROM verification_mutation done WHERE
+          (done.installation_id,done.owner_id,done.actor_id,done.request_id)=(job.installation_id,job.owner_id,job.actor_id,job.request_id)
+          AND done.operation='diagnostic-result'
+        )
+      ON CONFLICT DO NOTHING`,[installationId,p.actorId,digest({code:"BATCH_INTERRUPTED"})]);
+    return {recovered:recovered.rowCount??0};
+   });
+  },
   async claimInvestigation(p:Principal,request:unknown) {
    validateInvestigation("claim",request);
    const input = request as Claim;
    return mutation(p,"diagnostic-claim",input,async db=>{
-    if (input.case_id) await lookup(db,{...p,reviewer:false},input.case_id);
-    const selected = await db.query(`${diagnosticRows} SELECT c.id,c.revision,r.observation,r.registered_at FROM bug_case c JOIN report r ON r.case_id=c.id
-      WHERE c.installation_id=$1 AND c.owner_id=$2 AND c.review_state <> 'archived'
+    if (input.case_id) await lookup(db,{...p,reviewer:p.installationInvestigator===true},input.case_id);
+    const selected = await db.query(`${diagnosticRows} SELECT c.id,c.owner_id,c.revision,r.observation,r.registered_at FROM bug_case c
+      JOIN LATERAL (
+       SELECT observation,registered_at FROM report r WHERE r.case_id=c.id AND r.owner_id=c.owner_id AND r.installation_id=c.installation_id
+       ORDER BY r.registered_at,r.id LIMIT 1
+      ) r ON true
+      WHERE c.installation_id=$1 AND ($2::text IS NULL OR c.owner_id=$2) AND c.review_state <> 'archived'
         AND ($3::uuid IS NULL OR c.id=$3) AND ($4::text IS NULL OR c.component_id=$4)
         AND NOT EXISTS (SELECT 1 FROM diagnostics i WHERE i.case_id=c.id
           AND i.case_revision=c.revision AND i.state IN ('running','completed'))
       ORDER BY (SELECT max(i.finished_at) FROM diagnostics i WHERE i.case_id=c.id
         AND i.case_revision=c.revision AND i.state='failed') NULLS FIRST,
-        c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.ownerId,input.case_id??null,input.component??null]);
+        c.registered_at,c.id LIMIT 1 FOR UPDATE OF c SKIP LOCKED`,[installationId,p.installationInvestigator?null:p.ownerId,input.case_id??null,input.component??null]);
     if (!selected.rowCount) return {state:"no_work"};
-    const {id:caseId,revision,observation,registered_at} = selected.rows[0];
+    const {id:caseId,owner_id:ownerId,revision,observation,registered_at} = selected.rows[0];
     const id=randomUUID();
-    await appendDiagnostic(db,p,"diagnostic-job",id,{case_id:caseId,case_revision:revision});
-    const projection = prepareExternalProjection(observation,[p.ownerId]);
+    await appendDiagnostic(db,{...p,ownerId},"diagnostic-job",id,{
+     case_id:caseId,case_revision:revision,...(input.batch_id?{batch_id:input.batch_id}:{}),
+    });
+    const projection = prepareExternalProjection(observation,[ownerId]);
     return {state:"running",investigation_id:id,case_id:caseId,case_revision:revision,component:observation.component_id??null,projection,registered_at};
    });
   },

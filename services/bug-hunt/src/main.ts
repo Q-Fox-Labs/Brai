@@ -203,8 +203,11 @@ export async function startRuntime(cfg=loadConfig()){
    }});
   }
   mcp=await startMcp(cfg.mcp,gate,authorization=>codexPrincipal(wire,cfg.mcp.principalsFile,authorization),executeAgent,executeSystem,executeVerification,async(op,p,input,ctx)=>{
-   if (p.source!=="codex" || !cfg.mcp.investigators?.includes(p.actorId)) throw new Fault("FORBIDDEN");
+   if (p.source!=="codex" || (!p.installationInvestigator && !cfg.mcp.investigators?.includes(p.actorId))) throw new Fault("FORBIDDEN");
    const store=makeStore(ctx.deadlineAt);
+   if(op==="recover")return store.recoverInvestigationBatch(p,input);
+   if(op==="list")return store.listInvestigationQueue(p,input);
+   if(op==="card")return store.readInvestigationCard(p,input);
    if(op==="claim")return store.claimInvestigation(p,input);
    return store.finishInvestigation(p,op,input);
   });
