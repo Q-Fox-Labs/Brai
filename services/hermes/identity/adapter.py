@@ -55,6 +55,16 @@ def make_adapter(config, platform, peer, publish_file):
             saved = journal.prepared_response(staged[0], staged[1]) if staged and journal else None
             if saved and saved.get('plan'):
                 result = SimpleNamespace(**saved['plan']['extracted'])
+            elif getattr(event, '_brai_streamed_response', False):
+                media, _ = self.extract_media(response)
+                media = self.filter_media_delivery_paths(media)
+                force = '[[as_document]]' in response
+                from gateway.platforms.base import _IMAGE_EXTS
+                photos = [(path, voice) for path, voice in media
+                          if Path(path).suffix.lower() in _IMAGE_EXTS and not voice and not force]
+                rest = [(path, voice) for path, voice in media if (path, voice) not in photos]
+                result = SimpleNamespace(text_content='', images=[], media_files=photos + rest,
+                    local_files=[], force_document_attachments=force, pre_extract=response)
             else:
                 result = await super()._extract_response_content(response, event, session_key, **kwargs)
             event._brai_single_text = not (result.images or result.media_files or result.local_files)
@@ -79,6 +89,10 @@ def make_adapter(config, platform, peer, publish_file):
                         items, mode = await asyncio.to_thread(brai_files.output_items, paths)
                         if getattr(result, 'force_document_attachments', False):
                             items = [{**item, 'presentation': 'document'} for item in items]
+                        elif getattr(event, '_brai_streamed_response', False):
+                            items = [{**item, 'presentation': 'voice'}
+                                     if index < len(result.media_files) and result.media_files[index][1] else item
+                                     for index, item in enumerate(items)]
                         brai_files.validate_telegram(items)
                         set_ids = sorted({item['_setId'] for item in items if '_setId' in item})
                         public_items = [{key: value for key, value in item.items() if key != '_setId'} for item in items]
@@ -93,7 +107,8 @@ def make_adapter(config, platform, peer, publish_file):
                     fields = {key: getattr(result, key, None) for key in
                         ('text_content', 'images', 'media_files', 'local_files', 'force_document_attachments', 'pre_extract')}
                     journal.save_response_plan(staged[0], staged[1], {'extracted': fields, 'batches': batches,
-                        'set_ids': set_ids, 'cleanup_identity': cleanup_identity})
+                        'set_ids': set_ids, 'cleanup_identity': cleanup_identity,
+                        'footer': getattr(event, '_brai_stream_footer', None)})
                 event._brai_text_delivered = not bool(result.text_content)
             return result
 
@@ -140,6 +155,12 @@ def make_adapter(config, platform, peer, publish_file):
                                'kind': batch['kind'], 'fallback': batch['fallback'], 'metadata': metadata}
                     wire = {'payload': payload, 'scope_id': None, 'input_delivery_id': staged[1]}
                     outputs.append((delivery_id(['prepared-files', saved['id'], index]), 'send_file_set', wire))
+                footer = saved['plan'].get('footer')
+                if footer:
+                    wire = {'payload': {'chat_id': str(event.source.chat_id), 'content': footer,
+                                        'reply_to': None, 'metadata': metadata},
+                            'scope_id': None, 'input_delivery_id': staged[1]}
+                    outputs.append((delivery_id(['prepared-footer', saved['id']]), 'send', wire))
                 journal.enqueue_response(staged[0], staged[1], outputs)
                 if outputs:
                     record_delivery(SendResult(success=False, error='Reply saved for delivery',
@@ -445,6 +466,15 @@ def make_adapter(config, platform, peer, publish_file):
                 pass
 
         async def _file(self, action, chat_id, path, caption, reply_to, metadata, **kwargs):
+            # Подтверждённый или поставленный voice уже не требует новой публикации файла.
+            staged, voice = prepared_response.get(), prepared_voice.get()
+            journal = getattr(self, '_brai_delivery_journal', None)
+            if staged and voice is not None and action == 'send_voice' and journal is not None:
+                from .delivery_journal import delivery_id
+                ident = delivery_id(['prepared-voice', *staged, voice[0]])
+                saved = journal.output(ident)
+                if saved is not None and saved['action'] == action:
+                    return await self._action(action, saved['payload']['payload'])
             try:
                 from files.native import local_path
                 descriptor = await publish_file(local_path(path))

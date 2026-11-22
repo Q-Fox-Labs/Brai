@@ -323,6 +323,11 @@ class Worker:
             runner._hmwa_agent_error_reply = error_reply
         original_deliver = getattr(runner, '_hmwa_deliver_turn_response', None)
         if callable(original_deliver):
+            original_voice_check = getattr(runner, '_should_send_voice_reply', None)
+            if callable(original_voice_check):
+                def voice_check(event, *args, **kwargs):
+                    return False if getattr(event, '_brai_voice_done', False) else original_voice_check(event, *args, **kwargs)
+                runner._should_send_voice_reply = voice_check
             async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
                 from .scope import continuation_turn, input_delivery, prepared_response
                 guardrail = result.get('guardrail') if isinstance(result, dict) else None
@@ -339,7 +344,14 @@ class Worker:
                 intentional_silence = args[3] if len(args) > 3 else kwargs.get('_intentional_silence', False)
                 from gateway.warning_notifications import diagnostic_wake_muted
                 ident = input_delivery.get()
-                if (event._brai_successful_turn and not result.get('already_sent')
+                adapter = runner._delivery_adapter_for(source)
+                streaming_media = []
+                if (event._brai_successful_turn and result.get('already_sent')
+                        and not result.get('media_already_delivered') and isinstance(response, str)
+                        and adapter is not None):
+                    media, _ = adapter.extract_media(response)
+                    streaming_media = adapter.filter_media_delivery_paths(media)
+                if (event._brai_successful_turn and (not result.get('already_sent') or streaming_media)
                         and not intentional_silence and not diagnostic_wake_muted(event)
                         and isinstance(response, str) and response
                         and ident is not None and self.delivery_journal is not None
@@ -350,13 +362,30 @@ class Worker:
                     fields['message_type'] = getattr(kind, 'value', kind)
                     voice = getattr(runner, '_should_send_voice_reply', None)
                     messages = args[0] if args else kwargs.get('agent_messages', [])
-                    adapter = runner._delivery_adapter_for(source)
                     streamed = bool(adapter and getattr(adapter, '_streaming_tts_turn_completed',
                         lambda *_args, **_kwargs: False)(session_key, generation))
                     fields['auto_voice'] = 'yes' if (not streamed and callable(voice)
-                        and voice(event, response, messages, already_sent=False)) else 'no'
+                        and voice(event, response, messages, already_sent=bool(result.get('already_sent')))) else 'no'
+                    if streaming_media:
+                        fields['already_streamed'] = 'yes'
+                        fields['stream_footer'] = (args[2] if len(args) > 2 else kwargs.get('_footer_line')) or None
                     self.delivery_journal.save_response(session_key, ident, response, fields, source.to_dict())
                     prepared_response.set((session_key, ident, response))
+                    if streaming_media:
+                        event._brai_streamed_response = True
+                        event._brai_stream_footer = fields['stream_footer']
+                        if fields['auto_voice'] == 'yes':
+                            await runner._send_voice_reply(event, response)
+                            event._brai_voice_done = True
+                        extracted = await adapter._extract_response_content(response, event, session_key,
+                            is_ephemeral_response=False)
+                        await adapter._deliver_attachments(event, extracted, runner._event_thread_metadata(event, source),
+                            anything_sent=True, record_delivery=lambda _result: None)
+                        result = {**result, 'media_already_delivered': True}
+                        if len(args) > 2:
+                            args = (*args[:2], '', *args[3:])
+                        else:
+                            kwargs['_footer_line'] = ''
                 return await original_deliver(event, source, entry, session_key, generation, result, *args, **kwargs)
             runner._hmwa_deliver_turn_response = deliver
         runner._brai_retry_failed_sessions = self._retry_failed_sessions
@@ -462,6 +491,10 @@ class Worker:
                         event.message_type = MessageType(value)
                     elif name == 'auto_voice':
                         event._brai_auto_voice = value == 'yes'
+                    elif name == 'already_streamed':
+                        event._brai_streamed_response = value == 'yes'
+                    elif name == 'stream_footer':
+                        event._brai_stream_footer = value
                     else:
                         setattr(event, name, value)
             source_token = input_delivery.set(binding['input_id'])

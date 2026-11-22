@@ -116,7 +116,8 @@ class DeliveryJournal:
         if event_fields is None:
             event_fields = {}
         if (not isinstance(event_fields, dict) or set(event_fields) - {
-                'message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id', 'message_type', 'auto_voice'}
+                'message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id', 'message_type',
+                'auto_voice', 'already_streamed', 'stream_footer'}
                 or any(value is not None and not isinstance(value, str) for value in event_fields.values())):
             raise ValueError('CONTINUATION_EVENT_INVALID')
         with self.open() as db:

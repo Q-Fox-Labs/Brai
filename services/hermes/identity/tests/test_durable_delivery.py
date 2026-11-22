@@ -666,6 +666,82 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.worker.delivery_journal.pending_outputs(), [])
                 with native.store().db() as db:
                     self.assertEqual(db.execute("SELECT count(*) FROM deliveries WHERE state='unknown'").fetchone()[0], 0)
+                from types import MethodType
+                from gateway.run_turn import GatewayTurnMixin
+                stream_input = delivery_id('stream-input')
+                self.worker.delivery_journal.begin_input(stream_input, delivery_id('stream-digest'))
+                self.worker.delivery_journal.save_continuation('stream-session', stream_input, 3)
+                streamed_file = workspace / 'stream.pdf'
+                streamed_file.write_bytes(b'%PDF-1.4 streamed')
+                streamed = 'already streamed\nMEDIA:' + str(streamed_file)
+                stream_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='72')
+                self.runner._delivery_adapter_for = lambda _source: adapter
+                self.runner._event_thread_metadata = lambda _event, _source: {'thread_id': '7'}
+                self.runner._should_send_voice_reply = lambda *args, **kwargs: False
+                self.runner._hmwa_deliver_turn_response = MethodType(GatewayTurnMixin._hmwa_deliver_turn_response, self.runner)
+                self.worker._install_failure_recovery(self.runner)
+                nested_input, nested_response = input_delivery.set(stream_input), prepared_response.set(None)
+                try:
+                    with patch.object(adapter, '_deliver_attachments', AsyncMock(side_effect=RuntimeError('crash before file queue'))):
+                        with self.assertRaisesRegex(RuntimeError, 'crash before file queue'):
+                            await self.runner._hmwa_deliver_turn_response(stream_event, source, NS(session_id='id'),
+                                'stream-session', 0, {'already_sent': True}, [], streamed, 'footer', False)
+                    saved = self.worker.delivery_journal.prepared_response('stream-session', stream_input)
+                    self.assertEqual(saved['event']['already_streamed'], 'yes')
+                    self.assertEqual(saved['phase'], 'prepared')
+                    streamed_file.unlink()
+                    extracted = await adapter._extract_response_content(streamed, stream_event, 'stream-session', is_ephemeral_response=False)
+                    self.assertEqual(extracted.text_content, '')
+                    await adapter._deliver_attachments(stream_event, extracted, {'thread_id': '7'},
+                        anything_sent=True, record_delivery=lambda _: None)
+                    self.assertEqual([row['action'] for row in self.worker.delivery_journal.pending_outputs()],
+                                     ['send_file_set', 'send'])
+                    for row in self.worker.delivery_journal.pending_outputs():
+                        self.worker.delivery_journal.output_state(row['id'], 'sent', {'success': True, 'message_id': '90'})
+                    self.worker.delivery_journal.clear_response('stream-session', stream_input, streamed)
+                    next_input = delivery_id('stream-input-2')
+                    self.worker.delivery_journal.begin_input(next_input, delivery_id('stream-digest-2'))
+                    self.worker.delivery_journal.save_continuation('stream-session-2', next_input, 3)
+                    next_file = workspace / 'stream2.pdf'
+                    next_file.write_bytes(b'%PDF-1.4 stream2')
+                    next_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='74')
+                    next_token = input_delivery.set(next_input)
+                    try:
+                        value = await self.runner._hmwa_deliver_turn_response(next_event, source, NS(session_id='id'),
+                            'stream-session-2', 0, {'already_sent': True}, [], 'streamed\nMEDIA:' + str(next_file), 'footer 2', False)
+                        self.assertIsNone(value)
+                        self.assertEqual([row['action'] for row in self.worker.delivery_journal.pending_outputs()],
+                                         ['send_file_set', 'send'])
+                    finally:
+                        input_delivery.reset(next_token)
+                finally:
+                    prepared_response.reset(nested_response)
+                    input_delivery.reset(nested_input)
+                from identity.scope import prepared_voice
+                voice_input = delivery_id('native-voice-input')
+                self.worker.delivery_journal.begin_input(voice_input, delivery_id('native-voice-digest'))
+                self.worker.delivery_journal.save_continuation('voice-session', voice_input, 3)
+                self.worker.delivery_journal.save_response('voice-session', voice_input, 'voice text', {'message_id': '73'}, source.to_dict())
+                publisher = AsyncMock(side_effect=[{'artifact_id': 'voice-artifact'}, ConnectionError('publisher unavailable')])
+                voice_peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': '83'}))
+                voice_adapter = make_adapter(PlatformConfig(), Platform.TELEGRAM, voice_peer, publisher)
+                voice_adapter._brai_delivery_journal = self.worker.delivery_journal
+                voice_event = MessageEvent(text='original', message_type=MessageType.VOICE, source=source, message_id='73')
+                i, p, v = input_delivery.set(voice_input), prepared_response.set(('voice-session', voice_input, 'voice text')), prepared_voice.set([0])
+                try:
+                    first = await voice_adapter._play_tts_file(voice_event, 'voice text', str(workspace / 'first.ogg'),
+                        True, {'thread_id': '7'}, lambda _: None)
+                    self.assertTrue(first)
+                    prepared_voice.set([0])
+                    second = await voice_adapter._play_tts_file(voice_event, 'voice text', str(workspace / 'second.ogg'),
+                        True, {'thread_id': '7'}, lambda _: None)
+                    self.assertTrue(second)
+                    publisher.assert_awaited_once()
+                    voice_peer.call.assert_awaited_once()
+                finally:
+                    prepared_voice.reset(v)
+                    prepared_response.reset(p)
+                    input_delivery.reset(i)
             finally:
                 prepared_response.reset(b)
                 input_delivery.reset(a)
