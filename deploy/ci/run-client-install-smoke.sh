@@ -10,7 +10,13 @@ fixture=$(realpath "$(dirname "$0")/client-install-fixture.py")
 run_dir=$(mktemp -d "$RUNNER_TEMP/brai-client-install.XXXXXXXX")
 
 sample_disk() {
-  df -B1 --output=avail / | tail -1
+  local directory paths=(/ "$RUNNER_TEMP" /srv /var/lib)
+  for directory in /var/lib/docker /var/lib/containerd; do
+    if [[ -d "$directory" ]]; then
+      paths+=("$directory")
+    fi
+  done
+  df -B1 --output=target,avail "${paths[@]}" | tail -n +2 | sort -u
 }
 
 report() {
@@ -18,8 +24,13 @@ report() {
   trap - EXIT
   kill "$sampler" 2>/dev/null || true
   wait "$sampler" 2>/dev/null || true
-  { cat "$run_dir/disk"; sample_disk || true; } | awk 'NR == 1 { start = min = $1 } $1 < min { min = $1 }
-       END { printf "Start free: %.2f GiB\nLowest sampled free: %.2f GiB\nPeak increase: %.2f GiB\n", start / 2^30, min / 2^30, (start - min) / 2^30 }'
+  { cat "$run_dir/disk"; sample_disk || true; } | awk '
+    !($1 in start) { start[$1] = min[$1] = $2 }
+    $2 < min[$1] { min[$1] = $2 }
+    END {
+      for (mount in start)
+        printf "%s: start free %.2f GiB, lowest sampled free %.2f GiB, sampled increase %.2f GiB\n", mount, start[mount] / 2^30, min[mount] / 2^30, (start[mount] - min[mount]) / 2^30
+    }'
   if ((code)); then
     if [[ -f "$run_dir/ansible.log" ]]; then
       awk '/^TASK \[/ { last = $0 } END { if (last) print "Last Ansible task: " last }' "$run_dir/ansible.log"
@@ -44,10 +55,22 @@ printf 'Running client install from Admin %s\n' "$(git rev-parse HEAD)"
 ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true ansible-playbook -i "$run_dir/hosts.ini" client/install.yml \
   --extra-vars "@$run_dir/inputs.yml" > "$run_dir/ansible.log" 2>&1
 
-printf 'Checking installed containers, systemd services and the local Web endpoint\n'
+printf 'Checking the installed Brai revision, containers, systemd services and the local Web endpoint\n'
+installed_sha=$(git -c safe.directory=/srv/projects/brai -C /srv/projects/brai rev-parse HEAD)
+if [[ "$installed_sha" != "$BRAI_CI_SOURCE_SHA" ]]; then
+  echo 'Installed Brai revision differs from the requested candidate.' >&2
+  exit 1
+fi
 sudo /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
   --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
   > "$run_dir/verify.log" 2>&1
 sudo docker compose --project-name brai --file /var/lib/brai-install/projects/brai.json exec -T web \
-  node -e 'fetch("http://127.0.0.1:3000/", {signal: AbortSignal.timeout(5000)}).then(r => { if (!r.ok) process.exitCode=1 }).catch(() => { process.exitCode=1 })'
+  node -e '
+    (async () => {
+      const response = await fetch("http://127.0.0.1:3000/api/health", {signal: AbortSignal.timeout(5000)});
+      if (!response.ok) throw new Error("Web health check failed");
+      const health = await response.json();
+      if (health.component !== "web" || health.ready !== true) throw new Error("Web is not ready");
+    })().catch(() => { process.exitCode = 1; });
+  '
 echo 'Client install and local Web startup verified.'

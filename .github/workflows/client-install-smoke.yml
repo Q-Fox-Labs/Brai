@@ -3,6 +3,11 @@
 name: Client install smoke
 
 on:
+  push:
+    branches: [feature/clean-install-actions-da582c9]
+    paths:
+      - .github/workflows/client-install-smoke.yml
+      - deploy/ci/**
   workflow_dispatch:
     inputs:
       source_sha:
@@ -17,35 +22,57 @@ permissions:
 jobs:
   install:
     if: github.repository == 'Q-Fox-Labs/Brai'
+    name: Client install smoke
+    env:
+      BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha || vars.BRAI_CI_SOURCE_SHA }}
+      ADMIN_REPOSITORY: ${{ vars.BRAI_CI_ADMIN_REPOSITORY || 'Q-Fox-Labs/Q-Server' }}
+      ADMIN_SHA: ${{ vars.BRAI_CI_ADMIN_SHA || '8ef49bf67e2aa3870a609bcdae487c291ce241eb' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Check installer access and revision
-        env:
-          ADMIN_REPOSITORY: ${{ vars.BRAI_CI_ADMIN_REPOSITORY }}
-          ADMIN_SHA: ${{ vars.BRAI_CI_ADMIN_SHA }}
-          ADMIN_TOKEN: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
+      - name: Verify the candidate and measure available disk
         run: |
-          [[ "$ADMIN_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$ADMIN_SHA" =~ ^[a-f0-9]{40}$ && -n "$ADMIN_TOKEN" ]] || {
-            echo 'Set BRAI_CI_ADMIN_REPOSITORY, BRAI_CI_ADMIN_SHA and BRAI_CI_ADMIN_TOKEN.' >&2
+          [[ "$BRAI_CI_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || {
+            echo 'Set a full Brai commit SHA in source_sha or BRAI_CI_SOURCE_SHA.' >&2
             exit 1
           }
+          git fetch --no-tags --depth=1 origin "$BRAI_CI_SOURCE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$BRAI_CI_SOURCE_SHA"
+          printf 'Candidate: %s\nCPU cores: %s\n' "$BRAI_CI_SOURCE_SHA" "$(nproc)"
+          df -B1 --output=target,size,avail / /var/lib/docker
+      - name: Check access and test inputs
+        env:
+          BRAI_CI_ADMIN_TOKEN: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
+          BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
+          BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
+        run: |
+          [[ "$ADMIN_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$ADMIN_SHA" =~ ^[a-f0-9]{40}$ ]] || {
+            echo 'Use an owner/repository and full commit SHA for Admin.' >&2
+            exit 1
+          }
+          missing=()
+          for input in BRAI_CI_ADMIN_TOKEN BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN; do
+            [[ -n "${!input}" ]] || missing+=("$input")
+          done
+          if (("${#missing[@]}")); then
+            printf 'Missing Actions secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
       - name: Check out the installer
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: ${{ vars.BRAI_CI_ADMIN_REPOSITORY }}
-          ref: ${{ vars.BRAI_CI_ADMIN_SHA }}
+          repository: ${{ env.ADMIN_REPOSITORY }}
+          ref: ${{ env.ADMIN_SHA }}
           token: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
           path: installer
           persist-credentials: false
-      - name: Measure and free disk on the runner
+      - name: Prepare the disposable runner
         run: |
-          df -h /
           sudo rm -rf -- /usr/local/lib/android /opt/ghc
           sudo apt-get clean
-          df -h /
+          df -B1 --output=target,size,avail / /var/lib/docker
           # The installer installs Ubuntu's docker.io. Remove conflicting packages from the Actions image.
           packages=()
           for package in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; do
@@ -53,12 +80,11 @@ jobs:
               packages+=("$package")
             fi
           done
-          if ((${#packages[@]})); then
+          if (("${#packages[@]}")); then
             sudo apt-get purge -y "${packages[@]}"
           fi
       - name: Prepare the test inputs and run the client installer
         env:
-          BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
           BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
           BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
           BRAI_CI_REGISTRY_TOKEN: ${{ secrets.BRAI_CI_REGISTRY_TOKEN }}
