@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from contextvars import ContextVar
 from .ipc import RpcError
-from .scope import delivery_scope, input_delivery
+from .scope import delivery_scope, input_delivery, ephemeral_input, final_text_session
 from .telegram_proxy import BotProxy
 
 
@@ -29,6 +29,34 @@ def make_adapter(config, platform, peer, publish_file):
             self._bot = BotProxy(peer, on_content_action=self._brai_last_outputs.clear)
             self._interactive_actor = ContextVar('brai_identity_interactive_actor', default=None)
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
+
+        async def _process_message_background(self, event, session_key):
+            """Следующий queued input несёт собственную квитанцию, а не контекст старой task."""
+            external = not getattr(event, 'internal', False)
+            token = input_delivery.set(getattr(event, '_brai_identity_input_id', None)) if external else None
+            scope_token = delivery_scope.set(getattr(event, '_brai_delivery_scope', None)) if external else None
+            try:
+                return await super()._process_message_background(event, session_key)
+            finally:
+                if scope_token is not None:
+                    delivery_scope.reset(scope_token)
+                if token is not None:
+                    input_delivery.reset(token)
+
+        async def _extract_response_content(self, response, event, session_key, **kwargs):
+            """Отличить одиночный текст от ответа с отдельными медиа-вложениями."""
+            result = await super()._extract_response_content(response, event, session_key, **kwargs)
+            event._brai_single_text = not (result.images or result.media_files or result.local_files)
+            return result
+
+        async def _send_final_text(self, event, session_key, *args, **kwargs):
+            """Закрепить готовый одиночный текст вместе с durable output."""
+            completed = getattr(event, '_brai_single_text', False) and getattr(event, '_brai_successful_turn', False)
+            token = final_text_session.set(session_key if completed else None)
+            try:
+                return await super()._send_final_text(event, session_key, *args, **kwargs)
+            finally:
+                final_text_session.reset(token)
 
         def _send_retry_is_final(self, result):
             """Outbox владеет повтором сохранённого ответа; запрет прав не лечится fallback."""
@@ -112,7 +140,7 @@ def make_adapter(config, platform, peer, publish_file):
 
         async def _action(self, name, payload):
             metadata = payload.get('metadata') or {}
-            if (delivery_scope.get() is None and name in {
+            if (delivery_scope.get() is None and ephemeral_input.get() is None and input_delivery.get() is None and name in {
                     'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video',
                     'send_voice', 'send_animation'} and not payload.get('reply_to')
                     and not metadata.get('thread_id') and not metadata.get('message_thread_id')
@@ -134,10 +162,12 @@ def make_adapter(config, platform, peer, publish_file):
             reused = False
             try:
                 wire = {'payload': payload, 'scope_id': delivery_scope.get()}
+                if ephemeral_input.get() is not None and name == 'send':
+                    wire['input_delivery_id'] = ephemeral_input.get()
                 route = (str(payload.get('chat_id')), str(thread or ''))
                 value = None
                 journal = getattr(self, '_brai_delivery_journal', None)
-                persistent = (journal is not None and input_delivery.get() is not None
+                persistent = (ephemeral_input.get() is None and journal is not None and input_delivery.get() is not None
                     and name in {'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation'})
                 if persistent:
                     from .delivery_journal import canonical, delivery_id
@@ -165,7 +195,8 @@ def make_adapter(config, platform, peer, publish_file):
                             ident, reused = existing['id'], True
                             logging.getLogger(__name__).info('identity_duplicate_output_suppressed action=%s state=%s', name, existing['state'])
                     if not reused:
-                        journal.queue_output(ident, name, wire)
+                        journal.queue_output(ident, name, wire,
+                            completed_session=final_text_session.get() if name == 'send' else None)
                         self._brai_last_outputs[route] = (signature, ident)
                     saved = True
                 elif name != 'send_typing':

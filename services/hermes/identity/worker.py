@@ -35,6 +35,7 @@ class Worker:
         self.active = {}
         self.typing = {}
         self.turn_scopes = {}
+        self.recovery_scopes = {}
         self.tools_ready = False
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
@@ -181,6 +182,7 @@ class Worker:
                     self.typing.clear()
                     self.active.clear()
                     self.turn_scopes.clear()
+                    self.recovery_scopes.clear()
                     self.operational.clear()
                     self.adapter = self.runner = self.peer = None
                     self.peer_released.set()
@@ -248,6 +250,7 @@ class Worker:
             and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
         self.runner._brai_identity_recovery_allowed = lambda source: self.route_allowed(source, recovery=True)
         self._install_failure_recovery(self.runner)
+        self._install_restart_recovery(self.runner)
         self.runner._brai_return_notice_state = self.return_notice_state
         self.runner._brai_shutdown_notice_scope = self.shutdown_notice_scope
         self.runner._brai_consent_generation = lambda source: (
@@ -307,10 +310,6 @@ class Worker:
             if review_unavailable and not result.get('interrupted'):
                 # Native regards a controlled guardrail halt as complete; restore the marker afterwards.
                 await remember(source, session_key)
-            elif (isinstance(result, dict) and not result.get('failed') and not result.get('interrupted')
-                    and not result.get('partial') and not result.get('error')
-                    and result.get('completed') is not False and session_key and self.delivery_journal is not None):
-                self.delivery_journal.clear_continuation(session_key)
             return value
 
         runner._hmwa_shape_agent_response = shape
@@ -327,6 +326,10 @@ class Worker:
             async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
                 from .scope import continuation_turn
                 guardrail = result.get('guardrail') if isinstance(result, dict) else None
+                event._brai_successful_turn = (isinstance(result, dict)
+                    and not any(result.get(key) for key in ('failed', 'partial', 'error', 'interrupted'))
+                    and result.get('completed') is not False
+                    and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable'))
                 if (continuation_turn.get() and isinstance(result, dict)
                         and (result.get('failed') or (result.get('partial') and result.get('error'))
                              or (isinstance(guardrail, dict)
@@ -335,6 +338,91 @@ class Worker:
                 return await original_deliver(event, source, entry, session_key, generation, result, *args, **kwargs)
             runner._hmwa_deliver_turn_response = deliver
         runner._brai_retry_failed_sessions = self._retry_failed_sessions
+
+    def _install_restart_recovery(self, runner):
+        """Привязать начатый native ход к входу и восстановить его маршрут после рестарта."""
+        mark = getattr(runner, '_mark_durable_active_turn', None)
+        if callable(mark):
+            async def mark_bound(event, session_key):
+                from .scope import input_delivery
+                input_id = input_delivery.get()
+                if input_id is not None and self.delivery_journal is not None:
+                    generation = getattr(event, '_brai_chat_generation', None)
+                    if generation is None:
+                        binding = self.delivery_journal.continuation(session_key)
+                        generation = binding['chat_generation'] if binding else None
+                    if type(generation) is not int:
+                        raise ValueError('CONTINUATION_GENERATION_UNKNOWN')
+                    self.delivery_journal.save_continuation(session_key, input_id, generation)
+                elif self.delivery_journal is not None:
+                    self.delivery_journal.clear_continuation(session_key)
+                return await mark(event, session_key)
+            runner._mark_durable_active_turn = mark_bound
+        resume = getattr(runner, '_run_startup_resume_event', None)
+        if not callable(resume):
+            return
+
+        async def resume_bound(adapter, event, session_key):
+            from .scope import input_delivery, delivery_scope, continuation_turn
+            from gateway.run import _AGENT_PENDING_SENTINEL
+            if self.delivery_journal is None and os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+                self._enable_delivery()
+            binding = self.delivery_journal.continuation(session_key) if self.delivery_journal else None
+            route = self._chat_route(event.source)
+            if (binding is None or not self.route_allowed(event.source, recovery=True)
+                    or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
+                state = runner._peek_session_state(session_key)
+                if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                    runner._release_running_agent_state(session_key)
+                logging.getLogger(__name__).warning('HERMES_RECOVERY_INPUT_UNAVAILABLE session=%s', session_key)
+                return
+            if binding.get('ready_output'):
+                try:
+                    await runner.async_session_store.clear_resume_pending(session_key)
+                finally:
+                    state = runner._peek_session_state(session_key)
+                    if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                        runner._release_running_agent_state(session_key)
+                return
+            try:
+                if self.peer is None or self.peer.closed:
+                    raise ConnectionError('Ingress unavailable')
+                authorized = await self.peer.call('recovery.check', {'input_delivery_id': binding['input_id'],
+                    'chat_id': route[0], 'thread_id': str(getattr(event.source, 'thread_id', None) or '')})
+                if (authorized != {'allowed': True} or not self.route_allowed(event.source, recovery=True)
+                        or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
+                    raise PermissionError('Recovery authorization changed')
+            except (OSError, ConnectionError, TimeoutError, RpcError, PermissionError):
+                state = runner._peek_session_state(session_key)
+                if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                    runner._release_running_agent_state(session_key)
+                logging.getLogger(__name__).warning('HERMES_RECOVERY_AUTH_UNAVAILABLE session=%s', session_key)
+                return
+            except BaseException:
+                state = runner._peek_session_state(session_key)
+                if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                    runner._release_running_agent_state(session_key)
+                raise
+            event._brai_chat_generation = binding['chat_generation']
+            source_token = input_delivery.set(binding['input_id'])
+            scope_token = delivery_scope.set(None)
+            continuation_token = continuation_turn.set(True)
+            current = asyncio.current_task()
+            previous = self.recovery_scopes.get(session_key)
+            self.recovery_scopes[session_key] = (current, binding['input_id'], event.source)
+            try:
+                adapter.bind_source(event.source)
+                await resume(adapter, event, session_key)
+            finally:
+                if self.recovery_scopes.get(session_key, (None,))[0] is current:
+                    if previous is None:
+                        self.recovery_scopes.pop(session_key, None)
+                    else:
+                        self.recovery_scopes[session_key] = previous
+                continuation_turn.reset(continuation_token)
+                delivery_scope.reset(scope_token)
+                input_delivery.reset(source_token)
+        runner._run_startup_resume_event = resume_bound
 
     async def _retry_failed_sessions(self):
         """Вернуть сохранённые попытки в native turn после проверки владельца и маршрута."""
@@ -394,10 +482,14 @@ class Worker:
         source_token = input_delivery.set(input_id)
         scope_token = delivery_scope.set(None)
         continuation_token = continuation_turn.set(True)
+        current = asyncio.current_task()
+        self.recovery_scopes[session_key] = (current, input_id, event.source)
         try:
             adapter.bind_source(event.source)
             await runner._run_startup_resume_event(adapter, event, session_key)
         finally:
+            if self.recovery_scopes.get(session_key, (None,))[0] is current:
+                self.recovery_scopes.pop(session_key, None)
             continuation_turn.reset(continuation_token)
             delivery_scope.reset(scope_token)
             input_delivery.reset(source_token)
@@ -788,6 +880,8 @@ class Worker:
         fields['user_id'] = self.telegram_id
         self.adapter.bind_source(source)
         message = MessageEvent(source=source, message_type=MessageType(event.get('message_type', 'text')), **fields)
+        from .scope import input_delivery
+        message._brai_identity_input_id = input_delivery.get()
         from gateway.platforms import base as native_base
         coerce = getattr(native_base, 'coerce_plaintext_gateway_command', None)
         if callable(coerce):
@@ -818,6 +912,7 @@ class Worker:
                 and (not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128)):
             raise RpcError(-32602, 'Delivery scope required')
         from .scope import delivery_scope
+        message._brai_delivery_scope = scope_id
         scope_token = delivery_scope.set(scope_id)
         typing = None
         route = self._chat_route(source)
@@ -946,12 +1041,23 @@ class Worker:
     @contextmanager
     def shutdown_notice_scope(self, session_key):
         """Выбрать действующий ingress scope этого хода без фонового маршрута."""
-        from .scope import delivery_scope
+        from .scope import delivery_scope, ephemeral_input
         matches = [(token, task) for token, (key, task, _) in self.active.items()
                    if key == session_key and task is not None and not task.done()
                    and self.turn_scopes.get(token)]
         if len(matches) != 1:
-            yield False
+            recovery = self.recovery_scopes.get(session_key)
+            if (matches or recovery is None or recovery[0].done()
+                    or not self.route_allowed(recovery[2], recovery=True)):
+                yield False
+                return
+            token = ephemeral_input.set(recovery[1])
+            scope_token = delivery_scope.set(None)
+            try:
+                yield self.recovery_scopes.get(session_key) is recovery and not recovery[0].done()
+            finally:
+                delivery_scope.reset(scope_token)
+                ephemeral_input.reset(token)
             return
         turn, task = matches[0]
         scope = self.turn_scopes[turn]

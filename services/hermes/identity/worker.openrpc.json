@@ -6,6 +6,16 @@
   },
   "methods": [
     {
+      "name": "recovery.check",
+      "summary": "Проверить права исходного отправителя и маршрут перед восстановлением хода.",
+      "params": [
+        {"name": "input_delivery_id", "required": true, "schema": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+        {"name": "chat_id", "required": true, "schema": {"type": "string", "minLength": 1}},
+        {"name": "thread_id", "required": true, "schema": {"type": "string"}}
+      ],
+      "result": {"name": "result", "schema": {"type": "object", "required": ["allowed"], "properties": {"allowed": {"const": true}}, "additionalProperties": false}}
+    },
+    {
       "name": "dispatch",
       "summary": "Доставить допущенное Telegram событие в личный runner.",
       "params": [

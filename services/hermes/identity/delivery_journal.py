@@ -101,7 +101,10 @@ class DeliveryJournal:
         binding = json.loads(row[0])
         if binding.get('session_key') != session_key:
             raise ValueError('CONTINUATION_BINDING_CONFLICT')
-        return {'input_id': binding['input_id'], 'chat_generation': binding['chat_generation']}
+        result = {'input_id': binding['input_id'], 'chat_generation': binding['chat_generation']}
+        if binding.get('ready_output'):
+            result['ready_output'] = binding['ready_output']
+        return result
 
     def clear_continuation(self, session_key):
         """Удалить привязку только после подтверждённого завершения native хода."""
@@ -148,7 +151,7 @@ class DeliveryJournal:
                 if json.loads(raw).get('turn_id') == turn_id:
                     db.execute("UPDATE input_deliveries SET phase='completed' WHERE id=?", (ident,))
 
-    def queue_output(self, ident, action, payload):
+    def queue_output(self, ident, action, payload, *, completed_session=None):
         """Сохранить готовые байты ответа до сетевой попытки; повтор ID не меняет содержимое."""
         self.identity(ident, ident)
         raw = canonical(payload)
@@ -159,6 +162,15 @@ class DeliveryJournal:
                 raise ValueError('DELIVERY_OUTPUT_CONFLICT')
             if old is None:
                 db.execute("INSERT INTO output_deliveries(id,action,payload,phase) VALUES(?,?,?,'pending')", (ident, action, raw))
+            if completed_session is not None:
+                binding_id = delivery_id(['continuation', completed_session])
+                row = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='continuation' AND phase='continuation'", (binding_id,)).fetchone()
+                binding = json.loads(row[0]) if row else None
+                if (binding is None or binding.get('session_key') != completed_session
+                        or binding.get('input_id') != payload.get('input_delivery_id')):
+                    raise ValueError('CONTINUATION_BINDING_CONFLICT')
+                binding['ready_output'] = ident
+                db.execute('UPDATE output_deliveries SET payload=? WHERE id=?', (canonical(binding), binding_id))
         return self.output(ident)
 
     def output(self, ident):

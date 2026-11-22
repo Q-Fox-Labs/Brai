@@ -7,9 +7,10 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
-from types import SimpleNamespace as NS
+from types import ModuleType, SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -86,6 +87,35 @@ class JournalTests(unittest.TestCase):
         restarted.output_state(IDENT, 'pending')
         self.assertEqual(self.store.pending_outputs(), [])
 
+    def test_final_output_and_completion_are_one_durable_commit(self):
+        self.store.begin_input(IDENT, DIGEST)
+        self.store.save_continuation('session', IDENT, 3)
+        output = delivery_id('final')
+        wire = {'payload': {'chat_id': '42', 'content': 'done'}, 'input_delivery_id': IDENT, 'scope_id': None}
+        self.store.queue_output(output, 'send', wire, completed_session='session')
+        restarted = DeliveryJournal(self.path, 'owner')
+        self.assertEqual(restarted.continuation('session')['ready_output'], output)
+        self.assertEqual(restarted.pending_outputs()[0]['payload'], wire)
+        with self.assertRaisesRegex(ValueError, 'BINDING_CONFLICT'):
+            restarted.queue_output(delivery_id('foreign'), 'send', {**wire, 'input_delivery_id': DIGEST},
+                                   completed_session='session')
+        self.assertEqual(len(restarted.pending_outputs()), 1)
+
+    def test_backup_restores_original_input_and_ready_answer(self):
+        self.store.begin_input(IDENT, DIGEST)
+        self.store.save_continuation('session', IDENT, 3)
+        output = delivery_id('backup-answer')
+        self.store.queue_output(output, 'send', {'payload': {'content': 'done'},
+            'input_delivery_id': IDENT, 'scope_id': None}, completed_session='session')
+        backup = self.path.parent / 'restored.sqlite3'
+        with sqlite3.connect(self.path) as source, sqlite3.connect(backup) as target:
+            source.backup(target)
+        backup.chmod(0o600)
+        restored = DeliveryJournal(backup, 'owner')
+        self.assertEqual(restored.continuation('session'),
+                         {'input_id': IDENT, 'chat_generation': 3, 'ready_output': output})
+        self.assertEqual(restored.pending_outputs()[0]['id'], output)
+
 
 class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -94,7 +124,7 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.worker = Worker(os.getuid() + 1, 'owner', '42', None)
         self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
         self.worker.delivery_journal.begin_input(IDENT, DIGEST)
-        self.worker.peer = NS(closed=False)
+        self.worker.peer = NS(closed=False, call=AsyncMock(return_value={'allowed': True}))
         self.worker.chat_snapshot_ready = True
         self.worker.chat_states[('42', '7')] = {'paused': False, 'generation': 3, 'recoveryBlocked': False}
         self.worker.operational.set()
@@ -153,7 +183,148 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*self.tasks)
         self.runner._run_startup_resume_event.assert_awaited_once()
         await self.runner._hmwa_shape_agent_response({'failed': False, 'completed': True}, self.source, [], self.entry, 'session')
-        self.assertIsNone(self.worker.delivery_journal.continuation('session'))
+        self.assertEqual(self.worker.delivery_journal.continuation('session')['input_id'], IDENT)
+
+    async def test_recovered_turn_has_ephemeral_shutdown_route_only_while_running(self):
+        from identity.scope import ephemeral_input, delivery_scope
+        started, release = asyncio.Event(), asyncio.Event()
+        async def resume(adapter, event, key):
+            started.set()
+            await release.wait()
+        self.runner._run_startup_resume_event.side_effect = resume
+        task = asyncio.create_task(self.worker._resume_failed_turn(
+            self.runner, self.adapter, NS(source=self.source), 'session', IDENT))
+        await started.wait()
+        with self.worker.shutdown_notice_scope('session') as allowed:
+            self.assertTrue(allowed)
+            self.assertEqual(ephemeral_input.get(), IDENT)
+            self.assertIsNone(delivery_scope.get())
+        self.assertIsNone(ephemeral_input.get())
+        self.worker.chat_states[('42', '7')]['paused'] = True
+        with self.worker.shutdown_notice_scope('session') as allowed:
+            self.assertFalse(allowed)
+        release.set()
+        await task
+        with self.worker.shutdown_notice_scope('session') as allowed:
+            self.assertFalse(allowed)
+
+    async def test_ephemeral_shutdown_never_enters_worker_outbox(self):
+        from identity.scope import ephemeral_input
+        from identity.adapter import make_adapter
+        class Base:
+            def __init__(self, config):
+                pass
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': '81'}))
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', peer, None)
+        adapter._brai_delivery_journal = self.worker.delivery_journal
+        token = ephemeral_input.set(IDENT)
+        try:
+            result = await adapter._action('send', {'chat_id': '42', 'content': 'warning', 'metadata': {'thread_id': '7'}})
+        finally:
+            ephemeral_input.reset(token)
+        self.assertTrue(result.success)
+        wire = peer.call.await_args.args[1]
+        self.assertEqual(wire['input_delivery_id'], IDENT)
+        self.assertNotIn('delivery_id', wire)
+        self.assertEqual(self.worker.delivery_journal.pending_outputs(), [])
+
+    async def test_final_text_is_recorded_before_network_and_tied_to_input(self):
+        from identity.scope import input_delivery
+        from identity.adapter import make_adapter
+        class Base:
+            def __init__(self, config):
+                pass
+            async def _send_final_text(self, event, key, *args, **kwargs):
+                return await self._action('send', {'chat_id': '42', 'content': 'done', 'metadata': {'thread_id': '7'}})
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        async def send(method, wire):
+            self.assertEqual(self.worker.delivery_journal.continuation('session')['ready_output'], wire['delivery_id'])
+            return {'success': True, 'message_id': '81'}
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', NS(call=send), None)
+        adapter._brai_delivery_journal = self.worker.delivery_journal
+        token = input_delivery.set(IDENT)
+        try:
+            result = await adapter._send_final_text(NS(_brai_single_text=True, _brai_successful_turn=True), 'session')
+        finally:
+            input_delivery.reset(token)
+        self.assertTrue(result.success)
+
+    async def test_followup_uses_its_own_input_instead_of_old_task_context(self):
+        from identity.scope import input_delivery, delivery_scope
+        from identity.adapter import make_adapter
+        next_input = delivery_id('followup')
+        class Base:
+            def __init__(self, config):
+                pass
+            async def _process_message_background(self, event, key):
+                return input_delivery.get(), delivery_scope.get()
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', NS(), None)
+        old_input, old_scope = input_delivery.set(IDENT), delivery_scope.set('old')
+        try:
+            event = NS(internal=False, _brai_identity_input_id=next_input, _brai_delivery_scope='new')
+            self.assertEqual(await adapter._process_message_background(event, 'session'), (next_input, 'new'))
+            self.assertEqual((input_delivery.get(), delivery_scope.get()), (IDENT, 'old'))
+        finally:
+            input_delivery.reset(old_input)
+            delivery_scope.reset(old_scope)
+
+    async def test_restart_rebinds_running_turn_and_rejects_stale_route(self):
+        from identity.scope import input_delivery, continuation_turn, ephemeral_input
+        self.runner._mark_durable_active_turn = AsyncMock(return_value=True)
+        self.runner._peek_session_state = lambda key: self.slot
+        self.runner._release_running_agent_state = Mock()
+        original = self.runner._run_startup_resume_event
+        async def resume(adapter, event, key):
+            self.assertEqual(input_delivery.get(), IDENT)
+            self.assertTrue(continuation_turn.get())
+            with self.worker.shutdown_notice_scope(key) as allowed:
+                self.assertTrue(allowed)
+                self.assertEqual(ephemeral_input.get(), IDENT)
+        original.side_effect = resume
+        self.worker._install_restart_recovery(self.runner)
+        event = NS(source=self.source, _brai_chat_generation=3)
+        token = input_delivery.set(IDENT)
+        try:
+            await self.runner._mark_durable_active_turn(event, 'session')
+        finally:
+            input_delivery.reset(token)
+        self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
+        await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
+        original.assert_awaited_once()
+        self.worker.chat_states[('42', '7')]['generation'] = 4
+        await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
+        original.assert_awaited_once()
+        self.worker.chat_states[('42', '7')]['generation'] = 3
+        self.worker.peer.call.side_effect = PermissionError('revoked')
+        await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
+        original.assert_awaited_once()
+        self.assertIsNone(input_delivery.get())
+
+    async def test_restart_delivers_saved_final_without_reexecuting_model(self):
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        output = delivery_id('answer')
+        self.worker.delivery_journal.queue_output(output, 'send',
+            {'payload': {'chat_id': '42', 'content': 'done'}, 'scope_id': None, 'input_delivery_id': IDENT},
+            completed_session='session')
+        self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
+        self.runner._peek_session_state = lambda key: self.slot
+        self.runner._release_running_agent_state = Mock()
+        self.runner.async_session_store.clear_resume_pending = AsyncMock()
+        original = self.runner._run_startup_resume_event
+        self.worker._install_restart_recovery(self.runner)
+        await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
+        original.assert_not_awaited()
+        self.runner.async_session_store.clear_resume_pending.assert_awaited_once_with('session')
+        self.assertEqual(self.worker.delivery_journal.pending_outputs()[0]['id'], output)
 
     async def test_interrupted_stream_and_exhausted_retries_resume_without_followup(self):
         from identity.scope import input_delivery
@@ -396,6 +567,41 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.inbox.claim_for_delivery(PROFILE, 123, ident)
         self.transport.transition(123, ident, 'captured', 'handing_off')
         return binding
+
+    async def test_group_recovery_checks_original_author_and_sends_no_queued_warning(self):
+        from identity import telegram_runtime as runtime
+        from identity.ingress import Bridge
+        item = update(1, message={'message_id': 1, 'date': 1,
+            'chat': {'id': -55, 'type': 'supergroup', 'is_forum': True},
+            'from': {'id': 42, 'is_bot': False, 'first_name': 'synthetic'},
+            'message_thread_id': 7, 'is_topic_message': True, 'text': 'work'})
+        self.inbox.capture(PROFILE, item, 123)
+        source = self.inbox.bind_delivery(PROFILE, 123, [1])['delivery_id']
+        resolver = runtime.Resolver(NS(), journal=self.inbox.journal)
+        self.addCleanup(resolver.ledger.close)
+        route = ('-55', '7')
+        resolver.ledger.admit(PROFILE, route, {'thread_id': '7'}, '1')
+        resolver._account = AsyncMock(return_value=PROFILE)
+        resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '51'})
+        bridge = Bridge(PROFILE['userId'], '42', PROFILE['uid'], '/unused', AsyncMock(), None)
+        bridge.configure_delivery(require_scope=True, authorize_delivery=
+            lambda action, payload: resolver.authorize_delivery(PROFILE, action, payload))
+        bridge.durable_delivery = lambda owner, action, payload, ident, input_id: resolver.durable_reply(
+            PROFILE, owner, action, payload, ident, input_id)
+        bridge.recovery_authorize = lambda owner, input_id, chat, thread: resolver.authorize_recovery(
+            PROFILE, owner, input_id, chat, thread)
+        self.assertEqual(await bridge.check_recovery(source, '-55', '7'), {'allowed': True})
+        result = await bridge.send('send', {'chat_id': '-55', 'content': 'warning',
+            'metadata': {'thread_id': '7'}}, scope_id=None, input_delivery_id=source)
+        self.assertTrue(result['success'])
+        self.assertEqual(resolver._deliver_route.await_args.args[3], route)
+        self.assertEqual(resolver.ledger.db.execute('SELECT count(*) FROM reply_outbox').fetchone()[0], 0)
+        resolver._account.return_value = {**PROFILE, 'generation': 2}
+        with self.assertRaises(PermissionError):
+            await bridge.check_recovery(source, '-55', '7')
+        with self.assertRaises(PermissionError):
+            await bridge.send('send', {'chat_id': '-55', 'content': 'warning',
+                'metadata': {'thread_id': '7'}}, scope_id=None, input_delivery_id=source)
 
     async def test_release_admission_keeps_original_input_captured_until_owner_accepts(self):
         """Непринятый пакет не получает input; после допуска возвращается исходный Update."""
