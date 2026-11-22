@@ -241,3 +241,15 @@ test('readiness requires authentication and follows the live dependency state', 
   assert.equal(result.response.status, 200); assert.deepEqual(result.body, { ready: true });
   assert.equal(h.calls.length, 0);
 });
+
+test('readiness health probe rejects a disconnected coordinator and recovers', async (t) => {
+  let ready = false;
+  const h = await listener(t, {}, undefined, () => ready);
+  const {verifyReadiness} = await import('../../dist/coordinator/health.js');
+  const env = {TRANSCRIPTION_AUTH_BINDINGS_JSON:JSON.stringify([{token:'test-use'}]),
+    TRANSCRIPTION_ALLOWED_HOSTS_JSON:JSON.stringify(['transcription.test']),TRANSCRIPTION_HTTP_PORT:new URL(h.url).port,TRANSCRIPTION_HTTP_RESPONSE_BYTES:'100000'};
+  await assert.rejects(verifyReadiness(env));
+  ready = true;
+  await verifyReadiness(env);
+  await assert.rejects(verifyReadiness({...env,TRANSCRIPTION_AUTH_BINDINGS_JSON:JSON.stringify([{token:'bad'}])}));
+});
