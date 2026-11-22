@@ -1495,6 +1495,76 @@
       ]
     },
     {
+      "name": "telegram.accounts",
+      "description": "Read only the authenticated owner’s current Auth bindings. Telegram labels may be current, last known, or unavailable.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "accounts",
+            "maxAccounts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "accounts": {
+              "type": "array",
+              "maxItems": 2,
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "username",
+                  "metadata"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "username": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^[A-Za-z0-9_]{1,32}$"
+                  },
+                  "metadata": {
+                    "enum": [
+                      "current",
+                      "last_known",
+                      "unavailable"
+                    ]
+                  },
+                  "current": {
+                    "type": "boolean",
+                    "description": "Present only for a verified private Telegram turn."
+                  }
+                }
+              }
+            },
+            "maxAccounts": {
+              "const": 2
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
       "name": "telegram.link",
       "description": "Agent writes its warning and interprets the next explicit human permission. Broker verifies exact full-text confirmation from trusted ingress, fresh delivered question, same account/topic and pinned action/target. Any later human input or new offer invalidates the old answer. No automatic mutation retry; secrets never enter the model.",
       "paramStructure": "by-name",
