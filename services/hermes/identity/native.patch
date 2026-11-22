@@ -2689,7 +2689,7 @@ diff --git a/tools/async_delegation.py b/tools/async_delegation.py
 -                        if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
 -                            return SendResult(success=False, error=str(send_err), retryable=False)
 +                        if identity_group or private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
-+                            return SendResult(success=False, error=_redact_telegram_error_text(send_err), retryable=False)
++                            return SendResult(success=False, error=(_redact_telegram_error_text(send_err) if identity_group else str(send_err)), retryable=False)
                          # One-off "thread not found" flakes recover on immediate retry: same thread_id once.
                          if not retried_thread_not_found:
                              retried_thread_not_found = True

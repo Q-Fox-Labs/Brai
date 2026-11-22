@@ -641,8 +641,9 @@ class Resolver:
                 metadata['_brai_progress'] = True
         values = {**payload, 'metadata': metadata}
         if anchor is not None and action != 'edit_message':
-            if not self.ledger.owns(profile, route, anchor, outgoing=False):
-                raise PermissionError('Group reply has no admitted input')
+            # AIDEV-NOTE: Recovered input may enter debounce after a newer message.
+            # The bound inbox batch proves the original author and anchor independently of arrival order.
+            self.ledger.record(profile, route, anchor, outgoing=False)
             values['reply_to'] = anchor
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
         key = self.ledger.owner(profile)
@@ -1203,7 +1204,7 @@ class Resolver:
             request = {'chat_id': chat, 'metadata': {'thread_id': thread}}
             token = request_scope.set(scope_id)
             try:
-                route, metadata, _, current, _ = await self.delivery_context(profile, owner, request)
+                route, metadata, source_turn, current, _ = await self.delivery_context(profile, owner, request)
             finally:
                 request_scope.reset(token)
             if method != 'send_message' and not self.ledger.owns(profile, route, values.get('message_id'), outgoing=True):
@@ -1218,6 +1219,13 @@ class Resolver:
                 raise PermissionError('Foreign UI reply')
             values['chat_id'] = int(chat)
             if method == 'send_message':
+                if group_chat_id(route[0]):
+                    anchor = source_turn.get('replyTo') if source_turn else None
+                    if not anchor or not self.ledger.owns(profile, route, anchor, outgoing=False):
+                        raise PermissionError('Group UI reply has no admitted input')
+                    values.pop('reply_parameters', None)
+                    values.pop('allow_sending_without_reply', None)
+                    values['reply_to_message_id'] = int(anchor)
                 values.pop('message_thread_id', None)
                 values.pop('direct_messages_topic_id', None)
                 routing = getattr(self.adapter, '_thread_kwargs_for_send', None)

@@ -89,7 +89,8 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             'auth_author': '123', 'auth_role': 'user', 'auth_generation': 1,
             'payload': json.dumps({'message': {'message_id': 70, 'message_thread_id': 77,
                 'chat': {'id': -10012, 'type': 'supergroup', 'is_forum': True}}})}))
-        resolver.ledger.admit(actor, ('-10012', '77'), {'thread_id': '77'}, '70')
+        # Native debounce started with a newer update before replay merged the retained input.
+        resolver.ledger.admit(actor, ('-10012', '77'), {'thread_id': '77'}, '71')
         resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
         broker = AsyncMock(return_value=actor)
         with patch.object(runtime, 'broker_call', broker):
@@ -263,7 +264,8 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                   'authorTelegramId': '456', 'workerSocket': '/tmp/worker-2'}
         profiles = {'123': first, '456': second}
         send = AsyncMock(side_effect=[{'success': True, 'message_id': '81'}, {'success': True, 'message_id': '82'}])
-        adapter = NS(send=send)
+        clarify = AsyncMock(return_value={'message_id': 83})
+        adapter = NS(send=send, _bot=NS(send_message=clarify))
         resolver = runtime.Resolver(adapter)
         self.addCleanup(resolver.ledger.close)
         async def root(method, params):
@@ -307,6 +309,12 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PermissionError):
                     await bridge.send('send', {**payload, 'reply_to': other_message}, current['id'])
                 await bridge.send('send', payload, current['id'])
+            await bridges[0].call_telegram_api('send_message', {
+                'chat_id': '-10012', 'text': 'Уточните вопрос', 'message_thread_id': 77,
+                'allow_sending_without_reply': True}, resolver.turns[101]['id'])
+        self.assertEqual(clarify.await_args.kwargs['reply_to_message_id'], 70)
+        self.assertEqual(clarify.await_args.kwargs['message_thread_id'], 77)
+        self.assertNotIn('allow_sending_without_reply', clarify.await_args.kwargs)
         self.assertEqual([(call.kwargs['chat_id'], call.kwargs['reply_to'], call.kwargs['metadata'])
                           for call in send.await_args_list],
                          [('-10012', '70', {'thread_id': '77'}), ('-10012', '71', {'thread_id': '77'})])
