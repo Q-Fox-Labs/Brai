@@ -57,6 +57,19 @@ class ToolClientTest(unittest.TestCase):
         self.assertFalse(login['inputSchema']['properties'])
         self.assertFalse(login['inputSchema']['additionalProperties'])
 
+    def test_account_roster_tool_never_accepts_an_account_or_owner_argument(self):
+        with patch.object(tool_client, 'broker_call', return_value={'role': 'user', 'tools': []}):
+            catalog = tool_client.handle('tools/list', {})['tools']
+        roster = next(tool for tool in catalog if tool['name'] == 'brai_telegram_accounts')
+        self.assertFalse(roster['inputSchema']['additionalProperties'])
+        params = {'name': 'brai_telegram_accounts', 'arguments': {}}
+        result = {'accounts': [], 'maxAccounts': 2}
+        with patch.object(tool_client, 'broker_call', return_value=result) as broker:
+            self.assertEqual(tool_client.handle('tools/call', params)['structuredContent'], result)
+            broker.assert_called_once_with('telegram.accounts', {})
+            with self.assertRaises(ValueError):
+                tool_client.handle('tools/call', {**params, 'arguments': {'telegramId': '42'}})
+
     def test_account_tools_accept_only_full_text_confirmation_without_model_selected_owner(self):
         with patch.object(tool_client, "broker_call", return_value={"role": "user", "tools": []}):
             catalog = tool_client.handle("tools/list", {})["tools"]

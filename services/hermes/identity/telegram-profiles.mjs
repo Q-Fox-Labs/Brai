@@ -61,6 +61,24 @@ export function createTelegramProfiles({ path, info, download, requireRoot = tru
     }
   };
   return {
+    cachedLabel(id) {
+      if (!validId(id)) return null;
+      try {
+        const row = cached(id);
+        if (!row) return null;
+        const { telegramId, name, username } = JSON.parse(row.data);
+        return telegramId === id ? { name, username } : null;
+      } catch { return null; }
+    },
+    rememberLabel(id, { name, username }) {
+      if (!validId(id)) return;
+      try {
+        const row = cached(id), profile = row ? JSON.parse(row.data) : null;
+        if (profile?.telegramId === id && profile.name === name && profile.username === username) return;
+        save(id, { telegramId: id, name, username, avatar: profile?.telegramId === id ? profile.avatar : null },
+          row?.retry_at ?? Date.now());
+      } catch { /* Сбой кэша не меняет список привязок Auth. */ }
+    },
     get(id) {
       if (!validId(id)) return Promise.resolve(null);
       if (!pending.has(id)) pending.set(id, fetchProfile(id).finally(() => pending.delete(id)));

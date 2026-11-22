@@ -476,3 +476,37 @@ function accountFixture(options = {}) {
     accounts: () => [...accounts], role: value => { role = value; },
     replaceAccounts: value => { accounts = [...value]; } };
 }
+
+test('linked account roster survives unavailable labels and distinguishes fresh absence of a username', async () => {
+  const f = accountFixture({ accounts: ['42', '84'] });
+  const cached = new Map([['42', { name: 'Анна', username: 'old' }], ['84', { name: 'Борис', username: 'boris' }]]);
+  f.control.telegramProfiles = {
+    cachedLabel: id => cached.get(id),
+    rememberLabel: (id, label) => cached.set(id, label),
+  };
+  f.control.telegramInfo = async (_, id) => {
+    if (id === '84') throw Error('offline');
+    return { id, type: 'private', first_name: 'Анна' };
+  };
+  assert.deepEqual(await f.control.accountRoster(1001, '84'), { maxAccounts: 2, accounts: [
+    { name: 'Анна', username: null, metadata: 'current', current: false },
+    { name: 'Борис', username: 'boris', metadata: 'last_known', current: true },
+  ] });
+  assert.equal(cached.get('42').username, null);
+  cached.delete('84');
+  assert.deepEqual((await f.control.accountRoster(1001)).accounts[1],
+    { name: null, username: null, metadata: 'unavailable' });
+  await assert.rejects(f.control.accountRoster(1001, '126'), /FORBIDDEN/);
+  await assert.rejects(f.control.accountRoster(1002), /FORBIDDEN/);
+  f.replaceAccounts([]);
+  assert.deepEqual(await f.control.accountRoster(1001), { accounts: [], maxAccounts: 2 });
+});
+
+test('linked account roster fails closed when Auth changes during label lookup', async () => {
+  const f = accountFixture({ accounts: ['42', '84'] });
+  f.control.telegramInfo = async (_, id) => {
+    if (id === '84') f.replaceAccounts(['42']);
+    return { id, type: 'private', first_name: 'Fixture' };
+  };
+  await assert.rejects(f.control.accountRoster(1001, '42'), /FORBIDDEN/);
+});
