@@ -1643,3 +1643,1021 @@ index e9819bc..800c70d 100644
 -        agent.memory_notifications = str(mem_notif).lower() if mem_notif else "on"
 +        agent.memory_notifications = str(mem_notif).lower() if mem_notif else "off"
          agent.clarify_callback = self._clarify_callback_sync
+
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -257,5 +257,8 @@
+         provider_failure_notice, script_timeout_notice)
+
+-    job_name = job.get("name") or job.get("id") or "cron job"
++    from agent.i18n import t
++    from cron.scheduler_delivery import _scheduled_task_name
++
++    job_name = _scheduled_task_name(job) or t("scheduled_task.untitled")
+     job_id = job.get("id") or job_name
+     text = (error or "unknown error").strip()
+@@ -2932,5 +2935,7 @@
+         _pf_text = re.sub(r"\[blocked_config[^\]]*\]\s*", "", err).strip()
+         from cron.scheduler_failure_copy import blocked_config_notice
+-        deliver_content = blocked_config_notice(job.get("name") or job["id"], _pf_text)
++        from agent.i18n import t
++        from cron.scheduler_delivery import _scheduled_task_name
++        deliver_content = blocked_config_notice(_scheduled_task_name(job) or t("scheduled_task.untitled"), _pf_text)
+     elif success:
+         deliver_content = final_response
+@@ -2949,7 +2954,9 @@
+             # heuristics would re-diagnose it ("timed out" -> blame the model service, "401" ->
+             # "sign in again") and attach the wrong remediation. Deliver the evidence as-is.
++            from agent.i18n import t
++            from cron.scheduler_delivery import _scheduled_task_name
+             from cron.scheduler_failure_copy import generic_failure_notice
+             deliver_content = generic_failure_notice(
+-                job.get("name") or job["id"], job["id"], err.strip().rstrip("."),
++                _scheduled_task_name(job) or t("scheduled_task.untitled"), job["id"], err.strip().rstrip("."),
+             ) + _failure_streak_nudge(job)
+         else:
+@@ -3151,4 +3158,6 @@
+         job["last_delivery_queued"] = None
+     mark_kwargs: dict = {"delivery_error": d.delivery_error}
++    if job.get("_brai_quota_occurrence"):
++        mark_kwargs["automation_occurrence"] = job["_brai_quota_occurrence"]
+     if not d.success and job.pop("_model_unreachable", False):
+         # Never-reached-the-model failure: schedule the Cowork-style bounded re-run
+@@ -3294,4 +3303,39 @@
+
+
++def _complete_quota_skip(job, quota, execution_id, fence, *, adapters=None, loop=None) -> bool:
++    """Доставить пропуск и закрыть текущее срабатывание обычным забором владения."""
++    from cron.unreachable_retry import is_retry_run
++    from identity.automation_quota import notice
++
++    if fence.lost():
++        _record_fire_ownership_lost(job, fence.owner, execution_id)
++        return True
++
++    text = notice(job, quota)
++    with fence.side_effect_fence() as owns_delivery:
++        if owns_delivery:
++            delivery_job = {**job, "execution_id": execution_id, "_brai_quota_notice": True}
++            try:
++                delivery_error = _deliver_result(delivery_job, text, adapters=adapters, loop=loop)
++            except Exception as error:
++                logger.warning("Automation quota delivery failed: %s", type(error).__name__)
++                delivery_error = "Automation quota notification delivery failed"
++    if not owns_delivery:
++        _record_fire_ownership_lost(job, fence.owner, execution_id)
++        return True
++
++    recorded = mark_job_run(
++        job["id"], True, delivery_error=delivery_error, status="quota_skipped",
++        expected_fire_owner=fence.owner, ladder_rung=is_retry_run(job),
++    )
++    finish_execution(
++        execution_id, success=recorded,
++        error=None if recorded else "Fire claim ownership lost while recording quota skip.",
++        delivery_outcome="quota_skipped_delivery_failed" if delivery_error else "quota_skipped",
++    )
++    return True
++
++
++
+ def _run_one_job_body(
+     job: dict, *, adapters=None, loop=None, verbose: bool = False,
+@@ -3342,4 +3386,36 @@
+             logger.warning("Cron job %s lost execution ownership before start; skipping", job["id"])
+             return True
++
++        # The managed worker owns a read-only bind. Personal dotenv cannot turn off quota
++        # by replacing a mode variable before the ticker or a child CLI loads the profile.
++        from hermes_constants import is_brai_managed_worker
++
++        if is_brai_managed_worker():
++            from cron.jobs import release_unadmitted_automation
++            from identity.automation_quota import reserve
++
++            try:
++                quota = reserve(job, execution_id)
++            except Exception as error:
++                job["_brai_automation_admission"] = "quota_unavailable"
++                logger.warning("Automation admission unavailable: %s", type(error).__name__)
++                try:
++                    release_unadmitted_automation(job, fire_owner)
++                except Exception as release_error:
++                    logger.warning("Cannot restore unstarted automation: %s", type(release_error).__name__)
++                finish_execution(
++                    execution_id, success=False,
++                    error="Automation access or quota could not be verified.",
++                    delivery_outcome="quota_unavailable",
++                )
++                return True
++            if quota is not None:
++                if quota.exceeded:
++                    job["_brai_automation_admission"] = "quota_skipped"
++                    delivery_attempted = True
++                    return _complete_quota_skip(
++                        job, quota, execution_id, fence, adapters=adapters, loop=loop,
++                    )
++                job["_brai_quota_occurrence"] = quota.occurrence
+
+         # Bind the firing profile's COMPLETE terminal policy for this fire — agent build, run, delivery
+@@ -3461,5 +3537,5 @@
+             _err_text,
+             exc_info=(type(e), e, e.__traceback__))
+-        delivery_outcome = "suppressed"
++        delivery_outcome = job.get("_brai_automation_admission") or "suppressed"
+         # Owner fencing: a stale worker whose claim was taken over (or transport-cancelled) must not
+         # send a failure alert on top of the replacement run's; fall through to fenced bookkeeping.
+@@ -3467,4 +3543,5 @@
+             isinstance(e, Exception)
+             and not delivery_attempted
++            and not job.get("_brai_automation_admission")
+             and not isinstance(e, _FireClaimLostDuringSideEffect)
+             and not _fire_claim_ownership_lost()
+
+diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
+--- a/cron/scheduler_delivery.py
++++ b/cron/scheduler_delivery.py
+@@ -481,5 +481,7 @@
+     """Home target chat id: env var (first, so operator overrides win) → legacy env var →
+     config.yaml ``home_channel``."""
+-    if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform_name.lower() == "telegram":
++    from hermes_constants import is_brai_managed_worker
++
++    if platform_name.lower() == "telegram" and is_brai_managed_worker():
+         home = _get_config_home_channel(platform_name)
+         return str(home.chat_id) if home is not None else ""
+@@ -502,5 +504,7 @@
+     """
+     if platform_name.lower() == "telegram":
+-        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from hermes_constants import is_brai_managed_worker
++
++        if is_brai_managed_worker():
+             return None  # Automatic topic is resolved by the trusted Brai ingress.
+         cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)
+@@ -1651,5 +1655,5 @@
+ def _deliver_via_live_adapter(
+     t: _TargetDelivery, cleaned_text: str, media_files: list, *, target_errors: list,
+-    delivery_errors: list, unverified_targets: list,
++    delivery_errors: list, unverified_targets: list, cancel_hint: str = "",
+ ) -> bool:
+     """Deliver one target via the live gateway adapter; True once delivered. ``target_errors`` =
+@@ -1658,4 +1662,6 @@
+     job = t.job
+     route_thread_id, route_metadata, media_metadata = _live_route_metadata(t)
++    if cancel_hint and t.platform_name == "telegram" and os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        route_metadata["_brai_scheduled_cancel_hint"] = cancel_hint
+     delivered = False
+     try:
+@@ -1976,4 +1982,43 @@
+
+
++def _scheduled_task_name(job: dict) -> str:
++    """Вернуть название задания для чата, не подставляя служебный ID."""
++    name = str(job.get("name") or "").strip()
++    return name if name != job.get("id") else ""
++
++
++def _scheduled_delivery_text(job: dict, content: str, *, for_failure: bool) -> tuple[str, str]:
++    """Вернуть текст результата и отдельную подсказку, пока задание можно отменить."""
++    from agent.i18n import t
++    from cron.constants import is_recurring
++    from cron.jobs import get_job
++    from cron.unreachable_retry import is_retry_run
++
++    current = get_job(job["id"]) if job.get("id") else None
++    name = _scheduled_task_name(current if current is not None else job)
++    title = name or t("scheduled_task.untitled")
++    # Сообщение об ошибке уже содержит имя задания.
++    first_line = content.lstrip().partition("\n")[0]
++    existing_title = first_line.lstrip("# ").strip().strip("*")
++    text = content
++    if not for_failure and existing_title != title:
++        text = f"{title}\n\n{content}"
++
++    if (
++        current is None or not name or not is_recurring(current)
++        or not current.get("enabled", True) or current.get("state") in {"paused", "completed"}
++    ):
++        return text, ""
++
++    repeat = current.get("repeat") or {}
++    times = repeat.get("times")
++    counted = current.get("last_run_at") != job.get("last_run_at") or is_retry_run(job)
++    completed = repeat.get("completed", 0) + (0 if counted else 1)
++    if times is not None and times > 0 and completed >= times:
++        return text, ""
++
++    return text, t("scheduled_task.cancel", name=name)
++
++
+ def _deliver_result(
+     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
+@@ -1986,4 +2031,16 @@
+     job.pop("_notification_all_targets_suppressed", None)
+     targets = _resolve_delivery_targets(job, for_failure=for_failure)
++    quota_notice = job.get("_brai_quota_notice") is True
++    if quota_notice:
++        # Bot Chat injects its payload into an agent, which would start another model turn.
++        targets = [target for target in targets if target["platform"] != BOT_CHAT_PLATFORM]
++        if not targets:
++            origin_job = {**job, "deliver": "origin"}
++            targets = [target for target in _resolve_delivery_targets(origin_job)
++                       if target["platform"] != BOT_CHAT_PLATFORM]
++        if not targets:
++            chat_id = _get_home_target_chat_id("telegram")
++            if chat_id:
++                targets = [_home_target("telegram", chat_id, "origin_fallback")]
+     if not targets:
+         _record_delivery_verification(job, [])
+@@ -2025,16 +2082,9 @@
+     # persisted as ``last_delivery_unverified`` so `hermes cron list` shows it.
+     unverified_targets: list = []
+-    if wrap_response:
+-        task_name = job.get("name", job["id"])
+-        delivery_content = (
+-            f"Cronjob Response: {task_name}\n"
+-            f"(job_id: {job.get('id', '')})\n"
+-            f"-------------\n\n"
+-            f"{content}\n\n"
+-            "To stop or manage this job, send me a new message "
+-            f"(e.g. \"stop reminder {task_name}\")."
+-        )
+-    else:
+-        delivery_content = content
++    delivery_content, cancel_hint = content, ""
++    if wrap_response and not quota_notice:
++        delivery_content, cancel_hint = _scheduled_delivery_text(job, content, for_failure=for_failure)
++        if cancel_hint:
++            delivery_content = f"{delivery_content}\n\n{cancel_hint}"
+
+     from gateway.platforms.base import BasePlatformAdapter
+@@ -2049,4 +2099,8 @@
+     # failing curl with an API key, summarised a config file) sent it verbatim to the chat.
+     cleaned_delivery_content = _redact_cron_payload(cleaned_delivery_content, "delivery content")
++    if cancel_hint:
++        # Только уже очищенный текст может попасть в отдельное поле подписи.
++        _, separator, sanitized_hint = cleaned_delivery_content.strip().rpartition("\n\n")
++        cancel_hint = sanitized_hint if separator else ""
+     requested_media = len(media_files)
+     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+@@ -2113,5 +2167,5 @@
+             t, cleaned_delivery_content, media_files,
+             target_errors=target_errors, delivery_errors=delivery_errors,
+-            unverified_targets=unverified_targets,
++            unverified_targets=unverified_targets, cancel_hint=cancel_hint,
+         )
+         if not delivered:
+
+diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
+--- a/cron/scheduler_failure_copy.py
++++ b/cron/scheduler_failure_copy.py
+@@ -78,5 +78,5 @@
+         return None
+     if reason in _TRANSIENT_REASONS:
+-        action = f"{backup_provider_phrase} Задача запустится снова по расписанию."
++        action = backup_provider_phrase
+     else:
+         action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
+@@ -108,3 +108,3 @@
+     else:
+         detail = "обнаружена ошибка настроек"
+-    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась. Повторю запуск по расписанию."
++    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась."
+
+
+diff --git a/locales/af.yaml b/locales/af.yaml
+--- a/locales/af.yaml
++++ b/locales/af.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} sekonde"
+     second_other: "{count} sekondes"
++scheduled_task:
++  untitled: "Geskeduleerde taak"
++  cancel: "Skryf “Kanselleer die taak ‘{name}’” in die klets om dit te stop."
++
++  quota_first: "“{name}” is oorgeslaan. Die daaglikse perk is {limit} outomatiese lopies. Vir meer lopies het jy administrateurtoegang nodig."
++  quota_skipped: "“{name}” is oorgeslaan. Die daaglikse perk is {limit} lopies. Dit was sneller nommer {number} vandag."
++
+ gateway:
+   approval_expired: "⚠️ Goedkeuring het verval (die agent wag nie meer nie). Vra die agent om weer te probeer."
+
+diff --git a/locales/ar.yaml b/locales/ar.yaml
+--- a/locales/ar.yaml
++++ b/locales/ar.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} ثانية"
+     second_other: "{count} ثوانٍ"
++scheduled_task:
++  untitled: "مهمة مجدولة"
++  cancel: "لإيقاف مرات التشغيل القادمة، اكتب «ألغِ مهمة {name}» في المحادثة."
++
++  quota_first: "تم تخطي «{name}». الحد اليومي هو {limit} عمليات تشغيل تلقائية. تحتاج إلى صلاحيات المسؤول للمزيد."
++  quota_skipped: "تم تخطي «{name}». الحد اليومي {limit} عمليات تشغيل. هذا هو التشغيل رقم {number} اليوم."
++
+ gateway:
+   approval_expired: "⚠️ انتهت صلاحية الموافقة (لم يعد الوكيل ينتظر). اطلب من الوكيل المحاولة مرة أخرى."
+
+diff --git a/locales/de.yaml b/locales/de.yaml
+--- a/locales/de.yaml
++++ b/locales/de.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} Sekunde"
+     second_other: "{count} Sekunden"
++scheduled_task:
++  untitled: "Geplante Aufgabe"
++  cancel: "Schreibe „Brich die Aufgabe ‚{name}‘ ab“ in den Chat, um sie zu stoppen."
++
++  quota_first: "„{name}“ wurde übersprungen. Das Tageslimit liegt bei {limit} Automatisierungsläufen. Für weitere Läufe brauchst du Administratorzugriff."
++  quota_skipped: "„{name}“ wurde übersprungen. Das Tageslimit liegt bei {limit} Läufen. Das war heute Auslösung Nummer {number}."
++
+ gateway:
+   approval_expired: "⚠️ Genehmigung abgelaufen (Agent wartet nicht mehr). Bitten Sie den Agenten, es erneut zu versuchen."
+
+diff --git a/locales/en.yaml b/locales/en.yaml
+--- a/locales/en.yaml
++++ b/locales/en.yaml
+@@ -44,4 +44,11 @@
+     second_one: "{count} second"
+     second_other: "{count} seconds"
++
++scheduled_task:
++  untitled: "Scheduled task"
++  cancel: "To cancel future runs, write “Cancel the task ‘{name}’” in chat."
++
++  quota_first: "“{name}” was skipped. The daily limit is {limit} automation runs. To run more, you need administrator access."
++  quota_skipped: "“{name}” was skipped. The daily limit is {limit} runs. This was trigger number {number} today."
+
+ gateway:
+
+diff --git a/locales/es.yaml b/locales/es.yaml
+--- a/locales/es.yaml
++++ b/locales/es.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} segundo"
+     second_other: "{count} segundos"
++scheduled_task:
++  untitled: "Tarea programada"
++  cancel: "Para detener la tarea, escribe «Cancela la tarea “{name}”» en el chat."
++
++  quota_first: "Se omitió «{name}». El límite diario es de {limit} ejecuciones automáticas. Para ejecutar más, necesitas acceso de administrador."
++  quota_skipped: "Se omitió «{name}». El límite diario es de {limit} ejecuciones. Esta fue la activación número {number} de hoy."
++
+ gateway:
+   approval_expired: "⚠️ La aprobación ha caducado (el agente ya no está esperando). Pida al agente que lo intente de nuevo."
+
+diff --git a/locales/fr.yaml b/locales/fr.yaml
+--- a/locales/fr.yaml
++++ b/locales/fr.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} seconde"
+     second_other: "{count} secondes"
++scheduled_task:
++  untitled: "Tâche planifiée"
++  cancel: "Pour arrêter la tâche, écrivez « Annule la tâche “{name}” » dans le chat."
++
++  quota_first: "« {name} » a été ignorée. La limite quotidienne est de {limit} exécutions automatiques. Pour aller au-delà, il faut un accès administrateur."
++  quota_skipped: "« {name} » a été ignorée. La limite est de {limit} exécutions par jour. C’était le déclenchement numéro {number} aujourd’hui."
++
+ gateway:
+   approval_expired: "⚠️ Approbation expirée (l'agent n'attend plus). Demandez à l'agent de réessayer."
+
+diff --git a/locales/ga.yaml b/locales/ga.yaml
+--- a/locales/ga.yaml
++++ b/locales/ga.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} soicind"
+     second_other: "{count} soicind"
++scheduled_task:
++  untitled: "Tasc sceidealaithe"
++  cancel: "Chun an tasc a stopadh, scríobh “Cealaigh an tasc ‘{name}’” sa chomhrá."
++
++  quota_first: "Scipeáladh “{name}”. Is é {limit} rith uathoibrithe an teorainn laethúil. Teastaíonn rochtain riarthóra chun níos mó a rith."
++  quota_skipped: "Scipeáladh “{name}”. Is é {limit} rith an teorainn laethúil. Ba é seo truicear uimhir {number} inniu."
++
+ gateway:
+   approval_expired: "⚠️ Tá an cead imithe in éag (níl an gníomhaire ag fanacht níos mó). Iarr ar an ngníomhaire iarracht eile a dhéanamh."
+
+diff --git a/locales/hu.yaml b/locales/hu.yaml
+--- a/locales/hu.yaml
++++ b/locales/hu.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} másodperc"
+     second_other: "{count} másodperc"
++scheduled_task:
++  untitled: "Ütemezett feladat"
++  cancel: "A feladat leállításához írd a csevegésbe: „Töröld a(z) »{name}« feladatot”."
++
++  quota_first: "A(z) „{name}” kimaradt. A napi korlát {limit} automatizált futtatás. Több futtatáshoz rendszergazdai hozzáférés kell."
++  quota_skipped: "A(z) „{name}” kimaradt. A napi korlát {limit} futtatás. Ez volt ma a(z) {number}. indítás."
++
+ gateway:
+   approval_expired: "⚠️ A jóváhagyás lejárt (az ügynök már nem vár). Kérd meg az ügynököt, hogy próbálja újra."
+
+diff --git a/locales/it.yaml b/locales/it.yaml
+--- a/locales/it.yaml
++++ b/locales/it.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} secondo"
+     second_other: "{count} secondi"
++scheduled_task:
++  untitled: "Attività pianificata"
++  cancel: "Per interrompere l’attività, scrivi in chat «Annulla l’attività “{name}”»."
++
++  quota_first: "«{name}» è stata saltata. Il limite giornaliero è di {limit} esecuzioni automatiche. Per eseguirne altre serve l’accesso amministratore."
++  quota_skipped: "«{name}» è stata saltata. Il limite è di {limit} esecuzioni al giorno. Questa era l’attivazione numero {number} di oggi."
++
+ gateway:
+   approval_expired: "⚠️ Approvazione scaduta (l'agente non è più in attesa). Chiedi all'agente di riprovare."
+
+diff --git a/locales/ja.yaml b/locales/ja.yaml
+--- a/locales/ja.yaml
++++ b/locales/ja.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} 秒"
+     second_other: "{count} 秒"
++scheduled_task:
++  untitled: "予定されたタスク"
++  cancel: "今後の実行を止めるには、チャットに「タスク『{name}』をキャンセルして」と入力してください。"
++
++  quota_first: "「{name}」はスキップされました。1 日に実行できる自動化は {limit} 回までです。これを超えるには管理者権限が必要です。"
++  quota_skipped: "「{name}」はスキップされました。1 日の実行上限は {limit} 回です。今回の起動は本日 {number} 回目です。"
++
+ gateway:
+   approval_expired: "⚠️ 承認の有効期限が切れました（エージェントはもう待機していません）。エージェントに再試行を依頼してください。"
+
+diff --git a/locales/ko.yaml b/locales/ko.yaml
+--- a/locales/ko.yaml
++++ b/locales/ko.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count}초"
+     second_other: "{count}초"
++scheduled_task:
++  untitled: "예약된 작업"
++  cancel: "앞으로 실행하지 않으려면 채팅에 ‘{name} 작업을 취소해 줘’라고 입력하세요."
++
++  quota_first: "‘{name}’ 작업을 건너뛰었습니다. 하루 자동 실행 한도는 {limit}회입니다. 더 실행하려면 관리자 권한이 필요합니다."
++  quota_skipped: "‘{name}’ 작업을 건너뛰었습니다. 하루 실행 한도는 {limit}회입니다. 이번은 오늘 {number}번째 실행 시도입니다."
++
+ gateway:
+   approval_expired: "⚠️ 승인이 만료되었습니다 (에이전트가 더 이상 대기하지 않습니다). 에이전트에게 다시 시도하도록 요청하세요."
+
+diff --git a/locales/pt.yaml b/locales/pt.yaml
+--- a/locales/pt.yaml
++++ b/locales/pt.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} segundo"
+     second_other: "{count} segundos"
++scheduled_task:
++  untitled: "Tarefa agendada"
++  cancel: "Para interromper a tarefa, escreva «Cancela a tarefa “{name}”» no chat."
++
++  quota_first: "«{name}» foi ignorada. O limite diário é de {limit} execuções automáticas. Para executar mais, é preciso acesso de administrador."
++  quota_skipped: "«{name}» foi ignorada. O limite é de {limit} execuções por dia. Este foi o acionamento número {number} de hoje."
++
+ gateway:
+   approval_expired: "⚠️ A aprovação expirou (o agente já não está à espera). Peça ao agente para tentar novamente."
+
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -44,4 +44,11 @@
+     second_one: "{count} секунда"
+     second_other: "{count} сек"
++scheduled_task:
++  untitled: "Задание по расписанию"
++  cancel: "Чтобы больше не получать такие сообщения, напишите в чат «Отмени задание „{name}“»."
++
++  quota_first: "«{name}» пропущено. Сработал лимит на количество автоматизаций — не более {limit} запусков в сутки. Если требуется больше, нужен админский доступ."
++  quota_skipped: "«{name}» пропущено. Лимит — {limit} запусков в сутки. Это {number}-е срабатывание за сегодня."
++
+ gateway:
+   approval_expired: "⚠️ Срок одобрения истёк (агент больше не ожидает). Попросите агента повторить попытку."
+
+diff --git a/locales/tr.yaml b/locales/tr.yaml
+--- a/locales/tr.yaml
++++ b/locales/tr.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} saniye"
+     second_other: "{count} saniye"
++scheduled_task:
++  untitled: "Zamanlanmış görev"
++  cancel: "Görevi durdurmak için sohbete “{name} görevini iptal et” yazın."
++
++  quota_first: "“{name}” atlandı. Günlük sınır {limit} otomatik çalıştırmadır. Daha fazlası için yönetici erişimi gerekir."
++  quota_skipped: "“{name}” atlandı. Günlük sınır {limit} çalıştırmadır. Bu, bugünün {number}. tetiklemesiydi."
++
+ gateway:
+   approval_expired: "⚠️ Onay süresi doldu (ajan artık beklemiyor). Ajanın tekrar denemesini isteyin."
+
+diff --git a/locales/uk.yaml b/locales/uk.yaml
+--- a/locales/uk.yaml
++++ b/locales/uk.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} секунда"
+     second_other: "{count} секунд"
++scheduled_task:
++  untitled: "Заплановане завдання"
++  cancel: "Щоб більше не отримувати такі повідомлення, напишіть у чаті «Скасуй завдання “{name}”»."
++
++  quota_first: "«{name}» пропущено. Добовий ліміт — {limit} запусків автоматизацій. Для більшої кількості потрібен доступ адміністратора."
++  quota_skipped: "«{name}» пропущено. Ліміт — {limit} запусків на добу. Це {number}-те спрацювання за сьогодні."
++
+ gateway:
+   approval_expired: "⚠️ Час схвалення минув (агент більше не очікує). Попросіть агента спробувати ще раз."
+
+diff --git a/locales/zh-hant.yaml b/locales/zh-hant.yaml
+--- a/locales/zh-hant.yaml
++++ b/locales/zh-hant.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} 秒"
+     second_other: "{count} 秒"
++scheduled_task:
++  untitled: "定期工作"
++  cancel: "如要停止後續執行，請在聊天中傳送「取消工作『{name}』」。"
++
++  quota_first: "已略過「{name}」。每天最多可執行 {limit} 次自動化工作。若需要更多次數，須具備管理員權限。"
++  quota_skipped: "已略過「{name}」。每天最多可執行 {limit} 次，這是今日第 {number} 次觸發。"
++
+ gateway:
+   approval_expired: "⚠️ 批准已逾期（代理不再等待）。請讓代理重試。"
+
+diff --git a/locales/zh.yaml b/locales/zh.yaml
+--- a/locales/zh.yaml
++++ b/locales/zh.yaml
+@@ -42,4 +42,11 @@
+     second_one: "{count} 秒"
+     second_other: "{count} 秒"
++scheduled_task:
++  untitled: "定时任务"
++  cancel: "如需停止后续执行，请在聊天中发送“取消任务‘{name}’”。"
++
++  quota_first: "已跳过“{name}”。每天最多运行 {limit} 次自动化任务。若需要更多次数，则需要管理员权限。"
++  quota_skipped: "已跳过“{name}”。每天最多运行 {limit} 次，这是今天第 {number} 次触发。"
++
+ gateway:
+   approval_expired: "⚠️ 批准已过期（代理不再等待）。请让代理重试。"
+
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -401,13 +401,22 @@
+         # these runs, and a bare success=False with error=None reads as an unexplained failure). See #83993.
+         ok = last_status in {"ok", "delivery_queued"}
++        if last_status == "quota_skipped":
++            run_error = "Задание пропущено из-за суточного лимита автоматизаций."
+         if execution is not None and execution.get("status") != "completed":
+             ok = False
+             run_error = execution.get("error") or f"execution ended in {execution.get('status') or 'unknown'} state"
+-        return {"claimed": True, "success": bool(processed and ok), "error": run_error}
++        result = {"claimed": True, "success": bool(processed and ok), "error": run_error}
++        quota_outcome = job.get("_brai_automation_admission") or (execution or {}).get("delivery_outcome") or ""
++        if quota_outcome.startswith("quota_"):
++            result["_brai_quota_no_wake"] = True
++        return result
+     except Exception as e:
+         logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
+         with contextlib.suppress(Exception):
+             mark_job_run(job_id, False, str(e), expected_fire_owner=fire_owner)
+-        return {"claimed": True, "success": False, "error": str(e)}
++        result = {"claimed": True, "success": False, "error": str(e)}
++        if job.get("_brai_automation_admission"):
++            result["_brai_quota_no_wake"] = True
++        return result
+     finally:
+         # Setup failures and BaseException must release only our registration.
+@@ -507,4 +516,6 @@
+     res: dict[str, Any], job_id: str, job_name: str, deliver: str, started_at: float) -> dict[str, Any]:
+     """Async-delegation completion block for a finished background manual run."""
++    if res.get("_brai_quota_no_wake") is True:
++        return {"status": "completed", "_brai_quota_no_wake": True}
+     duration = round(time.time() - started_at, 2)
+     refreshed = get_job(job_id) or {}
+@@ -727,4 +738,9 @@
+         _result.update(_gateway_liveness_notice(plural=True))
+     return _dumps(_result)
++
++
++def _action_get(job: dict[str, Any], a: dict[str, Any]) -> str:
++    """Return the complete existing instructions for a narrow edit."""
++    return _dumps({"success": True, "job": {**_format_job(job), "prompt": job.get("prompt") or ""}})
+
+
+@@ -957,5 +973,5 @@
+ _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
+ _JOB_ACTIONS = {
+-    "remove": _action_remove, "update": _action_update,
++    "get": _action_get, "remove": _action_remove, "update": _action_update,
+     "run": _action_run, "run_now": _action_run, "trigger": _action_run,
+     "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
+@@ -1058,5 +1074,13 @@
+     "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
+
+-Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless pinned.
++Use a short, recognizable name in the user's language. Keep IDs, scheduler terms and schedule syntax
++out of user-facing text. For a request to cancel, pause, or change a task, list existing jobs and
++identify the intended one from the user's meaning and chat context. Consider the name, purpose,
++and schedule. A user can say “Отмени мне рассылку новостей” without giving the exact name. When
++several jobs plausibly fit, ask which one and show their names and schedules. When the target is
++clear, ask only for missing parameters (for example, the new time). Cancel with 'remove', and
++apply changes with 'update'. Before changing conditions in the prompt, use 'get' with the selected
++job_id to read the complete instructions as data. Preserve all settings and instructions the
++user did not ask to change. Confirm the change or removal only after the tool succeeds.
+
+ Jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless the user pins one. Prefer updating an existing job over creating near-duplicates.""",
+@@ -1068,9 +1092,9 @@
+             "action": {
+                 "type": "string",
+-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
++                "description": "One of: create, list, get, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+             },
+             "job_id": {
+                 "type": "string",
+-                "description": "Required for update/pause/resume/remove/run."
++                "description": "Required for get/update/pause/resume/remove/run. Use the selected ID from list."
+             },
+             "pinned": {
+@@ -1089,5 +1113,5 @@
+             "name": {
+                 "type": "string",
+-                "description": "Optional human-friendly name"
++                "description": "Short plain-language title in the user's language. Set this when creating a task with a from-chat delivery so its owner can recognize and cancel it by name."
+             },
+             "repeat": {
+
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -8068,7 +8068,7 @@
+     extra_headers: Optional[dict[str, str]] = None, api_mode: str = None, stream: bool = False,
+     stream_options: dict = None, route_info: Optional[dict[str, str]] = None,
+-    latency_info: Optional[dict[str, int]] = None,
++    latency_info: Optional[dict[str, int]] = None, single_attempt: bool = False,
+ ) -> Any:
+-    """Run an auxiliary LLM request, applying the configured task limit."""
++    """Run an auxiliary LLM request, optionally disabling recovery attempts."""
+     queue_started_at = time.monotonic()
+     semaphore = _acquire_sync_aux_semaphore(task)
+@@ -8098,4 +8098,5 @@
+                 reasoning_config=reasoning_config, extra_headers=extra_headers, api_mode=api_mode,
+                 stream=stream, stream_options=stream_options, route_info=route_info,
++                **({"single_attempt": True} if single_attempt else {}),
+             )
+         if stream and semaphore is not None:
+@@ -8203,4 +8204,5 @@
+     extra_headers: Optional[dict[str, str]] = None, api_mode: str = None, stream: bool = False,
+     stream_options: dict = None, route_info: Optional[dict[str, str]] = None,
++    single_attempt: bool = False,
+ ) -> Any:
+     """Centralized synchronous LLM call: resolve provider/model, auth, kwargs, fallbacks.
+@@ -8217,4 +8219,15 @@
+     )
+     client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
++    if single_attempt:
++        if isinstance(client, OpenAI):
++            if client.max_retries != 0:
++                client = client.with_options(max_retries=0)
++        elif (
++            not isinstance(client, CodexAuxiliaryClient)
++            or not isinstance(client._real_client, OpenAI)
++            or client._real_client.max_retries != 0
++        ):
++            # Other wrappers may resend through a provider SDK or renegotiate streaming.
++            raise RuntimeError("Configured auxiliary transport cannot guarantee a single attempt")
+     # Streaming path (MoA aggregator): return the raw SDK stream, skipping validation and
+     # the fallback chain (they assume a complete response); the caller owns reassembly/fallback.
+@@ -8252,4 +8265,12 @@
+             task, **validate_kw,
+         )
++    if single_attempt:
++        # The regular progress wrapper can renegotiate token limits or retry another wire shape.
++        # Use the selected transport directly for a notification with a fixed-text fallback.
++        response = _relay_sync_completion(
++            client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode,
++            create=lambda request: client.chat.completions.create(**request),
++        )
++        return _validate_llm_response(response, task, provider=request_provider, base_url=req.base_info)
+     try:
+         # Bounded same-provider retry (exponential backoff, auxiliary.transient_retries) for
+
+diff --git a/cron/executions.py b/cron/executions.py
+--- a/cron/executions.py
++++ b/cron/executions.py
+@@ -100,8 +100,8 @@
+
+ @contextmanager
+-def _transaction() -> Iterator[sqlite3.Connection]:
++def _transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+     from hermes_cli.sqlite_util import transaction
+
+-    with _lock, transaction(_connect()) as conn:
++    with _lock, transaction(_connect(), immediate=immediate) as conn:
+         yield conn
+
+
+diff --git a/cron/jobs.py b/cron/jobs.py
+--- a/cron/jobs.py
++++ b/cron/jobs.py
+@@ -2376,23 +2376,24 @@
+     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
+     job["last_status"] = status or (
+         "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
+-    job["last_error"] = None if success else error
+-    if success:
+-        # Healthy run: drop the alert-once dedup markers so a FUTURE break re-alerts, and clear
+-        # the forward-failure stamp so it only describes CURRENT auto-fire health.
+-        job.pop("preflight_alerted", None)
+-        job.pop("last_fire_error", None)
+-        job["failure_streak"] = 0
+-    else:
+-        # Consecutive agent-failure streak; delivery failures do NOT count
+-        # (scheduler._failure_streak_nudge).
+-        job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
+-        # Sticky last-failure stamp (#118354): the next success resets last_status and
+-        # failure_streak, which erases the only job-level trace that a run ever failed —
+-        # a monitor sampling jobs.json then sees a permanently green job. last_failure
+-        # survives success (latest failure wins); the recency window is the consumer's
+-        # call. Delivery failures keep their own sticky last_delivery_error.
+-        job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
++    if status != "quota_skipped":
++        job["last_error"] = None if success else error
++        if success:
++            # Healthy run: drop the alert-once dedup markers so a FUTURE break re-alerts, and clear
++            # the forward-failure stamp so it only describes CURRENT auto-fire health.
++            job.pop("preflight_alerted", None)
++            job.pop("last_fire_error", None)
++            job["failure_streak"] = 0
++        else:
++            # Consecutive agent-failure streak; delivery failures do NOT count
++            # (scheduler._failure_streak_nudge).
++            job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
++            # Sticky last-failure stamp (#118354): the next success resets last_status and
++            # failure_streak, which erases the only job-level trace that a run ever failed —
++            # a monitor sampling jobs.json then sees a permanently green job. last_failure
++            # survives success (latest failure wins); the recency window is the consumer's
++            # call. Delivery failures keep their own sticky last_delivery_error.
++            job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
+     job["last_delivery_error"] = delivery_error
+     # Clear both claims: the run is over, so the job is claimable again.
+     job["fire_claim"] = None
+@@ -2464,6 +2465,7 @@
+     ladder_rung: bool = False,
+     quota_hold_seconds: Optional[float] = None,
+     recover_consumed_fire: bool = False,
++    automation_occurrence: Optional[str] = None,
+ ) -> bool:
+     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
+     and retire the record as a terminal completion when the repeat limit is reached.
+@@ -2498,15 +2500,19 @@
+         _record_run_outcome(job, success, error, delivery_error, status, now)
+         _advance_after_run(job, now, ladder_rung=ladder_rung)
+         from cron import quota_hold
+-        from cron.unreachable_retry import clear_state, plan_retry
++        from cron.unreachable_retry import STATE_KEY, clear_state, plan_retry
+
+         if not success and model_unreachable and not is_terminal_job(job):
+-            plan_retry(job)
++            if plan_retry(job) and automation_occurrence:
++                job[STATE_KEY]["brai_automation_occurrence"] = automation_occurrence
+         else:
+             # Any run that reached the model (either outcome) resets the re-run ladder.
+             clear_state(job)
+         if not success and quota_hold_seconds and not is_terminal_job(job):
+-            quota_hold.plan_hold(job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire)
++            quota_hold.plan_hold(
++                job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire,
++                **({"automation_occurrence": automation_occurrence} if automation_occurrence else {}),
++            )
+         else:
+             quota_hold.clear_state(job)
+         save_jobs(jobs)
+@@ -2689,6 +2695,43 @@
+     return _with_job(job_id, apply, False)
+
+
++def release_unadmitted_automation(snapshot: dict, expected_owner: Optional[str]) -> bool:
++    """Вернуть допущенный планировщиком слот, если политика не разрешила его запуск."""
++    from cron.occurrences import scheduled_instant
++
++    job_id = snapshot["id"]
++
++    def apply(jobs, _index, job):
++        claim = job.get("fire_claim")
++        owner = (claim or {}).get("by") if isinstance(claim, dict) else None
++        if owner != expected_owner:
++            return False
++
++        job["fire_claim"] = None
++        job.pop("manual_run_at", None)
++        job.pop("manual_run_prompt", None)
++        if job.get("schedule") == snapshot.get("schedule"):
++            if (job.get("schedule") or {}).get("kind") == "once":
++                repeat = job.get("repeat") or {}
++                before = snapshot.get("repeat") or {}
++                if (
++                    repeat.get("times") == before.get("times")
++                    and repeat.get("times")
++                    and repeat.get("completed", 0) == before.get("completed", 0) + 1
++                ):
++                    repeat["completed"] = before.get("completed", 0)
++                claim = job.get("run_claim")
++                job["run_claim"] = {"outage": True} if isinstance(claim, dict) and claim.get("outage") else None
++            elif job.get("enabled", True) and job.get("next_run_at") == snapshot.get("next_run_at"):
++                instant = scheduled_instant(snapshot.get("_scheduled_instant"))
++                if instant:
++                    job["next_run_at"] = instant
++        save_jobs(jobs)
++        return True
++
++    return _under_fire_fence(job_id, lambda: _with_job(job_id, apply, missing=False))
++
++
+ def advance_next_runs(job_ids) -> int:
+     """Batch form of :func:`advance_next_run`: one load + at most one save for the whole due set;
+     one-shot/unknown ids are skipped. Returns the count advanced. Persisted once at the end, so a
+@@ -2740,7 +2783,7 @@
+
+ def claim_job_for_fire(
+     job_id: str, *, claim_ttl_seconds: int = FIRE_CLAIM_TTL_SECONDS, force: bool = False,
+-    manual: bool = False, return_job: bool = False,
++    manual: bool = False, return_job: bool = False, require_due: bool = False,
+ ) -> Union[bool, dict[str, Any]]:
+     """Atomically claim a job for one external 'fire' (multi-machine at-most-once); True iff THIS
+     caller won (``CronScheduler.fire_due``: exactly one of N replicas runs a job). Under the
+@@ -2783,6 +2826,8 @@
+         if (instant is not None
+                 and datetime.fromisoformat(instant) - now >= timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)):
+             instant = None
++        if require_due and instant is None:
++            return False
+         if instant and completed_occurrence(job, instant):
+             if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
+                 nxt = compute_next_run(job["schedule"], now.isoformat())
+
+diff --git a/cron/quota_hold.py b/cron/quota_hold.py
+--- a/cron/quota_hold.py
++++ b/cron/quota_hold.py
+@@ -28,4 +28,5 @@
+ STATE_KEY = "quota_hold_until"
+ SCHEDULE_EXPR_KEY = "quota_hold_cron_expr"
++AUTOMATION_OCCURRENCE_KEY = "brai_quota_hold_occurrence"
+
+ # The provider's remaining seconds were measured when the probe ran; by the time the run is
+@@ -68,4 +69,5 @@
+     job.pop(STATE_KEY, None)
+     job.pop(SCHEDULE_EXPR_KEY, None)
++    job.pop(AUTOMATION_OCCURRENCE_KEY, None)
+
+
+@@ -112,4 +114,5 @@
+ def plan_hold(
+     job: dict[str, Any], hold_seconds: float, *, recover_consumed_fire: bool = False,
++    automation_occurrence: Optional[str] = None,
+ ) -> bool:
+     """Called under the jobs lock AFTER ``_advance_after_run`` computed the schedule's natural
+@@ -137,7 +140,10 @@
+     else:
+         parked = window_end.isoformat()
++    job.pop(AUTOMATION_OCCURRENCE_KEY, None)
+     if recover:
+         # Only the recovery fire is off-lattice; the coalesced instant is a legal occurrence.
+         job[SCHEDULE_EXPR_KEY] = schedule.get("expr")
++        if automation_occurrence:
++            job[AUTOMATION_OCCURRENCE_KEY] = automation_occurrence
+     else:
+         job.pop(SCHEDULE_EXPR_KEY, None)
+
+diff --git a/cron/scheduler_provider.py b/cron/scheduler_provider.py
+--- a/cron/scheduler_provider.py
++++ b/cron/scheduler_provider.py
+@@ -206,4 +206,8 @@
+         execution = create_execution(job_id, source=self.name)
+         claim_kwargs = {"return_job": True}
++        if self.name == "chronos" and not (force or manual):
++            # NAS callbacks own due occurrences only. A duplicate arriving before the next
++            # slot must not be reinterpreted as an unscheduled manual launch.
++            claim_kwargs["require_due"] = True
+         if force:
+             claim_kwargs["force"] = True
+
+diff --git a/cron/scheduler_worker_failure.py b/cron/scheduler_worker_failure.py
+--- a/cron/scheduler_worker_failure.py
++++ b/cron/scheduler_worker_failure.py
+@@ -1,3 +1,30 @@
+ """Job-level visibility for a recovered, acknowledged worker death."""
++
++
++def _recover_quota_skip(job, owner, *, adapters=None, loop=None):
++    """Finish a known skipped fire without starting a model or repeating a queued delivery."""
++    from cron import scheduler
++    from cron.delivery_queue import get_status
++    from cron.unreachable_retry import is_retry_run
++    from identity.automation_quota import notice, saved_skip
++
++    execution_id = str(job["execution_id"])
++    delivery_error = None
++    try:
++        if get_status(execution_id) is None:
++            quota = saved_skip(job, execution_id)
++            if quota is not None and quota.exceeded:
++                text = notice(job, quota)
++                delivery_job = {**job, "_brai_quota_notice": True}
++                delivery_error = scheduler._deliver_result(
++                    delivery_job, text, adapters=adapters, loop=loop,
++                )
++    except Exception as error:
++        scheduler.logger.warning("Automation skip recovery delivery failed: %s", type(error).__name__)
++        delivery_error = "Automation quota notification delivery failed"
++    scheduler.mark_job_run(
++        job["id"], True, delivery_error=delivery_error, status="quota_skipped",
++        expected_fire_owner=owner, ladder_rung=is_retry_run(job),
++    )
+
+
+@@ -23,4 +50,8 @@
+     with scheduler.fire_claim_fence(job["id"], expected_owner=owner) as owns_claim:
+         if not owns_claim:
++            return True
++        if execution.get("delivery_outcome") == "quota_pending":
++            with scheduler._fire_secret_scope():
++                _recover_quota_skip(job, owner, adapters=adapters, loop=loop)
+             return True
+         error = error or execution["error"]
+
+diff --git a/gateway/config.py b/gateway/config.py
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -703,5 +703,7 @@
+
+     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
+-        if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform == Platform.TELEGRAM:
++        from hermes_constants import is_brai_managed_worker
++
++        if platform == Platform.TELEGRAM and is_brai_managed_worker():
+             configured = self.platforms.get(platform)
+             home = configured.home_channel if configured else None
+
+diff --git a/hermes_constants.py b/hermes_constants.py
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -22,4 +22,11 @@
+ INDICATOR_STYLES: tuple[str, ...] = ("ascii", "emoji", "kaomoji", "unicode")
+ DEFAULT_INDICATOR_STYLE: str = "kaomoji"
++
++BRAI_WORKER_CONFIG_PATH = Path("/opt/brai-profile/profile-config.json")
++
++
++def is_brai_managed_worker() -> bool:
++    """Recognize a personal Brai runtime even when profile dotenv overrides its mode."""
++    return os.environ.get("BRAI_IDENTITY_MODE") == "worker" or BRAI_WORKER_CONFIG_PATH.is_file()
+
+
+
+diff --git a/tools/async_delegation.py b/tools/async_delegation.py
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -214,4 +214,11 @@
+
+
++def _drop_completion(conn, delegation_id, status, result, now):
++    conn.execute("""UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
++           result_json=?, event_json=NULL, delivery_state='dropped'
++           WHERE delegation_id=?""",
++        (status, now, now, json.dumps(result), delegation_id))
++
++
+ def record_unit_child(delegation_id: str, entry: dict[str, Any]) -> None:
+     """Durably record ONE finished child of a still-running multi-child unit on the unit's own row, so a crash before
+@@ -276,4 +283,12 @@
+             task = json.loads(task_json or "{}")
+             error = "Delegation owner exited before recording a terminal result; outcome unknown."
++            if task.get("role") == "cron_run":
++                from hermes_constants import is_brai_managed_worker
++
++                if is_brai_managed_worker():
++                    # Cron owns delivery and recovery for this run, including a known quota skip.
++                    _drop_completion(conn, delegation_id, "unknown", {"error": error}, now)
++                    recovered += 1
++                    continue
+             recovered_results = _recovered_results(task, result_json, error)
+             if recovered_results:
+@@ -950,5 +965,17 @@
+         record["progress_fn"] = None  # stop stale-monitor sampling
+         snapshot = dict(record)
+-    _push_completion_event(snapshot, result(snapshot) if callable(result) else result, status)
++    completion = result(snapshot) if callable(result) else result
++    quota_skip = (
++        snapshot.get("role") == "cron_run" and isinstance(completion, dict)
++        and completion.get("_brai_quota_no_wake") is True
++    )
++    if quota_skip:
++        try:
++            with _DB_LOCK, _transaction() as conn:
++                _drop_completion(conn, delegation_id, status, completion, time.time())
++        except Exception:
++            logger.exception("Async delegation %s: could not record suppressed completion", delegation_id)
++    else:
++        _push_completion_event(snapshot, completion, status)
+     with _records_lock:
+         if delegation_id in _records:
