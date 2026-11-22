@@ -488,6 +488,19 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.resolve.assert_not_awaited()
 
 
+    async def test_held_hydration_defers_registered_and_unregistered_updates(self):
+        self.capture(1)
+        outsider = update(2)
+        self.transport.capture_batch([(outsider, {'state': 'unregistered'})], 123)
+        self.mirror.hydrated = False
+        self.mirror.inventory = AsyncMock(return_value={'profiles': [PROFILE]})
+        self.mirror.gate_store = object()
+        await self.mirror.hydrate_held()
+        self.assertTrue(self.mirror.hydrated)
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        await self.mirror.hydrate()
+        self.assertCountEqual([self.mirror.app.update_queue.get_nowait().update_id for _ in range(2)], [1, 2])
+
     async def test_ingress_restart_preserves_fifo_raw_messages(self):
         for ident in (3, 1, 2): self.capture(ident)
         self.mirror = self.new_mirror()

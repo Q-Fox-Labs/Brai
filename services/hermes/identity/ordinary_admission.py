@@ -153,6 +153,7 @@ class Mirror:
         self.bot_id = None
         self.input_ready = self.reconcile_delivery = None
         self.pump_lock = asyncio.Lock()
+        self.restart_pump_deferred = False
         self.auto_inputs, self.terminal_inputs = set(), set()
         self.input_routes = {}
         self.service_updates = {}
@@ -205,7 +206,7 @@ class Mirror:
         from pathlib import Path
         if self.hydrated:
             if not defer_recovery:
-                self._start_recovery()
+                await self._resume_hydrated()
             return
         if self.inventory is None or self.gate_store is None:
             raise ValueError('INGRESS_HYDRATION_UNAVAILABLE')
@@ -214,10 +215,10 @@ class Mirror:
         async with self.hydration_lock:
             if self.hydrated:
                 if not defer_recovery:
-                    self._start_recovery()
+                    await self._resume_hydrated()
                 return
             if self.restartable:
-                await self._restart_inputs()
+                await self._restart_inputs(defer_recovery=defer_recovery)
                 return
             boot = self.boot_id or Path('/proc/sys/kernel/random/boot_id').read_text().strip()
             result = await self.inventory()
@@ -357,8 +358,8 @@ class Mirror:
             if not defer_recovery:
                 self._start_recovery()
 
-    async def _restart_inputs(self):
-        """DEV: восстановить captured и сверяемые передачи; legacy unknown сохранить."""
+    async def _restart_inputs(self, *, defer_recovery):
+        """Восстановить журнал; отложить выдачу входов до открытия общего gate."""
         import json
         if self.transport is None or self.app is None:
             raise ValueError('TRANSPORT_RECOVERY_UNAVAILABLE')
@@ -379,7 +380,15 @@ class Mirror:
                 await asyncio.to_thread(self.transport.transition, row['bot_id'], row['update_id'], 'handing_off', 'unknown')
         self.bot_id = self.app.bot.id
         self.hydrated = True
-        await self.pump()
+        self.restart_pump_deferred = defer_recovery
+        if not defer_recovery:
+            await self.pump()
+
+    async def _resume_hydrated(self):
+        self._start_recovery()
+        if self.restart_pump_deferred:
+            await self.pump()
+            self.restart_pump_deferred = False
 
     def _start_recovery(self):
         """Запустить отложенный replay один раз после снятия общего gate."""
