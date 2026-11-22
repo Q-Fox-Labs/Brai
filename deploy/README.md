@@ -56,6 +56,8 @@ Compose публикует MCP только на `127.0.0.1`. Host-агент о
 
 ## Проверка production образов
 
+Порядок [пробной клиентской установки на одноразовом раннере GitHub Actions](ci/README.md) включает подготовку тестовых входов и замер места на диске.
+
 Изолированный `compose.production-test.yml` — общий startup smoke, а не browser-auth end-to-end стенд. Перед запуском нужны prepared contexts для текущих web/artifacts и заранее принятые auth/timer image tags. Значения `BRAI_WEB_RUNTIME_CONTEXT`, `BRAI_ARTIFACTS_RUNTIME_CONTEXT`, `BRAI_SOURCE_REVISION`, `BRAI_ARTIFACTS_IMAGE`, `BRAI_AUTH_IMAGE` и `BRAI_TIMER_IMAGE` передаются через отдельный compose env-файл. Для file Caddy задайте свободные `BRAI_ARTIFACTS_TEST_SUBNET` и адрес шлюза `BRAI_ARTIFACTS_PRIVATE_HOST_IP`; listener привязывается к этому адресу, который одинаково доступен host и контейнерам. Test PostgreSQL и NATS используют фиктивные данные в `tmpfs`, не публикуют БД и не подключаются к production сетям. Web доступен только на `127.0.0.1:13000`. Это общий startup smoke; он не проверяет полный browser auth/raw upload flow.
 
 ```sh
