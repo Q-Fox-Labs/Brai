@@ -107,11 +107,10 @@ class Config:
         """Проверить обязательные параметры; секреты остаются в окружении child process."""
         owner = os.environ.get("BRAI_TELEGRAM_OWNER_ID", "")
         chat = os.environ.get("BRAI_TELEGRAM_CHAT_ID", "")
-        if not chat:
-            # AIDEV-NOTE: Старый native профиль может задавать только Telegram allowlist.
-            native_chat = os.environ.get("TELEGRAM_ALLOWED_CHATS", "").strip()
-            if re.fullmatch(r"-[1-9][0-9]*", native_chat):
-                chat = native_chat
+        native_chat = os.environ.get("TELEGRAM_ALLOWED_CHATS", "").strip()
+        legacy_group = not chat and re.fullmatch(r"-[1-9][0-9]*", native_chat) is not None
+        if legacy_group:
+            chat = native_chat
         allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "")
         users = tuple(allowed.split(",")) if allowed else ()
         state = Path(os.environ.get("BRAI_TELEGRAM_STATE_DIR", ""))
@@ -135,7 +134,8 @@ class Config:
             game_core_enabled = json.loads(Path(tools_config).read_text()).get('gameCore', {}).get('enabled', True)
             if type(game_core_enabled) is not bool:
                 raise ValueError('BRAI_TELEGRAM_CONFIG_INVALID')
-        return cls(owner, state, entry, node, root, chat, users, game_core_enabled)
+        # AIDEV-NOTE: Native allowlist восстанавливает маршрут владельца. Общий доступ требует явного маршрута Brai.
+        return cls(owner, state, entry, node, root, chat, () if legacy_group else users, game_core_enabled)
 
     @classmethod
     def from_identity(cls):

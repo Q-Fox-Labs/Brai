@@ -982,21 +982,23 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             os.environ["BRAI_TELEGRAM_CHAT_ID"] = "-1008765432100"
             self.assertEqual(mod.Config.from_env().chat, "-1008765432100")
 
-        for chat, user, kind in ((GROUP, 456, "supergroup"), (GROUP, 123, "group"), ("456", 456, "private")):
+        for chat, user, kind in ((GROUP, 123, "supergroup"), (GROUP, 123, "group"), ("123", 123, "private")):
             await self.plugin.guard(self.update(chat=chat, owner=user, chat_type=kind), None)
         stop = sys.modules["telegram.ext"].ApplicationHandlerStop
-        for chat, user, kind in ((GROUP, 777, "supergroup"), ("-1008765432100", 456, "supergroup"),
-                                 ("123", 456, "private")):
+        for chat, user, kind in ((GROUP, 456, "supergroup"), (GROUP, 777, "supergroup"),
+                                 ("-1008765432100", 123, "supergroup"), ("456", 456, "private")):
             with self.assertRaises(stop):
                 await self.plugin.guard(self.update(chat=chat, owner=user, chat_type=kind), None)
 
         old_route = self.native_context["HERMES_SESSION_KEY"]
         origin = self.entry.origin
-        origin.chat_id, origin.chat_type, origin.user_id, origin.thread_id = GROUP, "group", "456", "77"
+        origin.chat_id, origin.chat_type, origin.user_id, origin.thread_id = GROUP, "group", "123", "77"
         self.native_context.update(HERMES_SESSION_CHAT_ID=GROUP, HERMES_SESSION_CHAT_TYPE="group",
-                                   HERMES_SESSION_USER_ID="456", HERMES_SESSION_THREAD_ID="77")
+                                   HERMES_SESSION_USER_ID="123", HERMES_SESSION_THREAD_ID="77")
         event = self.event(source=origin, text="Продолжим с прошлого шага")
         self.assertIsNone(await self.plugin.incoming(event))
+        other = self.event(source=NS(**{**vars(origin), "user_id": "456"}), text="Чужое сообщение")
+        self.assertEqual((await self.plugin.incoming(other))["action"], "skip")
         context = self.plugin._tool_context({"session_id": self.entry.session_id})
         self.assertEqual((context["session_key"], context["session_id"], context["chat_id"], context["thread_id"]),
                          (old_route, self.entry.session_id, GROUP, "77"))
