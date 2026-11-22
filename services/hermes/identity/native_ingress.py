@@ -60,6 +60,7 @@ class ReleaseGate:
         self.app = app
         self.operation = None
         self.probe_held_startup = False
+        self.probed_generation = None
         self.held = asyncio.Event()
         self.poll_held = False
         self.hydration_failed = False
@@ -120,9 +121,7 @@ class ReleaseGate:
         cls = type(bot)
         original = cls.get_updates
         owned = 'get_updates' in cls.__dict__
-        probed_generation = None
         async def gated(instance, *args, **kwargs):
-            nonlocal probed_generation
             cleanup = False
             if instance is bot and self.operation is not None:
                 timeout = kwargs.get('timeout')
@@ -151,7 +150,7 @@ class ReleaseGate:
                         try:
                             adapter = self.watchdog_adapter
                             generation = adapter._polling_generation
-                            if generation != probed_generation:
+                            if generation != self.probed_generation:
                                 # Offset zero confirms no positive update IDs. PTB cannot
                                 # advance its cursor until the gated call returns a batch.
                                 pending = await original(instance, offset=0, limit=1, timeout=0)
@@ -162,7 +161,7 @@ class ReleaseGate:
                                     raise RuntimeError('Held polling transport did not report progress')
                                 # Native transport will count the batch again after resume.
                                 adapter._updates_received_total -= len(pending)
-                                probed_generation = generation
+                                self.probed_generation = generation
                         except BaseException:
                             self.poll_held = False
                             raise
@@ -223,6 +222,7 @@ class ReleaseGate:
         if self.operation is None:
             self.operation = operationId
             self.probe_held_startup = probe_polling
+            self.probed_generation = None
             self.committed = False
             self.held.clear()
             self.unlocked.clear()
@@ -232,6 +232,17 @@ class ReleaseGate:
         """Зафиксировать операцию и ждать границу следующего polling без отмены запросов."""
         self.hold(operationId)
         return await self.status(operationId)
+
+    def _startup_probe_pending(self):
+        if not self.probe_held_startup:
+            return None
+        adapter = self.watchdog_adapter
+        if (self.drain is None or not self.drain.done() or not self.poll_held
+                or self.probed_generation is None
+                or adapter._polling_generation != self.probed_generation
+                or not adapter._polling_progress_accepting):
+            return {'operationId': self.operation, 'state': 'draining', 'reason': 'telegram_polling'}
+        return None
 
     async def status(self, operationId):
         """Сообщить границу транспорта; неподтверждённые worker блокируют release."""
@@ -252,7 +263,11 @@ class ReleaseGate:
         async with self.lock:
             if self.operation != operationId:
                 raise RpcError(-32602, 'Release operation does not own ingress')
-            return await self.resolver.release_status(operationId)
+            pending = self._startup_probe_pending()
+            if pending is not None:
+                return pending
+            result = await self.resolver.release_status(operationId)
+            return self._startup_probe_pending() or result
 
     async def profile_try(self, **params):
         owner = getattr(self.resolver, 'profile_release', None)
@@ -282,6 +297,9 @@ class ReleaseGate:
         async with self.lock:
             if self.operation != operationId or self.drain is not drain:
                 raise RpcError(-32602, 'Release operation changed')
+            pending = self._startup_probe_pending()
+            if pending is not None:
+                return pending
             self.committed = True
             return {'operationId': operationId, 'state': 'committed', 'reason': None}
 
@@ -296,12 +314,22 @@ class ReleaseGate:
         async with self.lock:
             if self.operation != operationId:
                 raise RpcError(-32602, 'Release operation does not own ingress')
+            pending = self._startup_probe_pending()
+            if pending is not None:
+                return pending
             if self.resolver is not None and not await self.resolver.release_resume(operationId):
                 return {'operationId': operationId, 'state': 'blocked', 'reason': 'worker_resume_unconfirmed'}
+            pending = self._startup_probe_pending()
+            if pending is not None:
+                return pending
             drain, self.drain = self.drain, None
             if drain is not None:
-                drain.cancel()
-                await asyncio.gather(drain, return_exceptions=True)
+                if drain.done():
+                    if not drain.cancelled():
+                        drain.exception()
+                else:
+                    drain.cancel()
+                    await asyncio.gather(drain, return_exceptions=True)
             if self.held.is_set() and self.watchdog_adapter is not None:
                 # После долгого hold возраст отсчитывается с открытия, не с прошлого poll.
                 adapter = self.watchdog_adapter

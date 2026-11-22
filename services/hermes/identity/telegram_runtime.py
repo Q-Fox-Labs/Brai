@@ -673,12 +673,28 @@ class Resolver:
         digest = delivery_id([key, auth, source_id, action, payload])
 
         def legacy_matches(saved):
-            # AIDEV-NOTE: Старый конверт мог получить профиль от другого вызова broker.
-            # Сверяем тот же ключ, права и точные данные уже подготовленной доставки.
+            # Старый конверт хранит готовый адрес и текст без исходной metadata запроса.
             saved_profile = saved['profile']
-            return (self.ledger.owner(saved_profile) == key
-                    and (saved_profile.get('role'), saved_profile.get('generation')) == auth[1:]
-                    and {**saved, 'profile': profile} == body)
+            if (self.ledger.owner(saved_profile) != key
+                    or (grouped and saved_profile.get('telegramId') != profile['telegramId'])
+                    or (saved_profile.get('role'), saved_profile.get('generation')) != auth[1:]
+                    or saved.get('action') != action or saved.get('generation') != source['chat_generation']):
+                return False
+            old_values = dict(saved['payload'])
+            old_metadata = old_values.pop('metadata')
+            old_thread = str(old_metadata.get('thread_id') or old_metadata.get('message_thread_id')
+                             or old_metadata.get('direct_messages_topic_id') or '')
+            if old_thread != route[1] or any(
+                    (old_metadata.get(flag) is True) != (metadata.get(flag) is True)
+                    for flag in ('_interim_send', '_brai_progress')):
+                return False
+            expected = {name: value for name, value in values.items() if name != 'metadata'}
+            if grouped and action != 'edit_message':
+                # Прежний DEV отвечал на первый вход native batch.
+                first = str(source.get('batch_first_message_id') or anchor)
+                if str(old_values.get('reply_to')) == first:
+                    expected['reply_to'] = old_values['reply_to']
+            return old_values == expected
 
         self.reply_outbox.enqueue(ident, key, body, request_digest=digest, legacy_matches=legacy_matches)
         previous = self.reply_outbox.result(ident)

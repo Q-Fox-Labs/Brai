@@ -247,6 +247,40 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['success'])
         self.assertEqual(adapter.send.await_count, 1)
 
+    async def test_legacy_group_outbox_keeps_anchor_and_receipt_after_route_metadata_changes(self):
+        actor = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 1,
+                 'telegramId': '456', 'authorTelegramId': '123'}
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        route = ('-10012', '77')
+        resolver.ledger.admit(actor, route, {'thread_id': '77', 'route_version': 2}, '71')
+        resolver.ledger.record(actor, route, '70', outgoing=False)
+        resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: {
+            'chat': route[0], 'actor_id': '456', 'chat_generation': 0, 'state': 'accepted',
+            'auth_author': '123', 'auth_role': 'user', 'auth_generation': 1,
+            'batch_first_message_id': 70,
+            'payload': json.dumps({'message': {'message_id': 71, 'message_thread_id': 77,
+                'chat': {'id': -10012, 'type': 'supergroup', 'is_forum': True}}})}))
+        receipt = {'success': True, 'message_id': '81'}
+        resolver._deliver_route = AsyncMock(return_value=receipt)
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        ident = delivery_id('legacy-group-reply')
+        source = delivery_id('group-input')
+        payload = {'chat_id': route[0], 'content': 'Готово', 'reply_to': '71',
+                   'metadata': {'thread_id': '77'}}
+        saved_payload = {**payload, 'reply_to': '70',
+                         'metadata': {'thread_id': '77', 'route_version': 1}}
+        saved = {'profile': actor, 'action': 'send', 'payload': saved_payload, 'generation': 0}
+        resolver.reply_outbox.enqueue(ident, resolver.ledger.owner(actor), saved)
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=actor)):
+            self.assertEqual(await resolver.durable_reply(actor, 'owner', 'send', payload, ident, source), receipt)
+            self.assertEqual(await resolver.durable_reply(actor, 'owner', 'send', payload, ident, source), receipt)
+            with self.assertRaisesRegex(ValueError, 'OUTBOX_ID_CONFLICT'):
+                await resolver.durable_reply(actor, 'owner', 'send',
+                    {**payload, 'content': 'Другой текст'}, ident, source)
+        resolver._deliver_route.assert_awaited_once()
+        self.assertEqual(resolver._deliver_route.await_args.args[2], saved_payload)
+
     async def test_supervisor_bridge_saves_explicit_author_before_first_send(self):
         resolver = runtime.Resolver(NS())
         self.addCleanup(resolver.ledger.close)

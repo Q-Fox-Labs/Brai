@@ -76,7 +76,17 @@ class InboxTests(unittest.TestCase):
             raw = update(ident).to_dict()
             raw['message'].update(message_thread_id=anchor, is_topic_message=False)
             telegram_update = Update.de_json(raw, Bot('123:abc'))
-            self.inbox.capture(PROFILE, telegram_update, '123')
+            captured = self.inbox.capture(PROFILE, telegram_update, '123')
+            if ident == 1:
+                # Повтор после обновления должен принять точную запись прежнего DEV.
+                db = self.journal.database(PROFILE)
+                try:
+                    with db:
+                        db.execute('UPDATE release_inbox SET thread=? WHERE seq=?',
+                                   (str(anchor), captured['seq']))
+                finally:
+                    db.close()
+                self.assertEqual(self.inbox.capture(PROFILE, telegram_update, '123'), captured)
             self.assertEqual(self.inbox.observe(PROFILE, '123', ident)['thread'], '')
             self.inbox.claim_for_delivery(PROFILE, '123', ident)
         batch = self.inbox.bind_delivery(PROFILE, '123', [1, 2])

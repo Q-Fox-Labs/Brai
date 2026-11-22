@@ -477,6 +477,52 @@ class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(progress.is_set())
         await gate.resume('op')
 
+    async def test_restarted_polling_cannot_reuse_previous_generation_readiness(self):
+        progress, entered, complete = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        adapter = SimpleNamespace(
+            _polling_generation=1, _polling_progress_accepting=True,
+            _polling_progress_event=progress, _updates_received_total=0,
+        )
+
+        class ReconnectingBot:
+            async def get_updates(self, **kwargs):
+                if adapter._polling_generation == 2:
+                    entered.set()
+                    await complete.wait()
+                progress.set()
+                return []
+
+        bot = ReconnectingBot()
+        gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.watchdog_adapter = adapter
+        gate.resolver = SimpleNamespace(release_status=AsyncMock(return_value={'state': 'ready'}),
+                                        release_resume=AsyncMock(return_value=True))
+        gate.install()
+        self.addCleanup(gate.restore)
+        gate.hold('op', probe_polling=True)
+        first = asyncio.create_task(bot.get_updates())
+        await asyncio.wait_for(gate.drain, timeout=1)
+        self.assertEqual((await gate.status('op'))['state'], 'ready')
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+        adapter._polling_generation += 1
+        progress.clear()
+        second = asyncio.create_task(bot.get_updates())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            self.assertEqual((await gate.status('op'))['state'], 'draining')
+            self.assertEqual((await gate.resume('op'))['state'], 'draining')
+            gate.resolver.release_resume.assert_not_awaited()
+            complete.set()
+            await asyncio.wait_for(progress.wait(), timeout=1)
+            self.assertEqual((await gate.status('op'))['state'], 'ready')
+            self.assertEqual((await gate.resume('op'))['state'], 'resumed')
+            await asyncio.wait_for(second, timeout=1)
+        finally:
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+
     async def test_real_updater_stops_with_only_cleanup_allowed(self):
         try:
             from telegram.ext import Updater

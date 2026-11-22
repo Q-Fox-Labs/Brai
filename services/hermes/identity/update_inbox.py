@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+from types import SimpleNamespace
 
 from .ordinary_admission import group_chat_id, group_message, message_thread
 
@@ -232,9 +233,15 @@ class UpdateInbox:
                     if tuple(auth) != (author,role,auth_generation):
                         raise ValueError('INBOX_IDENTITY_CONFLICT')
                     if (existing['digest'], existing['payload'], existing['profile_id'], existing['user_id'],
-                        existing['uid'], existing['actor_id'], existing['chat'], existing['thread']) != (
-                            digest,payload,ident,owner,uid,actor,chat,thread):
+                        existing['uid'], existing['actor_id'], existing['chat']) != (
+                            digest,payload,ident,owner,uid,actor,chat):
                         raise ValueError('INBOX_IDENTITY_CONFLICT')
+                    if existing['thread'] != thread:
+                        # Старый DEV записывал якорь ответа в личке как тему.
+                        message = getattr(update, 'effective_message', None)
+                        legacy = str(getattr(message, 'message_thread_id', None) or '')
+                        if group_chat_id(chat) or existing['thread'] != legacy:
+                            raise ValueError('INBOX_IDENTITY_CONFLICT')
                     result = {'seq': existing['seq'], 'state': existing['state'], 'digest': digest}
                 else:
                     state = self._state(db, chat, _consent_thread(payload))
@@ -419,12 +426,13 @@ class UpdateInbox:
             if group_chat_id(rows[0]['chat']) and len({(r['actor_id'], r['auth_author'], r['auth_role'],
                                                         r['auth_generation']) for r in rows}) != 1:
                 raise PermissionError('DELIVERY_INPUT_AUTH_CHANGED')
+            first = json.loads(rows[0]['payload']).get('message', {}).get('message_id')
             if reply_to:
                 for row in rows:
                     message = json.loads(row['payload']).get('message', {})
                     if str(message.get('message_id')) == str(reply_to):
-                        return dict(row)
-            return dict(rows[0])
+                        return {**dict(row), 'batch_first_message_id': first}
+            return {**dict(rows[0]), 'batch_first_message_id': first}
         finally:
             db.close()
 
