@@ -121,13 +121,47 @@ class JournalTests(unittest.TestCase):
         self.store.begin_input(IDENT, DIGEST)
         self.store.save_continuation('session', IDENT, 3)
         self.store.save_response('session', IDENT, 'answer MEDIA:file', {'message_id': '71'})
+        self.store.save_response_plan('session', IDENT, {'batches': [{'kind': 'single', 'items': [
+            {'artifact': {'artifact_id': 'file'}, 'caption': '', 'presentation': 'document'}]}]})
         backup = self.path.parent / 'composed.sqlite3'
         with sqlite3.connect(self.path) as source, sqlite3.connect(backup) as target:
             source.backup(target)
         backup.chmod(0o600)
-        restored = DeliveryJournal(backup, 'owner').continuation('session')
+        journal = DeliveryJournal(backup, 'owner')
+        restored = journal.continuation('session')
         self.assertEqual((restored['ready_response'], restored['response_event']['message_id']),
                          ('answer MEDIA:file', '71'))
+        self.assertEqual(journal.prepared_response('session', IDENT)['plan']['batches'][0]['items'][0]['artifact']['artifact_id'], 'file')
+
+    def test_new_input_keeps_previous_prepared_response_and_outbox(self):
+        self.store.begin_input(IDENT, DIGEST)
+        self.store.save_continuation('session', IDENT, 3)
+        self.store.save_response('session', IDENT, 'answer MEDIA:file', {'message_id': '71'}, {'chat_id': '42'})
+        newer, newer_digest = delivery_id('newer'), delivery_id('newer-digest')
+        self.store.begin_input(newer, newer_digest)
+        self.store.save_continuation('session', newer, 3)
+        restored = DeliveryJournal(self.path, 'owner')
+        self.assertEqual(restored.continuation('session')['input_id'], newer)
+        self.assertEqual(restored.prepared_response('session', IDENT)['response'], 'answer MEDIA:file')
+        output = delivery_id('saved-file')
+        restored.enqueue_response('session', IDENT, [(output, 'send_file_set',
+            {'payload': {'chat_id': '42'}, 'scope_id': None, 'input_delivery_id': IDENT})])
+        restored.clear_response('session', IDENT, 'answer MEDIA:file')
+        self.assertEqual(restored.continuation('session')['input_id'], newer)
+        self.assertEqual(restored.pending_outputs()[0]['id'], output)
+
+    def test_prepared_batch_conflict_rolls_back_all_outputs(self):
+        self.store.begin_input(IDENT, DIGEST)
+        self.store.save_continuation('session', IDENT, 3)
+        self.store.save_response('session', IDENT, 'answer')
+        first, conflict = delivery_id('first-file'), delivery_id('conflict-file')
+        self.store.queue_output(conflict, 'send', {'payload': {'content': 'different'}})
+        with self.assertRaisesRegex(ValueError, 'OUTPUT_CONFLICT'):
+            self.store.enqueue_response('session', IDENT, [
+                (first, 'send_file_set', {'payload': {'chat_id': '42'}}),
+                (conflict, 'send_file_set', {'payload': {'chat_id': '42'}})])
+        self.assertIsNone(self.store.output(first))
+        self.assertEqual(self.store.prepared_response('session', IDENT)['phase'], 'prepared')
 
 
 class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -269,6 +303,48 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             input_delivery.reset(token)
         self.assertTrue(result.success)
 
+    async def test_voice_after_staging_reuses_original_outbox_id(self):
+        from gateway.config import Platform
+        from gateway.platforms.event import MessageType
+        from gateway.session import SessionSource
+        from identity.scope import input_delivery, prepared_response, prepared_voice
+        from identity.adapter import make_adapter
+        class Base:
+            def __init__(self, config):
+                pass
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': '81'}))
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', peer, None)
+        adapter._brai_delivery_journal = self.worker.delivery_journal
+        adapter._streaming_tts_turn_completed = lambda *args: False
+        self.runner._delivery_adapter_for = lambda source: adapter
+        self.runner._should_send_voice_reply = lambda *args, **kwargs: True
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id='42', user_id='42', thread_id='7')
+        event = NS(source=source, message_id='71', message_type=MessageType.VOICE)
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        async def deliver(*args, **kwargs):
+            self.assertEqual(self.worker.delivery_journal.prepared_response('session', IDENT)['response'], 'answer')
+            return await adapter._action('send_voice', {'chat_id': '42', 'artifact': {'artifact_id': 'first'},
+                'caption': None, 'metadata': {'thread_id': '7'}})
+        self.runner._hmwa_deliver_turn_response = deliver
+        self.worker._install_failure_recovery(self.runner)
+        t1, t2, t3 = input_delivery.set(IDENT), prepared_response.set(None), prepared_voice.set([0])
+        try:
+            result = await self.runner._hmwa_deliver_turn_response(event, source, self.entry, 'session', 0,
+                {'completed': True}, [], 'answer', '', False)
+            self.assertTrue(result.success)
+            prepared_voice.set([0])
+            replay = await adapter._action('send_voice', {'chat_id': '42', 'artifact': {'artifact_id': 'regenerated'},
+                'caption': None, 'metadata': {'thread_id': '7'}})
+            self.assertTrue(replay.success)
+        finally:
+            prepared_voice.reset(t3)
+            prepared_response.reset(t2)
+            input_delivery.reset(t1)
+        peer.call.assert_awaited_once()
+
     async def test_followup_uses_its_own_input_instead_of_old_task_context(self):
         from identity.scope import input_delivery, delivery_scope
         from identity.adapter import make_adapter
@@ -298,6 +374,8 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, config):
                 self.crash = True
             async def _extract_response_content(self, response, event, key, **kwargs):
+                if not self.crash:
+                    raise AssertionError('Replay must use saved media plan after temporary file disappears')
                 return NS(text_content='answer', images=[], media_files=[('file', False)], local_files=[])
             async def _send_final_text(self, event, key, text, metadata, ephemeral, ttl, record):
                 record(await self._action('send', {'chat_id': '42', 'content': text,
@@ -306,14 +384,30 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 record_delivery(await self._action('send_file_set', {'chat_id': '42', 'metadata': metadata,
                     'items': [{'artifact': {'artifact_id': 'file'}, 'caption': '', 'presentation': 'document'}],
                     'kind': 'single', 'fallback': False}))
+            async def _release_turn_marker(self, event):
+                return None
             async def _process_message_background(self, event, key):
+                if getattr(event, '_brai_ready_response', None):
+                    from identity.scope import prepared_response
+                    prepared_response.set((key, IDENT, event._brai_ready_response))
                 extracted = await self._extract_response_content('answer MEDIA:file', event, key)
                 await self._send_final_text(event, key, extracted.text_content, {'thread_id': '7'}, False, 0, lambda _: None)
                 if self.crash:
                     raise RuntimeError('synthetic crash')
                 await self._deliver_attachments(event, extracted, {'thread_id': '7'}, anything_sent=True, record_delivery=lambda _: None)
+                await self._release_turn_marker(event)
         module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
         module.TelegramAdapter, platform.SendResult = Base, NS
+        files = ModuleType('brai_files')
+        files.output_items = lambda paths: ([{'file': {'artifactId': 'file', 'mimeType': 'application/pdf'},
+                                             'caption': '', 'presentation': 'document'}], 'files')
+        files.validate_telegram = lambda items: None
+        files.key = lambda value: delivery_id(value)
+        files.source_of = lambda event: {'chat': '42'}
+        files.store = lambda: NS(cleanup=lambda ident: None)
+        patched_files = patch.dict(sys.modules, {'brai_files': files})
+        patched_files.start()
+        self.addCleanup(patched_files.stop)
         peer = NS(call=AsyncMock(side_effect=[{'success': True, 'message_id': '1'},
                                               {'success': True, 'message_id': '2'}]))
         with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
@@ -321,23 +415,22 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.worker.delivery_journal.save_continuation('session', IDENT, 3)
         adapter._brai_delivery_journal = self.worker.delivery_journal
         adapter.gateway_runner = self.runner
-        self.runner._brai_retry_saved_response = self.worker._retry_saved_response
         self.runner.async_session_store.clear_resume_pending = AsyncMock()
-        event = NS(internal=True, _brai_successful_turn=True, message_id='71')
+        event = NS(internal=True, _brai_successful_turn=True, message_id='71', source=NS(chat_id='42'))
         token = input_delivery.set(IDENT)
         try:
             with self.assertRaisesRegex(RuntimeError, 'synthetic crash'):
                 await adapter._process_message_background(event, 'session')
             self.assertEqual(self.worker.delivery_journal.continuation('session')['ready_response'], 'answer MEDIA:file')
-            self.assertEqual(self.worker.restart_retries['session'], (IDENT, 3))
-            self.worker.restart_retries.clear()
             self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
             adapter._brai_delivery_journal = self.worker.delivery_journal
             adapter.crash = False
-            await adapter._process_message_background(NS(internal=True, _brai_successful_turn=True, message_id='71'), 'session')
+            await adapter._process_message_background(NS(internal=True, _brai_successful_turn=True, message_id='71',
+                _brai_ready_response='answer MEDIA:file', source=NS(chat_id='42')), 'session')
         finally:
             input_delivery.reset(token)
-        self.assertEqual([call.args[1]['action'] for call in peer.call.await_args_list], ['send', 'send_file_set'])
+        self.assertEqual([call.args[1]['action'] for call in peer.call.await_args_list], ['send'])
+        self.assertEqual(self.worker.delivery_journal.pending_outputs()[0]['action'], 'send_file_set')
         self.assertNotIn('ready_response', self.worker.delivery_journal.continuation('session'))
         self.runner.async_session_store.clear_resume_pending.assert_awaited_once_with('session')
 
@@ -401,13 +494,12 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         original = self.runner._run_startup_resume_event
         self.worker._install_restart_recovery(self.runner)
         await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
-        self.assertIn('session', self.worker.restart_retries)
+        self.assertTrue(self.entry.resume_pending)
         original.assert_not_awaited()
         with patch('identity.native_policy.principal', return_value={'role': 'user'}):
             await self.worker._retry_failed_sessions()
         await asyncio.gather(*self.tasks)
         original.assert_awaited_once()
-        self.assertNotIn('session', self.worker.restart_retries)
 
     async def test_saved_composed_response_bypasses_model_on_restart(self):
         self.worker.delivery_journal.save_continuation('session', IDENT, 3)
@@ -470,6 +562,113 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await self.worker._retry_failed_sessions()
             await asyncio.gather(*self.tasks)
         self.runner._run_startup_resume_event.assert_awaited_once()
+
+    async def test_ordinary_restart_also_has_no_new_expiry(self):
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        self.entry.resume_pending, self.entry.resume_reason = True, 'restart_timeout'
+        self.entry.last_resume_marked_at = '2000-01-01T00:00:00'
+        with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+            await self.worker._retry_failed_sessions()
+            await asyncio.gather(*self.tasks)
+        self.runner._run_startup_resume_event.assert_awaited_once()
+
+    async def test_prepared_old_response_restarts_after_new_turn(self):
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id='42', user_id='42', thread_id='7')
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        self.worker.delivery_journal.save_response('session', IDENT, 'old response', {'message_id': '71'}, source.to_dict())
+        newer = delivery_id('newer-input')
+        self.worker.delivery_journal.begin_input(newer, delivery_id('newer-digest'))
+        self.worker.delivery_journal.save_continuation('session', newer, 3)
+        self.entry.resume_pending = False
+        self.runner._peek_session_state = lambda key: self.slot
+        self.runner._release_running_agent_state = Mock()
+        self.adapter._session_tasks = {'session': NS(done=lambda: False)}
+        original = self.runner._run_startup_resume_event
+        async def resume(adapter, event, key):
+            self.assertEqual(event._brai_ready_response, 'old response')
+            self.assertEqual(event.message_id, '71')
+        original.side_effect = resume
+        self.worker._install_restart_recovery(self.runner)
+        with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+            await self.worker._retry_failed_sessions()
+            self.assertEqual(self.tasks, [])
+            self.adapter._session_tasks.clear()
+            await self.worker._retry_failed_sessions()
+        await asyncio.gather(*self.tasks)
+        original.assert_awaited_once()
+        self.assertEqual(self.worker.delivery_journal.continuation('session')['input_id'], newer)
+
+    @unittest.skipUnless(os.environ.get('HERMES_TEST_ENGINE'), 'Pinned native engine required')
+    async def test_native_media_plan_survives_removed_temporary_file(self):
+        from gateway.config import Platform, PlatformConfig
+        from gateway.platforms.base import BasePlatformAdapter
+        from gateway.platforms.event import MessageEvent, MessageType
+        from gateway.session import SessionSource
+        from files import native
+        from files.tests.test_files import Backend
+        from identity.scope import input_delivery, prepared_response
+        from identity.adapter import make_adapter
+        class NativeBase(BasePlatformAdapter):
+            def __init__(self, config):
+                super().__init__(config, Platform.TELEGRAM)
+            async def connect(self, **kwargs):
+                return True
+            async def disconnect(self):
+                return None
+            async def send(self, *args, **kwargs):
+                return NS(success=True, message_id='1')
+            async def get_chat_info(self, chat_id):
+                return {}
+        root = Path(self.tmp.name)
+        workspace, cache = root / 'workspace', root / 'cache'
+        workspace.mkdir()
+        local = workspace / 'result.pdf'
+        local.write_bytes(b'%PDF-1.4 synthetic')
+        config = {'ownerId': 'owner', 'stateRoot': str(root / 'file-state'), 'resultRoot': str(cache),
+                  'readRoots': [str(workspace)], 'account': 'test'}
+        module = ModuleType('plugins.platforms.telegram.adapter')
+        module.TelegramAdapter = NativeBase
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id='42', user_id='42', thread_id='7')
+        event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='71')
+        event._brai_successful_turn = True
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        response = 'answer\nMEDIA:' + str(local)
+        self.worker.delivery_journal.save_response('session', IDENT, response, {'message_id': '71'}, source.to_dict())
+        with patch.dict(os.environ, {'HERMES_HOME': str(root)}), patch.object(native, '_store', None), \
+                patch.object(native, 'schedule_recovery'), patch.dict(sys.modules, {
+                    'brai_files': native, 'plugins.platforms.telegram.adapter': module}):
+            native.configure(config, Backend(cache))
+            peer = NS(call=AsyncMock(side_effect=ConnectionError('synthetic IPC outage')))
+            adapter = make_adapter(PlatformConfig(), Platform.TELEGRAM, peer, None)
+            adapter._brai_delivery_journal = self.worker.delivery_journal
+            adapter.gateway_runner = self.runner
+            a, b = input_delivery.set(IDENT), prepared_response.set(('session', IDENT, response))
+            try:
+                first = await adapter._extract_response_content(response, event, 'session', is_ephemeral_response=False)
+                self.assertEqual(len(first.media_files), 1)
+                await adapter._send_final_text(event, 'session', first.text_content, {'thread_id': '7'}, False, 0, lambda _: None)
+                await adapter._deliver_attachments(event, first, {'thread_id': '7'}, anything_sent=True, record_delivery=lambda _: None)
+                self.assertEqual(self.worker.delivery_journal.prepared_response('session', IDENT)['phase'], 'prepared_enqueued')
+                local.unlink()
+                second = await adapter._extract_response_content(response, event, 'session', is_ephemeral_response=False)
+                self.assertEqual(len(second.media_files), 1)
+                self.assertEqual(second.text_content, first.text_content)
+                self.assertEqual(len(self.worker.delivery_journal.prepared_response('session', IDENT)['plan']['batches']), 1)
+                await adapter._send_final_text(event, 'session', second.text_content, {'thread_id': '7'}, False, 0, lambda _: None)
+                peer.call.assert_awaited_once()
+                self.assertEqual([row['action'] for row in self.worker.delivery_journal.pending_outputs()],
+                                 ['send', 'send_file_set'])
+                self.worker.peer = NS(call=AsyncMock(side_effect=[{'success': True, 'message_id': '81'},
+                    {'success': True, 'message_id': '82', 'raw_response': {'message_ids': ['82']}}]))
+                self.assertEqual(await self.worker.flush_outputs('owner'), {'sent': 2})
+                self.assertEqual(self.worker.delivery_journal.pending_outputs(), [])
+                with native.store().db() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM deliveries WHERE state='unknown'").fetchone()[0], 0)
+            finally:
+                prepared_response.reset(b)
+                input_delivery.reset(a)
 
     async def test_user_interrupt_does_not_create_recovery(self):
         await self.runner._hmwa_shape_agent_response({'failed': True, 'interrupted': True}, self.source, [], self.entry, 'session')

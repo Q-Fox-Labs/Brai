@@ -36,7 +36,6 @@ class Worker:
         self.typing = {}
         self.turn_scopes = {}
         self.recovery_scopes = {}
-        self.restart_retries = {}
         self.tools_ready = False
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
@@ -184,7 +183,6 @@ class Worker:
                     self.active.clear()
                     self.turn_scopes.clear()
                     self.recovery_scopes.clear()
-                    self.restart_retries.clear()
                     self.operational.clear()
                     self.adapter = self.runner = self.peer = None
                     self.peer_released.set()
@@ -326,7 +324,7 @@ class Worker:
         original_deliver = getattr(runner, '_hmwa_deliver_turn_response', None)
         if callable(original_deliver):
             async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
-                from .scope import continuation_turn
+                from .scope import continuation_turn, input_delivery, prepared_response
                 guardrail = result.get('guardrail') if isinstance(result, dict) else None
                 event._brai_successful_turn = (isinstance(result, dict)
                     and not any(result.get(key) for key in ('failed', 'partial', 'error', 'interrupted'))
@@ -337,6 +335,28 @@ class Worker:
                              or (isinstance(guardrail, dict)
                              and guardrail.get('code') == 'brai_review_unavailable'))):
                     return None
+                response = args[1] if len(args) > 1 else kwargs.get('response')
+                intentional_silence = args[3] if len(args) > 3 else kwargs.get('_intentional_silence', False)
+                from gateway.warning_notifications import diagnostic_wake_muted
+                ident = input_delivery.get()
+                if (event._brai_successful_turn and not result.get('already_sent')
+                        and not intentional_silence and not diagnostic_wake_muted(event)
+                        and isinstance(response, str) and response
+                        and ident is not None and self.delivery_journal is not None
+                        and callable(getattr(source, 'to_dict', None))):
+                    fields = {key: getattr(event, key, None) for key in
+                        ('message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id')}
+                    kind = getattr(event, 'message_type', None)
+                    fields['message_type'] = getattr(kind, 'value', kind)
+                    voice = getattr(runner, '_should_send_voice_reply', None)
+                    messages = args[0] if args else kwargs.get('agent_messages', [])
+                    adapter = runner._delivery_adapter_for(source)
+                    streamed = bool(adapter and getattr(adapter, '_streaming_tts_turn_completed',
+                        lambda *_args, **_kwargs: False)(session_key, generation))
+                    fields['auto_voice'] = 'yes' if (not streamed and callable(voice)
+                        and voice(event, response, messages, already_sent=False)) else 'no'
+                    self.delivery_journal.save_response(session_key, ident, response, fields, source.to_dict())
+                    prepared_response.set((session_key, ident, response))
                 return await original_deliver(event, source, entry, session_key, generation, result, *args, **kwargs)
             runner._hmwa_deliver_turn_response = deliver
         runner._brai_retry_failed_sessions = self._retry_failed_sessions
@@ -348,7 +368,11 @@ class Worker:
             async def handle_saved_response(event, source, session_key, *args, **kwargs):
                 response = getattr(event, '_brai_ready_response', None)
                 if response is not None:
+                    from .scope import input_delivery, prepared_response
+                    prepared_response.set((session_key, input_delivery.get(), response))
                     event._brai_successful_turn = True
+                    if getattr(event, '_brai_auto_voice', False):
+                        await runner._send_voice_reply(event, response)
                     return response
                 return await handle(event, source, session_key, *args, **kwargs)
             runner._handle_message_with_agent = handle_saved_response
@@ -378,18 +402,31 @@ class Worker:
             from gateway.run import _AGENT_PENDING_SENTINEL
             if self.delivery_journal is None and os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
                 self._enable_delivery()
-            binding = self.delivery_journal.continuation(session_key) if self.delivery_journal else None
+            current_binding = self.delivery_journal.continuation(session_key) if self.delivery_journal else None
+            detached = getattr(event, '_brai_detached_input', None)
+            candidate = detached or (current_binding['input_id'] if current_binding else None)
+            saved = self.delivery_journal.prepared_response(session_key, candidate) if candidate and self.delivery_journal else None
+            binding = ({'input_id': saved['input_id'], 'chat_generation': saved['chat_generation'],
+                        'ready_response': saved['response'], 'response_event': saved['event']} if saved else current_binding)
             route = self._chat_route(event.source)
             if (binding is None or not self.route_allowed(event.source, recovery=True)
                     or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
-                self.restart_retries.pop(session_key, None)
                 state = runner._peek_session_state(session_key)
                 if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
                     runner._release_running_agent_state(session_key)
                 logging.getLogger(__name__).warning('HERMES_RECOVERY_INPUT_UNAVAILABLE session=%s', session_key)
                 return
+            if saved and saved['phase'] == 'prepared_enqueued':
+                try:
+                    if current_binding and current_binding['input_id'] == saved['input_id']:
+                        await runner.async_session_store.clear_resume_pending(session_key)
+                    self.delivery_journal.clear_response(session_key, saved['input_id'], saved['response'])
+                finally:
+                    state = runner._peek_session_state(session_key)
+                    if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                        runner._release_running_agent_state(session_key)
+                return
             if binding.get('ready_output'):
-                self.restart_retries.pop(session_key, None)
                 try:
                     await runner.async_session_store.clear_resume_pending(session_key)
                 finally:
@@ -406,7 +443,6 @@ class Worker:
                         or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
                     raise PermissionError('Recovery authorization changed')
             except (OSError, ConnectionError, TimeoutError, RpcError, PermissionError):
-                self.restart_retries[session_key] = (binding['input_id'], binding['chat_generation'])
                 state = runner._peek_session_state(session_key)
                 if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
                     runner._release_running_agent_state(session_key)
@@ -417,12 +453,17 @@ class Worker:
                 if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
                     runner._release_running_agent_state(session_key)
                 raise
-            self.restart_retries.pop(session_key, None)
             event._brai_chat_generation = binding['chat_generation']
             if 'ready_response' in binding:
                 event._brai_ready_response = binding['ready_response']
                 for name, value in binding.get('response_event', {}).items():
-                    setattr(event, name, value)
+                    if name == 'message_type' and value is not None:
+                        from gateway.platforms.event import MessageType
+                        event.message_type = MessageType(value)
+                    elif name == 'auto_voice':
+                        event._brai_auto_voice = value == 'yes'
+                    else:
+                        setattr(event, name, value)
             source_token = input_delivery.set(binding['input_id'])
             scope_token = delivery_scope.set(None)
             continuation_token = continuation_turn.set(True)
@@ -442,36 +483,22 @@ class Worker:
                 delivery_scope.reset(scope_token)
                 input_delivery.reset(source_token)
         runner._run_startup_resume_event = resume_bound
-        runner._brai_retry_saved_response = self._retry_saved_response
 
-    def _retry_saved_response(self, session_key, input_id, response):
-        """Дать watcher повторить только ещё не доставленный сохранённый ответ."""
-        binding = self.delivery_journal.continuation(session_key) if self.delivery_journal else None
-        if (binding and binding['input_id'] == input_id
-                and binding.get('ready_response') == response):
-            self.restart_retries[session_key] = (input_id, binding['chat_generation'])
-
-    def _retry_restart_sessions(self, runner, adapter):
-        """Повторить только уже запланированные native ходы после временной ошибки допуска."""
+    def _retry_prepared_responses(self, runner, adapter):
+        """Возобновить готовые ответы, пережившие новый input или перезапуск worker."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         from gateway.platforms.event import MessageEvent, MessageType
-        for key, expected in list(self.restart_retries.items()):
-            with runner.session_store._lock:
-                runner.session_store._ensure_loaded_locked()
-                entry = runner.session_store._entries.get(key)
-                if entry is None or not entry.resume_pending or entry.suspended or entry.origin is None:
-                    self.restart_retries.pop(key, None)
-                    continue
-            binding = self.delivery_journal.continuation(key) if self.delivery_journal else None
-            if binding is None or (binding['input_id'], binding['chat_generation']) != expected:
-                self.restart_retries.pop(key, None)
+        from gateway.session import SessionSource
+        for saved in self.delivery_journal.prepared_responses():
+            key = saved['session_key']
+            if not isinstance(saved.get('source'), dict):
                 continue
-            source = runner._restored_source(entry)
-            if (not self.route_allowed(source, recovery=True)
-                    or expected[1] != self.chat_states.get(self._chat_route(source), {}).get('generation', 0)):
-                self.restart_retries.pop(key, None)
-                continue
-            if (runner._is_session_running(key) or not runner._resume_owner_authorized(key, source)
+            source = SessionSource.from_dict(saved['source'])
+            task = getattr(adapter, '_session_tasks', {}).get(key)
+            if ((task is not None and not task.done()) or runner._is_session_running(key)
+                    or not self.route_allowed(source, recovery=True)
+                    or saved['chat_generation'] != self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
+                    or not runner._resume_owner_authorized(key, source)
                     or runner._delivery_adapter_for(source) is not adapter):
                 continue
             state = runner._session_state(key)
@@ -479,6 +506,7 @@ class Worker:
             state.turn.started_ts = time.time()
             runner._persist_active_agents()
             event = MessageEvent(text='', message_type=MessageType.TEXT, source=source, internal=True)
+            event._brai_detached_input = saved['input_id']
             runner._retain_background_task(asyncio.create_task(runner._run_startup_resume_event(adapter, event, key)))
 
     async def _retry_failed_sessions(self):
@@ -492,26 +520,29 @@ class Worker:
                 runner.session_store._ensure_loaded_locked()
                 entries = [entry for entry in runner.session_store._entries.values()
                            if entry.resume_pending and not entry.suspended and entry.origin is not None
-                           and entry.resume_reason == 'brai_technical_failure']
-            if not entries and not self.restart_retries:
+                           and entry.resume_reason in {'brai_technical_failure', 'restart_timeout', 'shutdown_timeout', 'restart_interrupted'}]
+            if self.delivery_journal is None:
+                home = os.environ.get('HERMES_HOME')
+                if not entries and (not home or not (Path(home) / 'identity-delivery.sqlite3').exists()):
+                    return
+                self._enable_delivery()
+            if not entries and not self.delivery_journal.prepared_responses():
                 return
             from .native_policy import principal
             await asyncio.to_thread(principal)
             if (self.runner is not runner or self.adapter is not adapter or self.peer is not peer
                     or peer.closed or not self.operational.is_set() or self.policy_stopping):
                 return
-            if self.delivery_journal is None:
-                self._enable_delivery()
-            self._retry_restart_sessions(runner, adapter)
             from gateway.run import _AGENT_PENDING_SENTINEL
             from gateway.platforms.event import MessageEvent, MessageType
             for entry in entries:
                 with runner.session_store._lock:
                     current = runner.session_store._entries.get(entry.session_key)
                     if (current is not entry or not entry.resume_pending or entry.suspended
-                            or entry.resume_reason != 'brai_technical_failure'):
+                            or entry.resume_reason not in {'brai_technical_failure', 'restart_timeout', 'shutdown_timeout', 'restart_interrupted'}):
                         continue
-                if runner._is_session_running(entry.session_key):
+                task = getattr(adapter, '_session_tasks', {}).get(entry.session_key)
+                if (task is not None and not task.done()) or runner._is_session_running(entry.session_key):
                     continue
                 source = runner._restored_source(entry)
                 binding = self.delivery_journal.continuation(entry.session_key) if self.delivery_journal else None
@@ -529,6 +560,7 @@ class Worker:
                 runner._retain_background_task(asyncio.create_task(
                     self._resume_failed_turn(runner, adapter, event, entry.session_key, binding['input_id'])))
                 logging.getLogger(__name__).info('HERMES_FAILED_TURN_RECOVERY_STARTED session=%s', entry.session_key)
+            self._retry_prepared_responses(runner, adapter)
         except asyncio.CancelledError:
             raise
         except Exception as error:

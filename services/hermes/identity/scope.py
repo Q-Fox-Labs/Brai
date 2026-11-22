@@ -9,6 +9,7 @@ continuation_turn = ContextVar('brai_continuation_turn', default=False)
 ephemeral_input = ContextVar('brai_ephemeral_input', default=None)
 final_text_session = ContextVar('brai_final_text_session', default=None)
 prepared_response = ContextVar('brai_prepared_response', default=None)
+prepared_voice = ContextVar('brai_prepared_voice', default=None)
 
 delivery_scope = ContextVar('brai_identity_delivery_scope', default=None)
 UNSCOPED = object()

@@ -8,8 +8,9 @@ from pathlib import Path
 import tempfile
 import uuid
 from contextvars import ContextVar
+from types import SimpleNamespace
 from .ipc import RpcError
-from .scope import delivery_scope, input_delivery, ephemeral_input, final_text_session, prepared_response
+from .scope import delivery_scope, input_delivery, ephemeral_input, final_text_session, prepared_response, prepared_voice
 from .telegram_proxy import BotProxy
 
 
@@ -36,37 +37,64 @@ def make_adapter(config, platform, peer, publish_file):
             token = input_delivery.set(getattr(event, '_brai_identity_input_id', None)) if external else None
             scope_token = delivery_scope.set(getattr(event, '_brai_delivery_scope', None)) if external else None
             response_token = prepared_response.set(None)
+            voice_token = prepared_voice.set([0])
             try:
                 return await super()._process_message_background(event, session_key)
             finally:
-                staged = prepared_response.get()
-                retry = getattr(getattr(self, 'gateway_runner', None), '_brai_retry_saved_response', None)
-                if staged and callable(retry):
-                    try:
-                        retry(*staged)
-                    except Exception:
-                        logging.getLogger(__name__).warning('identity_saved_response_retry_registration_failed')
                 prepared_response.reset(response_token)
+                prepared_voice.reset(voice_token)
                 if scope_token is not None:
                     delivery_scope.reset(scope_token)
                 if token is not None:
                     input_delivery.reset(token)
 
         async def _extract_response_content(self, response, event, session_key, **kwargs):
-            """Отличить одиночный текст от ответа с отдельными медиа-вложениями."""
-            result = await super()._extract_response_content(response, event, session_key, **kwargs)
+            """Закрепить содержимое и опубликованные вложения до первой отправки."""
+            staged = prepared_response.get()
+            journal = getattr(self, '_brai_delivery_journal', None)
+            saved = journal.prepared_response(staged[0], staged[1]) if staged and journal else None
+            if saved and saved.get('plan'):
+                result = SimpleNamespace(**saved['plan']['extracted'])
+            else:
+                result = await super()._extract_response_content(response, event, session_key, **kwargs)
             event._brai_single_text = not (result.images or result.media_files or result.local_files)
             ident = input_delivery.get()
-            journal = getattr(self, '_brai_delivery_journal', None)
-            if (not event._brai_single_text and getattr(event, '_brai_successful_turn', False)
+            if (staged is None and not event._brai_single_text and getattr(event, '_brai_successful_turn', False)
                     and ident is not None and journal is not None):
                 event_fields = {key: getattr(event, key, None) for key in
                     ('message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id')}
-                journal.save_response(session_key, ident, response, event_fields)
-                await self.gateway_runner.async_session_store.mark_resume_pending(session_key, 'restart_interrupted')
-                prepared_response.set((session_key, ident, response))
+                source = getattr(event, 'source', None)
+                source = source.to_dict() if callable(getattr(source, 'to_dict', None)) else None
+                journal.save_response(session_key, ident, response, event_fields, source)
+                staged = (session_key, ident, response)
+                prepared_response.set(staged)
+                saved = journal.prepared_response(session_key, ident)
+            if staged:
+                if not saved or not saved.get('plan'):
+                    paths = [path for path, _ in result.media_files] + [path for path, _ in result.images] + list(result.local_files)
+                    batches, set_ids, cleanup_identity = [], [], None
+                    if paths:
+                        import brai_files
+                        from files.store import delivery_plan
+                        items, mode = await asyncio.to_thread(brai_files.output_items, paths)
+                        if getattr(result, 'force_document_attachments', False):
+                            items = [{**item, 'presentation': 'document'} for item in items]
+                        brai_files.validate_telegram(items)
+                        set_ids = sorted({item['_setId'] for item in items if '_setId' in item})
+                        public_items = [{key: value for key, value in item.items() if key != '_setId'} for item in items]
+                        cleanup_identity = brai_files.key([brai_files.source_of(event),
+                            str(getattr(event, 'ledger_message_id', None) or event.message_id), public_items, mode])
+                        plan = delivery_plan(items, mode, supports_album=True)
+                        for batch in plan['batches']:
+                            batches.append({'kind': batch['kind'], 'fallback': plan['fallback'], 'items': [
+                                {'artifact': {'artifact_id': item['file']['artifactId']},
+                                 'caption': item.get('caption', ''), 'presentation': item['presentation']}
+                                for item in batch['items']]})
+                    fields = {key: getattr(result, key, None) for key in
+                        ('text_content', 'images', 'media_files', 'local_files', 'force_document_attachments', 'pre_extract')}
+                    journal.save_response_plan(staged[0], staged[1], {'extracted': fields, 'batches': batches,
+                        'set_ids': set_ids, 'cleanup_identity': cleanup_identity})
                 event._brai_text_delivered = not bool(result.text_content)
-                event._brai_attachments_delivered = False
             return result
 
         async def _send_final_text(self, event, session_key, text_content, metadata,
@@ -84,19 +112,69 @@ def make_adapter(config, platform, peer, publish_file):
             finally:
                 final_text_session.reset(token)
 
+        async def _play_tts_file(self, event, text_content, tts_path, first, metadata, record_delivery):
+            """Не отправлять текст повторно, когда voice с подписью уже в outbox."""
+            pending = False
+            def record(result):
+                nonlocal pending
+                pending = getattr(result, 'error_kind', None) == 'delivery_pending'
+                record_delivery(result)
+            delivered = await super()._play_tts_file(event, text_content, tts_path, first, metadata, record)
+            caption_queued = pending and first and bool(text_content) and len(text_content) <= 1024
+            if delivered or caption_queued:
+                event._brai_text_delivered = True
+            return delivered or caption_queued
+
         async def _deliver_attachments(self, event, extracted, metadata, *, anything_sent, record_delivery):
             """Оставить сохранённый ответ, пока набор не принят доставкой."""
+            staged = prepared_response.get()
+            if staged:
+                from .delivery_journal import delivery_id
+                journal = self._brai_delivery_journal
+                saved = journal.prepared_response(staged[0], staged[1])
+                if not saved or not saved.get('plan') or not getattr(event, '_brai_text_delivered', False):
+                    return None
+                outputs = []
+                for index, batch in enumerate(saved['plan']['batches']):
+                    payload = {'chat_id': str(event.source.chat_id), 'items': batch['items'],
+                               'kind': batch['kind'], 'fallback': batch['fallback'], 'metadata': metadata}
+                    wire = {'payload': payload, 'scope_id': None, 'input_delivery_id': staged[1]}
+                    outputs.append((delivery_id(['prepared-files', saved['id'], index]), 'send_file_set', wire))
+                journal.enqueue_response(staged[0], staged[1], outputs)
+                if outputs:
+                    record_delivery(SendResult(success=False, error='Reply saved for delivery',
+                        retryable=False, error_kind='delivery_pending'))
+                return None
             def record(result):
                 if getattr(result, 'success', False) or getattr(result, 'error_kind', None) == 'delivery_pending':
                     event._brai_attachments_delivered = True
                 record_delivery(result)
             result = await super()._deliver_attachments(event, extracted, metadata,
                 anything_sent=anything_sent, record_delivery=record)
+            return result
+
+        async def _release_turn_marker(self, event):
+            """После native marker освободить только результат, уже записанный в outbox."""
+            result = await super()._release_turn_marker(event)
             staged = prepared_response.get()
-            if (staged and getattr(event, '_brai_text_delivered', False)
-                    and getattr(event, '_brai_attachments_delivered', False)):
-                await self.gateway_runner.async_session_store.clear_resume_pending(staged[0])
-                self._brai_delivery_journal.clear_response(*staged)
+            journal = getattr(self, '_brai_delivery_journal', None)
+            saved = journal.prepared_response(staged[0], staged[1]) if staged and journal else None
+            if saved and saved['phase'] == 'prepared_enqueued':
+                binding = journal.continuation(staged[0])
+                if binding and binding['input_id'] == staged[1] and binding.get('ready_response') == staged[2]:
+                    await self.gateway_runner.async_session_store.clear_resume_pending(staged[0])
+                journal.clear_response(*staged)
+                if saved.get('plan', {}).get('cleanup_identity'):
+                    import brai_files
+                    for ident in saved['plan'].get('set_ids', []):
+                        try:
+                            await asyncio.to_thread(brai_files.release_set, ident)
+                        except Exception:
+                            logging.getLogger(__name__).warning('identity_prepared_file_cleanup_failed')
+                    try:
+                        await asyncio.to_thread(brai_files.store().cleanup, saved['plan']['cleanup_identity'])
+                    except Exception:
+                        logging.getLogger(__name__).warning('identity_prepared_file_cleanup_failed')
             return result
 
         def _send_retry_is_final(self, result):
@@ -216,7 +294,12 @@ def make_adapter(config, platform, peer, publish_file):
                     from .delivery_journal import canonical, delivery_id
                     staged = prepared_response.get()
                     text_part = final_text_session.get()
-                    ident = (delivery_id(['prepared-text', *staged]) if staged and text_part
+                    voice = prepared_voice.get() if staged and name == 'send_voice' else None
+                    voice_index = voice[0] if voice is not None else None
+                    if voice is not None:
+                        voice[0] += 1
+                    ident = (delivery_id(['prepared-voice', *staged, voice_index]) if voice is not None
+                             else delivery_id(['prepared-text', *staged]) if staged and text_part
                              else delivery_id(['prepared-output', *staged, name, payload]) if staged
                              else delivery_id(['output', uuid.uuid4().hex]))
                     wire['input_delivery_id'] = input_delivery.get()
@@ -254,7 +337,7 @@ def make_adapter(config, platform, peer, publish_file):
                             logging.getLogger(__name__).info('identity_duplicate_output_suppressed action=%s state=%s', name, existing['state'])
                     if not reused:
                         journal.queue_output(ident, name, wire,
-                            completed_session=text_part[0] if text_part and text_part[1] else None)
+                            completed_session=text_part[0] if text_part and text_part[1] and not staged else None)
                         self._brai_last_outputs[route] = (signature, ident)
                     saved = True
                 elif name != 'send_typing':

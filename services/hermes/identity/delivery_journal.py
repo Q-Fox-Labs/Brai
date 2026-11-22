@@ -109,14 +109,14 @@ class DeliveryJournal:
             result['response_event'] = binding.get('response_event', {})
         return result
 
-    def save_response(self, session_key, input_id, response, event_fields=None):
+    def save_response(self, session_key, input_id, response, event_fields=None, source=None):
         """До первой части сохранить составной готовый ответ для доставки после сбоя."""
         if not isinstance(response, str) or not response:
             raise ValueError('CONTINUATION_RESPONSE_INVALID')
         if event_fields is None:
             event_fields = {}
         if (not isinstance(event_fields, dict) or set(event_fields) - {
-                'message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id'}
+                'message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id', 'message_type', 'auto_voice'}
                 or any(value is not None and not isinstance(value, str) for value in event_fields.values())):
             raise ValueError('CONTINUATION_EVENT_INVALID')
         with self.open() as db:
@@ -124,16 +124,75 @@ class DeliveryJournal:
             ident = delivery_id(['continuation', session_key])
             row = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='continuation' AND phase='continuation'", (ident,)).fetchone()
             binding = json.loads(row[0]) if row else None
-            if not binding or binding.get('session_key') != session_key or binding.get('input_id') != input_id:
-                raise ValueError('CONTINUATION_BINDING_CONFLICT')
-            binding['ready_response'] = response
-            binding['response_event'] = event_fields
-            db.execute('UPDATE output_deliveries SET payload=? WHERE id=?', (canonical(binding), ident))
+            prepared_id = delivery_id(['prepared-response', session_key, input_id])
+            existing = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='prepared_response'", (prepared_id,)).fetchone()
+            if existing is not None:
+                old = json.loads(existing[0])
+                if (old.get('session_key'), old.get('input_id'), old.get('response')) != (session_key, input_id, response):
+                    raise ValueError('PREPARED_RESPONSE_CONFLICT')
+            else:
+                if not binding or binding.get('session_key') != session_key or binding.get('input_id') != input_id:
+                    raise ValueError('CONTINUATION_BINDING_CONFLICT')
+                prepared = {'session_key': session_key, 'input_id': input_id, 'response': response,
+                            'event': event_fields, 'source': source, 'chat_generation': binding['chat_generation']}
+                db.execute("INSERT INTO output_deliveries(id,action,payload,phase) VALUES(?,'prepared_response',?,'prepared')",
+                           (prepared_id, canonical(prepared)))
+            if binding and binding.get('input_id') == input_id:
+                binding['ready_response'] = response
+                binding['response_event'] = event_fields
+                db.execute('UPDATE output_deliveries SET payload=? WHERE id=?', (canonical(binding), ident))
+
+    def prepared_responses(self):
+        """Читать отдельные незавершённые ответы независимо от нового входа сессии."""
+        with self.open() as db:
+            rows = db.execute("SELECT id,payload,phase FROM output_deliveries WHERE action='prepared_response' AND phase IN ('prepared','prepared_enqueued') ORDER BY seq").fetchall()
+        return [{'id': ident, **json.loads(raw), 'phase': phase} for ident, raw, phase in rows]
+
+    def prepared_response(self, session_key, input_id):
+        """Найти сохранённый результат конкретного input."""
+        ident = delivery_id(['prepared-response', session_key, input_id])
+        return next((row for row in self.prepared_responses() if row['id'] == ident), None)
+
+    def save_response_plan(self, session_key, input_id, plan):
+        """Сохранить опубликованные артефакты до их постановки в outbox."""
+        ident = delivery_id(['prepared-response', session_key, input_id])
+        with self.open() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='prepared_response' AND phase='prepared'", (ident,)).fetchone()
+            if row is None:
+                raise ValueError('PREPARED_RESPONSE_UNKNOWN')
+            data = json.loads(row[0])
+            if 'plan' in data and data['plan'] != plan:
+                raise ValueError('PREPARED_PLAN_CONFLICT')
+            data['plan'] = plan
+            db.execute('UPDATE output_deliveries SET payload=? WHERE id=?', (canonical(data), ident))
+
+    def enqueue_response(self, session_key, input_id, outputs):
+        """Атомарно поставить все части результата в outbox и сохранить его завершение."""
+        prepared_id = delivery_id(['prepared-response', session_key, input_id])
+        with self.open() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT phase FROM output_deliveries WHERE id=? AND action='prepared_response'", (prepared_id,)).fetchone()
+            if row is None or row[0] not in ('prepared', 'prepared_enqueued'):
+                raise ValueError('PREPARED_RESPONSE_UNKNOWN')
+            for ident, action, payload in outputs:
+                self.identity(ident, ident)
+                raw = canonical(payload)
+                old = db.execute('SELECT action,payload FROM output_deliveries WHERE id=?', (ident,)).fetchone()
+                if old is not None and old != (action, raw):
+                    raise ValueError('DELIVERY_OUTPUT_CONFLICT')
+                if old is None:
+                    db.execute("INSERT INTO output_deliveries(id,action,payload,phase) VALUES(?,?,?,'pending')", (ident, action, raw))
+            db.execute("UPDATE output_deliveries SET phase='prepared_enqueued' WHERE id=?", (prepared_id,))
 
     def clear_response(self, session_key, input_id, response):
         """Не удалять готовый ответ более нового хода этой сессии."""
         with self.open() as db:
             db.execute('BEGIN IMMEDIATE')
+            prepared_id = delivery_id(['prepared-response', session_key, input_id])
+            ready = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='prepared_response' AND phase='prepared_enqueued'", (prepared_id,)).fetchone()
+            if ready and json.loads(ready[0]).get('response') == response:
+                db.execute('DELETE FROM output_deliveries WHERE id=?', (prepared_id,))
             ident = delivery_id(['continuation', session_key])
             row = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='continuation' AND phase='continuation'", (ident,)).fetchone()
             binding = json.loads(row[0]) if row else None
