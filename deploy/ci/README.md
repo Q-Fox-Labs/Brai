@@ -46,3 +46,5 @@ gh workflow run client-install-smoke.yml --repo Q-Fox-Labs/Brai --ref "$WORKFLOW
 ## Запустить кандидат из исходников
 
 Выберите `install_path=compose`, чтобы собрать образы Web, Auth, Timer и Artifacts из того же SHA и запустить их с изолированными PostgreSQL и NATS. Web собирается через штатный prepared runtime. Workflow использует тестовые миграции, роли и конфигурацию из `deploy/compose.production-test.yml` кандидата. Он проверяет готовность контейнеров и HTTP endpoint Web, скачивает и сверяет по SHA-256 открытые веса GigaAM, EmbeddingGemma и Silero и замеряет общий расход диска. Этот путь проверяет запуск перечисленных компонентов. Для полной клиентской установки, включая модели и Hermes, используйте `install_path=client`.
+
+Чтобы в том же прогоне `compose` проверить загрузку закреплённого VAD, передайте `verify_vad=true` и настройте ограниченный `BRAI_CI_HF_TOKEN` в защищённом окружении `brai-clean-install`. Дополнительная задача сверяет манифест весов с кандидатом. Токен доступен только шагу скачивания. Замер Compose охватывает открытые модели, а размер VAD указан в отчёте отдельной задачи.

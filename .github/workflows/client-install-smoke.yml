@@ -15,6 +15,10 @@ on:
         type: choice
         default: client
         options: [client, compose]
+      verify_vad:
+        description: Also verify the candidate's restricted VAD snapshot
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -124,3 +128,25 @@ jobs:
         env:
           BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
         run: bash deploy/ci/run-compose-install-smoke.sh
+
+  vad:
+    if: github.repository == 'Q-Fox-Labs/Brai' && inputs.install_path == 'compose' && inputs.verify_vad
+    name: Verify the candidate VAD snapshot
+    environment: brai-clean-install
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Match the candidate and download the pinned VAD
+        env:
+          BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
+        run: |
+          [[ "$BRAI_CI_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          runner_path=services/local-ai/runners/gigaam
+          git fetch --no-tags --depth=1 origin "$BRAI_CI_SOURCE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$BRAI_CI_SOURCE_SHA"
+          git show "FETCH_HEAD:$runner_path/vad_manifest.json" | cmp - "$runner_path/vad_manifest.json"
+          python3 -B "$runner_path/prepare_vad.py" --model-dir "$RUNNER_TEMP/brai-vad"
+          jq -r '"Verified VAD revision: \(.revision). Snapshot bytes: \([.files[].bytes] | add)."' "$RUNNER_TEMP/brai-vad/manifest.json"
