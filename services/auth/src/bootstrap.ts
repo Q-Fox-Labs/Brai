@@ -3,6 +3,7 @@
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import type { PoolClient } from "pg";
 import { z } from "zod";
 import { lifecycleLock, requestLifecycle } from "./lifecycle.js";
 
@@ -17,7 +18,17 @@ try{
  raw=readFileSync(fd,"utf8");
 }finally{closeSync(fd);}
 const input=dataSchema.parse(JSON.parse(raw));
+const queueProfile=process.env.AUTH_BOOTSTRAP_QUEUE_PROFILE==="true";
+if(queueProfile&&(!input.userId||input.profileId))throw new Error("Queued owner bootstrap requires a stable user ID and no profile ID");
 const pool=new Pool({connectionString:databaseURL,connectionTimeoutMillis:5000});
+
+async function enqueueOwnerProfile(client:PoolClient,userId:string){
+ const result=await requestLifecycle(client,"operator","users-add",{
+  telegramId:input.telegramId,requestId:"operator-bootstrap-profile:"+userId
+ });
+ if(result.status!==200)throw new Error("Owner profile could not be queued");
+}
+
 try{
  const client=await pool.connect();
  try{
@@ -34,6 +45,7 @@ try{
     const result=await requestLifecycle(client,'operator','role-set',{userId:saved.user_id,role:'creator',requestId:'operator-first-creator:'+saved.user_id});
     if(result.status!==200)throw new Error('Creator unavailable');
    }
+   if(queueProfile&&saved.status==="provisioning")await enqueueOwnerProfile(client,saved.user_id);
    await client.query("COMMIT");console.log("auth owner configured");
   } else {
   if((await client.query("SELECT 1 FROM brai_identity WHERE role IN ('creator','admin') LIMIT 1")).rowCount)throw new Error("Owner already configured");
@@ -44,6 +56,7 @@ try{
   await client.query("INSERT INTO brai_identity(user_id,telegram_id,profile_id,role,status) VALUES($1,$2,$3,$5,$4)",[id,input.telegramId,input.profileId??null,input.profileId?"active":"provisioning",input.role??"admin"]);
   await client.query("INSERT INTO brai_owner_bootstrap(user_id) VALUES($1)",[id]);
   await client.query("INSERT INTO brai_identity_audit(id,actor_id,target_id,action) VALUES($1,'operator',$2,'owner-bootstrap')",[randomUUID(),id]);
+  if(queueProfile)await enqueueOwnerProfile(client,id);
   await client.query("COMMIT");console.log("auth owner configured");
   }
  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
