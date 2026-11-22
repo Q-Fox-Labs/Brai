@@ -316,95 +316,18 @@ diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstrea
                  break
              if agent._interrupt_requested:
 diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
-index 10078ef..f196f01 100644
 --- a/agent/conversation_compression.py
 +++ b/agent/conversation_compression.py
-@@ -490,12 +490,15 @@ class CompressionCommitFence:
-         if total_ceiling_seconds is not None:
-             self.set_total_ceiling_seconds(total_ceiling_seconds)
-
--    def set_total_ceiling_seconds(self, seconds: float) -> None:
--        """Arm the wall-clock deadline shared by the host and worker."""
-+    def set_total_ceiling_seconds(self, seconds: float, *, deadline: float | None = None) -> None:
-+        """Закрепить общий срок владельца сжатия и рабочего потока в монотонных секундах."""
+@@ -495,7 +495,8 @@
          seconds = float(seconds)
          if seconds <= 0:
              raise ValueError("total compression ceiling must be positive")
 -        self._deadline = time.monotonic() + seconds
-+        ceiling = time.monotonic() + seconds
-+        if deadline is not None:
-+            ceiling = min(ceiling, deadline)
-+        self._deadline = ceiling if self._deadline is None else min(self._deadline, ceiling)
++        deadline = time.monotonic() + seconds
++        self._deadline = deadline if self._deadline is None else min(self._deadline, deadline)
 
      def touch_progress(self) -> None:
          """Record forward progress (a streamed token); a bare float store is atomic, so no lock."""
-@@ -938,7 +941,7 @@ def request_exceeds_model_window(agent: Any, request_tokens: Any) -> Optional[bo
-
- def _retry_compression_on_fallback_chain(
-     *, worker: Callable[[CompressionCommitFence], tuple[list, str]], messages: list,
--    system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
-+    system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float, deadline: float,
-     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
-     on_timeout_cause: Optional[Callable[[bool, bool], None]] = None, telemetry_agent: Any = None,
-     new_fence: Optional[Callable[[], CompressionCommitFence]] = None, escalate_deterministic: bool = False,
-@@ -950,10 +953,8 @@ def _retry_compression_on_fallback_chain(
-     before. The entry's ``timeout`` sets the idle window. Re-runs the whole worker, so pre-compression
-     callbacks must be idempotent.
-
--    The retry is bounded the same way the primary was: silence for one idle window ends it, while a fallback
--    that is streaming keeps its ceiling. The entry's own ``timeout`` (when declared) sets that idle window,
--    so a fallback tuned for a slower-but-healthy backend is not held to a deadline the stalled primary
--    defined (#62452 semantics, applied to the stall path).
-+    У резервного маршрута свой срок бездействия. Абсолютный срок операции
-+    сжатия передаётся от первой попытки ко всем повторам.
-     Known limitation (accepted, #96634 review): the retry re-runs the COMPLETE worker, which repeats
-     memory/plugin pre-compression callbacks. Built-in callbacks are idempotent (re-reads and overwrites of
-     attempt-scoped state); third-party plugin callbacks are advised to be. Splitting the worker to resume
-@@ -969,7 +970,7 @@ def _retry_compression_on_fallback_chain(
-             route, worker=worker, messages=messages, system_prompt_fallback=system_prompt_fallback,
-             idle_timeout_seconds=idle_timeout_seconds, total_ceiling_seconds=total_ceiling_seconds,
-             on_commit_overrun=on_commit_overrun, on_timeout_cause=on_timeout_cause, telemetry_agent=telemetry_agent,
--            new_fence=new_fence,
-+            new_fence=new_fence, deadline=deadline,
-         )
-         if recovered is not None:
-             return recovered
-@@ -980,7 +981,7 @@ def _run_pinned_compression_retry(
-     route: dict, *, worker: Callable[[CompressionCommitFence], tuple[list, str]], messages: list,
-     system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
-     on_commit_overrun: Optional[Callable[[float, float], None]], on_timeout_cause: Optional[Callable[[bool, bool], None]],
--    telemetry_agent: Any, new_fence: Optional[Callable[[], CompressionCommitFence]],
-+    telemetry_agent: Any, new_fence: Optional[Callable[[], CompressionCommitFence]], deadline: float,
- ) -> Optional[tuple[list, str]]:
-     """One bounded re-run of ``worker`` with ``route`` pinned; ``None`` when it produced no compression."""
-     # The aborted fence refuses all commits; mint a fresh one via the host factory
-@@ -1003,6 +1004,9 @@ def _run_pinned_compression_retry(
-         retry_fence = CompressionCommitFence()
-     idle = float(route.get("timeout") or idle_timeout_seconds)
-     ceiling = max(float(total_ceiling_seconds), idle)
-+    retry_fence.set_total_ceiling_seconds(ceiling, deadline=deadline)
-+    if retry_fence.deadline_exceeded:
-+        return None
-     deterministic = route.get("deterministic") is True
-     if deterministic:
-         logger.warning(
-@@ -1249,6 +1253,7 @@ def run_compress_context_with_progress_timeout(
-         raise
-     future.add_done_callback(_release_compression_admission)
-     wait_started = time.monotonic()
-+    ceiling = min(ceiling, fence.deadline_monotonic - wait_started)
-     # EVERY host unwind must revoke commit admission or a detached worker could
-     # later mutate durable state; handled_exit marks paths that settle it themselves
-     handled_exit = False
-@@ -1272,7 +1277,7 @@ def run_compress_context_with_progress_timeout(
-                 worker=fallback_worker or worker, messages=messages, system_prompt_fallback=system_prompt_fallback,
-                 idle_timeout_seconds=idle, total_ceiling_seconds=ceiling, on_commit_overrun=on_commit_overrun,
-                 on_timeout_cause=on_timeout_cause, telemetry_agent=telemetry_agent, new_fence=new_fence,
--                escalate_deterministic=escalate_deterministic,
-+                escalate_deterministic=escalate_deterministic, deadline=fence.deadline_monotonic,
-             )
-             if recovered is not None:
-                 return recovered
 diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 index 0000000..ee2ae9c
@@ -820,6 +743,26 @@ index 0000000..ee2ae9c
 diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
 --- a/agent/auxiliary_client.py
 +++ b/agent/auxiliary_client.py
+@@ -419,7 +419,7 @@
+ def aux_stream_deadline(deadline: Optional[float]):
+     """Publish the host's absolute ``time.monotonic()`` deadline to the stream consumer.
+
+-    ``None`` is a passthrough; re-entrant-safe. Host->worker return leg of the progress hook:
+-    without it the isolated provider daemon streams to its own ceiling after the host stopped
+-    waiting, billing a summary the commit fence refuses.
++    ``None`` очищает унаследованный срок для вызова, у которого нет своего.
++    Если срок задан, рабочий поток прекращает чтение после завершения ожидания
++    владельцем сжатия.
+
+@@ -430,7 +430,7 @@
+     session that compression never managed to shrink. See #99692.
+     """
+     previous = getattr(_aux_stream_deadline, "value", None)
+-    _aux_stream_deadline.value = deadline if isinstance(deadline, (int, float)) else previous
++    _aux_stream_deadline.value = deadline if isinstance(deadline, (int, float)) else None
+     try:
+         yield
+     finally:
 @@ -1196,6 +1196,11 @@
          host_deadline = _current_aux_stream_deadline()
          if isinstance(host_deadline, (int, float)) and host_deadline < self.hard_deadline:

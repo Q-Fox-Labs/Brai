@@ -778,39 +778,66 @@ class NativeTurnBudgetTests(unittest.TestCase):
             with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
                 self.state.start(self.metadata("api:2"))
 
-    def test_native_compression_fences_isolate_new_runs_and_keep_retry_deadline(self):
+    def test_native_compression_fences_isolate_new_and_fallback_runs(self):
         budget_module = types.ModuleType("agent.brai_turn_budget")
         budget_module.logical_deadline = self.budget.logical_deadline
         clock = types.SimpleNamespace(monotonic=Mock(return_value=0.0))
-        compressor = types.SimpleNamespace(pin_summary_route=lambda route: contextlib.nullcontext())
+        pin_route = Mock(return_value=contextlib.nullcontext())
+        original = ["over the context window"]
+        compressed = ["deterministic summary"]
+        deterministic = {"label": "fallback", "deterministic": True}
+        fences = []
+
+        def settle(_future, fence, **kwargs):
+            fences.append(fence)
+            if pin_route.called:
+                self.assertFalse(fence.deadline_exceeded)
+                return True, (compressed, "prompt")
+            clock.monotonic.return_value = fence.deadline_monotonic
+            return True, (original, "prompt")
+
         modules = {"agent": types.ModuleType("agent"), "agent.brai_turn_budget": budget_module,
-                   "agent.context_compressor": compressor}
-        run = Mock(return_value=(["recovered"], "prompt"))
+                   "agent.context_compressor": types.SimpleNamespace(pin_summary_route=pin_route),
+                   "tools.thread_context": types.SimpleNamespace(propagate_context_to_thread=lambda worker: worker)}
         with patch.dict("sys.modules", modules), patch.object(self.budget.time, "monotonic", clock.monotonic):
             native = native_nodes(
                 self.engine, "agent/conversation_compression.py",
-                {"CompressionCommitFence", "_run_pinned_compression_retry"},
+                {"CompressionCommitFence", "run_compress_context_with_progress_timeout",
+                 "_retry_compression_on_fallback_chain", "_run_pinned_compression_retry"},
                 threading=threading, time=clock, logger=logging.getLogger("compression-fixture"),
-                run_compress_context_with_progress_timeout=run,
+                _get_compress_timeout_executor=lambda: Mock(), _try_admit_compression_job=lambda: True,
+                _release_compression_admission=Mock(), _await_worker_within_budget=settle,
+                _stall_retry_routes=lambda escalate: [deterministic] if escalate else [],
             )
-            first = native.CompressionCommitFence(10)
-            self.state.start(self.metadata("compression:1", "auxiliary:compression")).finish(failed=True)
-            clock.monotonic.return_value = 8.0
-            native._run_pinned_compression_retry(
-                {"label": "fallback", "model": "fixture"}, worker=Mock(), messages=[],
-                system_prompt_fallback="prompt", idle_timeout_seconds=5, total_ceiling_seconds=20,
-                on_commit_overrun=None, on_timeout_cause=None, telemetry_agent=None,
-                new_fence=native.CompressionCommitFence, deadline=first.deadline_monotonic,
+            result = native.run_compress_context_with_progress_timeout(
+                worker=Mock(), messages=original, system_prompt_fallback="prompt", idle_timeout_seconds=5,
+                total_ceiling_seconds=30, request_exceeds_window=True, new_fence=native.CompressionCommitFence,
             )
-            retry = run.call_args.kwargs["fence"]
-            self.assertEqual(retry.deadline_monotonic, 10.0)
+            self.assertEqual(result, (compressed, "prompt"))
+            pin_route.assert_called_once_with(deterministic)
+            first, fallback = fences
+            self.assertEqual(fallback.deadline_monotonic, 10.0)
             first.set_total_ceiling_seconds(99)
-            self.assertEqual(first.deadline_monotonic, 10.0)
-            clock.monotonic.return_value = 11.0
-            self.assertTrue(retry.deadline_exceeded)
+            self.assertEqual(first.deadline_monotonic, 5.0)
+            self.assertTrue(first.deadline_exceeded)
+            clock.monotonic.return_value = 15.0
             second = native.CompressionCommitFence(20)
-            self.assertEqual(second.deadline_monotonic, 31.0)
+            self.assertEqual(second.deadline_monotonic, 35.0)
             self.assertFalse(second.deadline_exceeded)
+
+    def test_native_auxiliary_scope_can_clear_an_inherited_compression_deadline(self):
+        native = native_nodes(
+            self.engine, "agent/auxiliary_client.py", {"aux_stream_deadline", "_current_aux_stream_deadline"},
+            contextlib=contextlib, _aux_stream_deadline=threading.local(),
+        )
+        with native.aux_stream_deadline(10.0):
+            with native.aux_stream_deadline(None):
+                self.assertIsNone(native._current_aux_stream_deadline())
+                with native.aux_stream_deadline(22.0):
+                    self.assertEqual(native._current_aux_stream_deadline(), 22.0)
+                self.assertIsNone(native._current_aux_stream_deadline())
+            self.assertEqual(native._current_aux_stream_deadline(), 10.0)
+        self.assertIsNone(native._current_aux_stream_deadline())
 
     def test_native_iteration_summary_has_its_own_request_scope(self):
         previous = "turn:api:19"
