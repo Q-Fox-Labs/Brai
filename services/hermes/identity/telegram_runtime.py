@@ -645,7 +645,7 @@ class Resolver:
             turn = self.turns.get(profile['uid'])
             if (turn is None or request_scope.get() != turn['id'] or turn['route'] != route
                     or (turn.get('delivery') or {}).get('delivery_id') != source_id):
-                return {'success': False, 'retryable': True, 'error': 'Waiting for input acceptance'}
+                return None, {'pending': {'success': False, 'retryable': True, 'error': 'Waiting for input acceptance'}}
         elif source['state'] != 'accepted':
             raise PermissionError('Reply input not accepted')
         supplied = payload.get('metadata') or {}
@@ -669,14 +669,17 @@ class Resolver:
             self.ledger.record(profile, route, anchor, outgoing=False)
             values['reply_to'] = anchor
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
-        return body
+        return body, {'auth': auth, 'source': source, 'grouped': grouped, 'route': route,
+                      'metadata': metadata, 'values': values, 'anchor': anchor}
 
     async def authorize_recovery(self, profile, owner, source_id, chat_id, thread_id):
         """Не запускать старую задачу после отзыва доступа или смены чата."""
         if not isinstance(chat_id, str) or not isinstance(thread_id, str):
             raise PermissionError('Invalid recovery route')
-        body = await self._input_delivery_body(profile, owner, 'send',
+        body, details = await self._input_delivery_body(profile, owner, 'send',
             {'chat_id': chat_id, 'metadata': {'thread_id': thread_id}}, source_id, strict_thread=True)
+        if body is None:
+            raise PermissionError('Recovery input not yet accepted')
         bound, payload = body['profile'], body['payload']
         route = (chat_id, thread_id)
         active = await self._account(bound, bound['telegramId'] if group_chat_id(chat_id) else chat_id)
@@ -688,12 +691,16 @@ class Resolver:
 
     async def durable_reply(self, profile, owner, action, payload, ident, source_id):
         """Сохранить ответ только к реально допущенному исходному input этого worker."""
-        body = await self._input_delivery_body(profile, owner, action, payload, source_id)
+        body, details = await self._input_delivery_body(profile, owner, action, payload, source_id)
+        if body is None:
+            return details['pending']
         profile = body['profile']
         if ident is None:
             # Предупреждение актуально только сейчас и не должно попасть в outbox.
             return await self._deliver_saved_reply(body)
         key = self.ledger.owner(profile)
+        auth, source, grouped, route, metadata, values, anchor = (details[name] for name in
+            ('auth', 'source', 'grouped', 'route', 'metadata', 'values', 'anchor'))
         from .delivery_journal import delivery_id
         digest = delivery_id([key, auth, source_id, action, payload])
 

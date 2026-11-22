@@ -578,6 +578,8 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
             'message_thread_id': 7, 'is_topic_message': True, 'text': 'work'})
         self.inbox.capture(PROFILE, item, 123)
         source = self.inbox.bind_delivery(PROFILE, 123, [1])['delivery_id']
+        self.inbox.claim_for_delivery(PROFILE, 123, 1)
+        self.inbox.markaccepted(PROFILE, 123, 1, RECEIPT)
         resolver = runtime.Resolver(NS(), journal=self.inbox.journal)
         self.addCleanup(resolver.ledger.close)
         route = ('-55', '7')
