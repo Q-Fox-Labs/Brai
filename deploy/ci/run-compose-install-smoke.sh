@@ -60,6 +60,7 @@ test "$(git -C "$source_dir" rev-parse HEAD)" = "$BRAI_CI_SOURCE_SHA"
   cd "$source_dir"
   test "$(npm --version)" = '11.19.1'
   npm ci --no-audit --no-fund
+  npm run build --workspace=@brai/agent
   CI=1 NEXT_TELEMETRY_DISABLED=1 BRAI_WEB_STANDALONE_OUTPUT=0 npm run build --workspace=@brai/web
   node deploy/scripts/materialize-runtime.mjs --source "$source_dir" --workspace @brai/web \
     --revision "$BRAI_CI_SOURCE_SHA" --output "$run_dir/web-runtime"
