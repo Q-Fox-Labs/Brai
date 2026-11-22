@@ -17,7 +17,7 @@ Workflow **Client install smoke** запускает штатный `ansible/cli
 
    ```sh
    python3 deploy/ci/client-install-fixture.py pack "$BRAI_SHA" product-candidate.json test-settings.json fixture.b64
-   gh secret set BRAI_CI_INSTALL_BUNDLE --repo Q-Fox-Labs/Brai < fixture.b64
+   gh secret set BRAI_CI_INSTALL_BUNDLE --repo Q-Fox-Labs/Brai --env brai-clean-install < fixture.b64
    ```
 
 Workflow использует клиентскую установку без развёртывания персональных профилей Auth. Поддержка инфраструктуры в составе определяется самим манифестом. Оставьте список `public_urls` пустым для локальной проверки Web. Полные журналы Ansible и тестовые настройки хранятся на одноразовом раннере.
@@ -29,7 +29,7 @@ Workflow использует клиентскую установку без р�
 | `BRAI_CI_ADMIN_REPOSITORY` | По умолчанию `Q-Fox-Labs/Q-Server`. Для переопределения укажите `владелец/репозиторий`. |
 | `BRAI_CI_ADMIN_SHA` | По умолчанию `8ef49bf67e2aa3870a609bcdae487c291ce241eb`, устанавливающий Codex 0.171.0. Для переопределения укажите полный SHA. |
 
-Добавьте `BRAI_CI_ADMIN_TOKEN` с правом чтения репозитория Admin и `BRAI_CI_HF_TOKEN` тестового аккаунта с доступом к закреплённому VAD. Workflow читает OCI через `GITHUB_TOKEN`. Для отдельного допуска к пакетам задайте секрет `BRAI_CI_REGISTRY_TOKEN` и переменную `BRAI_CI_REGISTRY_USER`.
+Ограничьте окружение Actions `brai-clean-install` веткой проверки. В этом окружении задайте `BRAI_CI_ADMIN_SSH_KEY` с ключом развёртывания только на чтение репозитория Admin или `BRAI_CI_ADMIN_TOKEN` с тем же доступом. Добавьте `BRAI_CI_HF_TOKEN` тестового аккаунта с доступом к закреплённому VAD. Workflow читает OCI через `GITHUB_TOKEN`. Для отдельного допуска к пакетам задайте секрет `BRAI_CI_REGISTRY_TOKEN` и переменную `BRAI_CI_REGISTRY_USER`.
 
 Запустите зарегистрированный workflow **Client install smoke** с ветки, в которой находится его файл. Для опубликованного workflow по умолчанию передайте ветку `main`.
 
@@ -45,4 +45,4 @@ gh workflow run client-install-smoke.yml --repo Q-Fox-Labs/Brai --ref "$WORKFLOW
 
 ## Запустить кандидат из исходников
 
-Выберите `install_path=compose`, чтобы собрать образы Web, Auth, Timer и Artifacts из того же SHA и запустить их с изолированными PostgreSQL и NATS. Workflow использует тестовые миграции, роли и конфигурацию из `deploy/compose.production-test.yml` кандидата. Он проверяет готовность контейнеров и HTTP endpoint Web и замеряет место на диске Docker. Этот путь проверяет запуск перечисленных компонентов. Для полной клиентской установки, включая модели и Hermes, используйте `install_path=client`.
+Выберите `install_path=compose`, чтобы собрать образы Web, Auth, Timer и Artifacts из того же SHA и запустить их с изолированными PostgreSQL и NATS. Workflow использует тестовые миграции, роли и конфигурацию из `deploy/compose.production-test.yml` кандидата. Он проверяет готовность контейнеров и HTTP endpoint Web, скачивает и сверяет по SHA-256 открытые веса GigaAM, EmbeddingGemma и Silero и замеряет общий расход диска. Этот путь проверяет запуск перечисленных компонентов. Для полной клиентской установки, включая модели и Hermes, используйте `install_path=client`.

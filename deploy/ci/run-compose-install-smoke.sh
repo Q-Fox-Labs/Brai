@@ -23,7 +23,7 @@ finish() {
   if [[ -n "$sampler" ]]; then
     kill "$sampler" 2>/dev/null || true
     wait "$sampler" 2>/dev/null || true
-    { cat "$run_dir/disk"; sample_disk; } | awk '
+    { cat "$run_dir/disk"; sample_disk || true; } | awk '
       NR == 1 { start = min = $1 }
       $1 < min { min = $1 }
       END {
@@ -58,6 +58,9 @@ test "$(git -C "$source_dir" rev-parse HEAD)" = "$BRAI_CI_SOURCE_SHA"
 # Override prepared contexts with the candidate's normal production Dockerfiles.
 cat > "$run_dir/from-source.yml" <<'YAML'
 services:
+  db:
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, timer_owner, -d, brai_timer_test]
   web:
     build: { context: .., dockerfile: apps/web/Dockerfile }
   artifacts:
@@ -86,10 +89,54 @@ for service in auth timer; do
   docker build --label "org.opencontainers.image.revision=$BRAI_CI_SOURCE_SHA" \
     --tag "brai-ci-$service:$BRAI_CI_SOURCE_SHA" --file "$source_dir/services/$service/Dockerfile" "$source_dir"
 done
-"${compose[@]}" --profile artifacts-initialize run --rm --build --no-deps artifacts-volume-init
+# YAML's quoted scalar in the d415983 fixture contains a real newline inside a JavaScript string.
+init_script=$("${compose[@]}" --profile artifacts-initialize config --format json \
+  | jq -er '.services["artifacts-volume-init"].command[2]')
+init_script=${init_script//$'artifact fixture bytes\n'/artifact fixture bytes\\n}
+node --check <<< "$init_script"
+"${compose[@]}" --profile artifacts-initialize run --rm --build --no-deps artifacts-volume-init node -e "$init_script"
+"${compose[@]}" up -d --wait db nats
 "${compose[@]}" --profile migration run --rm artifacts-migrate
-"${compose[@]}" up -d --build --wait
+"${compose[@]}" build web
+"${compose[@]}" up -d --no-build --wait
 "${compose[@]}" ps -a
 curl --fail --silent --show-error http://127.0.0.1:13000/api/health \
   | jq -e '.component == "web" and .ready == true'
 echo "Candidate $BRAI_CI_SOURCE_SHA started with fresh PostgreSQL and NATS."
+python3 - "$source_dir" "$run_dir" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import sys
+from urllib.parse import quote
+from urllib.request import urlopen
+
+source, work = map(Path, sys.argv[1:])
+profiles = source / 'services/local-ai/profiles'
+total = 0
+for name in ('gigaam_pytorch', 'embeddinggemma2_llama_cpp', 'silero_pytorch'):
+    profile = json.loads((profiles / f'{name}.json').read_text())
+    model = profile['source']
+    destination = work / 'models' / name
+    destination.mkdir(parents=True)
+    for entry in model['files']:
+        filename = entry['path']
+        if Path(filename).name != filename:
+            raise ValueError(f'Unexpected model path in {name}')
+        url = entry.get('url') or (
+            f'https://huggingface.co/{model["repository"]}/resolve/'
+            f'{model["revision"]}/{quote(filename)}'
+        )
+        target = destination / filename
+        with urlopen(url) as response, target.open('wb') as output:
+            shutil.copyfileobj(response, output)
+        with target.open('rb') as saved:
+            digest = hashlib.file_digest(saved, 'sha256').hexdigest()
+        size = target.stat().st_size
+        if size != entry['bytes'] or digest != entry['sha256']:
+            raise ValueError(f'Model file differs from the source manifest: {name}/{filename}')
+        total += size
+    print(f'Verified public model snapshot {name}.', flush=True)
+print(f'Public model files on disk: {total} bytes.')
+PY

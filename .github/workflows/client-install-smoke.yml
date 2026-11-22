@@ -24,6 +24,7 @@ jobs:
   install:
     if: github.repository == 'Q-Fox-Labs/Brai' && inputs.install_path == 'client'
     name: Client install smoke
+    environment: brai-clean-install
     env:
       BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
       ADMIN_REPOSITORY: ${{ vars.BRAI_CI_ADMIN_REPOSITORY || 'Q-Fox-Labs/Q-Server' }}
@@ -43,22 +44,17 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "$BRAI_CI_SOURCE_SHA"
           printf 'Candidate: %s\nCPU cores: %s\n' "$BRAI_CI_SOURCE_SHA" "$(nproc)"
           df -B1 --output=target,size,avail / /var/lib/docker
-      - name: Check access and test inputs
+      - name: Check installer access
         env:
           BRAI_CI_ADMIN_TOKEN: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
-          BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
-          BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
+          BRAI_CI_ADMIN_SSH_KEY: ${{ secrets.BRAI_CI_ADMIN_SSH_KEY }}
         run: |
           [[ "$ADMIN_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$ADMIN_SHA" =~ ^[a-f0-9]{40}$ ]] || {
             echo 'Use an owner/repository and full commit SHA for Admin.' >&2
             exit 1
           }
-          missing=()
-          for input in BRAI_CI_ADMIN_TOKEN BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN; do
-            [[ -n "${!input}" ]] || missing+=("$input")
-          done
-          if (("${#missing[@]}")); then
-            printf 'Missing Actions secret: %s\n' "${missing[@]}" >&2
+          if [[ -z "$BRAI_CI_ADMIN_SSH_KEY" && -z "$BRAI_CI_ADMIN_TOKEN" ]]; then
+            echo 'Set a read-only Admin deploy key or token in the brai-clean-install environment.' >&2
             exit 1
           fi
       - name: Check out the installer
@@ -66,9 +62,29 @@ jobs:
         with:
           repository: ${{ env.ADMIN_REPOSITORY }}
           ref: ${{ env.ADMIN_SHA }}
-          token: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
+          ssh-key: ${{ secrets.BRAI_CI_ADMIN_SSH_KEY }}
+          token: ${{ secrets.BRAI_CI_ADMIN_TOKEN || github.token }}
           path: installer
           persist-credentials: false
+      - name: Verify the installer revision
+        working-directory: installer
+        run: |
+          test "$(git rev-parse HEAD)" = "$ADMIN_SHA"
+          test -f ansible/client/install.yml
+          printf 'Verified client installer at Admin %s\n' "$ADMIN_SHA"
+      - name: Check test inputs
+        env:
+          BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
+          BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
+        run: |
+          missing=()
+          for input in BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN; do
+            [[ -n "${!input}" ]] || missing+=("$input")
+          done
+          if (("${#missing[@]}")); then
+            printf 'Missing Actions secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
       - name: Prepare the disposable runner
         run: |
           sudo rm -rf -- /usr/local/lib/android /opt/ghc
