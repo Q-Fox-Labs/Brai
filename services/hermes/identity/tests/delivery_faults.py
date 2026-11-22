@@ -40,6 +40,7 @@ async def run(config, fixture, native, receipt):
     root.mkdir(mode=0o711)
     identity = root.stat().st_dev, root.stat().st_ino
     workers, servers, log_tasks = [], [], []
+    broker_runs = []
     deliveries = []
     connection_errors = []
     consumer = supervisor = None

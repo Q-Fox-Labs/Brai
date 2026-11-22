@@ -415,6 +415,7 @@
       "services/hermes/identity/tests/fixtures/ordinary_release/plugins/platforms/telegram/update_admission.py",
       "services/hermes/identity/tests/test_durable_delivery.py",
       "services/hermes/identity/tests/delivery_faults.py",
+      "services/hermes/identity/tests/test_delivery_fault_cleanup.py",
       "services/hermes/identity/tests/redaction-lock.test.mjs",
       "services/hermes/identity/tests/test_redaction_lock.py",
       "services/hermes/identity/tests/fixtures/ordinary_release/agent/codex_app_server_session.py",
