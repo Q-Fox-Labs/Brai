@@ -1643,3 +1643,357 @@ index e9819bc..800c70d 100644
 -        agent.memory_notifications = str(mem_notif).lower() if mem_notif else "on"
 +        agent.memory_notifications = str(mem_notif).lower() if mem_notif else "off"
          agent.clarify_callback = self._clarify_callback_sync
+
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -257,5 +257,8 @@
+         provider_failure_notice, script_timeout_notice)
+
+-    job_name = job.get("name") or job.get("id") or "cron job"
++    from agent.i18n import t
++    from cron.scheduler_delivery import _scheduled_task_name
++
++    job_name = _scheduled_task_name(job) or t("scheduled_task.untitled")
+     job_id = job.get("id") or job_name
+     text = (error or "unknown error").strip()
+@@ -2932,5 +2935,7 @@
+         _pf_text = re.sub(r"\[blocked_config[^\]]*\]\s*", "", err).strip()
+         from cron.scheduler_failure_copy import blocked_config_notice
+-        deliver_content = blocked_config_notice(job.get("name") or job["id"], _pf_text)
++        from agent.i18n import t
++        from cron.scheduler_delivery import _scheduled_task_name
++        deliver_content = blocked_config_notice(_scheduled_task_name(job) or t("scheduled_task.untitled"), _pf_text)
+     elif success:
+         deliver_content = final_response
+@@ -2949,7 +2954,9 @@
+             # heuristics would re-diagnose it ("timed out" -> blame the model service, "401" ->
+             # "sign in again") and attach the wrong remediation. Deliver the evidence as-is.
++            from agent.i18n import t
++            from cron.scheduler_delivery import _scheduled_task_name
+             from cron.scheduler_failure_copy import generic_failure_notice
+             deliver_content = generic_failure_notice(
+-                job.get("name") or job["id"], job["id"], err.strip().rstrip("."),
++                _scheduled_task_name(job) or t("scheduled_task.untitled"), job["id"], err.strip().rstrip("."),
+             ) + _failure_streak_nudge(job)
+         else:
+
+diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
+--- a/cron/scheduler_delivery.py
++++ b/cron/scheduler_delivery.py
+@@ -1976,4 +1976,36 @@
+
+
++def _scheduled_task_name(job: dict) -> str:
++    """Вернуть название задания для чата, не подставляя служебный ID."""
++    name = str(job.get("name") or "").strip()
++    return name if name != job.get("id") else ""
++
++
++def _scheduled_delivery_text(job: dict, content: str, *, for_failure: bool) -> str:
++    """Оформить результат задания без служебного ID и подсказать отмену будущих запусков."""
++    from agent.i18n import t
++    from cron.constants import is_recurring
++    from cron.unreachable_retry import is_retry_run
++
++    name = _scheduled_task_name(job)
++    title = name or t("scheduled_task.untitled")
++    # Сообщение об ошибке уже содержит имя задания.
++    first_line = content.lstrip().partition("\n")[0].strip()
++    text = content
++    if not for_failure and first_line not in (title, f"**{title}**"):
++        text = f"{title}\n\n{content}"
++
++    if not name or not is_recurring(job) or not job.get("enabled", True) or job.get("state") in {"paused", "completed"}:
++        return text
++
++    repeat = job.get("repeat") or {}
++    times = repeat.get("times")
++    completed = repeat.get("completed", 0) + (0 if is_retry_run(job) else 1)
++    if times is not None and times > 0 and completed >= times:
++        return text
++
++    return f'{text}\n\n{t("scheduled_task.cancel", name=name)}'
++
++
+ def _deliver_result(
+     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
+@@ -2025,16 +2057,7 @@
+     # persisted as ``last_delivery_unverified`` so `hermes cron list` shows it.
+     unverified_targets: list = []
+-    if wrap_response:
+-        task_name = job.get("name", job["id"])
+-        delivery_content = (
+-            f"Cronjob Response: {task_name}\n"
+-            f"(job_id: {job.get('id', '')})\n"
+-            f"-------------\n\n"
+-            f"{content}\n\n"
+-            "To stop or manage this job, send me a new message "
+-            f"(e.g. \"stop reminder {task_name}\")."
+-        )
+-    else:
+-        delivery_content = content
++    delivery_content = (
++        _scheduled_delivery_text(job, content, for_failure=for_failure) if wrap_response else content
++    )
+
+     from gateway.platforms.base import BasePlatformAdapter
+
+diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
+--- a/cron/scheduler_failure_copy.py
++++ b/cron/scheduler_failure_copy.py
+@@ -78,5 +78,5 @@
+         return None
+     if reason in _TRANSIENT_REASONS:
+-        action = f"{backup_provider_phrase} Задача запустится снова по расписанию."
++        action = backup_provider_phrase
+     else:
+         action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
+@@ -108,3 +108,3 @@
+     else:
+         detail = "обнаружена ошибка настроек"
+-    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась. Повторю запуск по расписанию."
++    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась."
+
+diff --git a/locales/af.yaml b/locales/af.yaml
+--- a/locales/af.yaml
++++ b/locales/af.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} sekonde"
+     second_other: "{count} sekondes"
++scheduled_task:
++  untitled: "Geskeduleerde taak"
++  cancel: "Skryf “Kanselleer die taak ‘{name}’” in die klets om dit te stop."
++
+ gateway:
+   approval_expired: "⚠️ Goedkeuring het verval (die agent wag nie meer nie). Vra die agent om weer te probeer."
+
+diff --git a/locales/ar.yaml b/locales/ar.yaml
+--- a/locales/ar.yaml
++++ b/locales/ar.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} ثانية"
+     second_other: "{count} ثوانٍ"
++scheduled_task:
++  untitled: "مهمة مجدولة"
++  cancel: "لإيقاف مرات التشغيل القادمة، اكتب «ألغِ مهمة {name}» في المحادثة."
++
+ gateway:
+   approval_expired: "⚠️ انتهت صلاحية الموافقة (لم يعد الوكيل ينتظر). اطلب من الوكيل المحاولة مرة أخرى."
+
+diff --git a/locales/de.yaml b/locales/de.yaml
+--- a/locales/de.yaml
++++ b/locales/de.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} Sekunde"
+     second_other: "{count} Sekunden"
++scheduled_task:
++  untitled: "Geplante Aufgabe"
++  cancel: "Schreibe „Brich die Aufgabe ‚{name}‘ ab“ in den Chat, um sie zu stoppen."
++
+ gateway:
+   approval_expired: "⚠️ Genehmigung abgelaufen (Agent wartet nicht mehr). Bitten Sie den Agenten, es erneut zu versuchen."
+
+diff --git a/locales/en.yaml b/locales/en.yaml
+--- a/locales/en.yaml
++++ b/locales/en.yaml
+@@ -44,4 +44,8 @@
+     second_one: "{count} second"
+     second_other: "{count} seconds"
++
++scheduled_task:
++  untitled: "Scheduled task"
++  cancel: "To cancel future runs, write “Cancel the task ‘{name}’” in chat."
+
+ gateway:
+
+diff --git a/locales/es.yaml b/locales/es.yaml
+--- a/locales/es.yaml
++++ b/locales/es.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} segundo"
+     second_other: "{count} segundos"
++scheduled_task:
++  untitled: "Tarea programada"
++  cancel: "Para detener la tarea, escribe «Cancela la tarea “{name}”» en el chat."
++
+ gateway:
+   approval_expired: "⚠️ La aprobación ha caducado (el agente ya no está esperando). Pida al agente que lo intente de nuevo."
+
+diff --git a/locales/fr.yaml b/locales/fr.yaml
+--- a/locales/fr.yaml
++++ b/locales/fr.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} seconde"
+     second_other: "{count} secondes"
++scheduled_task:
++  untitled: "Tâche planifiée"
++  cancel: "Pour arrêter la tâche, écrivez « Annule la tâche “{name}” » dans le chat."
++
+ gateway:
+   approval_expired: "⚠️ Approbation expirée (l'agent n'attend plus). Demandez à l'agent de réessayer."
+
+diff --git a/locales/ga.yaml b/locales/ga.yaml
+--- a/locales/ga.yaml
++++ b/locales/ga.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} soicind"
+     second_other: "{count} soicind"
++scheduled_task:
++  untitled: "Tasc sceidealaithe"
++  cancel: "Chun an tasc a stopadh, scríobh “Cealaigh an tasc ‘{name}’” sa chomhrá."
++
+ gateway:
+   approval_expired: "⚠️ Tá an cead imithe in éag (níl an gníomhaire ag fanacht níos mó). Iarr ar an ngníomhaire iarracht eile a dhéanamh."
+
+diff --git a/locales/hu.yaml b/locales/hu.yaml
+--- a/locales/hu.yaml
++++ b/locales/hu.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} másodperc"
+     second_other: "{count} másodperc"
++scheduled_task:
++  untitled: "Ütemezett feladat"
++  cancel: "A feladat leállításához írd a csevegésbe: „Töröld a(z) »{name}« feladatot”."
++
+ gateway:
+   approval_expired: "⚠️ A jóváhagyás lejárt (az ügynök már nem vár). Kérd meg az ügynököt, hogy próbálja újra."
+
+diff --git a/locales/it.yaml b/locales/it.yaml
+--- a/locales/it.yaml
++++ b/locales/it.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} secondo"
+     second_other: "{count} secondi"
++scheduled_task:
++  untitled: "Attività pianificata"
++  cancel: "Per interrompere l’attività, scrivi in chat «Annulla l’attività “{name}”»."
++
+ gateway:
+   approval_expired: "⚠️ Approvazione scaduta (l'agente non è più in attesa). Chiedi all'agente di riprovare."
+
+diff --git a/locales/ja.yaml b/locales/ja.yaml
+--- a/locales/ja.yaml
++++ b/locales/ja.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} 秒"
+     second_other: "{count} 秒"
++scheduled_task:
++  untitled: "予定されたタスク"
++  cancel: "今後の実行を止めるには、チャットに「タスク『{name}』をキャンセルして」と入力してください。"
++
+ gateway:
+   approval_expired: "⚠️ 承認の有効期限が切れました（エージェントはもう待機していません）。エージェントに再試行を依頼してください。"
+
+diff --git a/locales/ko.yaml b/locales/ko.yaml
+--- a/locales/ko.yaml
++++ b/locales/ko.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count}초"
+     second_other: "{count}초"
++scheduled_task:
++  untitled: "예약된 작업"
++  cancel: "앞으로 실행하지 않으려면 채팅에 ‘{name} 작업을 취소해 줘’라고 입력하세요."
++
+ gateway:
+   approval_expired: "⚠️ 승인이 만료되었습니다 (에이전트가 더 이상 대기하지 않습니다). 에이전트에게 다시 시도하도록 요청하세요."
+
+diff --git a/locales/pt.yaml b/locales/pt.yaml
+--- a/locales/pt.yaml
++++ b/locales/pt.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} segundo"
+     second_other: "{count} segundos"
++scheduled_task:
++  untitled: "Tarefa agendada"
++  cancel: "Para interromper a tarefa, escreva «Cancela a tarefa “{name}”» no chat."
++
+ gateway:
+   approval_expired: "⚠️ A aprovação expirou (o agente já não está à espera). Peça ao agente para tentar novamente."
+
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -44,4 +44,8 @@
+     second_one: "{count} секунда"
+     second_other: "{count} сек"
++scheduled_task:
++  untitled: "Задание по расписанию"
++  cancel: "Чтобы больше не получать такие сообщения, напишите в чат «Отмени задание „{name}“»."
++
+ gateway:
+   approval_expired: "⚠️ Срок одобрения истёк (агент больше не ожидает). Попросите агента повторить попытку."
+
+diff --git a/locales/tr.yaml b/locales/tr.yaml
+--- a/locales/tr.yaml
++++ b/locales/tr.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} saniye"
+     second_other: "{count} saniye"
++scheduled_task:
++  untitled: "Zamanlanmış görev"
++  cancel: "Görevi durdurmak için sohbete “{name} görevini iptal et” yazın."
++
+ gateway:
+   approval_expired: "⚠️ Onay süresi doldu (ajan artık beklemiyor). Ajanın tekrar denemesini isteyin."
+
+diff --git a/locales/uk.yaml b/locales/uk.yaml
+--- a/locales/uk.yaml
++++ b/locales/uk.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} секунда"
+     second_other: "{count} секунд"
++scheduled_task:
++  untitled: "Заплановане завдання"
++  cancel: "Щоб більше не отримувати такі повідомлення, напишіть у чаті «Скасуй завдання “{name}”»."
++
+ gateway:
+   approval_expired: "⚠️ Час схвалення минув (агент більше не очікує). Попросіть агента спробувати ще раз."
+
+diff --git a/locales/zh-hant.yaml b/locales/zh-hant.yaml
+--- a/locales/zh-hant.yaml
++++ b/locales/zh-hant.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} 秒"
+     second_other: "{count} 秒"
++scheduled_task:
++  untitled: "定期工作"
++  cancel: "如要停止後續執行，請在聊天中傳送「取消工作『{name}』」。"
++
+ gateway:
+   approval_expired: "⚠️ 批准已逾期（代理不再等待）。請讓代理重試。"
+
+diff --git a/locales/zh.yaml b/locales/zh.yaml
+--- a/locales/zh.yaml
++++ b/locales/zh.yaml
+@@ -42,4 +42,8 @@
+     second_one: "{count} 秒"
+     second_other: "{count} 秒"
++scheduled_task:
++  untitled: "定时任务"
++  cancel: "如需停止后续执行，请在聊天中发送“取消任务‘{name}’”。"
++
+ gateway:
+   approval_expired: "⚠️ 批准已过期（代理不再等待）。请让代理重试。"
+
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -1058,5 +1058,9 @@
+     "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
+
+-Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless pinned.
++Use a short, recognizable name in the user's language when creating a job. Keep IDs, scheduler terms
++and schedule syntax out of messages to the user. When the user asks to cancel a scheduled task
++(for example, “Отмени задание «Название»”), list jobs and match the exact name. Use 'remove' on that
++job so it stops running. If several jobs share the name, ask which schedule to cancel. Confirm only
++after removal succeeds.
+
+ Jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless the user pins one. Prefer updating an existing job over creating near-duplicates.""",
+@@ -1089,5 +1093,5 @@
+             "name": {
+                 "type": "string",
+-                "description": "Optional human-friendly name"
++                "description": "Short plain-language title in the user's language. Set this when creating a task with a from-chat delivery so its owner can recognize and cancel it by name."
+             },
+             "repeat": {
