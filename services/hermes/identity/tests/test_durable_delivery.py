@@ -831,6 +831,54 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         prepared_response.reset(mr)
                         input_delivery.reset(mi)
+                url_input = delivery_id('url-input')
+                self.worker.delivery_journal.begin_input(url_input, delivery_id('url-digest'))
+                self.worker.delivery_journal.save_continuation('url-session', url_input, 3)
+                url_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='79')
+                ui, ur = input_delivery.set(url_input), prepared_response.set(None)
+                try:
+                    url_response = 'answer ![pic](https://example.com/pic.png)'
+                    await self.runner._hmwa_deliver_turn_response(url_event, source, NS(session_id='id'),
+                        'url-session', 0, {'completed': True}, [], url_response, '', False)
+                    extracted = await adapter._extract_response_content(url_response, url_event, 'url-session', is_ephemeral_response=False)
+                    self.assertEqual(extracted.images, [])
+                    self.assertIn('answer', extracted.text_content)
+                    self.assertIn('https://example.com/pic.png', extracted.text_content)
+                    await adapter._send_final_text(url_event, 'url-session', extracted.text_content,
+                        {'thread_id': '7'}, False, 0, lambda _: None)
+                    queued = [row for row in self.worker.delivery_journal.pending_outputs()
+                              if row['payload']['input_delivery_id'] == url_input]
+                    self.assertEqual([row['action'] for row in queued], ['send'])
+                finally:
+                    prepared_response.reset(ur)
+                    input_delivery.reset(ui)
+                pdf = workspace / 'set.pdf'
+                png = workspace / 'set.png'
+                pdf.write_bytes(b'%PDF synthetic')
+                png.write_bytes(b'synthetic png')
+                pdf_artifact = native.store().resolve(str(pdf), ['fixture', 'pdf'])['artifactId']
+                png_artifact = native.store().resolve(str(png), ['fixture', 'png'])['artifactId']
+                explicit = native.final_text('BRAI_FILES:' + json.dumps({'mode': 'files', 'items': [
+                    {'artifactId': pdf_artifact, 'caption': 'one', 'presentation': 'document'},
+                    {'artifactId': png_artifact, 'caption': 'two', 'presentation': 'document'}]}), 'explicit-set')
+                set_input = delivery_id('explicit-input')
+                self.worker.delivery_journal.begin_input(set_input, delivery_id('explicit-digest'))
+                self.worker.delivery_journal.save_continuation('explicit-session', set_input, 3)
+                set_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='80')
+                si, sr = input_delivery.set(set_input), prepared_response.set(None)
+                try:
+                    await self.runner._hmwa_deliver_turn_response(set_event, source, NS(session_id='id'),
+                        'explicit-session', 0, {'already_sent': True}, [], explicit, '', False)
+                    queued = [row for row in self.worker.delivery_journal.pending_outputs()
+                              if row['payload']['input_delivery_id'] == set_input]
+                    self.assertEqual([row['payload']['payload']['items'][0]['artifact']['artifact_id'] for row in queued],
+                                     [pdf_artifact, png_artifact])
+                    self.assertEqual([row['payload']['payload']['items'][0]['presentation'] for row in queued],
+                                     ['document', 'document'])
+                    self.assertEqual([row['payload']['payload']['items'][0]['caption'] for row in queued], ['one', 'two'])
+                finally:
+                    prepared_response.reset(sr)
+                    input_delivery.reset(si)
                 from identity.scope import prepared_voice
                 voice_input = delivery_id('native-voice-input')
                 self.worker.delivery_journal.begin_input(voice_input, delivery_id('native-voice-digest'))

@@ -116,6 +116,12 @@ def make_adapter(config, platform, peer, publish_file):
                 result = SimpleNamespace(**preview)
             else:
                 result = await super()._extract_response_content(response, event, session_key, **kwargs)
+            remote = [url for url, _ in result.images if str(url).lower().startswith(('http://', 'https://'))]
+            if remote:
+                result.images = [(url, alt) for url, alt in result.images
+                                 if not str(url).lower().startswith(('http://', 'https://'))]
+                lines = [url for url in dict.fromkeys(remote) if url not in (result.text_content or '')]
+                result.text_content = '\n\n'.join(part for part in (result.text_content or '', '\n'.join(lines)) if part)
             event._brai_single_text = not (result.images or result.media_files or result.local_files)
             ident = input_delivery.get()
             if (staged is None and not event._brai_single_text and getattr(event, '_brai_successful_turn', False)
@@ -138,19 +144,21 @@ def make_adapter(config, platform, peer, publish_file):
                         import brai_files
                         from files.store import delivery_plan
                         items, mode = await asyncio.to_thread(brai_files.output_items, paths)
-                        if getattr(event, '_brai_streamed_response', False):
+                        streaming = getattr(event, '_brai_streamed_response', False)
+                        explicit = streaming and await asyncio.to_thread(brai_files.explicit_output_set, paths)
+                        if streaming and not explicit:
                             batches, checked = _streamed_batches(items, result.media_files, event.source,
                                 getattr(result, 'force_document_attachments', False))
                             brai_files.validate_telegram(checked)
                         elif getattr(result, 'force_document_attachments', False):
                             items = [{**item, 'presentation': 'document'} for item in items]
-                        if not getattr(event, '_brai_streamed_response', False):
+                        if not streaming or explicit:
                             brai_files.validate_telegram(items)
                         set_ids = sorted({item['_setId'] for item in items if '_setId' in item})
                         public_items = [{key: value for key, value in item.items() if key != '_setId'} for item in items]
                         cleanup_identity = brai_files.key([brai_files.source_of(event),
                             str(getattr(event, 'ledger_message_id', None) or event.message_id), public_items, mode])
-                        if not getattr(event, '_brai_streamed_response', False):
+                        if not streaming or explicit:
                             plan = delivery_plan(items, mode, supports_album=True)
                             for batch in plan['batches']:
                                 batches.append({'kind': batch['kind'], 'fallback': plan['fallback'], 'items': [

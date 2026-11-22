@@ -839,6 +839,41 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mode, 'album')
         self.assertEqual([i['caption'] for i in restored], ['0', '1'])
 
+    async def test_output_set_origin_and_legacy_records(self):
+        item = self.items(1)[0]
+        data = {'mode': 'files', 'items': [{'artifactId': item['file']['artifactId'], 'presentation': 'document'}]}
+        explicit = native.final_text('BRAI_FILES:' + json.dumps(data), 'explicit-origin')
+        explicit_paths = [json.loads(line.removeprefix('MEDIA:')) for line in explicit.splitlines()]
+        self.assertTrue(native.explicit_output_set(explicit_paths))
+        ordinary_file = self.file('ordinary-origin', '.jpg')
+        ordinary = native.final_text('MEDIA:' + str(ordinary_file), 'ordinary-origin')
+        ordinary_paths = [json.loads(line.removeprefix('MEDIA:')) for line in ordinary.splitlines()]
+        self.assertFalse(native.explicit_output_set(ordinary_paths))
+        backup = self.root / 'output-sets-backup.sqlite'
+        with sqlite3.connect(self.store.root / 'files.sqlite') as source, sqlite3.connect(backup) as target:
+            source.backup(target)
+        with sqlite3.connect(backup) as restored:
+            flags = [json.loads(row[0])['explicit'] for row in restored.execute('SELECT payload FROM output_sets')]
+        self.assertEqual(sorted(flags), [False, True])
+        with self.store.db() as db:
+            row = db.execute('SELECT identity,payload FROM output_sets WHERE paths=?', (native.paths_key(ordinary_paths),)).fetchone()
+            payload = json.loads(row['payload'])
+            payload.pop('explicit')
+            db.execute('UPDATE output_sets SET payload=? WHERE identity=?', (json.dumps(payload), row['identity']))
+        self.assertTrue(native.explicit_output_set(ordinary_paths))
+
+    async def test_explicit_and_ordinary_same_files_keep_separate_rules(self):
+        path = self.file('same-origin', '.jpg')
+        ordinary = native.final_text('MEDIA:' + str(path), 'same-turn')
+        ordinary_paths = [json.loads(line.removeprefix('MEDIA:')) for line in ordinary.splitlines()]
+        items, _ = native.output_items(ordinary_paths)
+        data = {'mode': 'files', 'items': [{'artifactId': items[0]['file']['artifactId']}]}
+        explicit = native.final_text('BRAI_FILES:' + json.dumps(data), 'same-turn')
+        explicit_paths = [json.loads(line.removeprefix('MEDIA:')) for line in explicit.splitlines()]
+        self.assertNotEqual(ordinary_paths, explicit_paths)
+        self.assertFalse(native.explicit_output_set(ordinary_paths))
+        self.assertTrue(native.explicit_output_set(explicit_paths))
+
     async def test_telegram_long_captions_topic_and_mixed_types(self):
         items = self.items(2)
         items[0]['caption'] = 'Я' * 5300
