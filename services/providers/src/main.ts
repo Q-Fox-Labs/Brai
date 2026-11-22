@@ -16,7 +16,7 @@ if(!NATS_URL || !LITELLM_URL)throw new Error("MISSING_RUNTIME_CONFIGURATION");
 const store=PROVIDERS_DATABASE_URL?postgresStore(PROVIDERS_DATABASE_URL):undefined;
 if(store){await store.exclusive(()=>process.exit(1));await store.recover(Date.now());await store.sweep(Date.now());}
 const guard=await createEgressGuard({host:"127.0.0.1",port:Number(process.env.PROVIDERS_EGRESS_PORT ?? "18401")});
-const nc=await connect({servers:NATS_URL,user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD,inboxPrefix:process.env.NATS_INBOX_PREFIX,maxReconnectAttempts:0,reconnect:false,maxPingOut:2,timeout:3000});
+const nc=await connect({servers:NATS_URL,user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD,inboxPrefix:process.env.NATS_INBOX_PREFIX,maxReconnectAttempts:-1,maxPingOut:2,timeout:3000});
 const observationStore=PROVIDERS_DATABASE_URL?postgresObservation(PROVIDERS_DATABASE_URL):undefined;
 const js=nc.jetstream();
 const observation=observationStore?createObservation(observationStore,historySender(nc),event=>js.publish('brai.alerts.v1.ingest',new TextEncoder().encode(JSON.stringify(event)),{msgID:event.id,timeout:OBSERVATION_LIMITS.timeoutMs}),()=>!nc.isClosed()):undefined;

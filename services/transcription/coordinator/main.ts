@@ -15,7 +15,7 @@ import { createAlertsPublisher } from './transport/alerts.js';
 import { createAlertsController } from './recovery/alerts.js';
 
 function connection(settings: NatsSettings, timeout: number): Promise<NatsConnection> {
-  return connect({ ...settings, timeout, reconnect: false });
+  return connect({ ...settings, timeout, maxReconnectAttempts: -1 });
 }
 
 /** Запускает собственные ресурсы, ожидает startup recovery и возвращает идемпотентный close/status. */
