@@ -20,6 +20,23 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def telegram_topic(message):
+    """Вернуть тему личного чата. Telegram также передаёт thread ID как якорь UI."""
+    return str(message.get('message_thread_id') or '') if message.get('is_topic_message') is True else ''
+
+
+def _input_topic(payload):
+    update = json.loads(payload)
+    message = (update.get('message') or update.get('edited_message')
+               or (update.get('callback_query') or {}).get('message') or {})
+    return telegram_topic(message)
+
+
+def _consent_thread(payload):
+    topic = _input_topic(payload)
+    return '' if topic == '1' else topic
+
+
 def binding(profile):
     ident, owner, uid = profile['profileId'], profile['userId'], profile['uid']
     if not isinstance(ident, str) or str(uuid.UUID(ident)) != ident:
@@ -222,7 +239,7 @@ class UpdateInbox:
                         raise ValueError('INBOX_IDENTITY_CONFLICT')
                     result = {'seq': existing['seq'], 'state': existing['state'], 'digest': digest}
                 else:
-                    state = self._state(db, chat, thread)
+                    state = self._state(db, chat, _consent_thread(payload))
                     generation = state['generation'] if state else 0
                     cur = db.execute("""INSERT INTO release_inbox
                         (bot_id,update_id,profile_id,user_id,uid,actor_id,chat,thread,chat_generation,payload,digest,state)
@@ -286,7 +303,7 @@ class UpdateInbox:
                                   else "('unknown','blocked')")
                 if not self.restartable and db.execute("SELECT 1 FROM release_inbox WHERE seq<? AND state IN " + blocked_states + " LIMIT 1", (row['seq'],)).fetchone():
                     raise ValueError('INBOX_ORDER_BLOCKED')
-                current = self._state(db,row['chat'],row['thread'])
+                current = self._state(db, row['chat'], _consent_thread(row['payload']))
                 if current and (current['paused'] or current['generation'] != row['chat_generation']):
                     raise PermissionError('INBOX_CONSENT_CHANGED')
                 db.execute("UPDATE release_inbox SET state='handing_off' WHERE seq=?", (row['seq'],))
@@ -364,7 +381,7 @@ class UpdateInbox:
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 rows = [self._find(db, profile, bot_id, ident) for ident in update_ids]
-                if not rows or len({(r['chat'], r['thread']) for r in rows}) != 1:
+                if not rows or len({(r['chat'], _input_topic(r['payload'])) for r in rows}) != 1:
                     raise ValueError('DELIVERY_BATCH_ROUTE_CHANGED')
                 ident = delivery_id([profile['profileId'], str(bot_id), [r['update_id'] for r in rows]])
                 digest = delivery_id([[r['update_id'], r['digest']] for r in rows])
@@ -398,7 +415,7 @@ class UpdateInbox:
                 WHERE d.delivery_id=? ORDER BY i.seq''', (delivery_id,)).fetchall()
             if not rows or any((r['profile_id'], r['user_id'], r['uid']) != binding(profile) for r in rows):
                 raise PermissionError('DELIVERY_INPUT_OWNER_CHANGED')
-            if len({(r['chat'], r['thread'], r['chat_generation']) for r in rows}) != 1:
+            if len({(r['chat'], _input_topic(r['payload']), r['chat_generation']) for r in rows}) != 1:
                 raise PermissionError('DELIVERY_INPUT_ROUTE_CHANGED')
             if reply_to:
                 for row in rows:
@@ -440,8 +457,10 @@ class UpdateInbox:
         db = self._open(profile)
         try:
             row = self._find(db,profile,bot_id,update_id)
-            return {key:row[key] for key in ('seq','bot_id','update_id','profile_id','user_id','uid',
-                    'actor_id','chat','thread','chat_generation','digest','state','operation_id','receipt')}
+            result = {key: row[key] for key in ('seq','bot_id','update_id','profile_id','user_id','uid',
+                      'actor_id','chat','chat_generation','digest','state','operation_id','receipt')}
+            result['thread'] = _consent_thread(row['payload'])
+            return result
         finally: db.close()
 
     def held(self, profile, operation_id):

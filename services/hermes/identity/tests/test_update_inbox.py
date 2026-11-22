@@ -71,6 +71,17 @@ class InboxTests(unittest.TestCase):
                          ('42', 'member', 1))
         self.assertEqual(self.inbox.delivery_source(PROFILE, batch['delivery_id'])['update_id'], '1')
 
+    def test_reply_anchor_uses_root_consent_and_can_share_a_native_batch(self):
+        for ident, anchor in ((1, 77), (2, 78)):
+            raw = update(ident).to_dict()
+            raw['message'].update(message_thread_id=anchor, is_topic_message=False)
+            telegram_update = Update.de_json(raw, Bot('123:abc'))
+            self.inbox.capture(PROFILE, telegram_update, '123')
+            self.assertEqual(self.inbox.observe(PROFILE, '123', ident)['thread'], '')
+            self.inbox.claim_for_delivery(PROFILE, '123', ident)
+        batch = self.inbox.bind_delivery(PROFILE, '123', [1, 2])
+        self.assertEqual(self.inbox.delivery_source(PROFILE, batch['delivery_id'], 2)['update_id'], '2')
+
     def test_zero_update_id_is_valid_and_preserved(self):
         self.capture(0)
         self.assertEqual(self.inbox.observe(PROFILE,'123',0)['update_id'],'0')

@@ -540,8 +540,8 @@ class Mirror:
             from .durable_inputs import ordinary
             if ordinary(update):
                 self.auto_inputs.add(key)
-                route = (str(update.effective_chat.id), str(getattr(update.effective_message, 'message_thread_id', None) or ''))
                 row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update.update_id)
+                route = (row['chat'], row['thread'])
                 if row['state'] != 'captured':
                     return True
                 consent = await asyncio.to_thread(self.inbox.journal.chat_state, profile, (row['chat'], row['thread']))

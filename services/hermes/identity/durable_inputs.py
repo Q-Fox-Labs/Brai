@@ -74,7 +74,7 @@ async def pump(mirror):
                     observed = await asyncio.to_thread(mirror.inbox.observe, profile, row['bot_id'], row['update_id'])
                     if observed['state'] != 'captured':
                         return
-                    route = (str(getattr(update.effective_chat, 'id', '')), str(getattr(update.effective_message, 'message_thread_id', None) or ''))
+                    route = (observed['chat'], observed['thread'])
                     state = await asyncio.to_thread(mirror.inbox.journal.chat_state, profile, route)
                     if state['paused'] or state['generation'] != observed['chat_generation']:
                         return

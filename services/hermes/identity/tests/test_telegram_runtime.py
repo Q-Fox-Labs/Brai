@@ -127,7 +127,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 route = ('456', '77')
                 source = {'chat': '456', 'actor_id': '456', 'chat_generation': 0, 'state': 'accepted',
                           'auth_author': '123', 'auth_role': 'user', 'auth_generation': 0,
-                          'payload': json.dumps({'message': {'message_thread_id': 77, 'message_id': 55}})}
+                          'payload': json.dumps({'message': {'message_thread_id': 77, 'is_topic_message': True, 'message_id': 55}})}
                 resolver.ledger.admit(legacy, route, {'thread_id': '77'}, '55')
                 resolver.ledger.record(legacy, route, '57', outgoing=False)
                 resolver.ledger.record(legacy, route, '58', outgoing=True)
@@ -174,7 +174,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         source_id = delivery_id('active-input')
         source = {'chat': '456', 'actor_id': '456', 'chat_generation': 0,
                   'state': 'handing_off', 'auth_author': '123', 'auth_role': 'user', 'auth_generation': 2,
-                  'payload': json.dumps({'message': {'message_thread_id': 77, 'message_id': 55}})}
+                  'payload': json.dumps({'message': {'message_thread_id': 77, 'is_topic_message': True, 'message_id': 55}})}
         resolver.ledger.admit(primary, route, {'thread_id': '77'}, '55')
         resolver.mirror = NS(restartable=True, accepted=AsyncMock(),
                              inbox=NS(delivery_source=lambda *args: source))
@@ -224,7 +224,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         resolver.mirror = NS(restartable=True, accepted=AsyncMock(), inbox=NS(
             delivery_source=lambda *args: {'chat': '123', 'actor_id': '123', 'chat_generation': 0,
                 'state': 'accepted', 'auth_author': '123', 'auth_role': 'user', 'auth_generation': 0,
-                'payload': json.dumps({'message': {'message_thread_id': 77}})}))
+                'payload': json.dumps({'message': {'message_thread_id': 77, 'is_topic_message': True}})}))
         resolver.ledger.admit(restored, ('123', '77'), {'thread_id': '77'}, '55')
         resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
         resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)

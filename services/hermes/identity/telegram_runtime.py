@@ -578,7 +578,10 @@ class Resolver:
             if not isinstance(status, dict) or status.get('ready') is not True:
                 return False
         turn = self.turns.get(profile['uid'])
-        return turn is None or turn['route'] == route
+        if turn is None:
+            return True
+        chat, thread = turn['route']
+        return (chat, '' if thread == '1' else thread) == route
 
     async def reconcile_delivery(self, profile, binding):
         """Сверить факт приёма worker после потерянного RPC receipt."""
@@ -603,7 +606,8 @@ class Resolver:
             raise PermissionError('Reply owner mismatch')
         source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id, payload.get('reply_to'))
         original = json.loads(source['payload']).get('message', {})
-        route = (source['chat'], str(original.get('message_thread_id') or ''))
+        from .update_inbox import telegram_topic
+        route = (source['chat'], telegram_topic(original))
         if str(payload.get('chat_id')) != route[0] or source.get('actor_id') != route[0]:
             raise PermissionError('Reply input route changed')
         auth = (str(profile['authorTelegramId']), profile.get('role'), profile.get('generation'))
