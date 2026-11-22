@@ -107,6 +107,11 @@ class Config:
         """Проверить обязательные параметры; секреты остаются в окружении child process."""
         owner = os.environ.get("BRAI_TELEGRAM_OWNER_ID", "")
         chat = os.environ.get("BRAI_TELEGRAM_CHAT_ID", "")
+        if not chat:
+            # AIDEV-NOTE: Старый native профиль может задавать только Telegram allowlist.
+            native_chat = os.environ.get("TELEGRAM_ALLOWED_CHATS", "").strip()
+            if re.fullmatch(r"-[1-9][0-9]*", native_chat):
+                chat = native_chat
         allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "")
         users = tuple(allowed.split(",")) if allowed else ()
         state = Path(os.environ.get("BRAI_TELEGRAM_STATE_DIR", ""))
@@ -904,18 +909,24 @@ class TelegramPlugin:
         chat = getattr(update, "effective_chat", None)
         message = getattr(update, "effective_message", None)
         user = getattr(update, "effective_user", None)
-        if (not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None),
-                                    getattr(user, "id", ""))
-                or not self.config.allows(getattr(user, "id", "")) or getattr(user, "is_bot", False)
-                or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
-            raise ApplicationHandlerStop
         original = getattr(update, "message", None) or getattr(update, "edited_message", None)
+        chat_id, chat_type = getattr(chat, "id", None), getattr(chat, "type", None)
+        admitted = (self._route_matches(chat_id, chat_type, getattr(user, "id", ""))
+                    and not getattr(user, "is_bot", False) and not getattr(message, "sender_chat", None)
+                    and not getattr(message, "business_connection_id", None))
+        group_forum = (chat_type == 'supergroup' and getattr(chat, 'is_forum', False) is True
+                       and str(chat_id) == self.config.chat)
+        # AIDEV-NOTE: Ручная правка темы администратором группы отменяет генерацию,
+        # даже если этот администратор не может отправлять поручения агенту.
+        group_topic_edit = group_forum and getattr(original, 'forum_topic_edited', None) is not None
         if (self.topic_socket and original is not None and not self.config.identity_worker
-                and getattr(chat, 'type', None) == 'private' and self._route_matches(chat.id, 'private', user.id)):
+                and ((admitted and (chat_type == 'private' or group_forum)) or group_topic_edit)):
             try:
                 self._topic_update(original, chat, user, getattr(update, 'edited_message', None) is not None)
             except Exception as error:
                 logging.getLogger(__name__).warning('BRAI_TELEGRAM_TOPIC_ADMISSION_FAILED error=%s', type(error).__name__)
+        if not admitted:
+            raise ApplicationHandlerStop
         if self.journal is not None and original is not None:
             try:
                 await asyncio.to_thread(self.journal.incoming, original, chat, user)
@@ -971,12 +982,12 @@ class TelegramPlugin:
             if not isinstance(text, str) or not text.strip():
                 return
             operation = 'claim'
-        task = self.loop.create_task(self._admit_topic_update(route, str(user.id), operation, text))
+        task = self.loop.create_task(self._admit_topic_update(route, chat.type, str(getattr(user, 'id', '')), operation, text))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
 
-    async def _admit_topic_update(self, route, user_id, operation, text):
+    async def _admit_topic_update(self, route, chat_type, user_id, operation, text):
         try:
             async with self.topic_admission_lock:
                 if operation == 'create':
@@ -984,12 +995,12 @@ class TelegramPlugin:
                 elif operation == 'cancel':
                     await self._cancel_automatic_topic_name(route)
                 elif await asyncio.to_thread(self.tokens.claim_implicit_topic, *route) and not self.closed:
-                    self._schedule_automatic_topic_name(route, user_id, text)
+                    self._schedule_automatic_topic_name(route, chat_type, user_id, text)
         except Exception as error:
             logging.getLogger(__name__).warning('BRAI_TELEGRAM_TOPIC_ADMISSION_FAILED error=%s', type(error).__name__)
 
-    def _schedule_automatic_topic_name(self, route, user_id, text):
-        task = self.loop.create_task(self._name_topic(route, user_id, text))
+    def _schedule_automatic_topic_name(self, route, chat_type, user_id, text):
+        task = self.loop.create_task(self._name_topic(route, chat_type, user_id, text))
         self.topic_tasks[route] = task
         self.tasks.add(task)
         def finished(done):
@@ -1014,20 +1025,20 @@ class TelegramPlugin:
             raise BridgeError('TOPIC_GENERATOR_UNAVAILABLE')
         return await _topic_module('topic_names').suggest(self.topic_socket, text, icons)
 
-    async def _name_topic(self, route, user_id, text):
+    async def _name_topic(self, route, chat_type, user_id, text):
         try:
             bot = self.bot
             result = await self._suggest_topic_name(bot, text)
             if self.topic_rename:
                 async with self.topic_rename.edit_lock(route):
-                    await self._apply_automatic_topic_name(bot, route, user_id, result)
+                    await self._apply_automatic_topic_name(bot, route, chat_type, user_id, result)
             else:
-                await self._apply_automatic_topic_name(bot, route, user_id, result)
+                await self._apply_automatic_topic_name(bot, route, chat_type, user_id, result)
         except Exception as error:
             logging.getLogger(__name__).warning('BRAI_TELEGRAM_TOPIC_FAILED error=%s', type(error).__name__)
 
-    async def _apply_automatic_topic_name(self, bot, route, user_id, result):
-        if self.closed or self.bot is not bot or not self._route_matches(route[0], 'private', user_id):
+    async def _apply_automatic_topic_name(self, bot, route, chat_type, user_id, result):
+        if self.closed or self.bot is not bot or not self._route_matches(route[0], chat_type, user_id):
             return
         await bot.edit_forum_topic(chat_id=int(route[0]), message_thread_id=int(route[1]),
                                    name=result['title'], icon_custom_emoji_id=result['iconId'])
