@@ -747,7 +747,7 @@ class Broker:
                 catalog = await self.control.call('tools.list', {'uid': peer_uid})
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if state['role'] == 'guest' else short in (
-                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_accounts','brai_telegram_link_account','brai_telegram_unlink_account'))
             if name == 'mcp__brai__brai_dev_release':
                 allowed = state['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
             current = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
@@ -783,14 +783,14 @@ class Broker:
                 catalog = await self.control.call('tools.list', {'uid': peer_uid})
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if profile['role'] == 'guest' else short in (
-                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_accounts','brai_telegram_link_account','brai_telegram_unlink_account'))
             if name == 'mcp__brai__brai_dev_release':
                 allowed = profile['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
             current = await self.authorize(peer_uid)
             if any(current[key] != profile[key] for key in ('role','generation')):
                 allowed = False
             return {'allowed': allowed, 'role': profile['role'], 'generation': profile['generation']}
-        if profile['role'] == 'guest' and method in ('login.send','telegram.link','telegram.unlink','artifacts.publish'):
+        if profile['role'] == 'guest' and method in ('login.send','telegram.accounts','telegram.link','telegram.unlink','artifacts.publish'):
             raise PermissionError('Role denied')
         if method in ('generated.begin','generated.finish','generated.abort'):
             if profile['role'] != 'guest':
@@ -815,6 +815,14 @@ class Broker:
             current = await self.authorize(peer_uid)
             if any(current[key] != profile[key] for key in ('role','generation')):
                 raise PermissionError('Access changed')
+            return result
+        if method == 'telegram.accounts' and not params:
+            scope = {'uid': peer_uid}
+            if request_turn and request_turn.get('privateChat'):
+                scope['telegramId'] = request_turn['telegramId']
+            result = await self.control.call(method, scope)
+            if self.turns.get(peer_uid) is not request_turn:
+                raise PermissionError('Owner turn changed')
             return result
         if method in ('telegram.link', 'telegram.unlink') and (request_turn is None or self.turns.get(peer_uid) is not request_turn):
             raise PermissionError('Owner turn changed')
@@ -1035,6 +1043,7 @@ PARAMETERS = {
     'files.list': (set(), {'limit', 'offset'}),
     'files.prepare': ({'mode', 'items'}, set()),
     'login.send': (set(), set()),
+    'telegram.accounts': (set(), set()),
     'telegram.link': (set(), {'message', 'confirmation'}),
     'telegram.unlink': ({'target'}, {'confirmation'}),
 }

@@ -188,6 +188,20 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await self.broker.call(INGRESS_UID, 'ingress.status', {'uid': WORKER_UID, 'turnId': 'alias-turn'})
 
+    async def test_account_list_uses_worker_owner_and_actual_private_sender(self):
+        self.control.aliases['333444'] = '111222'
+        await self.broker.call(INGRESS_UID, 'ingress.admit', {
+            'telegramId': '333444', 'chatId': '333444', 'privateChat': True, 'turnId': 'roster'})
+        await self.broker.call(WORKER_UID, 'telegram.accounts', {})
+        scope = next(params for method, params, _ in self.control.calls if method == 'telegram.accounts')
+        self.assertEqual(scope, {'uid': WORKER_UID, 'telegramId': '333444'})
+        self.assertFalse(self.broker.link_offers)
+        self.assertFalse(self.broker.unlink_offers)
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'telegram.accounts', {'telegramId': '111222'})
+        with self.assertRaises(PermissionError):
+            await self.broker.call(INGRESS_UID, 'telegram.accounts', {})
+
     async def _account_offer(self, method="telegram.link", *, turn="offer", digit="a", message="101", target="other"):
         original = {"telegramId": "111222", "chatId": "111222", "privateChat": True,
                     "turnId": turn, "inputId": digit * 64, "messageId": message}

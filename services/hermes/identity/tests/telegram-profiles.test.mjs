@@ -21,6 +21,9 @@ test('profile is fetched once, survives restart and keeps two accounts separate'
     const values=await Promise.all(Array.from({length:10},()=>cache.get('123')));
     assert.equal(calls,1);assert.equal(photos,1);assert.equal(values[0].name,'Анна');assert.match(values[0].avatar,/^data:image\/jpeg;base64,/);
     assert.deepEqual(await createTelegramProfiles(options).get('123'),values[0]);assert.equal(calls,1);
+    cache.rememberLabel('123', {name:'Анна',username:null});
+    assert.deepEqual(createTelegramProfiles(options).cachedLabel('123'), {name:'Анна',username:null});
+    assert.equal((await cache.get('123')).avatar, values[0].avatar);
     assert.equal((await cache.get('456')).name,'Борис');assert.equal(calls,2);assert.equal(statSync(options.path).mode&0o777,0o600);
   } finally {rmSync(root,{recursive:true,force:true});}
 });

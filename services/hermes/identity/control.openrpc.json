@@ -706,6 +706,93 @@
       "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry."
     },
     {
+      "name": "telegram.accounts",
+      "description": "Read only the authenticated owner’s current Auth bindings. Telegram labels may be current, last known, or unavailable.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "accounts",
+            "maxAccounts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "accounts": {
+              "type": "array",
+              "maxItems": 2,
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "username",
+                  "metadata"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "username": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^[A-Za-z0-9_]{1,32}$"
+                  },
+                  "metadata": {
+                    "enum": [
+                      "current",
+                      "last_known",
+                      "unavailable"
+                    ]
+                  },
+                  "current": {
+                    "type": "boolean",
+                    "description": "Present only for a verified private Telegram turn."
+                  }
+                }
+              }
+            },
+            "maxAccounts": {
+              "const": 2
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        }
+      ]
+    },
+    {
       "name": "telegram.link",
       "paramStructure": "by-name",
       "params": [

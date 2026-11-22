@@ -38,6 +38,11 @@ function quarantineProfile(value, artifactOwner) {
 const error = (status, code) => ({ status, body: { error: code }, setCookies: [] });
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 4096;
+function cleanAccountLabel(value) {
+  const name = typeof value?.name === 'string' ? value.name.replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 128) : '';
+  const username = typeof value?.username === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(value.username) ? value.username : null;
+  return { name: name || null, username };
+}
 const toolPolicy = JSON.parse(readFileSync(new URL('./tool-policy.json', import.meta.url), 'utf8'));
 const knownRole = role => toolPolicy.roles.includes(role);
 const manager = role => toolPolicy.managers.includes(role);
@@ -252,14 +257,47 @@ export class Control {
   /** Прочитать имена только уже проверенных аккаунтов; ошибки метаданных не меняют доступ. */
   async accountNames(ids) {
     return Promise.all(ids.map(async id => {
-      try {
-        const value = await this.telegramInfo('getChat', id);
-        if (String(value?.id) !== id || value.type !== 'private') throw new Error('INVALID_ACCOUNT');
-        const clean = value => typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 128) : '';
-        const name = clean([value.first_name, value.last_name].filter(part => typeof part === 'string').join(' '));
-        return { name: name || null, username: /^[A-Za-z0-9_]{1,32}$/.test(value.username ?? '') ? value.username : null };
-      } catch { return { name: null, username: null }; }
+      try { return await this.accountLabel(id); }
+      catch { return { name: null, username: null }; }
     }));
+  }
+
+  async accountLabel(id) {
+    const value = await this.telegramInfo('getChat', id);
+    if (String(value?.id) !== id || value.type !== 'private') throw new Error('INVALID_ACCOUNT');
+    return cleanAccountLabel({
+      name: [value.first_name, value.last_name].filter(part => typeof part === 'string').join(' '),
+      username: value.username,
+    });
+  }
+
+  /** Список Auth с подписями, которые не участвуют в определении привязки. */
+  async accountRoster(uid, telegramId) {
+    const read = async () => {
+      const registry = await this.registry(), profile = registry?.version === 1 && registry.profiles?.[String(uid)];
+      if (profile?.status !== 'active') throw new Error('FORBIDDEN');
+      const { user, telegramIds: ids } = await this.authCall('identity-get', { userId: profile.userId });
+      if (user?.status !== 'active' || user.id !== profile.userId || user.profileId !== profile.profileId ||
+          !knownRole(user.role) || user.role === 'guest' || !Array.isArray(ids) || ids.length > 2 ||
+          new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[1-9][0-9]{0,19}$/.test(id)) ||
+          (telegramId !== undefined && !ids.includes(telegramId))) throw new Error('FORBIDDEN');
+      return { owner: user.id, profile: user.profileId, role: user.role, generation: user.generation ?? 0, ids: [...ids].sort() };
+    };
+    const roster = await read();
+    const accounts = await Promise.all(roster.ids.map(async id => {
+      let label, metadata;
+      try {
+        label = await this.accountLabel(id);
+        metadata = 'current';
+      } catch {
+        label = cleanAccountLabel(this.telegramProfiles?.cachedLabel(id));
+        metadata = label.name || label.username ? 'last_known' : 'unavailable';
+      }
+      if (metadata === 'current') this.telegramProfiles?.rememberLabel(id, label);
+      return { ...label, metadata, ...(telegramId === undefined ? {} : { current: telegramId === id }) };
+    }));
+    if (JSON.stringify(await read()) !== JSON.stringify(roster)) throw new Error('FORBIDDEN');
+    return { accounts, maxAccounts: 2 };
   }
 
   /** Получить публичную ссылку именно на текущего бота. */
@@ -748,6 +786,11 @@ export async function privateCall(runtime, method, params) {
     return authCall('profile-ready',{userId:params.userId,profileId:params.profileId});
   }
   if (method === 'login.send') return control.sendLogin(params);
+  if (method === 'telegram.accounts') {
+    if (Object.keys(params).some(key => !['uid', 'telegramId'].includes(key)) || !Number.isSafeInteger(params.uid) || params.uid <= 0 ||
+        (params.telegramId !== undefined && (typeof params.telegramId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(params.telegramId)))) throw new Error('INVALID_ARGUMENT');
+    return control.accountRoster(params.uid, params.telegramId);
+  }
   if (method === 'telegram.link') {
     if (Object.keys(params).some(key=>!['uid','telegramId','phase','threadId','message'].includes(key))) throw new Error('INVALID_ARGUMENT');
     return control.sendAccountLink(params);
