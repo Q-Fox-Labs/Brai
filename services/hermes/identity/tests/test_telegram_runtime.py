@@ -62,6 +62,30 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
         resolver._deliver_route.assert_awaited_once()
 
+    async def test_startup_hold_defers_durable_recovery(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        resolver.release_gate = NS(operation='release-123')
+        resolver.mirror = NS(restartable=True, pump=AsyncMock())
+        resolver.reply_outbox = NS(flush=AsyncMock())
+        peer = NS(call=AsyncMock())
+        async def tick(delay):
+            if resolver.release_gate.operation is None:
+                raise asyncio.CancelledError
+            resolver.mirror.pump.assert_not_awaited()
+            resolver.reply_outbox.flush.assert_not_awaited()
+            self.assertEqual([c.args[0] for c in peer.call.await_args_list], ['health'])
+            resolver.release_gate.operation = None
+        with patch.dict(runtime.os.environ, {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': 'release-123'}), \
+                patch.object(runtime, 'broker_call', AsyncMock(return_value={'profiles': [profile()]})), \
+                patch.object(resolver, '_bridge', return_value=NS(connect=AsyncMock(return_value=peer))), \
+                patch.object(runtime.asyncio, 'sleep', tick):
+            with self.assertRaises(asyncio.CancelledError):
+                await resolver._supervise()
+        resolver.mirror.pump.assert_awaited_once()
+        resolver.reply_outbox.flush.assert_awaited_once()
+        self.assertEqual([c.args[0] for c in peer.call.await_args_list], ['health', 'health', 'outbox.flush'])
+
     async def test_supervisor_accepts_and_sends_reply_in_second_accounts_topic(self):
         resolver = runtime.Resolver(NS(send=AsyncMock(return_value={'success': True, 'message_id': '56'})))
         self.addAsyncCleanup(resolver.close)

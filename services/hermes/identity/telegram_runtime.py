@@ -486,6 +486,10 @@ class Resolver:
                                if bridge.task is not None), return_exceptions=True)
         self.ledger.close()
 
+    def _startup_held(self):
+        operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
+        return operation is not None and getattr(self.release_gate, 'operation', None) == operation
+
     async def _supervise(self):
         """Обрыв одного worker не отключает расписания соседних владельцев."""
         semaphore = asyncio.Semaphore(8)
@@ -496,7 +500,7 @@ class Resolver:
                     peer = await bridge.connect()
                     await peer.call('health', {'require_tools': True}, timeout=240)
                     self.ready_profiles.add(profile['uid'])
-                    if self.mirror is not None and self.mirror.restartable:
+                    if self.mirror is not None and self.mirror.restartable and not self._startup_held():
                         turn = self.turns.get(profile['uid'])
                         if turn is not None and turn.get('delivery'):
                             await self.reconcile_delivery(profile, turn['delivery'])
@@ -515,10 +519,11 @@ class Resolver:
                 if not isinstance(profiles, list) or len(profiles) > 10000:
                     raise ValueError('Invalid active profiles')
                 await asyncio.gather(*(ready(profile) for profile in profiles))
-                if self.mirror is not None:
-                    await self.mirror.pump()
-                if self.reply_outbox is not None:
-                    await self.reply_outbox.flush()
+                if not self._startup_held():
+                    if self.mirror is not None:
+                        await self.mirror.pump()
+                    if self.reply_outbox is not None:
+                        await self.reply_outbox.flush()
             except asyncio.CancelledError:
                 raise
             except Exception:
