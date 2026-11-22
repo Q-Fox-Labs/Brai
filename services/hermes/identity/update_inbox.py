@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+from types import SimpleNamespace
 
 from .ordinary_admission import group_chat_id, group_message, message_thread
 
@@ -20,6 +21,18 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS release_inbox (
 
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _input_topic(payload):
+    update = json.loads(payload)
+    message = (update.get('message') or update.get('edited_message')
+               or (update.get('callback_query') or {}).get('message') or {})
+    return message_thread(SimpleNamespace(**message.get('chat', {})), SimpleNamespace(**message))
+
+
+def _consent_thread(payload):
+    topic = _input_topic(payload)
+    return '' if topic == '1' else topic
 
 
 def binding(profile):
@@ -220,12 +233,18 @@ class UpdateInbox:
                     if tuple(auth) != (author,role,auth_generation):
                         raise ValueError('INBOX_IDENTITY_CONFLICT')
                     if (existing['digest'], existing['payload'], existing['profile_id'], existing['user_id'],
-                        existing['uid'], existing['actor_id'], existing['chat'], existing['thread']) != (
-                            digest,payload,ident,owner,uid,actor,chat,thread):
+                        existing['uid'], existing['actor_id'], existing['chat']) != (
+                            digest,payload,ident,owner,uid,actor,chat):
                         raise ValueError('INBOX_IDENTITY_CONFLICT')
+                    if existing['thread'] != thread:
+                        # Старый DEV записывал якорь ответа в личке как тему.
+                        message = getattr(update, 'effective_message', None)
+                        legacy = str(getattr(message, 'message_thread_id', None) or '')
+                        if group_chat_id(chat) or existing['thread'] != legacy:
+                            raise ValueError('INBOX_IDENTITY_CONFLICT')
                     result = {'seq': existing['seq'], 'state': existing['state'], 'digest': digest}
                 else:
-                    state = self._state(db, chat, thread)
+                    state = self._state(db, chat, _consent_thread(payload))
                     generation = state['generation'] if state else 0
                     cur = db.execute("""INSERT INTO release_inbox
                         (bot_id,update_id,profile_id,user_id,uid,actor_id,chat,thread,chat_generation,payload,digest,state)
@@ -289,7 +308,7 @@ class UpdateInbox:
                                   else "('unknown','blocked')")
                 if not self.restartable and db.execute("SELECT 1 FROM release_inbox WHERE seq<? AND state IN " + blocked_states + " LIMIT 1", (row['seq'],)).fetchone():
                     raise ValueError('INBOX_ORDER_BLOCKED')
-                current = self._state(db,row['chat'],row['thread'])
+                current = self._state(db, row['chat'], _consent_thread(row['payload']))
                 if current and (current['paused'] or current['generation'] != row['chat_generation']):
                     raise PermissionError('INBOX_CONSENT_CHANGED')
                 db.execute("UPDATE release_inbox SET state='handing_off' WHERE seq=?", (row['seq'],))
@@ -367,7 +386,7 @@ class UpdateInbox:
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 rows = [self._find(db, profile, bot_id, ident) for ident in update_ids]
-                if not rows or len({(r['chat'], r['thread']) for r in rows}) != 1:
+                if not rows or len({(r['chat'], _input_topic(r['payload'])) for r in rows}) != 1:
                     raise ValueError('DELIVERY_BATCH_ROUTE_CHANGED')
                 ident = delivery_id([profile['profileId'], str(bot_id), [r['update_id'] for r in rows]])
                 digest = delivery_id([[r['update_id'], r['digest']] for r in rows])
@@ -391,8 +410,8 @@ class UpdateInbox:
         finally:
             db.close()
 
-    def delivery_source(self, profile, delivery_id):
-        """Прочитать provenance готового ответа после restart ingress; права не расширяются."""
+    def delivery_source(self, profile, delivery_id, reply_to=None):
+        """Прочитать исходный допуск готового ответа, включая вход из его native batch."""
         db = self._open(profile)
         try:
             rows = db.execute('''SELECT i.*, a.author_id AS auth_author, a.role AS auth_role,
@@ -402,12 +421,18 @@ class UpdateInbox:
                 WHERE d.delivery_id=? ORDER BY i.seq''', (delivery_id,)).fetchall()
             if not rows or any((r['profile_id'], r['user_id'], r['uid']) != binding(profile) for r in rows):
                 raise PermissionError('DELIVERY_INPUT_OWNER_CHANGED')
-            if len({(r['chat'], r['thread'], r['chat_generation']) for r in rows}) != 1:
+            if len({(r['chat'], _input_topic(r['payload']), r['chat_generation']) for r in rows}) != 1:
                 raise PermissionError('DELIVERY_INPUT_ROUTE_CHANGED')
             if group_chat_id(rows[0]['chat']) and len({(r['actor_id'], r['auth_author'], r['auth_role'],
                                                         r['auth_generation']) for r in rows}) != 1:
                 raise PermissionError('DELIVERY_INPUT_AUTH_CHANGED')
-            return dict(rows[0])
+            first = json.loads(rows[0]['payload']).get('message', {}).get('message_id')
+            if reply_to:
+                for row in rows:
+                    message = json.loads(row['payload']).get('message', {})
+                    if str(message.get('message_id')) == str(reply_to):
+                        return {**dict(row), 'batch_first_message_id': first}
+            return {**dict(rows[0]), 'batch_first_message_id': first}
         finally:
             db.close()
 
@@ -442,8 +467,10 @@ class UpdateInbox:
         db = self._open(profile)
         try:
             row = self._find(db,profile,bot_id,update_id)
-            return {key:row[key] for key in ('seq','bot_id','update_id','profile_id','user_id','uid',
-                    'actor_id','chat','thread','chat_generation','digest','state','operation_id','receipt')}
+            result = {key: row[key] for key in ('seq','bot_id','update_id','profile_id','user_id','uid',
+                      'actor_id','chat','chat_generation','digest','state','operation_id','receipt')}
+            result['thread'] = _consent_thread(row['payload'])
+            return result
         finally: db.close()
 
     def held(self, profile, operation_id):

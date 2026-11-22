@@ -2,7 +2,8 @@
 # ABOUTME: Использует настоящие SQLite/PTB Update и перезапуск объектов без пользовательских данных.
 import asyncio
 import ast
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -722,6 +723,19 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.resolve.assert_not_awaited()
 
 
+    async def test_held_hydration_defers_registered_and_unregistered_updates(self):
+        self.capture(1)
+        outsider = update(2)
+        self.transport.capture_batch([(outsider, {'state': 'unregistered'})], 123)
+        self.mirror.hydrated = False
+        self.mirror.inventory = AsyncMock(return_value={'profiles': [PROFILE]})
+        self.mirror.gate_store = object()
+        await self.mirror.hydrate_held()
+        self.assertTrue(self.mirror.hydrated)
+        self.assertTrue(self.mirror.app.update_queue.empty())
+        await self.mirror.hydrate()
+        self.assertCountEqual([self.mirror.app.update_queue.get_nowait().update_id for _ in range(2)], [1, 2])
+
     async def test_ingress_restart_preserves_fifo_raw_messages(self):
         for ident in (3, 1, 2): self.capture(ident)
         self.mirror = self.new_mirror()
@@ -1013,6 +1027,35 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             self.outbox.enqueue(IDENT, 'other', {'text': 'first'})
         with self.assertRaisesRegex(ValueError, 'CONFLICT'):
             self.outbox.enqueue(IDENT, 'owner', {'text': 'second'})
+
+    async def test_snapshot_restores_exact_envelope_and_receipt(self):
+        body = {'action': 'send', 'payload': {'text': 'Ответ'}}
+        digest = delivery_id('request')
+        self.outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
+        await self.outbox.flush()
+
+        with closing(sqlite3.connect(':memory:', isolation_level=None)) as restored:
+            self.db.backup(restored)
+            stored = restored.execute('SELECT body FROM reply_outbox WHERE id=?', (IDENT,)).fetchone()
+            self.assertEqual(json.loads(stored[0]), body)
+            old_receipt = restored.execute('SELECT receipt FROM reply_outbox WHERE id=?', (IDENT,)).fetchone()
+            self.assertEqual(json.loads(old_receipt[0]), {'success': True, 'message_id': '1'})
+            outbox = ReplyOutbox(restored, self.deliver)
+            outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
+            with self.assertRaisesRegex(ValueError, 'CONFLICT'):
+                outbox.enqueue(IDENT, 'owner', {**body, 'payload': {'text': 'Другой ответ'}},
+                               request_digest=digest)
+            await outbox.flush()
+        self.deliver.assert_awaited_once()
+
+    async def test_released_envelope_preserves_its_embedded_request_fingerprint(self):
+        digest = delivery_id('previous request')
+        body = {'text': 'Ответ'}
+        self.db.execute("INSERT INTO reply_outbox(id,owner,body,state) VALUES (?,?,?,'pending')",
+                        (IDENT, 'owner', json.dumps({**body, 'requestDigest': digest})))
+        self.outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
+        with self.assertRaisesRegex(ValueError, 'CONFLICT'):
+            self.outbox.enqueue(IDENT, 'owner', body, request_digest=delivery_id('different'))
 
     async def test_owner_fifo_and_independent_other_owner(self):
         second, other = delivery_id('second'), delivery_id('other')
