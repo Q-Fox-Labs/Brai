@@ -120,14 +120,20 @@ class ReleaseGate:
         cls = type(bot)
         original = cls.get_updates
         owned = 'get_updates' in cls.__dict__
+        probed_generation = None
         async def gated(instance, *args, **kwargs):
+            nonlocal probed_generation
             cleanup = False
             if instance is bot and self.operation is not None:
                 timeout = kwargs.get('timeout')
                 seconds = timeout.total_seconds() if callable(getattr(timeout, 'total_seconds', None)) else timeout
                 updater = getattr(self.app, 'updater', None)
+                stopping = updater is not None and updater.running is False and seconds == 0
                 # PTB stop отменяет удержанный action и отдельно подтверждает обработанный offset.
-                cleanup = self.committed and updater is not None and updater.running is False and seconds == 0
+                cleanup = self.committed and stopping
+                if stopping and self.probe_held_startup and not cleanup:
+                    # До открытия startup hold PTB не получал ни одной пачки.
+                    return ()
                 if not cleanup:
                     self.poll_held = True
                     mirror = getattr(self.resolver, 'mirror', None)
@@ -141,15 +147,22 @@ class ReleaseGate:
                         self.held.set()
                         raise
                     self.hydration_failed = False
-                    if self.probe_held_startup and not self.held.is_set():
+                    if self.probe_held_startup:
                         try:
-                            # Offset zero confirms no positive update IDs. PTB cannot
-                            # advance its cursor until the gated call returns a batch.
-                            pending = await original(instance, offset=0, limit=1, timeout=0)
-                            if pending and self.watchdog_adapter is not None:
-                                # Native transport counted the preview. It will count
-                                # these updates again when ordinary polling delivers them.
-                                self.watchdog_adapter._updates_received_total -= len(pending)
+                            adapter = self.watchdog_adapter
+                            generation = adapter._polling_generation
+                            if generation != probed_generation:
+                                # Offset zero confirms no positive update IDs. PTB cannot
+                                # advance its cursor until the gated call returns a batch.
+                                pending = await original(instance, offset=0, limit=1, timeout=0)
+                                if (generation != adapter._polling_generation
+                                        or not adapter._polling_progress_accepting):
+                                    raise asyncio.CancelledError
+                                if not adapter._polling_progress_event.is_set():
+                                    raise RuntimeError('Held polling transport did not report progress')
+                                # Native transport will count the batch again after resume.
+                                adapter._updates_received_total -= len(pending)
+                                probed_generation = generation
                         except BaseException:
                             self.poll_held = False
                             raise
@@ -177,6 +190,7 @@ class ReleaseGate:
         cls.get_updates = gated
         def restore():
             self.operation = None
+            self.probe_held_startup = False
             self.poll_held = False
             self.unlocked.set()
             if self.drain is not None:

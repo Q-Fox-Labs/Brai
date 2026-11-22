@@ -381,6 +381,7 @@ class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):
             _check_polling_stall=AsyncMock(), _probe_pending_updates=AsyncMock(),
             _verifier_stale=lambda *args: False, _escalate_stuck_consumer=lambda *args: None,
             _schedule_polling_recovery=lambda *args, **kwargs: None, _updates_received_total=0,
+            _polling_generation=1, _polling_progress_accepting=True, _polling_progress_event=progress,
         )
 
         async def readiness(observed, error, failures):
@@ -437,7 +438,9 @@ class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):
                 raise OSError('transport unavailable')
 
         bot = FailedBot()
-        gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        updater = SimpleNamespace(running=True)
+        gate = ReleaseGate(SimpleNamespace(bot=bot, updater=updater, update_queue=asyncio.Queue()))
+        gate.watchdog_adapter = SimpleNamespace(_polling_generation=1)
         gate.install()
         self.addCleanup(gate.restore)
         gate.hold('op', probe_polling=True)
@@ -445,6 +448,33 @@ class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):
             await bot.get_updates(offset=0)
         self.assertFalse(gate.held.is_set())
         self.assertEqual((await gate.status('op'))['state'], 'draining')
+        updater.running = False
+        self.assertEqual(await asyncio.wait_for(bot.get_updates(offset=0, timeout=0), timeout=1), ())
+        await gate.resume('op')
+
+    async def test_stale_startup_probe_cannot_advance_readiness_or_counters(self):
+        progress = asyncio.Event()
+        adapter = SimpleNamespace(
+            _polling_generation=1, _polling_progress_accepting=True,
+            _polling_progress_event=progress, _updates_received_total=0,
+        )
+
+        class ReconnectingBot:
+            async def get_updates(self, **kwargs):
+                adapter._polling_generation += 1
+                return [SimpleNamespace(update_id=42)]
+
+        bot = ReconnectingBot()
+        gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.watchdog_adapter = adapter
+        gate.install()
+        self.addCleanup(gate.restore)
+        gate.hold('op', probe_polling=True)
+        with self.assertRaises(asyncio.CancelledError):
+            await bot.get_updates()
+        self.assertEqual(adapter._updates_received_total, 0)
+        self.assertFalse(gate.held.is_set())
+        self.assertFalse(progress.is_set())
         await gate.resume('op')
 
     async def test_real_updater_stops_with_only_cleanup_allowed(self):
