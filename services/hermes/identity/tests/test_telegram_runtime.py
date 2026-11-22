@@ -62,6 +62,82 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
         resolver._deliver_route.assert_awaited_once()
 
+    async def test_supervisor_accepts_and_sends_reply_in_second_accounts_topic(self):
+        resolver = runtime.Resolver(NS(send=AsyncMock(return_value={'success': True, 'message_id': '56'})))
+        self.addAsyncCleanup(resolver.close)
+        registered = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        active = {**registered, 'authorTelegramId': '123', 'telegramId': '456'}
+        bridge = resolver._bridge(registered)
+        incoming = event()
+        incoming.source = NS(chat_id='456', user_id='456', thread_id='77', chat_type='dm')
+        incoming.media_urls = []
+        incoming._brai_identity_inputs = []
+        payload = {'chat_id': '456', 'content': 'Ответ', 'reply_to': '55',
+                   'metadata': {'thread_id': '77'}}
+        async def broker(method, params):
+            if method == 'identity.resolve':
+                self.assertEqual(params['telegramId'], '456')
+                return active
+            if method == 'ingress.admit':
+                self.assertEqual(params['telegramId'], '456')
+            return {}
+        with patch.object(runtime, 'broker_call', broker):
+            self.assertIs(await resolver(incoming.source), bridge)
+            prepared = await bridge.prepare_event(incoming)
+            response = await bridge.send('send', payload, scope_id=prepared['delivery_scope'])
+        self.assertEqual(bridge.worker_telegram_id, '123')
+        self.assertEqual(response, {'success': True, 'message_id': '56'})
+        self.assertTrue(resolver.ledger.owns(registered, ('456', '77'), '55', outgoing=False))
+        self.assertTrue(resolver.ledger.owns(registered, ('456', '77'), '56', outgoing=True))
+        self.assertFalse(resolver.ledger.owns(registered, ('123', '77'), '56'))
+        self.assertEqual(resolver.adapter.send.await_args.kwargs['chat_id'], '456')
+
+    async def test_saved_second_account_reply_recovers_legacy_admission(self):
+        for denied in (None, 'unlinked', 'other_message', 'other_generation'):
+            with self.subTest(denied=denied):
+                resolver = runtime.Resolver(NS(send=AsyncMock(return_value={'success': True, 'message_id': '56'})))
+                self.addAsyncCleanup(resolver.close)
+                registered = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+                active = {**registered, 'authorTelegramId': '123', 'telegramId': '456'}
+                legacy = {**registered, 'telegramId': '456'}
+                route = ('456', '77')
+                source = {'chat': '456', 'actor_id': '456', 'chat_generation': 0, 'state': 'accepted',
+                          'auth_author': '123', 'auth_role': 'user', 'auth_generation': 0,
+                          'payload': json.dumps({'message': {'message_thread_id': 77, 'message_id': 55}})}
+                resolver.ledger.admit(legacy, route, {'thread_id': '77'}, '55')
+                resolver.ledger.record(legacy, route, '57', outgoing=False)
+                resolver.ledger.record(legacy, route, '58', outgoing=True)
+                resolver.mirror = NS(restartable=True, accepted=AsyncMock(),
+                                     inbox=NS(delivery_source=lambda *args: source))
+                resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+                bridge = resolver._bridge(registered)
+                target = '57' if denied == 'other_message' else '55'
+                payload = {'chat_id': '456', 'content': 'Ответ', 'reply_to': target, 'metadata': {'thread_id': '77'}}
+                ident = delivery_id('stored-reply')
+                kwargs = {'scope_id': 'finished-turn', 'delivery_id': ident,
+                          'input_delivery_id': delivery_id('stored-input')}
+                async def broker(method, params):
+                    self.assertEqual((method, params), ('identity.resolve', {'telegramId': '456'}))
+                    if denied == 'unlinked':
+                        raise PermissionError('Account unlinked')
+                    return {**active, 'generation': 1} if denied == 'other_generation' else active
+                with patch.object(runtime, 'broker_call', broker):
+                    if denied is None:
+                        sent = await bridge.send('send', payload, **kwargs)
+                        repeated = await bridge.send('send', payload, **kwargs)
+                        self.assertEqual(sent, {'success': True, 'message_id': '56'})
+                        self.assertEqual(repeated, sent)
+                        resolver.adapter.send.assert_awaited_once()
+                        self.assertTrue(resolver.ledger.owns(registered, route, '55', outgoing=False))
+                    else:
+                        with self.assertRaises(PermissionError):
+                            await bridge.send('send', payload, **kwargs)
+                        resolver.adapter.send.assert_not_awaited()
+                        self.assertIsNone(resolver.reply_outbox.result(ident))
+                        self.assertIsNone(resolver.ledger.metadata(registered, route))
+                self.assertFalse(resolver.ledger.owns(registered, route, '57'))
+                self.assertFalse(resolver.ledger.owns(registered, route, '58'))
+
     async def test_saved_reply_rejects_changed_owner_role_and_generation(self):
         restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
         for change in ({'uid': 202}, {'userId': 'foreign'}, {'profileId': 'foreign'},

@@ -214,7 +214,7 @@ class Bridge:
         thread = str(metadata.get('thread_id') or metadata.get('message_thread_id') or '')
         route = (str(payload.get('chat_id') or ''), thread)
         persistent = callable(self.authorize_delivery)
-        if persistent:
+        if persistent and delivery_id is None:
             self.authorize_delivery(action, payload)
         if not persistent and route not in self.routes:
             raise RpcError(-32602, 'Unauthorized destination')

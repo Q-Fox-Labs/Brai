@@ -596,7 +596,7 @@ class Resolver:
         profile = {**profile, 'authorTelegramId': profile.get('authorTelegramId', profile['telegramId'])}
         if owner != profile['userId'] or self.reply_outbox is None:
             raise PermissionError('Reply owner mismatch')
-        source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id)
+        source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id, payload.get('reply_to'))
         original = json.loads(source['payload']).get('message', {})
         route = (source['chat'], str(original.get('message_thread_id') or ''))
         if str(payload.get('chat_id')) != route[0]:
@@ -606,8 +606,11 @@ class Resolver:
         if thread is not None and str(thread) != route[1]:
             raise PermissionError('Reply input thread changed')
         metadata = self.ledger.metadata(profile, route)
+        if metadata is None or payload.get('reply_to') and not self.ledger.owns(profile, route, payload['reply_to']):
+            metadata = await self._recover_reply_admission(profile, route, source, original, payload.get('reply_to'), metadata)
         if metadata is None:
             raise PermissionError('Reply input admission unavailable')
+        self.authorize_delivery(profile, action, payload)
         if supplied.get('_interim_send') is True:
             metadata['_interim_send'] = True
             if supplied.get('_brai_progress') is True:
@@ -621,6 +624,31 @@ class Resolver:
             return previous
         await self.reply_outbox.flush_owner(key)
         return self.reply_outbox.result(ident) or {'success': False, 'retryable': True, 'error': 'Delivery pending'}
+
+    async def _recover_reply_admission(self, profile, route, source, original, reply_to, metadata):
+        """Восстановить запись только для подтверждённого входа сохранённого ответа."""
+        chat = route[0]
+        message_id = str(original.get('message_id') or '')
+        if (chat == str(profile['authorTelegramId']) or source.get('state') != 'accepted'
+                or source.get('actor_id') != chat or not message_id or reply_to and str(reply_to) != message_id):
+            return metadata
+        auth = (str(profile['authorTelegramId']), profile.get('role'), profile.get('generation'))
+        if auth != (source.get('auth_author'), source.get('auth_role'), source.get('auth_generation')):
+            return metadata
+        legacy = {**profile, 'authorTelegramId': chat}
+        old_metadata = self.ledger.metadata(legacy, route)
+        if old_metadata is None or not self.ledger.owns(legacy, route, message_id, outgoing=False):
+            return metadata
+        active = await self._account(profile, chat)
+        if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
+            raise PermissionError('Reply owner binding changed')
+        self._chat_generation(profile, route, source['chat_generation'])
+        # AIDEV-NOTE: После проверки Auth оставляем более свежие параметры канонического маршрута.
+        metadata = self.ledger.metadata(profile, route)
+        if metadata is None:
+            metadata = old_metadata
+        self.ledger.admit(profile, route, metadata, message_id)
+        return metadata
 
     async def _deliver_saved_reply(self, body):
         """Восстановить доставку готового ответа при актуальных Auth и поколении беседы."""
@@ -667,8 +695,10 @@ class Resolver:
         """Закрепить единственный канал worker за стабильным владельцем UID."""
         uid = profile['uid']
         if uid not in self.bridges:
+            author = profile.get('authorTelegramId', profile['telegramId'])
             async def prepare(event):
-                return await self.prepare({**profile, 'telegramId': str(event.source.user_id)}, event)
+                return await self.prepare({**profile, 'authorTelegramId': author,
+                                           'telegramId': str(event.source.user_id)}, event)
             async def deliver(owner, action, payload):
                 return await self.deliver(profile, owner, action, payload)
             async def started(turn_id):
@@ -680,9 +710,8 @@ class Resolver:
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
-            bridge = Bridge(profile['userId'], profile.get('authorTelegramId', profile['telegramId']), uid, profile['workerSocket'],
-                            deliver, prepare, on_turn_start=started, on_turn_end=ended,
-                            worker_telegram_id=profile.get('authorTelegramId', profile['telegramId']))
+            bridge = Bridge(profile['userId'], author, uid, profile['workerSocket'],
+                            deliver, prepare, on_turn_start=started, on_turn_end=ended)
             bridge.profile_id = profile.get('profileId')
             self.bridges[uid] = bridge
         bridge = self.bridges[uid]

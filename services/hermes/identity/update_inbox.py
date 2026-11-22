@@ -388,16 +388,23 @@ class UpdateInbox:
         finally:
             db.close()
 
-    def delivery_source(self, profile, delivery_id):
-        """Прочитать provenance готового ответа после restart ingress; права не расширяются."""
+    def delivery_source(self, profile, delivery_id, reply_to=None):
+        """Прочитать исходный допуск готового ответа, включая вход из его native batch."""
         db = self._open(profile)
         try:
-            rows = db.execute('''SELECT i.* FROM release_inbox i JOIN release_input_delivery d ON d.inbox_seq=i.seq
+            rows = db.execute('''SELECT i.*, a.author_id AS auth_author, a.role AS auth_role, a.generation AS auth_generation
+                FROM release_inbox i JOIN release_input_delivery d ON d.inbox_seq=i.seq
+                LEFT JOIN release_inbox_auth a ON a.inbox_seq=i.seq
                 WHERE d.delivery_id=? ORDER BY i.seq''', (delivery_id,)).fetchall()
             if not rows or any((r['profile_id'], r['user_id'], r['uid']) != binding(profile) for r in rows):
                 raise PermissionError('DELIVERY_INPUT_OWNER_CHANGED')
             if len({(r['chat'], r['thread'], r['chat_generation']) for r in rows}) != 1:
                 raise PermissionError('DELIVERY_INPUT_ROUTE_CHANGED')
+            if reply_to:
+                for row in rows:
+                    message = json.loads(row['payload']).get('message', {})
+                    if str(message.get('message_id')) == str(reply_to):
+                        return dict(row)
             return dict(rows[0])
         finally:
             db.close()
