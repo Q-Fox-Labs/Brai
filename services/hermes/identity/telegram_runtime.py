@@ -629,7 +629,18 @@ class Resolver:
         values = {**payload, 'metadata': metadata}
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
         key = self.ledger.owner(profile)
-        self.reply_outbox.enqueue(ident, key, body)
+        from .delivery_journal import delivery_id
+        digest = delivery_id([key, auth, source_id, action, payload])
+
+        def legacy_matches(saved):
+            # AIDEV-NOTE: Старый конверт мог получить профиль от другого вызова broker.
+            # Сверяем тот же ключ, права и точные данные уже подготовленной доставки.
+            saved_profile = saved['profile']
+            return (self.ledger.owner(saved_profile) == key
+                    and (saved_profile.get('role'), saved_profile.get('generation')) == auth[1:]
+                    and {**saved, 'profile': profile} == body)
+
+        self.reply_outbox.enqueue(ident, key, body, request_digest=digest, legacy_matches=legacy_matches)
         previous = self.reply_outbox.result(ident)
         if previous and previous.get('success') and previous.get('message_id'):
             return previous

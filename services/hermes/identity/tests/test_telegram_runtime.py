@@ -124,7 +124,11 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(runtime, 'broker_call', broker):
                     if denied is None:
                         sent = await bridge.send('send', payload, **kwargs)
+                        resolver._bridge(active)
+                        resolver.ledger.admit(registered, route, {'thread_id': '77', 'new_anchor': '57'}, '59')
                         repeated = await bridge.send('send', payload, **kwargs)
+                        with self.assertRaisesRegex(ValueError, 'OUTBOX_ID_CONFLICT'):
+                            await bridge.send('send', {**payload, 'content': 'Другой ответ'}, **kwargs)
                         self.assertEqual(sent, {'success': True, 'message_id': '56'})
                         self.assertEqual(repeated, sent)
                         resolver.adapter.send.assert_awaited_once()
