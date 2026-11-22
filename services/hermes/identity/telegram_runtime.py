@@ -672,8 +672,8 @@ class Resolver:
         from .delivery_journal import delivery_id
         digest = delivery_id([key, auth, source_id, action, payload])
 
-        def legacy_matches(saved):
-            # Старый конверт хранит готовый адрес и текст без исходной metadata запроса.
+        def matches_saved_reply(saved):
+            # Сверяем устойчивые данные доставки. Метаданные действующего маршрута могут обновиться.
             saved_profile = saved['profile']
             if (self.ledger.owner(saved_profile) != key
                     or (grouped and saved_profile.get('telegramId') != profile['telegramId'])
@@ -696,7 +696,7 @@ class Resolver:
                     expected['reply_to'] = old_values['reply_to']
             return old_values == expected
 
-        self.reply_outbox.enqueue(ident, key, body, request_digest=digest, legacy_matches=legacy_matches)
+        self.reply_outbox.enqueue(ident, key, body, request_digest=digest, matches=matches_saved_reply)
         previous = self.reply_outbox.result(ident)
         if previous and previous.get('success') and previous.get('message_id'):
             return previous

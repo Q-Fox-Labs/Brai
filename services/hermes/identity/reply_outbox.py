@@ -15,37 +15,27 @@ class ReplyOutbox:
         db.execute('''CREATE TABLE IF NOT EXISTS reply_outbox (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
             owner TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)''')
-        # Не меняем байты старого конверта: на откате его читает прежний DEV.
-        db.execute('''CREATE TABLE IF NOT EXISTS reply_outbox_requests (
-            id TEXT PRIMARY KEY REFERENCES reply_outbox(id), digest TEXT NOT NULL)''')
 
-    def enqueue(self, ident, owner, body, *, request_digest=None, legacy_matches=None):
-        """Сохранить первый конверт доставки и сверить неизменный запрос при повторе."""
+    def enqueue(self, ident, owner, body, *, request_digest=None, matches=None):
+        """Сохранять первый конверт и подтверждать повтор без изменения записи."""
         DeliveryJournal.identity(ident, ident)
         raw = canonical(body)
-        with self.db:
-            self.db.execute('BEGIN IMMEDIATE')
-            inserted = self.db.execute(
-                "INSERT OR IGNORE INTO reply_outbox(id,owner,body,state) VALUES(?,?,?,'pending')",
-                (ident, owner, raw))
-            if inserted.rowcount:
-                if request_digest is not None:
-                    self.db.execute('INSERT INTO reply_outbox_requests VALUES(?,?)', (ident, request_digest))
-                return
-            row = self.db.execute('''SELECT o.owner, o.body, r.digest
-                FROM reply_outbox o LEFT JOIN reply_outbox_requests r ON r.id=o.id
-                WHERE o.id=?''', (ident,)).fetchone()
-            if row is not None and row[0] == owner:
-                saved = json.loads(row[1])
-                # RELEASE уже выпускал конверты со встроенным отпечатком.
-                previous_digest = row[2] or saved.get('requestDigest')
-                if previous_digest is not None:
-                    if previous_digest == request_digest:
-                        return
-                elif row[1] == raw or (request_digest is not None and legacy_matches is not None
-                                       and legacy_matches(saved)):
+        inserted = self.db.execute(
+            "INSERT OR IGNORE INTO reply_outbox(id,owner,body,state) VALUES(?,?,?,'pending')",
+            (ident, owner, raw))
+        if inserted.rowcount:
+            return
+        previous = self.db.execute('SELECT owner,body FROM reply_outbox WHERE id=?', (ident,)).fetchone()
+        if previous is not None and previous[0] == owner:
+            saved = json.loads(previous[1])
+            # RELEASE уже выпускал записи со встроенным отпечатком.
+            previous_digest = saved.get('requestDigest')
+            if previous_digest is not None:
+                if previous_digest == request_digest:
                     return
-            raise ValueError('OUTBOX_ID_CONFLICT')
+            elif previous[1] == raw or (matches is not None and matches(saved)):
+                return
+        raise ValueError('OUTBOX_ID_CONFLICT')
 
     def result(self, ident):
         """Квитанция относится к фактическому message ID, включая ответ после потери IPC."""

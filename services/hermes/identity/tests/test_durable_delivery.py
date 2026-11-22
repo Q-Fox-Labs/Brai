@@ -821,7 +821,7 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'CONFLICT'):
             self.outbox.enqueue(IDENT, 'owner', {'text': 'second'})
 
-    async def test_snapshot_restores_exact_envelope_receipt_and_request_fingerprint(self):
+    async def test_snapshot_restores_exact_envelope_and_receipt(self):
         body = {'action': 'send', 'payload': {'text': 'Ответ'}}
         digest = delivery_id('request')
         self.outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
@@ -836,7 +836,8 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             outbox = ReplyOutbox(restored, self.deliver)
             outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
             with self.assertRaisesRegex(ValueError, 'CONFLICT'):
-                outbox.enqueue(IDENT, 'owner', body, request_digest=delivery_id('different'))
+                outbox.enqueue(IDENT, 'owner', {**body, 'payload': {'text': 'Другой ответ'}},
+                               request_digest=digest)
             await outbox.flush()
         self.deliver.assert_awaited_once()
 
