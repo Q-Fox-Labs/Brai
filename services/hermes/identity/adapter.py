@@ -205,6 +205,12 @@ def make_adapter(config, platform, peer, publish_file):
 
         async def send(self, chat_id, content, reply_to=None, metadata=None):
             from .long_reply import needs_pdf, excerpt, render_pdf
+            closing_text = ""
+            if metadata and "_brai_scheduled_cancel_hint" in metadata:
+                metadata = dict(metadata)
+                hint = metadata.pop("_brai_scheduled_cancel_hint")
+                if isinstance(hint, str):
+                    closing_text = hint
             if isinstance(content, str) and needs_pdf(self, content):
                 # Сокращённый текст и PDF идут одной доставкой и одной квитанцией.
                 try:
@@ -213,7 +219,8 @@ def make_adapter(config, platform, peer, publish_file):
                     with tempfile.TemporaryDirectory(prefix='brai-long-reply-', dir=workspace) as directory:
                         target = Path(directory) / 'Полный ответ.pdf'
                         await asyncio.to_thread(render_pdf, content, target)
-                        return await self.send_document(chat_id, str(target), caption=excerpt(self, content),
+                        caption = excerpt(self, content, closing_text=closing_text)
+                        return await self.send_document(chat_id, str(target), caption=caption,
                                                         reply_to=reply_to, metadata=metadata)
                 except Exception as error:
                     logging.getLogger(__name__).warning('identity_long_reply_failed error=%s', type(error).__name__)

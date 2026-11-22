@@ -1681,7 +1681,21 @@ diff --git a/cron/scheduler.py b/cron/scheduler.py
 diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 --- a/cron/scheduler_delivery.py
 +++ b/cron/scheduler_delivery.py
-@@ -1976,4 +1976,36 @@
+@@ -1651,5 +1651,5 @@
+ def _deliver_via_live_adapter(
+     t: _TargetDelivery, cleaned_text: str, media_files: list, *, target_errors: list,
+-    delivery_errors: list, unverified_targets: list,
++    delivery_errors: list, unverified_targets: list, cancel_hint: str = "",
+ ) -> bool:
+     """Deliver one target via the live gateway adapter; True once delivered. ``target_errors`` =
+@@ -1658,4 +1658,6 @@
+     job = t.job
+     route_thread_id, route_metadata, media_metadata = _live_route_metadata(t)
++    if cancel_hint and t.platform_name == "telegram" and os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        route_metadata["_brai_scheduled_cancel_hint"] = cancel_hint
+     delivered = False
+     try:
+@@ -1976,4 +1978,43 @@
 
 
 +def _scheduled_task_name(job: dict) -> str:
@@ -1690,38 +1704,46 @@ diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 +    return name if name != job.get("id") else ""
 +
 +
-+def _scheduled_delivery_text(job: dict, content: str, *, for_failure: bool) -> str:
-+    """Оформить результат задания без служебного ID и подсказать отмену будущих запусков."""
++def _scheduled_delivery_text(job: dict, content: str, *, for_failure: bool) -> tuple[str, str]:
++    """Вернуть текст результата и отдельную подсказку, пока задание можно отменить."""
 +    from agent.i18n import t
 +    from cron.constants import is_recurring
++    from cron.jobs import get_job
 +    from cron.unreachable_retry import is_retry_run
 +
-+    name = _scheduled_task_name(job)
++    current = get_job(job["id"]) if job.get("id") else None
++    name = _scheduled_task_name(current if current is not None else job)
 +    title = name or t("scheduled_task.untitled")
 +    # Сообщение об ошибке уже содержит имя задания.
-+    first_line = content.lstrip().partition("\n")[0].strip()
++    first_line = content.lstrip().partition("\n")[0]
++    existing_title = first_line.lstrip("# ").strip().strip("*")
 +    text = content
-+    if not for_failure and first_line not in (title, f"**{title}**"):
++    if not for_failure and existing_title != title:
 +        text = f"{title}\n\n{content}"
 +
-+    if not name or not is_recurring(job) or not job.get("enabled", True) or job.get("state") in {"paused", "completed"}:
-+        return text
++    if (
++        current is None or not name or not is_recurring(current)
++        or not current.get("enabled", True) or current.get("state") in {"paused", "completed"}
++    ):
++        return text, ""
 +
-+    repeat = job.get("repeat") or {}
++    repeat = current.get("repeat") or {}
 +    times = repeat.get("times")
-+    completed = repeat.get("completed", 0) + (0 if is_retry_run(job) else 1)
++    counted = current.get("last_run_at") != job.get("last_run_at") or is_retry_run(job)
++    completed = repeat.get("completed", 0) + (0 if counted else 1)
 +    if times is not None and times > 0 and completed >= times:
-+        return text
++        return text, ""
 +
-+    return f'{text}\n\n{t("scheduled_task.cancel", name=name)}'
++    return text, t("scheduled_task.cancel", name=name)
 +
 +
  def _deliver_result(
      job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
-@@ -2025,16 +2057,7 @@
+@@ -2025,16 +2066,9 @@
      # persisted as ``last_delivery_unverified`` so `hermes cron list` shows it.
      unverified_targets: list = []
--    if wrap_response:
++    delivery_content, cancel_hint = content, ""
+     if wrap_response:
 -        task_name = job.get("name", job["id"])
 -        delivery_content = (
 -            f"Cronjob Response: {task_name}\n"
@@ -1733,11 +1755,27 @@ diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 -        )
 -    else:
 -        delivery_content = content
-+    delivery_content = (
-+        _scheduled_delivery_text(job, content, for_failure=for_failure) if wrap_response else content
-+    )
++        delivery_content, cancel_hint = _scheduled_delivery_text(job, content, for_failure=for_failure)
++        if cancel_hint:
++            delivery_content = f"{delivery_content}\n\n{cancel_hint}"
 
      from gateway.platforms.base import BasePlatformAdapter
+@@ -2049,4 +2083,8 @@
+     # failing curl with an API key, summarised a config file) sent it verbatim to the chat.
+     cleaned_delivery_content = _redact_cron_payload(cleaned_delivery_content, "delivery content")
++    if cancel_hint:
++        # Только уже очищенный текст может попасть в отдельное поле подписи.
++        _, separator, sanitized_hint = cleaned_delivery_content.strip().rpartition("\n\n")
++        cancel_hint = sanitized_hint if separator else ""
+     requested_media = len(media_files)
+     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+@@ -2113,5 +2151,5 @@
+             t, cleaned_delivery_content, media_files,
+             target_errors=target_errors, delivery_errors=delivery_errors,
+-            unverified_targets=unverified_targets,
++            unverified_targets=unverified_targets, cancel_hint=cancel_hint,
+         )
+         if not delivered:
 
 diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 --- a/cron/scheduler_failure_copy.py

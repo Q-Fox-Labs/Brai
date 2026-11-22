@@ -35,9 +35,10 @@ class ScheduledMessagesTests(unittest.TestCase):
         return self.jobs.create_job(self.digest, schedule, name=name, repeat=repeat, deliver="origin")
 
     def render(self, job, content=None, *, failure=False):
-        return self.delivery._scheduled_delivery_text(
+        text, hint = self.delivery._scheduled_delivery_text(
             job, self.digest if content is None else content, for_failure=failure
         )
+        return f"{text}\n\n{hint}" if hint else text
 
     def test_telegram_send_uses_plain_title_and_cancellation_instruction(self):
         job = self.create()
@@ -66,26 +67,44 @@ class ScheduledMessagesTests(unittest.TestCase):
             self.assertIsNone(self.delivery._deliver_result(job, self.digest))
         self.assertEqual(send.call_args.args[1], self.digest)
 
-    def test_one_shot_final_and_cancelled_tasks_do_not_offer_cancellation(self):
+    def test_one_shot_final_and_paused_tasks_do_not_offer_cancellation(self):
         once = self.create("in 1m")
         final = self.create(repeat=2)
-        final["repeat"]["completed"] = 1
+        self.jobs.mark_job_run(final["id"], success=True)
+        final = self.jobs.get_job(final["id"])
         paused = self.create()
-        paused["enabled"] = False
+        self.jobs.pause_job(paused["id"])
         for job in (once, final, paused):
             with self.subTest(schedule=job["schedule"], repeat=job["repeat"], enabled=job["enabled"]):
                 self.assertEqual(self.render(job), f"{self.title}\n\n{self.digest}")
 
+    def test_queued_delivery_uses_new_name_and_counts_the_run_once(self):
+        job = self.create(repeat=2)
+        self.jobs.mark_job_run(job["id"], success=True)
+        renamed = "Новости дня"
+        self.jobs.update_job(job["id"], {"name": renamed})
+        self.assertTrue(self.render(job).startswith(f"{renamed}\n\n"))
+        self.assertIn(f"Отмени задание „{renamed}“", self.render(job))
+
+    def test_task_that_removes_itself_can_deliver_without_a_cancellation_hint(self):
+        job = self.create()
+        with self.jobs.self_removal_delivery_scope(job["id"]):
+            self.assertTrue(self.jobs.remove_job(job["id"]))
+            self.assertEqual(self.render(job), f"{self.title}\n\n{self.digest}")
+
     def test_existing_title_and_failure_appear_once(self):
         job = self.create()
-        content = f"**{self.title}**\n\n{self.digest}"
-        self.assertEqual(self.render(job, content), f"{content}\n\n{self.instruction}")
+        for heading in (f"**{self.title}**", f"## {self.title}"):
+            with self.subTest(heading=heading):
+                content = f"{heading}\n\n{self.digest}"
+                self.assertEqual(self.render(job, content), f"{content}\n\n{self.instruction}")
         failure = f"Не удалось подготовить «{self.title}»."
         self.assertEqual(self.render(job, failure, failure=True), f"{failure}\n\n{self.instruction}")
 
     def test_untitled_task_does_not_expose_its_id(self):
         job = self.create()
-        job["name"] = job["id"]
+        self.jobs.update_job(job["id"], {"name": job["id"]})
+        job = self.jobs.get_job(job["id"])
         self.assertEqual(self.render(job), f"Задание по расписанию\n\n{self.digest}")
         message = self.delivery._sched._summarize_cron_failure_for_delivery(job, "synthetic")
         self.assertNotIn(job["id"], message)

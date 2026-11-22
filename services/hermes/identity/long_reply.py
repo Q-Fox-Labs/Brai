@@ -26,12 +26,17 @@ def needs_pdf(adapter, content):
     return len(text) > RICH_MAX_CHARS or len(text.encode('utf-8')) > RICH_MAX_BYTES
 
 
-def excerpt(adapter, content):
-    """Начало ответа и пометка о PDF помещаются в подпись Telegram."""
+def excerpt(adapter, content, *, closing_text=""):
+    """Поместить начало ответа, пометку о PDF и доступную подсказку в подпись Telegram."""
     notice = '\n\n… Полный ответ — в PDF.'
     formatter = getattr(adapter, 'format_message', lambda value: value)
     def fits(text):
         return len(formatter(text).encode('utf-16-le')) // 2 <= CAPTION_MAX_UNITS
+    if closing_text and content.endswith('\n\n' + closing_text):
+        closing = notice + '\n\n' + closing_text
+        if fits(closing):
+            content = content.removesuffix('\n\n' + closing_text)
+            notice = closing
     low, high = 0, min(len(content), CAPTION_MAX_UNITS)
     while low < high:
         middle = (low + high + 1) // 2

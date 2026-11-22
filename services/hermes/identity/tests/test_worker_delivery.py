@@ -286,6 +286,31 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Полный ответ — в PDF.', payload['caption'])
         self.assertLessEqual(len(payload['caption'].encode('utf-16-le')) // 2, 1024)
 
+    async def test_scheduled_pdf_keeps_cancellation_in_visible_caption(self):
+        from identity import long_reply
+
+        deliver = AsyncMock(return_value={'success': True, 'message_id': '400'})
+        worker = self.adapter(deliver)
+        cancel = 'Чтобы больше не получать такие сообщения, напишите в чат «Отмени задание „Новости“».'
+        text = f"Новости\n\n{'сводка ' * 5000}\n\n{cancel}"
+
+        def render(content, target):
+            self.assertEqual(content, text)
+            target.write_bytes(b'%PDF-1.7\ncomplete fixture')
+
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.input)}), patch.object(long_reply, 'render_pdf', render):
+            result = await worker.send('123', text, metadata={
+                'thread_id': '77', '_brai_scheduled_cancel_hint': cancel,
+            })
+        self.assertTrue(result.success)
+        args = deliver.await_args.args
+        self.assertEqual(args[1], 'send_document')
+        self.assertEqual(args[2]['metadata']['thread_id'], '77')
+        self.assertNotIn('_brai_scheduled_cancel_hint', args[2]['metadata'])
+        self.assertIsNone(args[2]['reply_to'])
+        self.assertTrue(args[2]['caption'].endswith(cancel))
+        self.assertLessEqual(len(args[2]['caption'].encode('utf-16-le')) // 2, 1024)
+
     async def test_pdf_render_failure_never_claims_delivery_or_splits(self):
         long_reply = importlib.import_module('identity.long_reply')
         deliver = AsyncMock()
