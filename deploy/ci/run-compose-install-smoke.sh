@@ -55,14 +55,20 @@ git -C "$source_dir" fetch --no-tags --depth=1 https://github.com/Q-Fox-Labs/Bra
 git -C "$source_dir" switch --detach FETCH_HEAD
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$BRAI_CI_SOURCE_SHA"
 
-# Override prepared contexts with the candidate's normal production Dockerfiles.
+# Web uses the release's prepared runtime. The other images use their source Dockerfiles.
+(
+  cd "$source_dir"
+  test "$(npm --version)" = '11.19.1'
+  npm ci --no-audit --no-fund
+  CI=1 NEXT_TELEMETRY_DISABLED=1 BRAI_WEB_STANDALONE_OUTPUT=0 npm run build --workspace=@brai/web
+  node deploy/scripts/materialize-runtime.mjs --source "$source_dir" --workspace @brai/web \
+    --revision "$BRAI_CI_SOURCE_SHA" --output "$run_dir/web-runtime"
+)
 cat > "$run_dir/from-source.yml" <<'YAML'
 services:
   db:
     healthcheck:
       test: [CMD, pg_isready, -h, 127.0.0.1, -U, timer_owner, -d, brai_timer_test]
-  web:
-    build: { context: .., dockerfile: apps/web/Dockerfile }
   artifacts:
     build: { context: .., dockerfile: services/artifacts/Dockerfile }
   artifacts-migrate:
@@ -74,7 +80,7 @@ services:
 YAML
 cat > "$run_dir/compose.env" <<ENV
 BRAI_SOURCE_REVISION=$BRAI_CI_SOURCE_SHA
-BRAI_WEB_RUNTIME_CONTEXT=$source_dir
+BRAI_WEB_RUNTIME_CONTEXT=$run_dir/web-runtime
 BRAI_ARTIFACTS_RUNTIME_CONTEXT=$source_dir
 BRAI_ARTIFACTS_IMAGE=brai-ci-artifacts:$BRAI_CI_SOURCE_SHA
 BRAI_AUTH_IMAGE=brai-ci-auth:$BRAI_CI_SOURCE_SHA
