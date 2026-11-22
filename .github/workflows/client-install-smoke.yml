@@ -3,11 +3,6 @@
 name: Client install smoke
 
 on:
-  push:
-    branches: [feature/clean-install-actions-da582c9]
-    paths:
-      - .github/workflows/client-install-smoke.yml
-      - deploy/ci/**
   workflow_dispatch:
     inputs:
       source_sha:
@@ -24,7 +19,7 @@ jobs:
     if: github.repository == 'Q-Fox-Labs/Brai'
     name: Client install smoke
     env:
-      BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha || vars.BRAI_CI_SOURCE_SHA }}
+      BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
       ADMIN_REPOSITORY: ${{ vars.BRAI_CI_ADMIN_REPOSITORY || 'Q-Fox-Labs/Q-Server' }}
       ADMIN_SHA: ${{ vars.BRAI_CI_ADMIN_SHA || '8ef49bf67e2aa3870a609bcdae487c291ce241eb' }}
     runs-on: ubuntu-24.04
@@ -35,7 +30,7 @@ jobs:
       - name: Verify the candidate and measure available disk
         run: |
           [[ "$BRAI_CI_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || {
-            echo 'Set a full Brai commit SHA in source_sha or BRAI_CI_SOURCE_SHA.' >&2
+            echo 'Set a full Brai commit SHA in source_sha.' >&2
             exit 1
           }
           git fetch --no-tags --depth=1 origin "$BRAI_CI_SOURCE_SHA"
