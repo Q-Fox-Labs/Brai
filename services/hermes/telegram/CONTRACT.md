@@ -14,7 +14,7 @@
 | --- | --- |
 | `BRAI_TELEGRAM_OWNER_ID` | Обязательный положительный decimal Telegram **user ID** владельца. Не chat ID и не Brai owner. |
 | `TELEGRAM_ALLOWED_USERS` | Необязательный список положительных Telegram user ID через запятую, до 20 уникальных ID без пробелов. Дополнительные участники задаются при настроенном групповом route. Владелец и участники могут писать в эту группу и в собственную личку боту. Они получают общий доступ к агенту, данным Brai и human решениям владельца; это не отдельные Brai аккаунты. Без значения доступ имеет только владелец. |
-| `BRAI_TELEGRAM_CHAT_ID` | Необязательный signed decimal ID общего рабочего чата. Отрицательный — группа/supergroup; положительный допустим только равный owner. Без значения используется прежний личный чат owner. |
+| `BRAI_TELEGRAM_CHAT_ID` | Необязательный ID рабочего чата. Отрицательный ID задаёт группу или супергруппу. Положительный ID должен совпадать с ID владельца. Если значение отсутствует, плагин берёт единственный отрицательный ID из `TELEGRAM_ALLOWED_CHATS`. При пустом значении или списке в `TELEGRAM_ALLOWED_CHATS` доступен личный чат владельца. |
 | `BRAI_TELEGRAM_STATE_DIR` | Абсолютный профильный каталог с последним сегментом `brai-telegram`. Содержит private SQLite подтверждений. |
 | `BRAI_HERMES_TRUSTED_ENTRY` | Абсолютный путь к `services/hermes/trusted.mjs`. |
 | `BRAI_HERMES_NODE_EXECUTABLE` | Абсолютный путь к доверенному Node; окружение экземпляра задаёт `/usr/local/bin/node`. |
@@ -23,9 +23,9 @@
 
 Состояние принадлежит плагину; Graph и Artifacts принадлежат своим сервисам. Связи: native ingress → owner/route проверка → publisher RPC → exact Markdown; model output → descriptor → fetch RPC → native MEDIA upload; model tool → human prepare → native кнопки → owner callback → read/complete или cancel. Точка сборки — `register(ctx)`, native bot и loop предоставляет factory `(app, adapter)`.
 
-Factory ставит один штатный PTB `TypeHandler(Update, guard)` в группе `-100`, раньше native command/media/callback/inline handlers. Guard допускает заданную группу и личные чаты владельца либо явно разрешённых участников. В личке `chat.id` обязан совпадать с `effective_user.id`; anonymous `sender_chat` и bot identities запрещены. Business-события передаются отдельно, как описано ниже. Отказ через `ApplicationHandlerStop` происходит до download, команды, inline ответа и обработки кнопки; ответ чужому отправителю не отправляется. Для группы допустимы group/supergroup/forum, для лички разрешённого отправителя — private/dm. Forum topic не является отдельным разрешением: маршрут охватывает заданный чат целиком. Нативный ответ сохраняет исходный thread; human кнопки и уведомления адресованы исходной беседе. Доступ к общим данным Brai сохраняется; сообщения лички не перенаправляются в группу.
+Factory ставит один штатный PTB `TypeHandler(Update, guard)` в группе `-100`, раньше native command/media/callback/inline handlers. Guard допускает заданную группу и личные чаты владельца либо явно разрешённых участников. В личке `chat.id` обязан совпадать с `effective_user.id`; anonymous `sender_chat` и bot identities запрещены. Business-события передаются отдельно, как описано ниже. Отказ через `ApplicationHandlerStop` происходит до download, команды, inline ответа и обработки кнопки; ответ чужому отправителю не отправляется. Для группы допустимы group/supergroup/forum, для лички разрешённого отправителя — private/dm. Forum topic не является отдельным разрешением: маршрут охватывает заданный чат целиком. Hermes получает исходные идентификаторы чата, темы и участника, по которым находит сохранённую сессию. При обновлении для продолжения диалога используются тот же бот и каталог профиля Hermes. Ответ, кнопки и уведомления остаются в исходной беседе. Доступ к общим данным Brai сохраняется; сообщения лички не перенаправляются в группу.
 
-В identity worker Root ingress проверяет подключённый Telegram-аккаунт, сохраняет его `source.chat_id` и передаёт канонический `source.user_id` владельца профиля. Поэтому в личном MessageEvent эти ID могут различаться. Плагин допускает такой вход только после `config.allows(source.user_id)` и при точной записи `adapter._brai_chats[source.chat_id]` с типом `private` или `dm`, ранее сохранённой из Root-admitted source. Эти два имени типа обозначают один личный маршрут. Неизвестный личный чат, запись группового типа и чужой автор получают отказ. В обычном режиме без identity worker сохраняется требование `chat_id == user_id`; групповая проверка не меняется.
+В identity worker Root ingress проверяет подключённый Telegram-аккаунт, сохраняет его `source.chat_id` и передаёт канонический `source.user_id` владельца профиля. Поэтому в личном MessageEvent эти ID могут различаться. Плагин допускает такой вход только после `config.allows(source.user_id)` и при точной записи `adapter._brai_chats[source.chat_id]` с типом `private` или `dm`, ранее сохранённой из Root-admitted source. Эти два имени типа обозначают один личный маршрут. Неизвестный личный чат, запись группового типа и чужой автор получают отказ. В одиночном профиле для личного маршрута действует требование `chat_id == user_id`.
 
 Business lifecycle не проходит через маршруты общего диалога Brai. Guard допускает `business_connection` только с `connection.user.id`, равным `BRAI_TELEGRAM_OWNER_ID`, без bot identity. `business_message`, `edited_business_message` и `deleted_business_messages` передаются зарегистрированным Business handlers без проверки customer chat по рабочему маршруту Brai. Telegram определяет доступные Business-чаты; отдельный Business-плагин проверяет сохранённое подключение, его активность, паузы, полномочия владельца и подтверждение отправки. Неизвестное подключение не создаёт черновик. После unload guard останавливает и Business-события. Обычный update с одним `message.business_connection_id` не получает исключения.
 
@@ -34,6 +34,25 @@ Business lifecycle не проходит через маршруты общег�
 Runtime дополнительно задаёт native `TELEGRAM_ALLOWED_CHATS=chatId` (штатный фильтр только групп; личку он не запрещает), `TELEGRAM_GROUP_ALLOWED_USERS` и `TELEGRAM_ALLOWED_USERS` со списком владельца и явно назначенных участников; `TELEGRAM_HOME_CHANNEL` при необходимости содержит route. `TELEGRAM_GROUP_ALLOWED_CHATS` и YAML `group_allowed_chats` не используются: в закреплённом Hermes они дают доступ всем участникам. Отрицательные chat ID запрещены в `TELEGRAM_GROUP_ALLOWED_USERS`: Hermes сохраняет legacy chat grant. Нет wildcard, allow-all, guest/observe или bot grants; adapter `allow_from/group_allow_from`, если заданы, содержат только владельца и назначенных участников. Один chat ID без обязательного user owner не активирует плагин. Секреты и пользовательские значения живут только в защищённом runtime, не в исходниках.
 
 Сам Hermes считается доверенным ядром. Защита callback обеспечивает обычный маршрут MCP/Telegram. Она не изолирует private CLI от произвольного кода, запущенного native terminal тем же Unix пользователем с тем же окружением. В интегрированном плане game-core атомарно сверяет текущую revision и снимок claim для всех решений; planning stage также проверяется для legacy Action. У legacy final/review остаются предварительные проверки private порта, общего атомарного CAS для них нет.
+
+## Заголовки тем
+
+В одиночном профиле с `BRAI_TELEGRAM_TOPIC_SOCKET` guard принимает служебное
+событие `forum_topic_created` с `is_name_implicit=true` в личке и настроенной
+форумной супергруппе. Первое содержательное сообщение допущенного участника
+занимает запись в SQLite по ID чата и темы. Генератор Диалогов предлагает
+заголовок и значок, а плагин вызывает `editForumTopic` в фоне для исходной темы
+после повторной проверки маршрута. Темы с заданным именем и General сохраняют
+свои названия. Служебное событие ручного редактирования отменяет ожидающую
+попытку, в том числе при правке другим администратором настроенной группы.
+При отказе генератора или Telegram агент продолжает диалог. Следующие сообщения
+в той же теме общаются с агентом без повторной автоматической попытки.
+
+Существующую тему в личке или настроенной форумной супергруппе можно
+переименовать инструментом `telegram_rename_current_topic` в текущей сессии.
+Аргумент `text` обращается к тому же генератору, а `title` передаёт готовое имя.
+Telegram требует право `can_manage_topics` в супергруппе, если тему создал
+другой участник. [Правила Telegram Bot API](https://core.telegram.org/bots/api#editforumtopic).
 
 ## Уточнения и редактирование
 

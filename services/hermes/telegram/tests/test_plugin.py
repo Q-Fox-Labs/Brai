@@ -972,6 +972,41 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 mod.Config.from_env()
 
+    async def test_legacy_group_route_keeps_existing_topic_session_and_private_chat(self):
+        env = {"BRAI_TELEGRAM_OWNER_ID": "123", "BRAI_TELEGRAM_STATE_DIR": str(self.config.state_dir),
+               "BRAI_HERMES_TRUSTED_ENTRY": self.config.entry, "BRAI_HERMES_NODE_EXECUTABLE": self.config.node,
+               "BRAI_TELEGRAM_RESULT_ROOT": self.config.result_root, "TELEGRAM_ALLOWED_CHATS": GROUP,
+               "TELEGRAM_ALLOWED_USERS": "123,456"}
+        with patch.dict(os.environ, env, clear=True):
+            self.plugin.config = mod.Config.from_env()
+            os.environ["BRAI_TELEGRAM_CHAT_ID"] = "-1008765432100"
+            self.assertEqual(mod.Config.from_env().chat, "-1008765432100")
+
+        for chat, user, kind in ((GROUP, 456, "supergroup"), (GROUP, 123, "group"), ("456", 456, "private")):
+            await self.plugin.guard(self.update(chat=chat, owner=user, chat_type=kind), None)
+        stop = sys.modules["telegram.ext"].ApplicationHandlerStop
+        for chat, user, kind in ((GROUP, 777, "supergroup"), ("-1008765432100", 456, "supergroup"),
+                                 ("123", 456, "private")):
+            with self.assertRaises(stop):
+                await self.plugin.guard(self.update(chat=chat, owner=user, chat_type=kind), None)
+
+        old_route = self.native_context["HERMES_SESSION_KEY"]
+        origin = self.entry.origin
+        origin.chat_id, origin.chat_type, origin.user_id, origin.thread_id = GROUP, "group", "456", "77"
+        self.native_context.update(HERMES_SESSION_CHAT_ID=GROUP, HERMES_SESSION_CHAT_TYPE="group",
+                                   HERMES_SESSION_USER_ID="456", HERMES_SESSION_THREAD_ID="77")
+        event = self.event(source=origin, text="Продолжим с прошлого шага")
+        self.assertIsNone(await self.plugin.incoming(event))
+        context = self.plugin._tool_context({"session_id": self.entry.session_id})
+        self.assertEqual((context["session_key"], context["session_id"], context["chat_id"], context["thread_id"]),
+                         (old_route, self.entry.session_id, GROUP, "77"))
+
+        with patch.dict(os.environ, env, clear=True):
+            os.environ["TELEGRAM_ALLOWED_USERS"] = "123"
+            for value in ("123", "*", f"{GROUP},-1008765432100"):
+                os.environ["TELEGRAM_ALLOWED_CHATS"] = value
+                self.assertEqual(mod.Config.from_env().chat, "123")
+
     async def test_foreign_owner_group_and_business_never_publish(self):
         for changes in ({"user_id": "456"}, {"chat_id": "456"}, {"chat_type": "group"}):
             event = self.event(media_urls=["/file.pdf"])
@@ -2530,7 +2565,7 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
         await self.submit(text)
         await self.submit(text)
         await asyncio.sleep(0)
-        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
+        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), 'private', '123', 'План отпуска')
         await self.submit(self.message(88, forum_topic_created=NS(is_name_implicit=False)))
         await self.submit(self.message(88, text='Сохранить название'))
         await self.submit(self.message(99, text='Старая тема'))
@@ -2541,7 +2576,7 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
         await self.submit(NS(message_id=77, forum_topic_created=NS(is_name_implicit=True)))
         await self.submit(self.message(text='План отпуска'))
         await asyncio.sleep(0)
-        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), '123', 'План отпуска')
+        self.plugin._name_topic.assert_awaited_once_with(('123', '77'), 'private', '123', 'План отпуска')
 
     async def test_manual_edit_cancels_inflight_and_photo_gets_label(self):
         entered, cancelled = asyncio.Event(), asyncio.Event()
@@ -2583,12 +2618,63 @@ class ImplicitTopicTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.gather(*tuple(self.plugin.topic_tasks.values()))
 
+    async def test_group_forum_uses_original_topic_and_telegram_rejection_stays_in_background(self):
+        self.plugin.config = replace(self.plugin.config, chat_id=GROUP)
+        self.plugin._name_topic = mod.TelegramPlugin._name_topic.__get__(self.plugin)
+        self.plugin._suggest_topic_name = AsyncMock(return_value={'title': 'Маршрут поездки', 'iconId': '12'})
+        self.plugin.bot = NS(edit_forum_topic=AsyncMock(side_effect=[True, PermissionError()]))
+        chat = NS(id=int(GROUP), type='supergroup', is_forum=True)
+        modules = ptb_stubs()
+
+        async def dispatch(message, target=chat, user=self.user):
+            update = NS(effective_chat=target, effective_user=user, effective_message=message, message=message)
+            await self.plugin.guard(update, None)
+            await asyncio.gather(*tuple(self.plugin.tasks))
+
+        with patch.dict(sys.modules, modules):
+            for thread in (77, 88):
+                await dispatch(self.message(thread, forum_topic_created=NS(is_name_implicit=True)))
+                await dispatch(self.message(thread, text='Поездка'))
+                await dispatch(self.message(thread, text='Продолжим'))
+            await dispatch(self.message(99, forum_topic_created=NS(is_name_implicit=False)))
+            await dispatch(self.message(99, text='Моя тема'))
+            await dispatch(self.message(1, forum_topic_created=NS(is_name_implicit=True)))
+            await dispatch(self.message(1, text='General'))
+            non_forum = NS(id=int(GROUP), type='supergroup', is_forum=False)
+            await dispatch(self.message(99, forum_topic_created=NS(is_name_implicit=True)), non_forum)
+            await dispatch(self.message(99, text='Сообщение'), non_forum)
+            foreign = NS(id=-1008765432100, type='supergroup', is_forum=True)
+            with self.assertRaises(modules['telegram.ext'].ApplicationHandlerStop):
+                await dispatch(self.message(forum_topic_created=NS(is_name_implicit=True)), foreign)
+        self.assertEqual(self.plugin._suggest_topic_name.await_count, 2)
+        self.assertEqual([call.kwargs for call in self.plugin.bot.edit_forum_topic.await_args_list], [
+            {'chat_id': int(GROUP), 'message_thread_id': thread, 'name': 'Маршрут поездки', 'icon_custom_emoji_id': '12'}
+            for thread in (77, 88)])
+
+    async def test_group_topic_edited_by_other_admin_cancels_pending_generation(self):
+        self.plugin.config = replace(self.plugin.config, chat_id=GROUP)
+        chat = NS(id=int(GROUP), type='supergroup', is_forum=True)
+        modules = ptb_stubs()
+
+        def update(message, user):
+            return NS(effective_chat=chat, effective_user=user, effective_message=message, message=message)
+
+        with patch.dict(sys.modules, modules):
+            created = self.message(forum_topic_created=NS(is_name_implicit=True))
+            await self.plugin.guard(update(created, self.user), None)
+            edited = self.message(forum_topic_edited=NS(name='Ручное имя'))
+            with self.assertRaises(modules['telegram.ext'].ApplicationHandlerStop):
+                await self.plugin.guard(update(edited, NS(id=999)), None)
+            await self.plugin.guard(update(self.message(text='Обычное сообщение'), self.user), None)
+            await asyncio.gather(*tuple(self.plugin.tasks))
+        self.plugin._name_topic.assert_not_awaited()
+
     async def test_non_text_first_content_is_claimed_in_update_order(self):
         for thread, field, label in ((77, 'sticker', 'Стикер'), (88, 'location', 'Геопозиция'), (99, 'venue', 'Место')):
             updates = [self.message(thread, forum_topic_created=NS(is_name_implicit=True)),
                        self.message(thread, **{field: True}), self.message(thread, text='Второе сообщение')]
             await asyncio.gather(*(self.plugin._topic_update(message, self.chat, self.user, False) for message in updates))
-            self.plugin._name_topic.assert_awaited_with(('123', str(thread)), '123', label)
+            self.plugin._name_topic.assert_awaited_with(('123', str(thread)), 'private', '123', label)
         self.assertEqual(self.plugin._name_topic.await_count, 3)
 
     async def test_blocked_sqlite_does_not_delay_update_handler(self):
@@ -2683,6 +2769,16 @@ class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captured, {'request': 'Маршрут и отели у моря', 'icons': ['🏖️']})
         self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name='Пляжный отпуск')
 
+    async def test_generated_name_renames_an_existing_group_topic(self):
+        self.plugin.config = replace(self.plugin.config, chat_id=GROUP)
+        self.entry.origin.chat_id, self.entry.origin.chat_type = GROUP, 'group'
+        self.context.update(HERMES_SESSION_CHAT_ID=GROUP, HERMES_SESSION_CHAT_TYPE='group')
+        self.plugin._suggest_topic_name = AsyncMock(return_value={'title': 'Маршрут поездки'})
+        ticket = self.authorize({'text': 'Маршрут и отели'})['args']['_topicTicket']
+        self.assertEqual(await self.redeem(ticket), {'ok': True, 'title': 'Маршрут поездки'})
+        self.plugin._suggest_topic_name.assert_awaited_once_with(self.bot, 'Маршрут и отели')
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=int(GROUP), message_thread_id=77, name='Маршрут поездки')
+
     async def test_refuses_injected_route_or_changed_session(self):
         for args in ({'title': 'Название', 'thread_id': 88}, {'title': 'Имя', 'text': 'Описание'}, {'title': 'X\nY'}):
             self.assertEqual(self.authorize(args)['action'], 'block')
@@ -2719,7 +2815,7 @@ class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
         manual = asyncio.create_task(self.redeem(ticket))
         try:
             await asyncio.wait_for(started.wait(), 2)
-            await asyncio.wait_for(self.plugin._name_topic(('123', '88'), '123', 'Автоматический запрос'), 2)
+            await asyncio.wait_for(self.plugin._name_topic(('123', '88'), 'private', '123', 'Автоматический запрос'), 2)
             self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=88,
                                                               name='Автоматическое имя', icon_custom_emoji_id='13')
         finally:
