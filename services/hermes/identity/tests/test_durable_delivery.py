@@ -2,7 +2,8 @@
 # ABOUTME: Использует настоящие SQLite/PTB Update и перезапуск объектов без пользовательских данных.
 import asyncio
 import ast
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -819,6 +820,34 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             self.outbox.enqueue(IDENT, 'other', {'text': 'first'})
         with self.assertRaisesRegex(ValueError, 'CONFLICT'):
             self.outbox.enqueue(IDENT, 'owner', {'text': 'second'})
+
+    async def test_snapshot_restores_exact_envelope_receipt_and_request_fingerprint(self):
+        body = {'action': 'send', 'payload': {'text': 'Ответ'}}
+        digest = delivery_id('request')
+        self.outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
+        await self.outbox.flush()
+
+        with closing(sqlite3.connect(':memory:', isolation_level=None)) as restored:
+            self.db.backup(restored)
+            stored = restored.execute('SELECT body FROM reply_outbox WHERE id=?', (IDENT,)).fetchone()
+            self.assertEqual(json.loads(stored[0]), body)
+            old_receipt = restored.execute('SELECT receipt FROM reply_outbox WHERE id=?', (IDENT,)).fetchone()
+            self.assertEqual(json.loads(old_receipt[0]), {'success': True, 'message_id': '1'})
+            outbox = ReplyOutbox(restored, self.deliver)
+            outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
+            with self.assertRaisesRegex(ValueError, 'CONFLICT'):
+                outbox.enqueue(IDENT, 'owner', body, request_digest=delivery_id('different'))
+            await outbox.flush()
+        self.deliver.assert_awaited_once()
+
+    async def test_released_envelope_preserves_its_embedded_request_fingerprint(self):
+        digest = delivery_id('previous request')
+        body = {'text': 'Ответ'}
+        self.db.execute("INSERT INTO reply_outbox(id,owner,body,state) VALUES (?,?,?,'pending')",
+                        (IDENT, 'owner', json.dumps({**body, 'requestDigest': digest})))
+        self.outbox.enqueue(IDENT, 'owner', body, request_digest=digest)
+        with self.assertRaisesRegex(ValueError, 'CONFLICT'):
+            self.outbox.enqueue(IDENT, 'owner', body, request_digest=delivery_id('different'))
 
     async def test_owner_fifo_and_independent_other_owner(self):
         second, other = delivery_id('second'), delivery_id('other')
