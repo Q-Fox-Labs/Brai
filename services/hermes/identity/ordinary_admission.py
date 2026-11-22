@@ -609,7 +609,14 @@ class Mirror:
             return None
         profile = self.snapshot(f'{self.bot_id}:{ids[0]}')['profile']
         row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, ids[0])
-        if self.input_ready is not None and not await self.input_ready(profile, (row['chat'], row['thread'])):
+        route = (row['chat'], row['thread'])
+        if group_chat_id(row['chat']):
+            thread = str(event.source.thread_id or '')
+            if str(event.source.chat_id) != row['chat'] or ('' if thread == '1' else thread) != row['thread']:
+                raise PermissionError('Group delivery route changed')
+            # AIDEV-NOTE: Native General is '1'. The journal uses '' for its pause state.
+            route = (row['chat'], thread)
+        if self.input_ready is not None and not await self.input_ready(profile, route):
             return {'deferred': True}
         result = await asyncio.to_thread(self.inbox.bind_delivery, profile, self.bot_id, ids)
         for ident in ids:

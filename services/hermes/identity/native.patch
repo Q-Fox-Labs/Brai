@@ -2661,3 +2661,44 @@ diff --git a/tools/async_delegation.py b/tools/async_delegation.py
 +        _push_completion_event(snapshot, completion, status)
      with _records_lock:
          if delegation_id in _records:
+
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -1448,6 +1448,8 @@
+         reply_to_source = reply_to or (str(metadata_reply_to) if private_dm_topic_send and metadata_reply_to is not None else None)
+         if private_dm_topic_send:
+             should_thread = reply_to_source is not None and self._reply_to_mode != "off"
++        elif os.environ.get("BRAI_IDENTITY_MODE") == "telegram" and str(chat_id).startswith("-") and index == 0:
++            should_thread = reply_to_source is not None
+         else:
+             should_thread = self._should_thread_reply(reply_to_source, index)
+         reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
+@@ -3511,6 +3513,8 @@
+         Returns ``(msg, used_thread_fallback)`` on success or a ``SendResult`` to return verbatim (fail-loud DM-topic
+         cases, flood cap); raises anything the caller's classifier should see."""
+         _NetErr, _BadReq, _TimedOut = error_types
++        # AIDEV-NOTE: Ответ личного профиля не должен менять группу, тему или адресата.
++        identity_group = os.environ.get("BRAI_IDENTITY_MODE") == "telegram" and str(chat_id).startswith("-")
+         retried_thread_not_found = False
+         private_dm_topic_send, dm_topic_reply_to_off, reply_to_id = self._chunk_reply_routing(chat_id, reply_to, metadata, thread_id, index)
+         if private_dm_topic_send and reply_to_id is None and not dm_topic_reply_to_off:
+@@ -3531,8 +3535,8 @@
+                 # BadRequest subclasses NetworkError in PTB but is permanent; handle specific cases.
+                 if _BadReq and isinstance(send_err, _BadReq):
+                     if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
+-                        if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
+-                            return SendResult(success=False, error=str(send_err), retryable=False)
++                        if identity_group or private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
++                            return SendResult(success=False, error=_redact_telegram_error_text(send_err), retryable=False)
+                         # One-off "thread not found" flakes recover on immediate retry: same thread_id once.
+                         if not retried_thread_not_found:
+                             retried_thread_not_found = True
+@@ -3547,7 +3551,7 @@
+                         continue
+                     if "message to be replied not found" in str(send_err).lower() and reply_to_id is not None:
+                         safe_send_error = _redact_telegram_error_text(send_err)
+-                        if private_dm_topic_send:
++                        if identity_group or private_dm_topic_send:
+                             return SendResult(success=False, error=safe_send_error, retryable=False)
+                         # Reply target deleted; private-topic fallback sends drop anchor + topic id together.
+                         logger.warning("[%s] Reply target deleted, retrying without reply_to: %s", self.name, safe_send_error)

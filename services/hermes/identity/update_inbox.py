@@ -5,7 +5,7 @@ import json
 import os
 import uuid
 
-from .ordinary_admission import group_message, message_thread
+from .ordinary_admission import group_chat_id, group_message, message_thread
 
 SCHEMA = '''CREATE TABLE IF NOT EXISTS release_inbox (
  seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -395,12 +395,18 @@ class UpdateInbox:
         """Прочитать provenance готового ответа после restart ingress; права не расширяются."""
         db = self._open(profile)
         try:
-            rows = db.execute('''SELECT i.* FROM release_inbox i JOIN release_input_delivery d ON d.inbox_seq=i.seq
+            rows = db.execute('''SELECT i.*, a.author_id AS auth_author, a.role AS auth_role,
+                    a.generation AS auth_generation
+                FROM release_inbox i JOIN release_input_delivery d ON d.inbox_seq=i.seq
+                LEFT JOIN release_inbox_auth a ON a.inbox_seq=i.seq
                 WHERE d.delivery_id=? ORDER BY i.seq''', (delivery_id,)).fetchall()
             if not rows or any((r['profile_id'], r['user_id'], r['uid']) != binding(profile) for r in rows):
                 raise PermissionError('DELIVERY_INPUT_OWNER_CHANGED')
             if len({(r['chat'], r['thread'], r['chat_generation']) for r in rows}) != 1:
                 raise PermissionError('DELIVERY_INPUT_ROUTE_CHANGED')
+            if group_chat_id(rows[0]['chat']) and len({(r['actor_id'], r['auth_author'], r['auth_role'],
+                                                        r['auth_generation']) for r in rows}) != 1:
+                raise PermissionError('DELIVERY_INPUT_AUTH_CHANGED')
             return dict(rows[0])
         finally:
             db.close()

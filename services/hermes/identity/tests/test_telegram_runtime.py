@@ -86,6 +86,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(resolver.ledger.close)
         resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: {
             'chat': '-10012', 'actor_id': '456', 'chat_generation': 0,
+            'auth_author': '123', 'auth_role': 'user', 'auth_generation': 1,
             'payload': json.dumps({'message': {'message_id': 70, 'message_thread_id': 77,
                 'chat': {'id': -10012, 'type': 'supergroup', 'is_forum': True}}})}))
         resolver.ledger.admit(actor, ('-10012', '77'), {'thread_id': '77'}, '70')
@@ -99,6 +100,13 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         broker.assert_awaited_once_with('identity.resolve', {'telegramId': '456'})
         adapter.send.assert_awaited_once_with(chat_id='-10012', content='Готово', reply_to='70',
                                               metadata={'thread_id': '77'})
+        downgraded = {**actor, 'generation': 2}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=downgraded)):
+            result = await resolver.durable_reply(downgraded, 'owner', 'send',
+                {'chat_id': '-10012', 'content': 'Несвоевременный ответ', 'metadata': {'thread_id': '77'}},
+                delivery_id('changed-group-reply'), delivery_id('group-input'))
+        self.assertFalse(result['success'])
+        self.assertEqual(adapter.send.await_count, 1)
 
     async def test_supervisor_bridge_saves_explicit_author_before_first_send(self):
         resolver = runtime.Resolver(NS())

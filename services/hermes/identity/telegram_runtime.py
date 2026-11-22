@@ -614,7 +614,11 @@ class Resolver:
         original = json.loads(source['payload']).get('message', {})
         if group_chat_id(source['chat']):
             # AIDEV-NOTE: Chat ID не идентифицирует владельца общей темы после restart.
-            profile['telegramId'] = source['actor_id']
+            if (source.get('auth_author') != str(profile['authorTelegramId'])
+                    or not isinstance(source.get('auth_role'), str)
+                    or type(source.get('auth_generation')) is not int):
+                raise PermissionError('Group reply has no admitted author binding')
+            profile.update(telegramId=source['actor_id'], role=source['auth_role'], generation=source['auth_generation'])
             metadata_group = original.get('chat', {})
             thread_id = message_thread(SimpleNamespace(**metadata_group), SimpleNamespace(**original))
             anchor = str(original.get('message_id') or '')
@@ -774,12 +778,17 @@ class Resolver:
         turn['inputId'] = input_id
         turn.pop('questionReceipt', None)
         turn.pop('accountOfferId', None)
-        await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
+        admitted = await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': private, 'turnId': turn['id'],
             'accountAnswer': answer if private and isinstance(answer, str) and len(answer) <= 8192 else '',
             'accountRefused': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
                 ('нет', 'отмена', 'не подтверждаю', 'не разрешаю', 'не подключай', 'не отвязывай'),
             **({'threadId': int(route[1])} if route[1] else {})})
+        if grouped:
+            if (not isinstance(admitted, dict) or not isinstance(admitted.get('role'), str)
+                    or type(admitted.get('generation')) is not int):
+                raise PermissionError('Group admission binding unavailable')
+            turn['auth'] = (admitted['role'], admitted['generation'])
         turn.pop('closePending', None)
         self.ledger.admit(profile, route, turn['metadata'], str(event.message_id))
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
@@ -857,7 +866,9 @@ class Resolver:
             **({'inputId': input_id} if input_id else {})})
         current()
         if 'actor' in turn:
-            await self._account(profile, turn['actor'])
+            active = await self._account(profile, turn['actor'])
+            if (active.get('role'), active.get('generation')) != turn['auth']:
+                raise PermissionError('Group reply author binding changed')
             current()
         turn['accountOfferId'] = state.get('accountOfferId') if state.get('needsAccountConsent') is True else None
         interim = metadata.get('_interim_send') is True

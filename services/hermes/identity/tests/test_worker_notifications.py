@@ -316,11 +316,11 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
     def source(self, name):
         from test_worker_lifecycle import patch_hunks
         source = (Path(os.environ['HERMES_TEST_ENGINE']) / name).read_text()
-        # Методы отправки не меняются identity overlay; читаем закреплённую реализацию.
-        if name == 'plugins/platforms/telegram/adapter.py':
-            return ast.parse(source)
         patch_text = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()
         for _, old, new in patch_hunks(patch_text, {name}):
+            if (name == 'plugins/platforms/telegram/adapter.py'
+                    and 'identity_group' not in new and 'and index == 0' not in new):
+                continue
             old, new = old.rstrip('\n') + '\n', new.rstrip('\n') + '\n'
             self.assertEqual(source.count(old), 1, name)
             source = source.replace(old, new, 1)
@@ -352,6 +352,29 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
                 source = NS(platform=platform, chat_type='dm')
                 await note(runner, source, [], [], 'hello')
         runner._deliver_platform_notice.assert_awaited_once()
+
+    async def test_group_reply_keeps_its_topic_and_anchor_on_telegram_rejection(self):
+        filename = 'plugins/platforms/telegram/adapter.py'
+        scope = {'os': os, 'SendResult': NS, 'normalize_telegram_chat_id': int,
+                 '_redact_telegram_error_text': str}
+        routing = self.function(filename, '_chunk_reply_routing', scope)
+        send_chunk = self.function(filename, '_send_chunk_with_retries', scope)
+        for error in ('Message thread not found', 'Message to be replied not found'):
+            send = AsyncMock(side_effect=BadRequest(error))
+            adapter = NS(_reply_to_mode='off', _metadata_reply_to_message_id=lambda meta: None,
+                         _is_private_dm_topic_send=lambda *args: False, _should_thread_reply=lambda *args: False,
+                         _thread_kwargs_for_send=lambda *args, **kwargs: {'message_thread_id': 77},
+                         _link_preview_kwargs=lambda: {}, _notification_kwargs=lambda meta: {},
+                         _is_thread_not_found_error=lambda err: 'thread not found' in str(err).lower(),
+                         _send_chunk_markdown_or_plain=send)
+            adapter._chunk_reply_routing = lambda *args: routing(adapter, *args)
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                result = await send_chunk(adapter, '-10012', 'Ответ', 0, '70', {'thread_id': '77'},
+                                          '77', False, (Exception, BadRequest, TimeoutError))
+            self.assertFalse(result.success)
+            self.assertFalse(result.retryable)
+            send.assert_awaited_once_with('Ответ', {'chat_id': -10012, 'reply_to_message_id': 70,
+                                                     'message_thread_id': 77})
 
     async def test_native_chunk_rejection_preserves_topic_and_never_duplicates_head(self):
         import logging

@@ -166,6 +166,7 @@ class MirrorTest(unittest.IsolatedAsyncioTestCase):
             # После нового процесса очереди исходный Auth и группа восстанавливаются по сохранённому update.
             restarted = Mirror(UpdateInbox(IdentityJournal(journal.root)), resolve, transport=transport)
             restarted.hydrated = True
+            restarted.bot_id = bot.id
             restarted.app = SimpleNamespace(bot=bot, update_queue=asyncio.Queue())
             await restarted.pump()
             recovered = {}
@@ -176,6 +177,20 @@ class MirrorTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(item.effective_chat.id, -10012)
                 recovered[item.update_id] = binding['uid']
             self.assertEqual(recovered, {10: 1001, 11: 1002, 13: 1001, 14: 1002})
+            restarted.auto_inputs.add('123:14')
+            active_route = ('-10012', '1')
+            async def ready(profile, route):
+                return profile == second and route == active_route
+            restarted.input_ready = ready
+            wrong = SimpleNamespace(source=SimpleNamespace(chat_id='-10012', thread_id='77'),
+                                    _brai_release_updates=[14])
+            with self.assertRaisesRegex(PermissionError, 'Group delivery route changed'):
+                await restarted.before_delivery(wrong)
+            general = SimpleNamespace(source=SimpleNamespace(chat_id='-10012', thread_id='1'),
+                                      _brai_release_updates=[14])
+            receipt = await restarted.before_delivery(general)
+            self.assertIn('delivery_id', receipt)
+            self.assertEqual(inbox.observe(second, 123, 14)['state'], 'handing_off')
 
     async def test_reserved_profile_collision_is_rejected_before_global_journal_open(self):
         from identity.chat_journal import IdentityJournal
