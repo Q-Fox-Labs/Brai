@@ -9,6 +9,12 @@ on:
         description: Full Brai SHA declared in the test client manifest
         required: true
         type: string
+      install_path:
+        description: Installer or isolated Compose startup from the same candidate
+        required: true
+        type: choice
+        default: client
+        options: [client, compose]
 
 permissions:
   contents: read
@@ -16,7 +22,7 @@ permissions:
 
 jobs:
   install:
-    if: github.repository == 'Q-Fox-Labs/Brai'
+    if: github.repository == 'Q-Fox-Labs/Brai' && inputs.install_path == 'client'
     name: Client install smoke
     env:
       BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -86,3 +92,16 @@ jobs:
           BRAI_CI_REGISTRY_USER: ${{ vars.BRAI_CI_REGISTRY_USER }}
           CI_PACKAGES_TOKEN: ${{ github.token }}
         run: bash deploy/ci/run-client-install-smoke.sh "$GITHUB_WORKSPACE/installer"
+
+  compose:
+    if: github.repository == 'Q-Fox-Labs/Brai' && inputs.install_path == 'compose'
+    name: Candidate Compose install
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build and start Brai on an empty runner
+        env:
+          BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: bash deploy/ci/run-compose-install-smoke.sh
