@@ -78,6 +78,9 @@ services:
     build: { context: .., dockerfile: services/artifacts/Dockerfile }
   artifacts-mcp:
     build: { context: .., dockerfile: services/artifacts/Dockerfile }
+    healthcheck:
+      disable: false
+      test: [CMD, node, -e, "const s=require('node:net').connect(3005, '127.0.0.1'); s.on('connect', () => s.end()); s.on('error', () => process.exit(1));"]
 YAML
 cat > "$run_dir/compose.env" <<ENV
 BRAI_SOURCE_REVISION=$BRAI_CI_SOURCE_SHA
@@ -109,6 +112,10 @@ node --check <<< "$init_script"
 "${compose[@]}" ps -a
 curl --fail --silent --show-error http://127.0.0.1:13000/api/health \
   | jq -e '.component == "web" and .ready == true'
+curl --fail --silent --show-error http://127.0.0.1:13005/mcp \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"clean-install-smoke","version":"1"}}}' \
+  | jq -e '.result.serverInfo.name == "brai-artifacts-mcp"'
 echo "Candidate $BRAI_CI_SOURCE_SHA started with fresh PostgreSQL and NATS."
 python3 - "$source_dir" "$run_dir" <<'PY'
 import hashlib
