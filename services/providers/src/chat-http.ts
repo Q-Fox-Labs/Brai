@@ -20,7 +20,7 @@ function completed(op:Awaited<ReturnType<Operations['get']>>){
 }
 function status(code:string){return code==='UNAUTHORIZED'?401:code==='NOT_FOUND'?404:code==='OVERLOADED'?429:code==='IDEMPOTENCY_CONFLICT'?409:['INVALID_REQUEST','INVALID_CONTINUATION','MODEL_NOT_ALLOWED','UNSUPPORTED_OPERATION'].includes(code)?400:503;}
 /** Создаёт сервер для внутренней сети. identities приходят из защищённой runtime конфигурации; до listen вызывающий задаёт адрес. */
-export function createChatHttp(operations:Operations,identities:readonly HttpIdentity[]) {
+export function createChatHttp(operations:Operations,identities:readonly HttpIdentity[],ready?:()=>Promise<boolean>) {
   if(!identities.length||identities.length>16||new Set(identities.map(i=>i.token)).size!==identities.length||identities.some(i=>typeof i.token!=='string'||i.token.length<32||i.token.length>256||!/^[a-zA-Z0-9_-]{1,64}$/.test(i.connectionId)||!keyValid({ownerId:i.ownerId,operationId:'00000000-0000-0000-0000-000000000000'})))throw new Error('INVALID_HTTP_CONFIGURATION');
   const credentials=identities.map(i=>({...i,bytes:Buffer.from(i.token)}));
   let active=0;
@@ -33,6 +33,7 @@ export function createChatHttp(operations:Operations,identities:readonly HttpIde
       const identity=credentials.find(i=>supplied.length===i.bytes.length&&timingSafeEqual(supplied,i.bytes));
       if(!identity)throw new Failure('UNAUTHORIZED','not_sent');
       if(active>=8)throw new Failure('OVERLOADED','not_sent');active++;held=true;
+      if(req.method==='GET'&&req.url==='/internal/readiness'&&ready){const available=await ready();send(available?200:503,{ready:available});return;}
       const recover=/^\/v1\/operations\/([0-9a-fA-F-]{36})$/.exec(req.url??'');
       if(req.method==='GET'&&recover&&uuid.test(recover[1])){
         const op=await operations.get(identity.ownerId,recover[1]);

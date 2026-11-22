@@ -129,3 +129,21 @@ test('mocked localAI catalog omits unsupported null profile, keeps full selector
   await assert.rejects(cycling.localCatalog.list(), (error) => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE');
   assert.equal(pages, 2);
 });
+
+
+test('catalog retries connection after initial failure without replaying a request', async () => {
+  let connects = 0, requests = 0;
+  const card = { modelId: 'whisper', name: 'model', description: '', source: 'fixture', license: null, revision: 'v1', profileId: 'cpu', supported: true,
+    operations: ['transcribe'], languages: [], inputKinds: ['audio_artifact'], outputKinds: ['transcription'], files: [],
+    hardwareRequirements: { cpuArchitectures: [], minMemoryBytes: null, accelerator: null }, limits: { maxInputBytes: null, maxAudioSeconds: null, maxItems: null, maxResultBytes: null, vectorDimensions: null },
+    parameters: { embed: null, transcribe: {} }, installationState: 'installed', runtimeState: 'ready' };
+  const ports = await createDependencyPorts({}, async () => {
+    connects++;
+    if (connects === 1) return undefined;
+    return { request: async () => { requests++; return reply({ items: [card], nextCursor: null }); } };
+  }, bounds);
+  await assert.rejects(ports.localCatalog.list(), error => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE');
+  assert.equal(requests, 0);
+  assert.equal((await ports.localCatalog.list()).length, 1);
+  assert.equal(connects, 2); assert.equal(requests, 1);
+});

@@ -2,7 +2,7 @@
 // ABOUTME: Без PG запускает только прежний v0; миграции и платный health не выполняет.
 import { createChatHttp } from "./chat-http.js";
 import { artifactsPort } from "./artifacts.js";
-import { connect } from "nats";
+import { connectBroker } from "./nats-connection.js";
 import { registerProviders } from "./nats.js";
 import { registerProvidersV1 } from "./nats-v1.js";
 import { createEgressGuard } from "./egress.js";
@@ -16,16 +16,26 @@ if(!NATS_URL || !LITELLM_URL)throw new Error("MISSING_RUNTIME_CONFIGURATION");
 const store=PROVIDERS_DATABASE_URL?postgresStore(PROVIDERS_DATABASE_URL):undefined;
 if(store){await store.exclusive(()=>process.exit(1));await store.recover(Date.now());await store.sweep(Date.now());}
 const guard=await createEgressGuard({host:"127.0.0.1",port:Number(process.env.PROVIDERS_EGRESS_PORT ?? "18401")});
-const nc=await connect({servers:NATS_URL,user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD,inboxPrefix:process.env.NATS_INBOX_PREFIX,maxReconnectAttempts:-1,maxPingOut:2,timeout:3000});
+const nc=await connectBroker({servers:NATS_URL,user:process.env.NATS_USER,pass:process.env.NATS_PASSWORD,inboxPrefix:process.env.NATS_INBOX_PREFIX});
+let natsConnected=true;
+void (async()=>{
+  try {for await(const event of nc.status()){
+    if(event.type==='disconnect')natsConnected=false;
+    if(event.type==='reconnect')natsConnected=true;
+  }} finally {natsConnected=false;}
+})().catch(()=>{natsConnected=false;});
 const observationStore=PROVIDERS_DATABASE_URL?postgresObservation(PROVIDERS_DATABASE_URL):undefined;
 const js=nc.jetstream();
-const observation=observationStore?createObservation(observationStore,historySender(nc),event=>js.publish('brai.alerts.v1.ingest',new TextEncoder().encode(JSON.stringify(event)),{msgID:event.id,timeout:OBSERVATION_LIMITS.timeoutMs}),()=>!nc.isClosed()):undefined;
+const observation=observationStore?createObservation(observationStore,historySender(nc),event=>js.publish('brai.alerts.v1.ingest',new TextEncoder().encode(JSON.stringify(event)),{msgID:event.id,timeout:OBSERVATION_LIMITS.timeoutMs}),()=>natsConnected&&!nc.isClosed()):undefined;
 const operations=store?createOperations(store,liteLLMDecidePort(LITELLM_URL,guard,LITELLM_API_KEY),{deadlineMs:Number(process.env.PROVIDERS_JEV_DEADLINE_MS ?? "30000"),chatPort:liteLLMChatPort(LITELLM_URL,guard,LITELLM_API_KEY),chatDeadlineMs:Number(process.env.PROVIDERS_CHAT_DEADLINE_MS??"90000"),imagePort:liteLLMImagePort(LITELLM_URL,guard,LITELLM_API_KEY),artifacts:process.env.PROVIDERS_ARTIFACTS_INTERNAL_ORIGIN&&process.env.PROVIDERS_ARTIFACTS_UPLOAD_ORIGIN?artifactsPort(nc,{internalOrigin:process.env.PROVIDERS_ARTIFACTS_INTERNAL_ORIGIN,uploadOrigin:process.env.PROVIDERS_ARTIFACTS_UPLOAD_ORIGIN}):undefined}):undefined;
 await operations?.resumeOutputs();
 const v0=process.env.PROVIDERS_V0_ENABLED==="0"?undefined:await registerProviders(nc,liteLLMPort(LITELLM_URL,guard,LITELLM_API_KEY));
 await observation?.tick();
 const v1=operations?await registerProvidersV1(nc,operations,{inboxPrefix:process.env.PROVIDERS_INBOX_PREFIX,diagnostics:()=>observation!.status()}):undefined;
-const http=process.env.PROVIDERS_HTTP_PORT?createChatHttp(operations??(()=>{throw new Error('HTTP_REQUIRES_PG');})(),[{token:process.env.PROVIDERS_HTTP_TOKEN??'',ownerId:process.env.PROVIDERS_HTTP_OWNER_ID??'',connectionId:process.env.PROVIDERS_HTTP_CONNECTION_ID??''}]):undefined;
+const http=process.env.PROVIDERS_HTTP_PORT?createChatHttp(operations??(()=>{throw new Error('HTTP_REQUIRES_PG');})(),[{token:process.env.PROVIDERS_HTTP_TOKEN??'',ownerId:process.env.PROVIDERS_HTTP_OWNER_ID??'',connectionId:process.env.PROVIDERS_HTTP_CONNECTION_ID??''}],async()=>{
+  if(!natsConnected||nc.isClosed()||!operations?.status().ready||observation?.status().dependencies.storage!=='ready')return false;
+  try {const [,proxy]=await Promise.all([store!.ready(),fetch(new URL('/health/liveliness',LITELLM_URL),{signal:AbortSignal.timeout(5000)})]);return proxy.ok;} catch {return false;}
+}):undefined;
 if(http){const port=Number(process.env.PROVIDERS_HTTP_PORT);if(!Number.isInteger(port)||port<1||port>65535)throw new Error('INVALID_HTTP_CONFIGURATION');await new Promise<void>((resolve,reject)=>{http.once('error',reject);http.listen(port,process.env.PROVIDERS_HTTP_HOST??'127.0.0.1',resolve);});}
 const observe=observation?setInterval(()=>{void observation.tick();},OBSERVATION_LIMITS.pollMs):undefined;observe?.unref();
 const sweep=store?setInterval(()=>{void store.sweep(Date.now()).catch(()=>{console.error('{"code":"STORAGE_UNAVAILABLE"}');});},60000):undefined;sweep?.unref();

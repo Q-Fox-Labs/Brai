@@ -29,7 +29,7 @@ const outputs = {
   'result.get': { state: 'available', result: { requestId: id, text: 'Ёж 🦔', segments: null, actualModel: selector } },
 };
 
-async function listener(t, overrides = {}, invoke) {
+async function listener(t, overrides = {}, invoke, readiness) {
   const calls = [];
   const gateway = createPublicGateway({ maxConcurrent: overrides.maxConcurrent ?? 4,
     bindings: [{ token: 'test-delegate', principal, permissions: ['identity:delegate'] },
@@ -40,7 +40,7 @@ async function listener(t, overrides = {}, invoke) {
   const allowedHosts = ['transcription.test'];
   const transport = await startHttpTransport({ host: '127.0.0.1', port: 0, allowedHosts,
     allowedOrigins: ['https://allowed.test'], headerBytes: 4096, requestBytes: 2048, responseBytes: 100000,
-    requestTimeoutMs: 1500, maxConnections: 20, ...overrides }, gateway);
+    requestTimeoutMs: 1500, maxConnections: 20, ...overrides }, gateway, readiness);
   t.after(() => transport.close());
   const url = `http://127.0.0.1:${transport.address().port}`;
   allowedHosts.push(new URL(url).host);
@@ -226,4 +226,18 @@ test('Root delegation is opt-in, closed and preserves private principal with HTT
   assert.equal((await send(delegated('settings.set', admin), 'test-delegate-admin')).response.status, 200);
   // Public DTOs remain closed, even when the caller holds a Root token.
   assert.equal((await h.send('request.get', delegated('request.get'), {authorization:'Bearer test-delegate'})).response.status, 400);
+});
+
+
+test('readiness requires authentication and follows the live dependency state', async (t) => {
+  let ready = false;
+  const h = await listener(t, {}, undefined, () => ready);
+  let result = await h.send('unused', {}, {}, '/internal/readiness');
+  assert.equal(result.response.status, 503); assert.deepEqual(result.body, { ready: false });
+  result = await h.send('unused', {}, { authorization: '' }, '/internal/readiness');
+  assert.equal(result.response.status, 401);
+  ready = true;
+  result = await h.send('unused', {}, {}, '/internal/readiness');
+  assert.equal(result.response.status, 200); assert.deepEqual(result.body, { ready: true });
+  assert.equal(h.calls.length, 0);
 });

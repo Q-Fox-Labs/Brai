@@ -14,7 +14,8 @@ import { startNatsTransport } from './transport/nats.js';
 import { createAlertsPublisher } from './transport/alerts.js';
 import { createAlertsController } from './recovery/alerts.js';
 
-function connection(settings: NatsSettings, timeout: number): Promise<NatsConnection> {
+/** Подключает NATS и восстанавливает соединение после обрыва без повтора запросов. */
+export function connection(settings: NatsSettings, timeout: number): Promise<NatsConnection> {
   return connect({ ...settings, timeout, maxReconnectAttempts: -1 });
 }
 
@@ -28,6 +29,27 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
   alerts.start();
   let nc: NatsConnection | undefined;
   let localAi: NatsConnection | undefined;
+  let localOpening: Promise<NatsConnection | undefined> | undefined;
+  let natsConnected = false, localConnected = false;
+  const watch = (connection: NatsConnection, update: (connected: boolean) => void) => {
+    update(true);
+    void (async () => {
+      try {
+        for await (const event of connection.status()) {
+          if (event.type === 'disconnect') update(false);
+          if (event.type === 'reconnect') update(true);
+        }
+      } finally { update(false); }
+    })().catch(() => update(false));
+  };
+  const localConnection = async (): Promise<NatsConnection | undefined> => {
+    if (!config.localAi || closing) return undefined;
+    if (localAi && !localAi.isClosed()) return localAi;
+    if (!localOpening) localOpening = connection(config.localAi, config.dependencyTimeoutMs).then((value) => {
+      localAi = value; watch(value, (state) => { if (localAi === value) localConnected = state; }); return value;
+    }).catch(() => undefined).finally(() => { localOpening = undefined; });
+    return localOpening;
+  };
   let http: Awaited<ReturnType<typeof startHttpTransport>> | undefined;
   let nats: Awaited<ReturnType<typeof startNatsTransport>> | undefined;
   let recovery: ReturnType<typeof createRecoveryController> | undefined;
@@ -37,6 +59,7 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
     // Закрытие channels делает незавершённые вызовы unknown; оно не подтверждает остановку вычисления.
     await alerts.close();
     await publisher.close();
+    await localOpening;
     const stopResources = [http?.close(), recovery?.close(), children.close(), localAi?.close(), nc?.close()];
     await Promise.allSettled(stopResources);
     // SDK service.stop дренирует через PONG; после nc.close он использует безопасный closed fast path.
@@ -49,11 +72,10 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
     if ('capacityAvailable' in health && health.capacityAvailable) alerts.observe('capacity', true);
     try { nc = await connection(config.nats, config.dependencyTimeoutMs); }
     catch { throw new Error('NATS unavailable'); }
-    if (config.localAi) {
-      // Недоступность local-ai допускает metadata/readiness, но не превращается в успешный пустой каталог.
-      try { localAi = await connection(config.localAi, config.dependencyTimeoutMs); } catch { localAi = undefined; }
-    }
-    const dependencies = await createDependencyPorts(nc, localAi, config);
+    watch(nc, (state) => { natsConnected = state; });
+    // Неуспешный первоначальный connect можно повторить при следующем чтении каталога.
+    await localConnection();
+    const dependencies = await createDependencyPorts(nc, localConnection, config);
     core = createCoordinator({ ports: { helper, local: children.local, external: children.external,
       artifacts: dependencies.artifacts, localCatalog: dependencies.localCatalog },
       config: config.domain, observe: alerts.observe });
@@ -71,21 +93,20 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
     const localHealth = await children.local.call('health', {}).catch(() => ({ available: false })) as { available: boolean };
     if (localHealth.available) alerts.observe('local_ai', true);
     const gateway = createPublicGateway({ invoke: core.invoke, bindings: config.bindings, maxConcurrent: config.maxPublicConcurrent });
-    http = await startHttpTransport(config.http, gateway);
+    const status = async () => {
+      const [helperHealth, localExecutor] = await Promise.all([
+        children.helper.call('health', {}).catch(() => ({ available: false, storageAvailable: false })),
+        children.local.call('health', {}).catch(() => ({ configured: Boolean(config.localAi), verified: false, available: false })),
+      ]) as [{ available: boolean; storageAvailable: boolean }, { configured: boolean; verified: boolean; available: boolean }];
+      const lifecycle = recovery!.status();
+      const metadataReady = !closing && natsConnected && !nc!.isClosed() && lifecycle.ready && helperHealth.available && helperHealth.storageAvailable;
+      return { ...lifecycle, ...alerts.status(), metadataReady, localExecutor,
+        ready: metadataReady && Boolean(localConnected && localAi && !localAi.isClosed()) && localExecutor.configured && localExecutor.verified && localExecutor.available };
+    };
+    http = await startHttpTransport(config.http, gateway, async () => (await status()).ready);
     nats = await startNatsTransport(nc, gateway, { requestBytes: config.natsRequestBytes, responseBytes: config.natsResponseBytes });
     recovery.start(core.pumpOnce);
-    return { close, address: http.address,
-      async status() {
-        const [helperHealth, localExecutor] = await Promise.all([
-          children.helper.call('health', {}).catch(() => ({ available: false, storageAvailable: false })),
-          children.local.call('health', {}).catch(() => ({ configured: Boolean(config.localAi), verified: false, available: false })),
-        ]) as [{ available: boolean; storageAvailable: boolean }, { configured: boolean; verified: boolean; available: boolean }];
-        const lifecycle = recovery!.status();
-        const metadataReady = !closing && !nc!.isClosed() && lifecycle.ready && helperHealth.available && helperHealth.storageAvailable;
-        return { ...lifecycle, ...alerts.status(), metadataReady, localExecutor,
-          ready: metadataReady && Boolean(localAi && !localAi.isClosed()) && localExecutor.configured && localExecutor.verified && localExecutor.available };
-      },
-    };
+    return { close, address: http.address, status };
   } catch {
     await close();
     throw new Error('Transcription coordinator startup failed');

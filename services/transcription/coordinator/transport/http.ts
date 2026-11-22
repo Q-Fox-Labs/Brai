@@ -131,7 +131,7 @@ async function handleMcp(body: JSONRPCMessage & { method: string }, res: ServerR
 }
 
 /** Запускает собственный HTTP listener с 7 API и 7 MCP tools; MCP не хранит сессии/SSE/resume. */
-export async function startHttpTransport(config: CoordinatorRuntimeConfig['http'], gateway: PublicGateway) {
+export async function startHttpTransport(config: CoordinatorRuntimeConfig['http'], gateway: PublicGateway, ready?: () => boolean | Promise<boolean>) {
   const server = createServer({ maxHeaderSize: config.headerBytes, headersTimeout: config.requestTimeoutMs,
     requestTimeout: 0, keepAliveTimeout: config.requestTimeoutMs }, (req, res) => {
     req.on('error', () => {});
@@ -155,6 +155,12 @@ export async function startHttpTransport(config: CoordinatorRuntimeConfig['http'
       }, config.requestTimeoutMs);
       const body = await readBody(req, config.requestBytes);
       if (res.destroyed || res.writableEnded) return;
+      if (req.url === '/internal/readiness') {
+        if (!ready || !body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) throw { errorCode: 'INVALID_ARGUMENT' };
+        const available = await ready();
+        send(res, available ? 200 : 503, { ready: available }, config.responseBytes);
+        return;
+      }
       if (req.url === '/internal/identity/transcription') {
         if (!validateDto('IdentityDelegateParams', body)) throw { errorCode: 'INVALID_ARGUMENT' };
         const delegated = body as { method: string; params: unknown; principal: unknown };

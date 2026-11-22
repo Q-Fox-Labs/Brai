@@ -38,7 +38,7 @@ async function request(nc: NatsConnection, subject: string, input: unknown, boun
 }
 
 /** Загружает только опубликованные owner schemas; local-ai отсутствие означает typed outage, а не пустой каталог. */
-export async function createDependencyPorts(nc: NatsConnection, localAi: NatsConnection | undefined, bounds: Bounds) {
+export async function createDependencyPorts(nc: NatsConnection, localAi: NatsConnection | undefined | (() => Promise<NatsConnection | undefined>), bounds: Bounds) {
   const anchor = import.meta.resolve('#transcription-contracts');
   const artifacts = await import(new URL('../../artifacts/contracts/index.mjs', anchor).href);
   const local = await import(new URL('../../local-ai/contracts/index.mjs', anchor).href);
@@ -64,7 +64,8 @@ export async function createDependencyPorts(nc: NatsConnection, localAi: NatsCon
     },
     localCatalog: {
       async list(): Promise<unknown> {
-        if (!localAi) throw { errorCode: 'MODEL_CATALOG_UNAVAILABLE' };
+        const connection = typeof localAi === 'function' ? await localAi() : localAi;
+        if (!connection) throw { errorCode: 'MODEL_CATALOG_UNAVAILABLE' };
         const items: unknown[] = [];
         const cursors = new Set<string>();
         let cursor: string | undefined;
@@ -73,7 +74,7 @@ export async function createDependencyPorts(nc: NatsConnection, localAi: NatsCon
           const input = { filter: { operation: 'transcribe', inputKind: 'audio_artifact', outputKind: 'transcription' },
             page: { limit: Math.min(bounds.catalogPageSize, bounds.maxCatalogItems - scanned), ...(cursor ? { cursor } : {}) } };
           if (!local.validateRequest(local.subjects.modelsList, input)) throw { errorCode: 'MODEL_CATALOG_UNAVAILABLE' };
-          const result = await request(localAi, local.subjects.modelsList, input, bounds, 'MODEL_CATALOG_UNAVAILABLE') as any;
+          const result = await request(connection, local.subjects.modelsList, input, bounds, 'MODEL_CATALOG_UNAVAILABLE') as any;
           if (!local.validateResponse(local.subjects.modelsList, result) || scanned + result.items.length > bounds.maxCatalogItems) throw { errorCode: 'MODEL_CATALOG_UNAVAILABLE' };
           scanned += result.items.length;
           for (const card of result.items) {
