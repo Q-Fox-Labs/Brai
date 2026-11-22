@@ -100,6 +100,10 @@ def reserve(job, execution_id):
                  PRIMARY KEY (job_id, occurrence), UNIQUE (day, number)
                )"""
         )
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS brai_automation_daily_explanation
+               ON brai_automation_fires(day) WHERE explanation_reserved=1"""
+        )
         previous = _find(conn, job["id"], occurrence)
         if previous is not None:
             if previous.exceeded:
@@ -107,13 +111,15 @@ def reserve(job, execution_id):
             return previous
 
         day = now().date().isoformat()
-        last, explained = conn.execute(
-            """SELECT COALESCE(MAX(number), 0), COALESCE(MAX(explanation_reserved), 0)
-               FROM brai_automation_fires WHERE day=?""",
+        last = conn.execute(
+            "SELECT COALESCE(MAX(number), 0) FROM brai_automation_fires WHERE day=?",
             (day,),
-        ).fetchone()
+        ).fetchone()[0]
         number = last + 1
-        explain = number > limit and not explained
+        explain = number > limit and conn.execute(
+            "SELECT 1 FROM brai_automation_fires WHERE day=? AND explanation_reserved=1",
+            (day,),
+        ).fetchone() is None
         conn.execute(
             """INSERT INTO brai_automation_fires
                (job_id, occurrence, day, number, limit_value, explanation_reserved)
