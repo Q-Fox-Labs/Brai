@@ -34,6 +34,7 @@ HASHES = {
     "agent/turn_recovery.py": "693236ce4d7d1a5785f00e6614aad3b3afbbc3cc7f1ec8d9794c31968e8ac067",
     "agent/turn_finalizer.py": "856c43abf03f7e0b24b3682f27ce1da373d896a16e2c91e2a55be84ec90de36c",
     "agent/chat_completion_nonstream.py": "34d4afad0a0c7228a0518eed4a2521ba1a340f509c83784c74abceb56f1becb7",
+    "agent/chat_completion_helpers.py": "088cbc18bd932c44356b188d3c9ce042f71d5a90bb54eef1a58938d3f8de29dd",
     "agent/conversation_compression.py": "c2a8f9c20db70d017b9b9ce8fce52b6a2fe48d3f6af54f37481c8b7ca8f15277",
     "agent/relay_llm.py": "97aecd95e90df447399102a49f5e59df20988ee41250347b988dbf4bd31caa34",
     "agent/conversation_loop.py": "a8e0d8236b4563cf62fdfad50b1833fc3e0dd0904776aa50467c9d2cef8eb1bd",
@@ -113,12 +114,15 @@ class PortableTurnBudgetTests(unittest.TestCase):
         except self.budget.TurnRequestBudgetExhausted as error:
             self.assertEqual(self.budget.failure_cause(error), ('ProviderError', 503))
 
-    def test_nested_worker_does_not_reset_budget(self):
+    def test_nested_turn_restores_parent_on_failure(self):
         @self.budget.turn_budget
         def nested():
-            return self.budget._current.get()
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            self.assertIs(pool.submit(contextvars.copy_context().run, nested).result(), self.state)
+            self.assertIsNot(self.budget._current.get(), self.state)
+            raise InterruptedError("cancel nested turn")
+
+        with self.assertRaises(InterruptedError):
+            nested()
+        self.assertIs(self.budget._current.get(), self.state)
 
     def test_internal_summary_text_does_not_count_as_delivered_answer(self):
         attempt = self.state.start({'call_role': 'auxiliary:compression', 'api_request_id': 'summary'})
@@ -659,13 +663,60 @@ class NativeTurnBudgetTests(unittest.TestCase):
         self.assertEqual(self.state.spent, 0)
         self.assertEqual(self.state.physical, 8)
 
-    def test_nested_turn_and_copied_worker_share_budget(self):
-        @self.budget.turn_budget
-        def nested():
-            return self.budget._current.get()
+    def test_physical_recovery_in_copied_worker_keeps_parent_guard(self):
+        metadata = self.metadata("api:parent")
+        attempt = self.state.start(metadata)
+        attempt.observe({"type": "response.output_text.delta", "delta": "visible"})
+        attempt.finish(failed=True)
+        provider = Mock()
+        recover = self.budget.physical_callback(provider, metadata)
         with ThreadPoolExecutor(max_workers=1) as pool:
-            state = pool.submit(contextvars.copy_context().run, nested).result()
-        self.assertIs(state, self.state)
+            future = pool.submit(contextvars.copy_context().run, recover, {})
+            with self.assertRaises(self.budget.TurnRequestBudgetExhausted) as error:
+                future.result()
+        self.assertEqual(error.exception.reason, "partial_emitted")
+        provider.assert_not_called()
+
+    def test_native_conversation_isolates_turns_launched_in_copied_contexts(self):
+        metadata = self.metadata("api:child")
+        parent = self.state.start(self.metadata("api:parent"))
+        parent.observe({"type": "response.output_text.delta", "delta": "visible"})
+        deadline = self.budget.logical_deadline(30, request_id=parent.request_id)
+        trace = []
+
+        def run_model(agent, message, **kwargs):
+            state = self.budget._current.get()
+            attempt = state.start(metadata)
+            self.assertFalse(attempt.is_retry)
+            self.assertGreater(self.budget.logical_deadline(60, request_id=attempt.request_id), deadline)
+            attempt.finish(failed=message == "first child")
+            trace.append(state.turn_id)
+            return {"message": message}
+
+        native = native_nodes(
+            self.engine, "agent/conversation_loop.py", {"run_conversation"},
+            turn_budget=self.budget.turn_budget, _run_conversation_turn=run_model,
+            _close_durable_failed_turn=Mock(),
+        )
+        files = types.SimpleNamespace(conversation=lambda agent, message, task: contextlib.nullcontext(message),
+                                      result_envelope=lambda result, agent: result)
+        turn_context = types.SimpleNamespace(export_current_turn_boundary=lambda agent, result, message: result)
+        voice = types.SimpleNamespace(end_voice_turn_route=Mock())
+        vision = types.SimpleNamespace(native_turn_images=lambda message: contextlib.nullcontext())
+        modules = {"brai_files": files, "agent.turn_context": turn_context,
+                   "agent.voice_turn_route": voice, "tools.vision_tools_history_budget": vision}
+
+        with patch.dict("sys.modules", modules), ThreadPoolExecutor(max_workers=2) as pool:
+            results = [pool.submit(contextvars.copy_context().run, native.run_conversation,
+                                   types.SimpleNamespace(), message)
+                       for message in ("first child", "second child")]
+            self.assertEqual([future.result()["message"] for future in results], ["first child", "second child"])
+        self.assertEqual(len(set(trace + [self.state.turn_id])), 3)
+        self.assertEqual(self.state.physical, 1)
+        self.assertIs(self.budget._current.get(), self.state)
+        parent.finish(failed=True)
+        with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+            self.state.start(self.metadata("api:parent"))
 
     def test_interrupt_is_not_replaced_with_budget_error(self):
         self.state.spent = 2
@@ -727,23 +778,85 @@ class NativeTurnBudgetTests(unittest.TestCase):
             with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
                 self.state.start(self.metadata("api:2"))
 
-    def test_native_compression_fence_does_not_extend_original_deadline(self):
+    def test_native_compression_fences_isolate_new_runs_and_keep_retry_deadline(self):
         budget_module = types.ModuleType("agent.brai_turn_budget")
         budget_module.logical_deadline = self.budget.logical_deadline
         clock = types.SimpleNamespace(monotonic=Mock(return_value=0.0))
-        modules = {"agent": types.ModuleType("agent"), "agent.brai_turn_budget": budget_module}
+        compressor = types.SimpleNamespace(pin_summary_route=lambda route: contextlib.nullcontext())
+        modules = {"agent": types.ModuleType("agent"), "agent.brai_turn_budget": budget_module,
+                   "agent.context_compressor": compressor}
+        run = Mock(return_value=(["recovered"], "prompt"))
         with patch.dict("sys.modules", modules), patch.object(self.budget.time, "monotonic", clock.monotonic):
-            native = native_nodes(self.engine, "agent/conversation_compression.py", {"CompressionCommitFence"},
-                                  threading=threading, time=clock)
+            native = native_nodes(
+                self.engine, "agent/conversation_compression.py",
+                {"CompressionCommitFence", "_run_pinned_compression_retry"},
+                threading=threading, time=clock, logger=logging.getLogger("compression-fixture"),
+                run_compress_context_with_progress_timeout=run,
+            )
             first = native.CompressionCommitFence(10)
             self.state.start(self.metadata("compression:1", "auxiliary:compression")).finish(failed=True)
             clock.monotonic.return_value = 8.0
-            retry = native.CompressionCommitFence(20)
+            native._run_pinned_compression_retry(
+                {"label": "fallback", "model": "fixture"}, worker=Mock(), messages=[],
+                system_prompt_fallback="prompt", idle_timeout_seconds=5, total_ceiling_seconds=20,
+                on_commit_overrun=None, on_timeout_cause=None, telemetry_agent=None,
+                new_fence=native.CompressionCommitFence, deadline=first.deadline_monotonic,
+            )
+            retry = run.call_args.kwargs["fence"]
             self.assertEqual(retry.deadline_monotonic, 10.0)
             first.set_total_ceiling_seconds(99)
             self.assertEqual(first.deadline_monotonic, 10.0)
             clock.monotonic.return_value = 11.0
             self.assertTrue(retry.deadline_exceeded)
+            second = native.CompressionCommitFence(20)
+            self.assertEqual(second.deadline_monotonic, 31.0)
+            self.assertFalse(second.deadline_exceeded)
+
+    def test_native_iteration_summary_has_its_own_request_scope(self):
+        previous = "turn:api:19"
+        attempt = self.state.start(self.metadata(previous))
+        attempt.observe({"type": "response.output_text.delta", "delta": "visible"})
+        attempt.finish()
+        summary_calls = []
+
+        def call_model(kwargs):
+            state = self.budget._current.get()
+            active = state.start(self.metadata(agent._current_api_request_id))
+            summary_calls.append((state, active.request_id, active.is_retry))
+            active.finish()
+            return "" if len(summary_calls) == 1 else "summary"
+
+        agent = types.SimpleNamespace(
+            _current_api_request_id=previous, api_mode="codex_responses",
+            _build_api_kwargs=lambda messages: {}, _interruptible_api_call=call_model,
+            max_iterations=19, suppress_status_output=True,
+        )
+        builders = {}
+        native = native_nodes(
+            self.engine, "agent/chat_completion_helpers.py", {"_codex_summary_attempt", "handle_max_iterations"},
+            turn_budget=self.budget.turn_budget, uuid=__import__("uuid"),
+            logger=logging.getLogger("iteration-summary-fixture"),
+            _iteration_summary_api_messages=lambda agent, messages: messages,
+            _summary_text=lambda agent, response: response, _EMPTY_SUMMARY_RESPONSE="empty",
+            _SUMMARY_ATTEMPT_BUILDERS=builders,
+            _chat_summary_attempt=Mock(side_effect=AssertionError("wrong route")),
+            append_message=lambda messages, row: messages.append(row) or row,
+        )
+        builders["codex_responses"] = native._codex_summary_attempt
+        relay = types.SimpleNamespace(complete_logical_call=Mock())
+        modules = {"agent": types.SimpleNamespace(relay_llm=relay),
+                   "agent.context_compressor": types.SimpleNamespace(MAX_ITERATIONS_SUMMARY_REQUEST="summarize")}
+        with patch.dict("sys.modules", modules):
+            self.assertEqual(native.handle_max_iterations(agent, [], 19), "summary")
+        first, second = summary_calls
+        self.assertIsNot(first[0], self.state)
+        self.assertIs(second[0], first[0])
+        self.assertEqual(first[1], second[1])
+        self.assertTrue(first[1].startswith("iteration-summary:"))
+        self.assertEqual([first[2], second[2]], [False, True])
+        self.assertEqual(self.state.physical, 1)
+        self.assertEqual(agent._current_api_request_id, previous)
+        relay.complete_logical_call.assert_called_once_with(first[1], outcome="success")
 
     def test_native_network_timeout_classification_preserves_history(self):
         kind_type = lambda **kwargs: types.SimpleNamespace(**kwargs)

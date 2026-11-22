@@ -227,6 +227,40 @@ diff --git a/agent/context_compressor.py b/agent/context_compressor.py
          # The fallback row replaces the older handoff in the transcript, and the next compaction drops
          # handoff rows from its window as "already folded into _previous_summary". Publish it like a
          # real summary so its anchors reach the next summarizer instead of the stale in-memory one.
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -26,6 +26,7 @@
+ from types import SimpleNamespace
+ from typing import Any, Dict, Optional
+
++from agent.brai_turn_budget import turn_budget
+ from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
+ from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
+ from agent.error_classifier import (
+@@ -2253,7 +2254,13 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
+         # Route through the same seam as normal Codex turns: a direct _run_codex_stream
+         # bypasses the stale/TTFB watchdogs, interrupt handling and client cleanup, so an
+         # unattended cron summary could wedge forever (#70943).
+-        return _summary_text(agent, agent._interruptible_api_call(codex_kwargs))
++        # AIDEV-NOTE: Codex берёт ID для watchdog и Relay из самого агента.
++        previous_request_id = getattr(agent, "_current_api_request_id", "")
++        agent._current_api_request_id = api_request_id
++        try:
++            return _summary_text(agent, agent._interruptible_api_call(codex_kwargs))
++        finally:
++            agent._current_api_request_id = previous_request_id
+     return _attempt
+
+
+@@ -2293,6 +2300,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
+ _SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthropic_messages": _anthropic_summary_attempt}
+
+
++@turn_budget
+ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
+     """Request a summary when max iterations are reached. Returns the final response text."""
+     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."
 diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstream.py
 --- a/agent/chat_completion_nonstream.py
 +++ b/agent/chat_completion_nonstream.py
@@ -282,21 +316,98 @@ diff --git a/agent/chat_completion_nonstream.py b/agent/chat_completion_nonstrea
                  break
              if agent._interrupt_requested:
 diff --git a/agent/conversation_compression.py b/agent/conversation_compression.py
+index 10078ef..f196f01 100644
 --- a/agent/conversation_compression.py
 +++ b/agent/conversation_compression.py
-@@ -495,7 +495,9 @@
+@@ -490,12 +490,15 @@ class CompressionCommitFence:
+         if total_ceiling_seconds is not None:
+             self.set_total_ceiling_seconds(total_ceiling_seconds)
+
+-    def set_total_ceiling_seconds(self, seconds: float) -> None:
+-        """Arm the wall-clock deadline shared by the host and worker."""
++    def set_total_ceiling_seconds(self, seconds: float, *, deadline: float | None = None) -> None:
++        """Закрепить общий срок владельца сжатия и рабочего потока в монотонных секундах."""
          seconds = float(seconds)
          if seconds <= 0:
              raise ValueError("total compression ceiling must be positive")
 -        self._deadline = time.monotonic() + seconds
-+        from agent.brai_turn_budget import logical_deadline
-+        deadline = logical_deadline(seconds, lane="auxiliary:compression")
-+        self._deadline = deadline if self._deadline is None else min(self._deadline, deadline)
- 
++        ceiling = time.monotonic() + seconds
++        if deadline is not None:
++            ceiling = min(ceiling, deadline)
++        self._deadline = ceiling if self._deadline is None else min(self._deadline, ceiling)
+
      def touch_progress(self) -> None:
          """Record forward progress (a streamed token); a bare float store is atomic, so no lock."""
+@@ -938,7 +941,7 @@ def request_exceeds_model_window(agent: Any, request_tokens: Any) -> Optional[bo
+
+ def _retry_compression_on_fallback_chain(
+     *, worker: Callable[[CompressionCommitFence], tuple[list, str]], messages: list,
+-    system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
++    system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float, deadline: float,
+     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
+     on_timeout_cause: Optional[Callable[[bool, bool], None]] = None, telemetry_agent: Any = None,
+     new_fence: Optional[Callable[[], CompressionCommitFence]] = None, escalate_deterministic: bool = False,
+@@ -950,10 +953,8 @@ def _retry_compression_on_fallback_chain(
+     before. The entry's ``timeout`` sets the idle window. Re-runs the whole worker, so pre-compression
+     callbacks must be idempotent.
+
+-    The retry is bounded the same way the primary was: silence for one idle window ends it, while a fallback
+-    that is streaming keeps its ceiling. The entry's own ``timeout`` (when declared) sets that idle window,
+-    so a fallback tuned for a slower-but-healthy backend is not held to a deadline the stalled primary
+-    defined (#62452 semantics, applied to the stall path).
++    У резервного маршрута свой срок бездействия. Абсолютный срок операции
++    сжатия передаётся от первой попытки ко всем повторам.
+     Known limitation (accepted, #96634 review): the retry re-runs the COMPLETE worker, which repeats
+     memory/plugin pre-compression callbacks. Built-in callbacks are idempotent (re-reads and overwrites of
+     attempt-scoped state); third-party plugin callbacks are advised to be. Splitting the worker to resume
+@@ -969,7 +970,7 @@ def _retry_compression_on_fallback_chain(
+             route, worker=worker, messages=messages, system_prompt_fallback=system_prompt_fallback,
+             idle_timeout_seconds=idle_timeout_seconds, total_ceiling_seconds=total_ceiling_seconds,
+             on_commit_overrun=on_commit_overrun, on_timeout_cause=on_timeout_cause, telemetry_agent=telemetry_agent,
+-            new_fence=new_fence,
++            new_fence=new_fence, deadline=deadline,
+         )
+         if recovered is not None:
+             return recovered
+@@ -980,7 +981,7 @@ def _run_pinned_compression_retry(
+     route: dict, *, worker: Callable[[CompressionCommitFence], tuple[list, str]], messages: list,
+     system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
+     on_commit_overrun: Optional[Callable[[float, float], None]], on_timeout_cause: Optional[Callable[[bool, bool], None]],
+-    telemetry_agent: Any, new_fence: Optional[Callable[[], CompressionCommitFence]],
++    telemetry_agent: Any, new_fence: Optional[Callable[[], CompressionCommitFence]], deadline: float,
+ ) -> Optional[tuple[list, str]]:
+     """One bounded re-run of ``worker`` with ``route`` pinned; ``None`` when it produced no compression."""
+     # The aborted fence refuses all commits; mint a fresh one via the host factory
+@@ -1003,6 +1004,9 @@ def _run_pinned_compression_retry(
+         retry_fence = CompressionCommitFence()
+     idle = float(route.get("timeout") or idle_timeout_seconds)
+     ceiling = max(float(total_ceiling_seconds), idle)
++    retry_fence.set_total_ceiling_seconds(ceiling, deadline=deadline)
++    if retry_fence.deadline_exceeded:
++        return None
+     deterministic = route.get("deterministic") is True
+     if deterministic:
+         logger.warning(
+@@ -1249,6 +1253,7 @@ def run_compress_context_with_progress_timeout(
+         raise
+     future.add_done_callback(_release_compression_admission)
+     wait_started = time.monotonic()
++    ceiling = min(ceiling, fence.deadline_monotonic - wait_started)
+     # EVERY host unwind must revoke commit admission or a detached worker could
+     # later mutate durable state; handled_exit marks paths that settle it themselves
+     handled_exit = False
+@@ -1272,7 +1277,7 @@ def run_compress_context_with_progress_timeout(
+                 worker=fallback_worker or worker, messages=messages, system_prompt_fallback=system_prompt_fallback,
+                 idle_timeout_seconds=idle, total_ceiling_seconds=ceiling, on_commit_overrun=on_commit_overrun,
+                 on_timeout_cause=on_timeout_cause, telemetry_agent=telemetry_agent, new_fence=new_fence,
+-                escalate_deterministic=escalate_deterministic,
++                escalate_deterministic=escalate_deterministic, deadline=fence.deadline_monotonic,
+             )
+             if recovered is not None:
+                 return recovered
 diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
+index 0000000..ee2ae9c
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
 @@ -0,0 +1,406 @@
@@ -360,7 +471,7 @@ new file mode 100644
 +        self.spent = 0
 +        self.physical = 0
 +        self.lanes = {}
-+        self.deadlines = {}
++        self.primary_deadline = None
 +
 +    def start(self, metadata):
 +        """Учесть физический вызов до обращения к провайдеру."""
@@ -376,7 +487,7 @@ new file mode 100644
 +            retry = previous is not None and (
 +                previous.failed or not previous.finished or (bool(request_id) and previous.request_id == request_id)
 +            )
-+            deadline = self.deadlines.get(role if role.startswith("auxiliary:") else lane)
++            deadline = self.primary_deadline if lane == "primary" else None
 +            if deadline is not None and retry and time.monotonic() >= deadline[1]:
 +                raise TurnRequestBudgetExhausted(
 +                    "Истёк срок исходного запроса; история сохранена.",
@@ -670,36 +781,36 @@ new file mode 100644
 +
 +
 +
-+def logical_deadline(seconds, *, lane="primary", request_id=""):
++def logical_deadline(seconds, *, request_id=""):
 +    """Закрепить исходный native timeout; повтор получает прежний absolute monotonic deadline."""
 +    budget = _current.get()
 +    now = time.monotonic()
 +    if budget is None:
 +        return now + seconds
 +    with budget.lock:
-+        previous = budget.lanes.get(lane)
-+        window = budget.deadlines.get(lane)
++        previous = budget.lanes.get("primary")
++        window = budget.primary_deadline
 +        baseline = previous is not None and previous.finished and not previous.failed and (
 +            not request_id or previous.request_id != request_id
 +        )
 +        # При nonstream execute текущая попытка начинается до создания watchdog.
 +        baseline = baseline or (
-+            lane == "primary" and window is not None and bool(request_id)
++            window is not None and bool(request_id)
 +            and window[0] != request_id and previous is not None and not previous.finished
 +            and not getattr(previous, "is_retry", False)
 +        )
 +        if window is None or baseline:
 +            window = (request_id, now + seconds)
-+            budget.deadlines[lane] = window
++            budget.primary_deadline = window
 +        return window[1]
 +
 +
 +def turn_budget(function):
-+    """Создать новый бюджет только на самостоятельный вход пользовательского хода."""
++    """Открыть область восстановления самостоятельного запуска генерации."""
 +    @wraps(function)
 +    def invoke(*args, **kwargs):
-+        if _current.get() is not None:
-+            return function(*args, **kwargs)
++        # AIDEV-NOTE: Новый запуск может унаследовать ContextVar чата через копию контекста.
++        # Повторы идут внутри этой области, а новый запуск получает своё состояние.
 +        token = _current.set(TurnRequestBudget())
 +        try:
 +            return function(*args, **kwargs)
