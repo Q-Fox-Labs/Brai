@@ -59,6 +59,7 @@ class ReleaseGate:
     def __init__(self, app):
         self.app = app
         self.operation = None
+        self.probe_held_startup = False
         self.held = asyncio.Event()
         self.poll_held = False
         self.hydration_failed = False
@@ -97,9 +98,9 @@ class ReleaseGate:
                 return
             return methods['_schedule_polling_recovery'](*args, **kwargs)
         async def readiness(progress, strict_error_event, strict_error):
-            # Startup hold is intentional; the poll and hydration remain fenced.
-            # Delegate any existing progress or strict error to the native verifier.
-            if self.operation is not None and not progress.is_set() and not strict_error and not strict_error_event.is_set():
+            # Legacy startup holds have no read-only polling probe.
+            if (self.operation is not None and not self.probe_held_startup
+                    and not progress.is_set() and not strict_error and not strict_error_event.is_set()):
                 return
             return await methods['_await_cold_start_readiness'](progress, strict_error_event, strict_error)
         wrappers = dict(zip(names,(stall,pending,stale,escalate,recovery,readiness)))
@@ -119,14 +120,20 @@ class ReleaseGate:
         cls = type(bot)
         original = cls.get_updates
         owned = 'get_updates' in cls.__dict__
+        probed_generation = None
         async def gated(instance, *args, **kwargs):
+            nonlocal probed_generation
             cleanup = False
             if instance is bot and self.operation is not None:
                 timeout = kwargs.get('timeout')
                 seconds = timeout.total_seconds() if callable(getattr(timeout, 'total_seconds', None)) else timeout
                 updater = getattr(self.app, 'updater', None)
+                stopping = updater is not None and updater.running is False and seconds == 0
                 # PTB stop отменяет удержанный action и отдельно подтверждает обработанный offset.
-                cleanup = self.committed and updater is not None and updater.running is False and seconds == 0
+                cleanup = self.committed and stopping
+                if stopping and self.probe_held_startup and not cleanup:
+                    # До открытия startup hold PTB не получал ни одной пачки.
+                    return ()
                 if not cleanup:
                     self.poll_held = True
                     mirror = getattr(self.resolver, 'mirror', None)
@@ -140,6 +147,25 @@ class ReleaseGate:
                         self.held.set()
                         raise
                     self.hydration_failed = False
+                    if self.probe_held_startup:
+                        try:
+                            adapter = self.watchdog_adapter
+                            generation = adapter._polling_generation
+                            if generation != probed_generation:
+                                # Offset zero confirms no positive update IDs. PTB cannot
+                                # advance its cursor until the gated call returns a batch.
+                                pending = await original(instance, offset=0, limit=1, timeout=0)
+                                if (generation != adapter._polling_generation
+                                        or not adapter._polling_progress_accepting):
+                                    raise asyncio.CancelledError
+                                if not adapter._polling_progress_event.is_set():
+                                    raise RuntimeError('Held polling transport did not report progress')
+                                # Native transport will count the batch again after resume.
+                                adapter._updates_received_total -= len(pending)
+                                probed_generation = generation
+                        except BaseException:
+                            self.poll_held = False
+                            raise
                     self.held.set()
                     try:
                         await self.unlocked.wait()
@@ -164,6 +190,7 @@ class ReleaseGate:
         cls.get_updates = gated
         def restore():
             self.operation = None
+            self.probe_held_startup = False
             self.poll_held = False
             self.unlocked.set()
             if self.drain is not None:
@@ -187,7 +214,7 @@ class ReleaseGate:
         await self.held.wait()
         await self.app.update_queue.join()
 
-    def hold(self, operationId):
+    def hold(self, operationId, *, probe_polling=False):
         """Закрыть poll синхронно до startup; worker barrier запрашивается отдельно."""
         from .ipc import RpcError
         self._validate(operationId)
@@ -195,6 +222,7 @@ class ReleaseGate:
             raise RpcError(-32602, 'Another release operation holds ingress')
         if self.operation is None:
             self.operation = operationId
+            self.probe_held_startup = probe_polling
             self.committed = False
             self.held.clear()
             self.unlocked.clear()
@@ -282,6 +310,7 @@ class ReleaseGate:
                 adapter._polling_pending_stuck_count = 0
                 adapter._polling_not_running_count = 0
             self.operation = None
+            self.probe_held_startup = False
             self.poll_held = False
             self.committed = False
             self.unlocked.set()
@@ -382,7 +411,7 @@ def register(ctx, *, build_resolver=None, admit_update=None):
                     or source != Path('/opt/brai-profile/runtime/services/hermes/identity/native_ingress.py')
                     or hashlib.sha256(source.read_bytes()).hexdigest() != bootstrap_source):
                 raise RuntimeError('Root startup release binding unavailable')
-            gate.hold(bootstrap_operation)
+            gate.hold(bootstrap_operation, probe_polling=os.environ.get('BRAI_IDENTITY_INSTANCE') == 'release')
         gate.install_watchdogs(adapter)
         gate.install()
         resolver.release_gate = gate

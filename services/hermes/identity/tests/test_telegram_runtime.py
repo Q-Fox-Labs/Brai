@@ -62,6 +62,144 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.result(ident), {'success': True, 'message_id': '56'})
         resolver._deliver_route.assert_awaited_once()
 
+    async def test_startup_hold_defers_durable_recovery(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        resolver.release_gate = NS(operation='release-123')
+        resolver.mirror = NS(restartable=True, pump=AsyncMock())
+        resolver.reply_outbox = NS(flush=AsyncMock())
+        peer = NS(call=AsyncMock())
+        async def tick(delay):
+            if resolver.release_gate.operation is None:
+                raise asyncio.CancelledError
+            resolver.mirror.pump.assert_not_awaited()
+            resolver.reply_outbox.flush.assert_not_awaited()
+            self.assertEqual([c.args[0] for c in peer.call.await_args_list], ['health'])
+            resolver.release_gate.operation = None
+        with patch.dict(runtime.os.environ, {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': 'release-123'}), \
+                patch.object(runtime, 'broker_call', AsyncMock(return_value={'profiles': [profile()]})), \
+                patch.object(resolver, '_bridge', return_value=NS(connect=AsyncMock(return_value=peer))), \
+                patch.object(runtime.asyncio, 'sleep', tick):
+            with self.assertRaises(asyncio.CancelledError):
+                await resolver._supervise()
+        resolver.mirror.pump.assert_awaited_once()
+        resolver.reply_outbox.flush.assert_awaited_once()
+        self.assertEqual([c.args[0] for c in peer.call.await_args_list], ['health', 'health', 'outbox.flush'])
+
+    async def test_supervisor_accepts_and_sends_reply_in_second_accounts_topic(self):
+        resolver = runtime.Resolver(NS(send=AsyncMock(return_value={'success': True, 'message_id': '56'})))
+        self.addAsyncCleanup(resolver.close)
+        registered = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+        active = {**registered, 'authorTelegramId': '123', 'telegramId': '456'}
+        bridge = resolver._bridge(registered)
+        incoming = event()
+        incoming.source = NS(chat_id='456', user_id='456', thread_id='77', chat_type='dm')
+        incoming.media_urls = []
+        incoming._brai_identity_inputs = []
+        payload = {'chat_id': '456', 'content': 'Ответ', 'reply_to': '55',
+                   'metadata': {'thread_id': '77'}}
+        async def broker(method, params):
+            if method == 'identity.resolve':
+                self.assertEqual(params['telegramId'], '456')
+                return active
+            if method == 'ingress.admit':
+                self.assertEqual(params['telegramId'], '456')
+            return {}
+        with patch.object(runtime, 'broker_call', broker):
+            self.assertIs(await resolver(incoming.source), bridge)
+            prepared = await bridge.prepare_event(incoming)
+            response = await bridge.send('send', payload, scope_id=prepared['delivery_scope'])
+        self.assertEqual(bridge.worker_telegram_id, '123')
+        self.assertEqual(response, {'success': True, 'message_id': '56'})
+        self.assertTrue(resolver.ledger.owns(registered, ('456', '77'), '55', outgoing=False))
+        self.assertTrue(resolver.ledger.owns(registered, ('456', '77'), '56', outgoing=True))
+        self.assertFalse(resolver.ledger.owns(registered, ('123', '77'), '56'))
+        self.assertEqual(resolver.adapter.send.await_args.kwargs['chat_id'], '456')
+
+    async def test_saved_second_account_reply_recovers_legacy_admission(self):
+        for denied in (None, 'unlinked', 'other_message', 'other_generation'):
+            with self.subTest(denied=denied):
+                resolver = runtime.Resolver(NS(send=AsyncMock(return_value={'success': True, 'message_id': '56'})))
+                self.addAsyncCleanup(resolver.close)
+                registered = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
+                active = {**registered, 'authorTelegramId': '123', 'telegramId': '456'}
+                legacy = {**registered, 'telegramId': '456'}
+                route = ('456', '77')
+                source = {'chat': '456', 'actor_id': '456', 'chat_generation': 0, 'state': 'accepted',
+                          'auth_author': '123', 'auth_role': 'user', 'auth_generation': 0,
+                          'payload': json.dumps({'message': {'message_thread_id': 77, 'is_topic_message': True, 'message_id': 55}})}
+                resolver.ledger.admit(legacy, route, {'thread_id': '77'}, '55')
+                resolver.ledger.record(legacy, route, '57', outgoing=False)
+                resolver.ledger.record(legacy, route, '58', outgoing=True)
+                resolver.mirror = NS(restartable=True, accepted=AsyncMock(),
+                                     inbox=NS(delivery_source=lambda *args: source))
+                resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+                bridge = resolver._bridge(registered)
+                target = '57' if denied == 'other_message' else '55'
+                payload = {'chat_id': '456', 'content': 'Ответ', 'reply_to': target, 'metadata': {'thread_id': '77'}}
+                ident = delivery_id('stored-reply')
+                kwargs = {'scope_id': 'finished-turn', 'delivery_id': ident,
+                          'input_delivery_id': delivery_id('stored-input')}
+                async def broker(method, params):
+                    self.assertEqual((method, params), ('identity.resolve', {'telegramId': '456'}))
+                    if denied == 'unlinked':
+                        raise PermissionError('Account unlinked')
+                    return {**active, 'generation': 1} if denied == 'other_generation' else active
+                with patch.object(runtime, 'broker_call', broker):
+                    if denied is None:
+                        sent = await bridge.send('send', payload, **kwargs)
+                        resolver._bridge(active)
+                        resolver.ledger.admit(registered, route, {'thread_id': '77', 'new_anchor': '57'}, '59')
+                        repeated = await bridge.send('send', payload, **kwargs)
+                        with self.assertRaisesRegex(ValueError, 'OUTBOX_ID_CONFLICT'):
+                            await bridge.send('send', {**payload, 'content': 'Другой ответ'}, **kwargs)
+                        self.assertEqual(sent, {'success': True, 'message_id': '56'})
+                        self.assertEqual(repeated, sent)
+                        resolver.adapter.send.assert_awaited_once()
+                        self.assertTrue(resolver.ledger.owns(registered, route, '55', outgoing=False))
+                    else:
+                        with self.assertRaises(PermissionError):
+                            await bridge.send('send', payload, **kwargs)
+                        resolver.adapter.send.assert_not_awaited()
+                        self.assertIsNone(resolver.reply_outbox.result(ident))
+                        self.assertIsNone(resolver.ledger.metadata(registered, route))
+                self.assertFalse(resolver.ledger.owns(registered, route, '57'))
+                self.assertFalse(resolver.ledger.owns(registered, route, '58'))
+
+    async def test_durable_reply_checks_input_even_with_existing_canonical_route(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        primary = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 2}
+        route = ('456', '77')
+        source_id = delivery_id('active-input')
+        source = {'chat': '456', 'actor_id': '456', 'chat_generation': 0,
+                  'state': 'handing_off', 'auth_author': '123', 'auth_role': 'user', 'auth_generation': 2,
+                  'payload': json.dumps({'message': {'message_thread_id': 77, 'is_topic_message': True, 'message_id': 55}})}
+        resolver.ledger.admit(primary, route, {'thread_id': '77'}, '55')
+        resolver.mirror = NS(restartable=True, accepted=AsyncMock(),
+                             inbox=NS(delivery_source=lambda *args: source))
+        deliver = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, deliver)
+        bridge = resolver._bridge(primary)
+        resolver.turns[primary['uid']] = {'id': 'active-turn', 'route': route,
+                                         'delivery': {'delivery_id': source_id}}
+        payload = {'chat_id': '456', 'content': 'Ответ', 'metadata': {'thread_id': '77'}}
+        options = {'delivery_id': delivery_id('outbound'), 'input_delivery_id': source_id}
+        pending = await bridge.send('send', payload, scope_id='stale-turn', **options)
+        self.assertEqual(pending, {'success': False, 'retryable': True, 'error': 'Waiting for input acceptance'})
+        deliver.assert_not_awaited()
+        self.assertIsNone(resolver.reply_outbox.result(options['delivery_id']))
+        result = await bridge.send('send', payload, scope_id='active-turn', **options)
+        self.assertEqual(result, {'success': True, 'message_id': '56'})
+        for state, generation in (('handled', 2), ('accepted', 1)):
+            with self.subTest(state=state, generation=generation):
+                source.update(state=state, auth_generation=generation)
+                options['delivery_id'] = delivery_id([state, generation])
+                with self.assertRaises(PermissionError):
+                    await bridge.send('send', payload, scope_id='active-turn', **options)
+                self.assertIsNone(resolver.reply_outbox.result(options['delivery_id']))
+        deliver.assert_awaited_once()
+
     async def test_saved_reply_rejects_changed_owner_role_and_generation(self):
         restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
         for change in ({'uid': 202}, {'userId': 'foreign'}, {'profileId': 'foreign'},
@@ -85,7 +223,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         resolver = runtime.Resolver(adapter)
         self.addCleanup(resolver.ledger.close)
         resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: {
-            'chat': '-10012', 'actor_id': '456', 'chat_generation': 0,
+            'chat': '-10012', 'actor_id': '456', 'chat_generation': 0, 'state': 'accepted',
             'auth_author': '123', 'auth_role': 'user', 'auth_generation': 1,
             'payload': json.dumps({'message': {'message_id': 70, 'message_thread_id': 77,
                 'chat': {'id': -10012, 'type': 'supergroup', 'is_forum': True}}})}))
@@ -115,8 +253,9 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
         active = {**restored, 'authorTelegramId': '123'}
         resolver.mirror = NS(restartable=True, accepted=AsyncMock(), inbox=NS(
-            delivery_source=lambda *args: {'chat': '123', 'chat_generation': 0,
-                'payload': json.dumps({'message': {'message_thread_id': 77}})}))
+            delivery_source=lambda *args: {'chat': '123', 'actor_id': '123', 'chat_generation': 0,
+                'state': 'accepted', 'auth_author': '123', 'auth_role': 'user', 'auth_generation': 0,
+                'payload': json.dumps({'message': {'message_thread_id': 77, 'is_topic_message': True}})}))
         resolver.ledger.admit(restored, ('123', '77'), {'thread_id': '77'}, '55')
         resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
         resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)

@@ -16,14 +16,26 @@ class ReplyOutbox:
             seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
             owner TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)''')
 
-    def enqueue(self, ident, owner, body):
-        """Commit ответа до первой внешней попытки; прежний ID не меняет байты и адресата."""
+    def enqueue(self, ident, owner, body, *, request_digest=None, legacy_matches=None):
+        """Сохранить первый конверт доставки и сверить неизменный запрос при повторе."""
         DeliveryJournal.identity(ident, ident)
-        raw = canonical(body)
-        old = self.db.execute('SELECT owner,body FROM reply_outbox WHERE id=?', (ident,)).fetchone()
-        if old is not None and old != (owner, raw):
-            raise ValueError('OUTBOX_ID_CONFLICT')
-        self.db.execute("INSERT OR IGNORE INTO reply_outbox(id,owner,body,state) VALUES(?,?,?,'pending')", (ident, owner, raw))
+        envelope = body if request_digest is None else {**body, 'requestDigest': request_digest}
+        raw = canonical(envelope)
+        inserted = self.db.execute("INSERT OR IGNORE INTO reply_outbox(id,owner,body,state) VALUES(?,?,?,'pending')",
+                                   (ident, owner, raw))
+        if inserted.rowcount:
+            return
+        saved_owner, saved_raw = self.db.execute('SELECT owner,body FROM reply_outbox WHERE id=?', (ident,)).fetchone()
+        if saved_owner == owner:
+            if saved_raw == raw:
+                return
+            if request_digest is not None:
+                saved = json.loads(saved_raw)
+                if saved.get('requestDigest') == request_digest:
+                    return
+                if 'requestDigest' not in saved and legacy_matches is not None and legacy_matches(saved):
+                    return
+        raise ValueError('OUTBOX_ID_CONFLICT')
 
     def result(self, ident):
         """Квитанция относится к фактическому message ID, включая ответ после потери IPC."""
