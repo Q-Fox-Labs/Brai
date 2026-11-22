@@ -136,6 +136,51 @@ class AutomationQuotaTests(unittest.TestCase):
         self.assertEqual(result.number, original.number)
         self.assertEqual(self.reserve("unrelated").number, 2)
 
+    def test_provider_hold_reuses_only_a_recovery_of_the_consumed_occurrence(self):
+        from cron import quota_hold
+        from cron.occurrences import scheduled_instant
+
+        now = self.day.replace(hour=1)
+        with (
+            patch.object(self.jobs, "_hermes_now", return_value=now),
+            patch.object(quota_hold, "_hermes_now", return_value=now),
+        ):
+            for index, schedule in enumerate(("0 1 * * *", "* * * * *")):
+                job = self.jobs.create_job("Новости", schedule, name=f"Новости {index}")
+                job["_scheduled_instant"] = scheduled_instant(now.isoformat())
+                original = self.quota.reserve(job, f"first-{index}")
+                self.assertTrue(self.jobs.mark_job_run(
+                    job["id"], False, "provider hold", quota_hold_seconds=300,
+                    recover_consumed_fire=True, automation_occurrence=original.occurrence,
+                ))
+                recovery = self.jobs.get_job(job["id"])
+                recovery["_scheduled_instant"] = scheduled_instant(recovery["next_run_at"])
+                result = self.quota.reserve(recovery, f"retry-{index}")
+                self.assertEqual(result.number, original.number + index)
+
+    def test_chronos_duplicate_before_next_slot_is_not_a_manual_attempt(self):
+        from cron.scheduler_provider import CronScheduler
+
+        class ChronosFixture(CronScheduler):
+            name = "chronos"
+
+            def start(self, **kwargs):
+                return None
+
+        provider = ChronosFixture()
+        job = self.jobs.create_job("Новости", "every 1m", name="Новости")
+        instant = datetime.fromisoformat(job["next_run_at"])
+        with patch.object(self.jobs, "_hermes_now", return_value=instant):
+            first = provider.claim_fire(job["id"])
+            self.assertIsNotNone(first)
+            self.assertTrue(self.jobs.mark_job_run(
+                job["id"], True, expected_fire_owner=first["fire_claim"]["by"],
+            ))
+            self.assertIsNone(provider.claim_fire(job["id"]))
+            manual = provider.claim_fire(job["id"], manual=True)
+            self.assertIsNotNone(manual)
+            self.assertIsNone(manual["_scheduled_instant"])
+
     def test_per_profile_scope_and_configuration_change(self):
         self.set_limit(1)
         self.reserve("job-a")
@@ -196,6 +241,89 @@ class AutomationQuotaTests(unittest.TestCase):
             self.assertIn("Можно выпускать сводку реже.", deliver.call_args_list[1].args[1])
             self.assertIn("3-е срабатывание", deliver.call_args_list[2].args[1])
 
+    def test_managed_worker_cannot_turn_off_quota_via_personal_environment(self):
+        self.set_limit(0)
+        self.home.joinpath("profile-config.json").write_text("{}")
+        job = self.jobs.create_job("Original action", "every 1m", name="Отчёт")
+        with (
+            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "other"}),
+            patch.object(self.scheduler, "_BRAI_WORKER_CONFIG", self.home / "profile-config.json"),
+            patch.object(self.scheduler, "run_job") as run,
+            patch.object(self.scheduler, "_deliver_result", return_value=None) as deliver,
+            patch("agent.auxiliary_client.call_llm", side_effect=ConnectionError) as explain,
+        ):
+            self.assertTrue(self.scheduler.run_one_job(job))
+        run.assert_not_called()
+        explain.assert_called_once()
+        self.assertIn("не более 0 запусков", deliver.call_args.args[1])
+
+    def test_auth_unavailable_preserves_one_shot_and_does_not_inject_bot_chat(self):
+        self.role.side_effect = ConnectionError("Auth unavailable")
+        job = self.jobs.create_job("Original action", "in 1m", name="Отчёт", deliver="bot-chat")
+        with (
+            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "worker"}),
+            patch.object(self.scheduler, "run_job") as run,
+            patch.object(self.scheduler, "_deliver_result") as send,
+            patch.object(self.scheduler, "_deliver_crash_failure") as crash_notice,
+            patch("agent.auxiliary_client.call_llm") as explain,
+        ):
+            self.assertTrue(self.scheduler.run_one_job(job))
+        run.assert_not_called()
+        send.assert_not_called()
+        crash_notice.assert_not_called()
+        explain.assert_not_called()
+        after = self.jobs.get_job(job["id"])
+        self.assertEqual(after["repeat"]["completed"], 0)
+        self.assertEqual(after["next_run_at"], job["next_run_at"])
+        self.assertEqual(self.executions.latest_execution(job["id"])["delivery_outcome"], "quota_unavailable")
+
+    def test_detached_worker_loss_recovers_static_notice_without_model(self):
+        from cron.scheduler_worker_failure import record_unknown_worker_outcome
+
+        self.set_limit(0)
+        job = self.jobs.create_job("Original action", "every 1m", name="Сводка", deliver="bot-chat")
+        claimed = self.jobs.claim_job_for_fire(job["id"], manual=True, return_job=True)
+        execution_id = self.executions.create_execution(job["id"], source="direct")["id"]
+        claimed["execution_id"] = execution_id
+        self.assertIsNotNone(self.executions.mark_execution_running(execution_id))
+        self.assertTrue(self.quota.reserve(claimed, execution_id).explain)
+        with self.executions._transaction() as conn:
+            conn.execute("UPDATE executions SET status='unknown' WHERE id=?", (execution_id,))
+        with (
+            patch.object(self.scheduler, "_deliver_result", return_value=None) as deliver,
+            patch.object(self.scheduler, "_deliver_crash_failure") as crash,
+            patch("agent.auxiliary_client.call_llm") as model,
+        ):
+            self.assertTrue(record_unknown_worker_outcome(claimed))
+        crash.assert_not_called()
+        model.assert_not_called()
+        self.assertTrue(deliver.call_args.args[0]["_brai_quota_notice"])
+        self.assertIn("нужен админский доступ", deliver.call_args.args[1])
+        self.assertEqual(self.jobs.get_job(job["id"])["last_status"], "quota_skipped")
+
+    def test_background_quota_suppresses_completion_wake(self):
+        from tools import async_delegation, cronjob_tools
+
+        self.set_limit(0)
+        job = self.jobs.create_job("Original action", "every 1m", name="Сводка")
+        claimed = self.jobs.claim_job_for_fire(job["id"], manual=True, return_job=True)
+        with (
+            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "worker"}),
+            patch.object(self.scheduler, "run_job") as run,
+            patch.object(self.scheduler, "_deliver_result", return_value=None),
+            patch("agent.auxiliary_client.call_llm", side_effect=ConnectionError),
+        ):
+            result = cronjob_tools._run_claimed_job(claimed)
+        run.assert_not_called()
+        block = cronjob_tools._manual_run_completion(result, job["id"], "Сводка", "origin", 0)
+        self.assertTrue(block["_brai_quota_no_wake"])
+        with (
+            patch.object(async_delegation, "_records", {"demo": {"status": "running", "role": "cron_run"}}),
+            patch.object(async_delegation, "_push_completion_event") as wake,
+        ):
+            async_delegation._finalize("demo", block, "completed")
+        wake.assert_not_called()
+
     def test_missing_model_response_uses_fixed_notice_and_no_second_model_call(self):
         job = {"id": "weather", "name": "Сводка погоды"}
         with patch("agent.auxiliary_client.call_llm", side_effect=ConnectionError) as model:
@@ -203,7 +331,7 @@ class AutomationQuotaTests(unittest.TestCase):
             further = self.quota.notice(job, self.quota.Quota(26, 24))
         model.assert_called_once()
         self.assertIn("не более 24 запусков", first)
-        self.assertIn("Сегодня использовано 24 из 24 запусков", further)
+        self.assertIn("Лимит — 24 запусков в сутки", further)
         self.assertIn("26-е срабатывание", further)
 
     def test_notice_does_not_start_bot_chat_and_retains_human_destination(self):
@@ -238,22 +366,46 @@ class AutomationQuotaTests(unittest.TestCase):
     def test_single_model_attempt_skips_sdk_and_aux_retries(self):
         from agent import auxiliary_client as aux
 
-        sdk = Mock()
+        from openai import OpenAI
+
+        sdk = Mock(spec=OpenAI)
+        sdk.max_retries = 2
         client = sdk.with_options.return_value
-        request = SimpleNamespace(client=sdk, kwargs={}, request_provider="test",
+        wire = client.chat.completions.create
+        wire.side_effect = RuntimeError("402: can only afford 2048 tokens")
+        request = SimpleNamespace(client=sdk, kwargs={"max_tokens": 3000}, request_provider="openrouter",
                                   resolved_api_mode="chat_completions", base_info=None,
                                   resolved_base_url=None)
+
+        def invoke(transport, kwargs, **params):
+            self.assertIs(transport, client)
+            return params["create"](kwargs)
+
         with (
             patch.object(aux, "_plan_aux_call", return_value=(request, {}, {})),
-            patch.object(aux, "_relay_sync_completion", side_effect=ConnectionError) as send,
+            patch.object(aux, "_relay_sync_completion", side_effect=invoke),
+            patch.object(aux, "_create_with_progress") as adjust_tokens,
             patch.object(aux, "_start_recovery_ladder") as retry,
         ):
-            with self.assertRaises(ConnectionError):
+            with self.assertRaisesRegex(RuntimeError, "402"):
                 aux._call_llm_impl(single_attempt=True, messages=[])
         sdk.with_options.assert_called_once_with(max_retries=0)
-        self.assertIs(send.call_args.args[0], client)
-        send.assert_called_once()
+        wire.assert_called_once_with(max_tokens=3000)
+        adjust_tokens.assert_not_called()
         retry.assert_not_called()
+
+
+    def test_single_attempt_refuses_a_transport_with_implicit_resends(self):
+        from agent import auxiliary_client as aux
+
+        request = SimpleNamespace(client=object(), kwargs={}, request_provider="wrapper")
+        with (
+            patch.object(aux, "_plan_aux_call", return_value=(request, {}, {})),
+            patch.object(aux, "_relay_sync_completion") as send,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "cannot guarantee a single attempt"):
+                aux._call_llm_impl(single_attempt=True, messages=[])
+        send.assert_not_called()
 
 
 if __name__ == "__main__":

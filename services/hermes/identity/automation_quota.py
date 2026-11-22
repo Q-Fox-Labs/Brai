@@ -21,10 +21,58 @@ class Quota:
     limit: int
     explain: bool = False
     occurrence: str = ""
+    first_excess: bool = False
 
     @property
     def exceeded(self):
         return self.number > self.limit
+
+
+def _occurrence(job, execution_id):
+    from cron import quota_hold
+    from cron.occurrences import scheduled_instant
+    from cron.unreachable_retry import STATE_KEY, is_retry_run
+
+    scheduled = scheduled_instant(job.get("_scheduled_instant"))
+    retry_origin = None
+    held_until = job.get(quota_hold.STATE_KEY)
+    if is_retry_run(job):
+        retry_origin = job[STATE_KEY].get("brai_automation_occurrence")
+    elif scheduled and scheduled_instant(held_until) == scheduled and quota_hold.is_recovery_fire(job, held_until):
+        retry_origin = job.get(quota_hold.AUTOMATION_OCCURRENCE_KEY)
+    return retry_origin or (f"scheduled:{scheduled}" if scheduled else f"execution:{execution_id}")
+
+
+def _find(conn, job_id, occurrence):
+    row = conn.execute(
+        """SELECT number, limit_value, explanation_reserved
+           FROM brai_automation_fires WHERE job_id=? AND occurrence=?""",
+        (job_id, occurrence),
+    ).fetchone()
+    if row is None:
+        return None
+    return Quota(
+        row["number"], row["limit_value"], occurrence=occurrence,
+        first_excess=bool(row["explanation_reserved"]),
+    )
+
+
+def _mark_pending(conn, job_id, execution_id):
+    # Terminalization of a dead worker leaves delivery_outcome intact. The marker binds the
+    # decision to this execution, including when Auth grants another role on a later attempt.
+    conn.execute(
+        """UPDATE executions SET delivery_outcome='quota_pending'
+           WHERE id=? AND job_id=? AND status='running'""",
+        (execution_id, job_id),
+    )
+
+
+def saved_skip(job, execution_id):
+    """Читать уже зафиксированный пропуск для восстановления после смерти worker."""
+    from cron.executions import _transaction
+
+    with _transaction() as conn:
+        return _find(conn, job["id"], _occurrence(job, execution_id))
 
 
 def reserve(job, execution_id):
@@ -40,16 +88,9 @@ def reserve(job, execution_id):
         raise ValueError("Некорректный суточный лимит автоматизаций")
 
     from cron.executions import _transaction
-    from cron.occurrences import scheduled_instant
-    from cron.unreachable_retry import STATE_KEY, is_retry_run
     from hermes_time import now
 
-    scheduled = scheduled_instant(job.get("_scheduled_instant"))
-    if is_retry_run(job):
-        retry_origin = job[STATE_KEY].get("brai_automation_occurrence")
-    else:
-        retry_origin = None
-    occurrence = retry_origin or (f"scheduled:{scheduled}" if scheduled else f"execution:{execution_id}")
+    occurrence = _occurrence(job, execution_id)
     with _transaction(immediate=True) as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS brai_automation_fires (
@@ -59,13 +100,11 @@ def reserve(job, execution_id):
                  PRIMARY KEY (job_id, occurrence), UNIQUE (day, number)
                )"""
         )
-        previous = conn.execute(
-            """SELECT number, limit_value FROM brai_automation_fires
-               WHERE job_id=? AND occurrence=?""",
-            (job["id"], occurrence),
-        ).fetchone()
+        previous = _find(conn, job["id"], occurrence)
         if previous is not None:
-            return Quota(previous["number"], previous["limit_value"], occurrence=occurrence)
+            if previous.exceeded:
+                _mark_pending(conn, job["id"], execution_id)
+            return previous
 
         day = now().date().isoformat()
         last, explained = conn.execute(
@@ -81,7 +120,9 @@ def reserve(job, execution_id):
                VALUES (?, ?, ?, ?, ?, ?)""",
             (job["id"], occurrence, day, number, limit, int(explain)),
         )
-        return Quota(number, limit, explain, occurrence)
+        if number > limit:
+            _mark_pending(conn, job["id"], execution_id)
+        return Quota(number, limit, explain, occurrence, first_excess=explain)
 
 
 def notice(job, quota):
@@ -90,10 +131,12 @@ def notice(job, quota):
     from cron.scheduler_delivery import _scheduled_task_name
 
     title = _scheduled_task_name(job) or t("scheduled_task.untitled")
-    if not quota.explain:
+    if not quota.explain and not quota.first_excess:
         return t("scheduled_task.quota_skipped", name=title, limit=quota.limit, number=quota.number)
 
     text = t("scheduled_task.quota_first", name=title, limit=quota.limit)
+    if not quota.explain:
+        return text
     try:
         from agent.auxiliary_client import call_llm
 

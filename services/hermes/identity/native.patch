@@ -1677,16 +1677,18 @@ diff --git a/cron/scheduler.py b/cron/scheduler.py
 +                _scheduled_task_name(job) or t("scheduled_task.untitled"), job["id"], err.strip().rstrip("."),
              ) + _failure_streak_nudge(job)
          else:
-@@ -3155,4 +3162,6 @@
-         # (cron/unreachable_retry.py) inside the same fenced store write.
-         mark_kwargs["model_unreachable"] = True
-+        if job.get("_brai_quota_occurrence"):
-+            mark_kwargs["automation_occurrence"] = job["_brai_quota_occurrence"]
-     from cron.unreachable_retry import is_retry_run
-     if is_retry_run(job):
-@@ -3294,4 +3303,39 @@
+@@ -3151,4 +3158,6 @@
+         job["last_delivery_queued"] = None
+     mark_kwargs: dict = {"delivery_error": d.delivery_error}
++    if job.get("_brai_quota_occurrence"):
++        mark_kwargs["automation_occurrence"] = job["_brai_quota_occurrence"]
+     if not d.success and job.pop("_model_unreachable", False):
+         # Never-reached-the-model failure: schedule the Cowork-style bounded re-run
+@@ -3294,4 +3303,41 @@
 
 
++_BRAI_WORKER_CONFIG = Path("/opt/brai-profile/profile-config.json")
++
 +def _complete_quota_skip(job, quota, execution_id, fence, *, adapters=None, loop=None) -> bool:
 +    """Доставить пропуск и закрыть текущее срабатывание обычным забором владения."""
 +    from cron.unreachable_retry import is_retry_run
@@ -1724,22 +1726,48 @@ diff --git a/cron/scheduler.py b/cron/scheduler.py
 +
  def _run_one_job_body(
      job: dict, *, adapters=None, loop=None, verbose: bool = False,
-@@ -3342,4 +3386,15 @@
+@@ -3342,4 +3388,34 @@
              logger.warning("Cron job %s lost execution ownership before start; skipping", job["id"])
              return True
 +
-+        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        # The managed worker owns a read-only bind. Personal dotenv cannot turn off quota
++        # by replacing a mode variable before the ticker or a child CLI loads the profile.
++        if _BRAI_WORKER_CONFIG.is_file() or os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++            from cron.jobs import release_unadmitted_automation
 +            from identity.automation_quota import reserve
 +
-+            quota = reserve(job, execution_id)
++            try:
++                quota = reserve(job, execution_id)
++            except Exception as error:
++                job["_brai_automation_admission"] = "quota_unavailable"
++                logger.warning("Automation admission unavailable: %s", type(error).__name__)
++                try:
++                    release_unadmitted_automation(job, fire_owner)
++                except Exception as release_error:
++                    logger.warning("Cannot restore unstarted automation: %s", type(release_error).__name__)
++                finish_execution(
++                    execution_id, success=False,
++                    error="Automation access or quota could not be verified.",
++                    delivery_outcome="quota_unavailable",
++                )
++                return True
 +            if quota is not None:
 +                if quota.exceeded:
++                    job["_brai_automation_admission"] = "quota_skipped"
++                    delivery_attempted = True
 +                    return _complete_quota_skip(
 +                        job, quota, execution_id, fence, adapters=adapters, loop=loop,
 +                    )
 +                job["_brai_quota_occurrence"] = quota.occurrence
 
          # Bind the firing profile's COMPLETE terminal policy for this fire — agent build, run, delivery
+@@ -3461,5 +3537,5 @@
+             _err_text,
+             exc_info=(type(e), e, e.__traceback__))
+-        delivery_outcome = "suppressed"
++        delivery_outcome = job.get("_brai_automation_admission") or "suppressed"
+         # Owner fencing: a stale worker whose claim was taken over (or transport-cancelled) must not
+         # send a failure alert on top of the replacement run's; fall through to fenced bookkeeping.
 
 diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 --- a/cron/scheduler_delivery.py
@@ -1882,7 +1910,7 @@ diff --git a/locales/af.yaml b/locales/af.yaml
 +  cancel: "Skryf “Kanselleer die taak ‘{name}’” in die klets om dit te stop."
 +
 +  quota_first: "“{name}” is oorgeslaan. Die daaglikse perk is {limit} outomatiese lopies. Vir meer lopies het jy administrateurtoegang nodig."
-+  quota_skipped: "“{name}” is oorgeslaan. Vandag is {limit} van {limit} lopies gebruik. Dit was sneller nommer {number}."
++  quota_skipped: "“{name}” is oorgeslaan. Die daaglikse perk is {limit} lopies. Dit was sneller nommer {number} vandag."
 +
  gateway:
    approval_expired: "⚠️ Goedkeuring het verval (die agent wag nie meer nie). Vra die agent om weer te probeer."
@@ -1898,7 +1926,7 @@ diff --git a/locales/ar.yaml b/locales/ar.yaml
 +  cancel: "لإيقاف مرات التشغيل القادمة، اكتب «ألغِ مهمة {name}» في المحادثة."
 +
 +  quota_first: "تم تخطي «{name}». الحد اليومي هو {limit} عمليات تشغيل تلقائية. تحتاج إلى صلاحيات المسؤول للمزيد."
-+  quota_skipped: "تم تخطي «{name}». استُخدمت {limit} من أصل {limit} عمليات تشغيل اليوم. هذا هو التشغيل رقم {number}."
++  quota_skipped: "تم تخطي «{name}». الحد اليومي {limit} عمليات تشغيل. هذا هو التشغيل رقم {number} اليوم."
 +
  gateway:
    approval_expired: "⚠️ انتهت صلاحية الموافقة (لم يعد الوكيل ينتظر). اطلب من الوكيل المحاولة مرة أخرى."
@@ -1914,7 +1942,7 @@ diff --git a/locales/de.yaml b/locales/de.yaml
 +  cancel: "Schreibe „Brich die Aufgabe ‚{name}‘ ab“ in den Chat, um sie zu stoppen."
 +
 +  quota_first: "„{name}“ wurde übersprungen. Das Tageslimit liegt bei {limit} Automatisierungsläufen. Für weitere Läufe brauchst du Administratorzugriff."
-+  quota_skipped: "„{name}“ wurde übersprungen. Heute sind {limit} von {limit} Läufen verbraucht. Das war Auslösung Nummer {number}."
++  quota_skipped: "„{name}“ wurde übersprungen. Das Tageslimit liegt bei {limit} Läufen. Das war heute Auslösung Nummer {number}."
 +
  gateway:
    approval_expired: "⚠️ Genehmigung abgelaufen (Agent wartet nicht mehr). Bitten Sie den Agenten, es erneut zu versuchen."
@@ -1931,7 +1959,7 @@ diff --git a/locales/en.yaml b/locales/en.yaml
 +  cancel: "To cancel future runs, write “Cancel the task ‘{name}’” in chat."
 +
 +  quota_first: "“{name}” was skipped. The daily limit is {limit} automation runs. To run more, you need administrator access."
-+  quota_skipped: "“{name}” was skipped. You used {limit} of {limit} daily runs. This was trigger number {number} today."
++  quota_skipped: "“{name}” was skipped. The daily limit is {limit} runs. This was trigger number {number} today."
 
  gateway:
 
@@ -1946,7 +1974,7 @@ diff --git a/locales/es.yaml b/locales/es.yaml
 +  cancel: "Para detener la tarea, escribe «Cancela la tarea “{name}”» en el chat."
 +
 +  quota_first: "Se omitió «{name}». El límite diario es de {limit} ejecuciones automáticas. Para ejecutar más, necesitas acceso de administrador."
-+  quota_skipped: "Se omitió «{name}». Hoy se usaron {limit} de {limit} ejecuciones. Esta fue la activación número {number}."
++  quota_skipped: "Se omitió «{name}». El límite diario es de {limit} ejecuciones. Esta fue la activación número {number} de hoy."
 +
  gateway:
    approval_expired: "⚠️ La aprobación ha caducado (el agente ya no está esperando). Pida al agente que lo intente de nuevo."
@@ -1962,7 +1990,7 @@ diff --git a/locales/fr.yaml b/locales/fr.yaml
 +  cancel: "Pour arrêter la tâche, écrivez « Annule la tâche “{name}” » dans le chat."
 +
 +  quota_first: "« {name} » a été ignorée. La limite quotidienne est de {limit} exécutions automatiques. Pour aller au-delà, il faut un accès administrateur."
-+  quota_skipped: "« {name} » a été ignorée. Aujourd’hui, {limit} exécutions sur {limit} ont été utilisées. C’était le déclenchement numéro {number}."
++  quota_skipped: "« {name} » a été ignorée. La limite est de {limit} exécutions par jour. C’était le déclenchement numéro {number} aujourd’hui."
 +
  gateway:
    approval_expired: "⚠️ Approbation expirée (l'agent n'attend plus). Demandez à l'agent de réessayer."
@@ -1978,7 +2006,7 @@ diff --git a/locales/ga.yaml b/locales/ga.yaml
 +  cancel: "Chun an tasc a stopadh, scríobh “Cealaigh an tasc ‘{name}’” sa chomhrá."
 +
 +  quota_first: "Scipeáladh “{name}”. Is é {limit} rith uathoibrithe an teorainn laethúil. Teastaíonn rochtain riarthóra chun níos mó a rith."
-+  quota_skipped: "Scipeáladh “{name}”. Úsáideadh {limit} as {limit} rith inniu. Ba é seo truicear uimhir {number}."
++  quota_skipped: "Scipeáladh “{name}”. Is é {limit} rith an teorainn laethúil. Ba é seo truicear uimhir {number} inniu."
 +
  gateway:
    approval_expired: "⚠️ Tá an cead imithe in éag (níl an gníomhaire ag fanacht níos mó). Iarr ar an ngníomhaire iarracht eile a dhéanamh."
@@ -1994,7 +2022,7 @@ diff --git a/locales/hu.yaml b/locales/hu.yaml
 +  cancel: "A feladat leállításához írd a csevegésbe: „Töröld a(z) »{name}« feladatot”."
 +
 +  quota_first: "A(z) „{name}” kimaradt. A napi korlát {limit} automatizált futtatás. Több futtatáshoz rendszergazdai hozzáférés kell."
-+  quota_skipped: "A(z) „{name}” kimaradt. Ma {limit}/{limit} futtatás fogyott el. Ez volt a(z) {number}. indítás."
++  quota_skipped: "A(z) „{name}” kimaradt. A napi korlát {limit} futtatás. Ez volt ma a(z) {number}. indítás."
 +
  gateway:
    approval_expired: "⚠️ A jóváhagyás lejárt (az ügynök már nem vár). Kérd meg az ügynököt, hogy próbálja újra."
@@ -2010,7 +2038,7 @@ diff --git a/locales/it.yaml b/locales/it.yaml
 +  cancel: "Per interrompere l’attività, scrivi in chat «Annulla l’attività “{name}”»."
 +
 +  quota_first: "«{name}» è stata saltata. Il limite giornaliero è di {limit} esecuzioni automatiche. Per eseguirne altre serve l’accesso amministratore."
-+  quota_skipped: "«{name}» è stata saltata. Oggi hai usato {limit} esecuzioni su {limit}. Questa era l’attivazione numero {number}."
++  quota_skipped: "«{name}» è stata saltata. Il limite è di {limit} esecuzioni al giorno. Questa era l’attivazione numero {number} di oggi."
 +
  gateway:
    approval_expired: "⚠️ Approvazione scaduta (l'agente non è più in attesa). Chiedi all'agente di riprovare."
@@ -2026,7 +2054,7 @@ diff --git a/locales/ja.yaml b/locales/ja.yaml
 +  cancel: "今後の実行を止めるには、チャットに「タスク『{name}』をキャンセルして」と入力してください。"
 +
 +  quota_first: "「{name}」はスキップされました。1 日に実行できる自動化は {limit} 回までです。これを超えるには管理者権限が必要です。"
-+  quota_skipped: "「{name}」はスキップされました。本日は上限 {limit} 回のうち {limit} 回を使用しました。今回の起動は本日 {number} 回目です。"
++  quota_skipped: "「{name}」はスキップされました。1 日の実行上限は {limit} 回です。今回の起動は本日 {number} 回目です。"
 +
  gateway:
    approval_expired: "⚠️ 承認の有効期限が切れました（エージェントはもう待機していません）。エージェントに再試行を依頼してください。"
@@ -2042,7 +2070,7 @@ diff --git a/locales/ko.yaml b/locales/ko.yaml
 +  cancel: "앞으로 실행하지 않으려면 채팅에 ‘{name} 작업을 취소해 줘’라고 입력하세요."
 +
 +  quota_first: "‘{name}’ 작업을 건너뛰었습니다. 하루 자동 실행 한도는 {limit}회입니다. 더 실행하려면 관리자 권한이 필요합니다."
-+  quota_skipped: "‘{name}’ 작업을 건너뛰었습니다. 오늘 한도 {limit}회 중 {limit}회를 모두 사용했습니다. 이번은 오늘 {number}번째 실행 시도입니다."
++  quota_skipped: "‘{name}’ 작업을 건너뛰었습니다. 하루 실행 한도는 {limit}회입니다. 이번은 오늘 {number}번째 실행 시도입니다."
 +
  gateway:
    approval_expired: "⚠️ 승인이 만료되었습니다 (에이전트가 더 이상 대기하지 않습니다). 에이전트에게 다시 시도하도록 요청하세요."
@@ -2058,7 +2086,7 @@ diff --git a/locales/pt.yaml b/locales/pt.yaml
 +  cancel: "Para interromper a tarefa, escreva «Cancela a tarefa “{name}”» no chat."
 +
 +  quota_first: "«{name}» foi ignorada. O limite diário é de {limit} execuções automáticas. Para executar mais, é preciso acesso de administrador."
-+  quota_skipped: "«{name}» foi ignorada. Hoje foram usadas {limit} de {limit} execuções. Este foi o acionamento número {number}."
++  quota_skipped: "«{name}» foi ignorada. O limite é de {limit} execuções por dia. Este foi o acionamento número {number} de hoje."
 +
  gateway:
    approval_expired: "⚠️ A aprovação expirou (o agente já não está à espera). Peça ao agente para tentar novamente."
@@ -2074,7 +2102,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
 +  cancel: "Чтобы больше не получать такие сообщения, напишите в чат «Отмени задание „{name}“»."
 +
 +  quota_first: "«{name}» пропущено. Сработал лимит на количество автоматизаций — не более {limit} запусков в сутки. Если требуется больше, нужен админский доступ."
-+  quota_skipped: "«{name}» пропущено. Сегодня использовано {limit} из {limit} запусков. Это {number}-е срабатывание за сутки."
++  quota_skipped: "«{name}» пропущено. Лимит — {limit} запусков в сутки. Это {number}-е срабатывание за сегодня."
 +
  gateway:
    approval_expired: "⚠️ Срок одобрения истёк (агент больше не ожидает). Попросите агента повторить попытку."
@@ -2090,7 +2118,7 @@ diff --git a/locales/tr.yaml b/locales/tr.yaml
 +  cancel: "Görevi durdurmak için sohbete “{name} görevini iptal et” yazın."
 +
 +  quota_first: "“{name}” atlandı. Günlük sınır {limit} otomatik çalıştırmadır. Daha fazlası için yönetici erişimi gerekir."
-+  quota_skipped: "“{name}” atlandı. Bugün {limit} çalıştırmanın {limit} tanesi kullanıldı. Bu, günün {number}. tetiklemesiydi."
++  quota_skipped: "“{name}” atlandı. Günlük sınır {limit} çalıştırmadır. Bu, bugünün {number}. tetiklemesiydi."
 +
  gateway:
    approval_expired: "⚠️ Onay süresi doldu (ajan artık beklemiyor). Ajanın tekrar denemesini isteyin."
@@ -2106,7 +2134,7 @@ diff --git a/locales/uk.yaml b/locales/uk.yaml
 +  cancel: "Щоб більше не отримувати такі повідомлення, напишіть у чаті «Скасуй завдання “{name}”»."
 +
 +  quota_first: "«{name}» пропущено. Добовий ліміт — {limit} запусків автоматизацій. Для більшої кількості потрібен доступ адміністратора."
-+  quota_skipped: "«{name}» пропущено. Сьогодні використано {limit} із {limit} запусків. Це {number}-те спрацювання за добу."
++  quota_skipped: "«{name}» пропущено. Ліміт — {limit} запусків на добу. Це {number}-те спрацювання за сьогодні."
 +
  gateway:
    approval_expired: "⚠️ Час схвалення минув (агент більше не очікує). Попросіть агента спробувати ще раз."
@@ -2122,7 +2150,7 @@ diff --git a/locales/zh-hant.yaml b/locales/zh-hant.yaml
 +  cancel: "如要停止後續執行，請在聊天中傳送「取消工作『{name}』」。"
 +
 +  quota_first: "已略過「{name}」。每天最多可執行 {limit} 次自動化工作。若需要更多次數，須具備管理員權限。"
-+  quota_skipped: "已略過「{name}」。今日已用完 {limit} 次執行額度（共 {limit} 次），這是今日第 {number} 次觸發。"
++  quota_skipped: "已略過「{name}」。每天最多可執行 {limit} 次，這是今日第 {number} 次觸發。"
 +
  gateway:
    approval_expired: "⚠️ 批准已逾期（代理不再等待）。請讓代理重試。"
@@ -2138,7 +2166,7 @@ diff --git a/locales/zh.yaml b/locales/zh.yaml
 +  cancel: "如需停止后续执行，请在聊天中发送“取消任务‘{name}’”。"
 +
 +  quota_first: "已跳过“{name}”。每天最多运行 {limit} 次自动化任务。若需要更多次数，则需要管理员权限。"
-+  quota_skipped: "已跳过“{name}”。今天已用完 {limit} 次运行额度（共 {limit} 次），这是今天第 {number} 次触发。"
++  quota_skipped: "已跳过“{name}”。每天最多运行 {limit} 次，这是今天第 {number} 次触发。"
 +
  gateway:
    approval_expired: "⚠️ 批准已过期（代理不再等待）。请让代理重试。"
@@ -2146,14 +2174,30 @@ diff --git a/locales/zh.yaml b/locales/zh.yaml
 diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 --- a/tools/cronjob_tools.py
 +++ b/tools/cronjob_tools.py
-@@ -401,4 +401,6 @@
+@@ -401,8 +401,14 @@
          # these runs, and a bare success=False with error=None reads as an unexplained failure). See #83993.
          ok = last_status in {"ok", "delivery_queued"}
 +        if last_status == "quota_skipped":
 +            run_error = "Задание пропущено из-за суточного лимита автоматизаций."
          if execution is not None and execution.get("status") != "completed":
              ok = False
-@@ -727,4 +729,9 @@
+             run_error = execution.get("error") or f"execution ended in {execution.get('status') or 'unknown'} state"
+-        return {"claimed": True, "success": bool(processed and ok), "error": run_error}
++        result = {"claimed": True, "success": bool(processed and ok), "error": run_error}
++        quota_outcome = job.get("_brai_automation_admission") or (execution or {}).get("delivery_outcome") or ""
++        if quota_outcome.startswith("quota_"):
++            result["_brai_quota_no_wake"] = True
++        return result
+     except Exception as e:
+         logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
+@@ -507,4 +513,6 @@
+     res: dict[str, Any], job_id: str, job_name: str, deliver: str, started_at: float) -> dict[str, Any]:
+     """Async-delegation completion block for a finished background manual run."""
++    if res.get("_brai_quota_no_wake") is True:
++        return {"status": "completed", "_brai_quota_no_wake": True}
+     duration = round(time.time() - started_at, 2)
+     refreshed = get_job(job_id) or {}
+@@ -727,4 +735,9 @@
          _result.update(_gateway_liveness_notice(plural=True))
      return _dumps(_result)
 +
@@ -2163,14 +2207,14 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +    return _dumps({"success": True, "job": {**_format_job(job), "prompt": job.get("prompt") or ""}})
 
 
-@@ -957,5 +964,5 @@
+@@ -957,5 +970,5 @@
  _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
  _JOB_ACTIONS = {
 -    "remove": _action_remove, "update": _action_update,
 +    "get": _action_get, "remove": _action_remove, "update": _action_update,
      "run": _action_run, "run_now": _action_run, "trigger": _action_run,
      "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
-@@ -1058,5 +1065,13 @@
+@@ -1058,5 +1071,13 @@
      "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
 
 -Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless pinned.
@@ -2185,7 +2229,7 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +user did not ask to change. Confirm the change or removal only after the tool succeeds.
 
  Jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless the user pins one. Prefer updating an existing job over creating near-duplicates.""",
-@@ -1068,9 +1083,9 @@
+@@ -1068,9 +1089,9 @@
              "action": {
                  "type": "string",
 -                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
@@ -2197,7 +2241,7 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +                "description": "Required for get/update/pause/resume/remove/run. Use the selected ID from list."
              },
              "pinned": {
-@@ -1089,5 +1104,5 @@
+@@ -1089,5 +1110,5 @@
              "name": {
                  "type": "string",
 -                "description": "Optional human-friendly name"
@@ -2230,18 +2274,33 @@ diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
 +    single_attempt: bool = False,
  ) -> Any:
      """Centralized synchronous LLM call: resolve provider/model, auth, kwargs, fallbacks.
-@@ -8217,4 +8219,6 @@
+@@ -8217,4 +8219,15 @@
      )
      client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
-+    if single_attempt and callable(getattr(client, "with_options", None)):
-+        client = client.with_options(max_retries=0)
++    if single_attempt:
++        if isinstance(client, OpenAI):
++            if client.max_retries != 0:
++                client = client.with_options(max_retries=0)
++        elif (
++            not isinstance(client, CodexAuxiliaryClient)
++            or not isinstance(client._real_client, OpenAI)
++            or client._real_client.max_retries != 0
++        ):
++            # Other wrappers may resend through a provider SDK or renegotiate streaming.
++            raise RuntimeError("Configured auxiliary transport cannot guarantee a single attempt")
      # Streaming path (MoA aggregator): return the raw SDK stream, skipping validation and
      # the fallback chain (they assume a complete response); the caller owns reassembly/fallback.
-@@ -8252,4 +8256,6 @@
+@@ -8252,4 +8265,12 @@
              task, **validate_kw,
          )
 +    if single_attempt:
-+        return _primary(provider=request_provider, base_url=req.base_info)
++        # The regular progress wrapper can renegotiate token limits or retry another wire shape.
++        # Use the selected transport directly for a notification with a fixed-text fallback.
++        response = _relay_sync_completion(
++            client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode,
++            create=lambda request: client.chat.completions.create(**request),
++        )
++        return _validate_llm_response(response, task, provider=request_provider, base_url=req.base_info)
      try:
          # Bounded same-provider retry (exponential backoff, auxiliary.transient_retries) for
 
@@ -2263,7 +2322,8 @@ diff --git a/cron/executions.py b/cron/executions.py
 diff --git a/cron/jobs.py b/cron/jobs.py
 --- a/cron/jobs.py
 +++ b/cron/jobs.py
-@@ -2377,21 +2377,22 @@
+@@ -2376,23 +2376,24 @@
+     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
      job["last_status"] = status or (
          "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
 -    job["last_error"] = None if success else error
@@ -2303,13 +2363,17 @@ diff --git a/cron/jobs.py b/cron/jobs.py
 +            job["last_failure"] = {"at": now, "detail": error or (status or "run failed")}
      job["last_delivery_error"] = delivery_error
      # Clear both claims: the run is over, so the job is claimable again.
-@@ -2465,4 +2466,5 @@
+     job["fire_claim"] = None
+@@ -2464,6 +2465,7 @@
+     ladder_rung: bool = False,
      quota_hold_seconds: Optional[float] = None,
      recover_consumed_fire: bool = False,
 +    automation_occurrence: Optional[str] = None,
  ) -> bool:
      """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
-@@ -2499,8 +2501,9 @@
+     and retire the record as a terminal completion when the repeat limit is reached.
+@@ -2498,15 +2500,19 @@
+         _record_run_outcome(job, success, error, delivery_error, status, now)
          _advance_after_run(job, now, ladder_rung=ladder_rung)
          from cron import quota_hold
 -        from cron.unreachable_retry import clear_state, plan_retry
@@ -2321,3 +2385,182 @@ diff --git a/cron/jobs.py b/cron/jobs.py
 +                job[STATE_KEY]["brai_automation_occurrence"] = automation_occurrence
          else:
              # Any run that reached the model (either outcome) resets the re-run ladder.
+             clear_state(job)
+         if not success and quota_hold_seconds and not is_terminal_job(job):
+-            quota_hold.plan_hold(job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire)
++            quota_hold.plan_hold(
++                job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire,
++                **({"automation_occurrence": automation_occurrence} if automation_occurrence else {}),
++            )
+         else:
+             quota_hold.clear_state(job)
+         save_jobs(jobs)
+@@ -2689,6 +2695,43 @@
+     return _with_job(job_id, apply, False)
+
+
++def release_unadmitted_automation(snapshot: dict, expected_owner: Optional[str]) -> bool:
++    """Вернуть допущенный планировщиком слот, если политика не разрешила его запуск."""
++    from cron.occurrences import scheduled_instant
++
++    job_id = snapshot["id"]
++
++    def apply(jobs, _index, job):
++        claim = job.get("fire_claim")
++        owner = (claim or {}).get("by") if isinstance(claim, dict) else None
++        if owner != expected_owner:
++            return False
++
++        job["fire_claim"] = None
++        job.pop("manual_run_at", None)
++        job.pop("manual_run_prompt", None)
++        if job.get("schedule") == snapshot.get("schedule"):
++            if (job.get("schedule") or {}).get("kind") == "once":
++                repeat = job.get("repeat") or {}
++                before = snapshot.get("repeat") or {}
++                if (
++                    repeat.get("times") == before.get("times")
++                    and repeat.get("times")
++                    and repeat.get("completed", 0) == before.get("completed", 0) + 1
++                ):
++                    repeat["completed"] = before.get("completed", 0)
++                claim = job.get("run_claim")
++                job["run_claim"] = {"outage": True} if isinstance(claim, dict) and claim.get("outage") else None
++            elif job.get("enabled", True) and job.get("next_run_at") == snapshot.get("next_run_at"):
++                instant = scheduled_instant(snapshot.get("_scheduled_instant"))
++                if instant:
++                    job["next_run_at"] = instant
++        save_jobs(jobs)
++        return True
++
++    return _under_fire_fence(job_id, lambda: _with_job(job_id, apply, missing=False))
++
++
+ def advance_next_runs(job_ids) -> int:
+     """Batch form of :func:`advance_next_run`: one load + at most one save for the whole due set;
+     one-shot/unknown ids are skipped. Returns the count advanced. Persisted once at the end, so a
+@@ -2740,7 +2783,7 @@
+
+ def claim_job_for_fire(
+     job_id: str, *, claim_ttl_seconds: int = FIRE_CLAIM_TTL_SECONDS, force: bool = False,
+-    manual: bool = False, return_job: bool = False,
++    manual: bool = False, return_job: bool = False, require_due: bool = False,
+ ) -> Union[bool, dict[str, Any]]:
+     """Atomically claim a job for one external 'fire' (multi-machine at-most-once); True iff THIS
+     caller won (``CronScheduler.fire_due``: exactly one of N replicas runs a job). Under the
+@@ -2783,6 +2826,8 @@
+         if (instant is not None
+                 and datetime.fromisoformat(instant) - now >= timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)):
+             instant = None
++        if require_due and instant is None:
++            return False
+         if instant and completed_occurrence(job, instant):
+             if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
+                 nxt = compute_next_run(job["schedule"], now.isoformat())
+
+diff --git a/cron/quota_hold.py b/cron/quota_hold.py
+--- a/cron/quota_hold.py
++++ b/cron/quota_hold.py
+@@ -28,4 +28,5 @@
+ STATE_KEY = "quota_hold_until"
+ SCHEDULE_EXPR_KEY = "quota_hold_cron_expr"
++AUTOMATION_OCCURRENCE_KEY = "brai_quota_hold_occurrence"
+
+ # The provider's remaining seconds were measured when the probe ran; by the time the run is
+@@ -68,4 +69,5 @@
+     job.pop(STATE_KEY, None)
+     job.pop(SCHEDULE_EXPR_KEY, None)
++    job.pop(AUTOMATION_OCCURRENCE_KEY, None)
+
+
+@@ -112,4 +114,5 @@
+ def plan_hold(
+     job: dict[str, Any], hold_seconds: float, *, recover_consumed_fire: bool = False,
++    automation_occurrence: Optional[str] = None,
+ ) -> bool:
+     """Called under the jobs lock AFTER ``_advance_after_run`` computed the schedule's natural
+@@ -137,7 +140,10 @@
+     else:
+         parked = window_end.isoformat()
++    job.pop(AUTOMATION_OCCURRENCE_KEY, None)
+     if recover:
+         # Only the recovery fire is off-lattice; the coalesced instant is a legal occurrence.
+         job[SCHEDULE_EXPR_KEY] = schedule.get("expr")
++        if automation_occurrence:
++            job[AUTOMATION_OCCURRENCE_KEY] = automation_occurrence
+     else:
+         job.pop(SCHEDULE_EXPR_KEY, None)
+
+diff --git a/cron/scheduler_provider.py b/cron/scheduler_provider.py
+--- a/cron/scheduler_provider.py
++++ b/cron/scheduler_provider.py
+@@ -206,4 +206,8 @@
+         execution = create_execution(job_id, source=self.name)
+         claim_kwargs = {"return_job": True}
++        if self.name == "chronos" and not (force or manual):
++            # NAS callbacks own due occurrences only. A duplicate arriving before the next
++            # slot must not be reinterpreted as an unscheduled manual launch.
++            claim_kwargs["require_due"] = True
+         if force:
+             claim_kwargs["force"] = True
+
+diff --git a/cron/scheduler_worker_failure.py b/cron/scheduler_worker_failure.py
+--- a/cron/scheduler_worker_failure.py
++++ b/cron/scheduler_worker_failure.py
+@@ -1,3 +1,30 @@
+ """Job-level visibility for a recovered, acknowledged worker death."""
++
++
++def _recover_quota_skip(job, owner, *, adapters=None, loop=None):
++    """Finish a known skipped fire without starting a model or repeating a queued delivery."""
++    from cron import scheduler
++    from cron.delivery_queue import get_status
++    from cron.unreachable_retry import is_retry_run
++    from identity.automation_quota import notice, saved_skip
++
++    execution_id = str(job["execution_id"])
++    delivery_error = None
++    try:
++        if get_status(execution_id) is None:
++            quota = saved_skip(job, execution_id)
++            if quota is not None and quota.exceeded:
++                text = notice(job, quota)
++                delivery_job = {**job, "_brai_quota_notice": True}
++                delivery_error = scheduler._deliver_result(
++                    delivery_job, text, adapters=adapters, loop=loop,
++                )
++    except Exception as error:
++        scheduler.logger.warning("Automation skip recovery delivery failed: %s", type(error).__name__)
++        delivery_error = "Automation quota notification delivery failed"
++    scheduler.mark_job_run(
++        job["id"], True, delivery_error=delivery_error, status="quota_skipped",
++        expected_fire_owner=owner, ladder_rung=is_retry_run(job),
++    )
+
+
+@@ -23,4 +50,8 @@
+     with scheduler.fire_claim_fence(job["id"], expected_owner=owner) as owns_claim:
+         if not owns_claim:
++            return True
++        if execution.get("delivery_outcome") == "quota_pending":
++            with scheduler._fire_secret_scope():
++                _recover_quota_skip(job, owner, adapters=adapters, loop=loop)
+             return True
+         error = error or execution["error"]
+
+diff --git a/tools/async_delegation.py b/tools/async_delegation.py
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -950,5 +950,11 @@
+         record["progress_fn"] = None  # stop stale-monitor sampling
+         snapshot = dict(record)
+-    _push_completion_event(snapshot, result(snapshot) if callable(result) else result, status)
++    completion = result(snapshot) if callable(result) else result
++    quota_skip = (
++        snapshot.get("role") == "cron_run" and isinstance(completion, dict)
++        and completion.get("_brai_quota_no_wake") is True
++    )
++    if not quota_skip:
++        _push_completion_event(snapshot, completion, status)
+     with _records_lock:
+         if delegation_id in _records:
