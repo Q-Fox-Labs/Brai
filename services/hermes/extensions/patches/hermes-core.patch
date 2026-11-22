@@ -41077,7 +41077,7 @@ index 07936db..dc917a6 100644
                                                                               explicit_base_url)
      try:
 diff --git a/gateway/run_shutdown.py b/gateway/run_shutdown.py
-index 3b94f09d..bedcfec9 100644
+index 3b94f09d..475d2434 100644
 --- a/gateway/run_shutdown.py
 +++ b/gateway/run_shutdown.py
 @@ -1,3 +1,5 @@
@@ -41130,20 +41130,40 @@ index 3b94f09d..bedcfec9 100644
  
          Called at the start of stop() while adapters are connected; send failures never block shutdown.
          """
-@@ -1067,9 +1059,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+@@ -1033,7 +1025,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+                     restart_source.platform.value, restart_source.chat_id, restart_source.thread_id
+                 )
+         notified: set[tuple[str, str, Optional[str]]] = set()
+-        for session_key in self._snapshot_running_agents():
++        for session_key, active_agent in self._snapshot_running_agents().items():
+             target = await self._shutdown_notification_target(session_key)
+             if target is None:
+                 continue
+@@ -1067,11 +1059,18 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
              # shape as the stall watcher). The requester's own chat on an in-chat /restart is the
              # requested outcome of that command and is never suppressed.
              async def _send_active(adapter=adapter, chat_id=chat_id, platform_str=platform_str,
 -                                   metadata=metadata, dedup_key=dedup_key):
-+                                   metadata=metadata, dedup_key=dedup_key, thread_id=thread_id):
-                 if await self._send_shutdown_notice(
+-                if await self._send_shutdown_notice(
 -                    adapter, chat_id, msg, "active chat", platform_str, metadata=metadata
-+                    adapter, chat_id, msg, "active chat", platform_str,
-+                    return_thread_id=thread_id, metadata=metadata
-                 ):
-                     notified.add(dedup_key)
+-                ):
+-                    notified.add(dedup_key)
++                                   metadata=metadata, dedup_key=dedup_key, thread_id=thread_id,
++                                   session_key=session_key, active_agent=active_agent):
++                scope_factory = getattr(self, "_brai_shutdown_notice_scope", None)
++                scope = scope_factory(session_key) if callable(scope_factory) else nullcontext(True)
++                with scope as allowed:
++                    if not allowed or self._snapshot_running_agents().get(session_key) is not active_agent:
++                        return
++                    if await self._send_shutdown_notice(
++                        adapter, chat_id, msg, "active chat", platform_str,
++                        return_thread_id=thread_id, metadata=metadata
++                    ):
++                        notified.add(dedup_key)
              from gateway.warning_notifications import present_notification
-@@ -1079,54 +1072,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+             from gateway.run import _async_profile_runtime_scope
+             scope = (_async_profile_runtime_scope(self._resolve_profile_home_for_source(source))
+@@ -1079,54 +1078,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
              async with scope:
                  presented = await present_notification(_send_active, platform=platform, diagnostic=restart_key != dedup_key)
              if not presented:
@@ -41199,7 +41219,7 @@ index 3b94f09d..bedcfec9 100644
  
      # Agent finalization / resource cleanup
      @staticmethod
-@@ -2124,8 +2070,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+@@ -2124,8 +2076,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
  
      async def _stop_persist_exit_state(self, ctx: "GatewayShutdownMixin._StopContext") -> None:
          """PID/lock release, clean-shutdown marker, restart markers, terminal runtime status."""
@@ -41209,7 +41229,7 @@ index 3b94f09d..bedcfec9 100644
          from gateway.status import remove_pid_file, release_gateway_runtime_lock
          remove_pid_file()
          release_gateway_runtime_lock()
-@@ -2142,17 +2087,6 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
+@@ -2142,17 +2093,6 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
          # Stuck-loop counter: sessions active across 3 consecutive restarts are auto-suspended next boot.
          if ctx.active_agents:
              self._increment_restart_failure_counts(set(ctx.active_agents.keys()))
@@ -41688,16 +41708,19 @@ index f0edf004..8ecf9832 100644
  # ---------------------------------------------------------------------------
 diff --git a/tests/gateway/test_return_notices.py b/tests/gateway/test_return_notices.py
 new file mode 100644
-index 00000000..a60c2a32
+index 00000000..78e594c4
 --- /dev/null
 +++ b/tests/gateway/test_return_notices.py
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,208 @@
 +# ABOUTME: Проверяет парные уведомления остановки и запуска по реальным маршрутам.
 +# ABOUTME: Использует native gateway и временный профиль без отправок в Telegram.
 +"""Регрессии возврата в несколько чатов/топиков и продолжения без сообщения."""
 +
 +import asyncio
 +import json
++from pathlib import Path
++import re
++from contextlib import contextmanager
 +from datetime import datetime
 +from types import SimpleNamespace
 +from unittest.mock import AsyncMock, Mock, patch
@@ -41760,6 +41783,40 @@ index 00000000..a60c2a32
 +
 +
 +@pytest.mark.asyncio
++async def test_unavailable_owner_scope_suppresses_warning(lifecycle):
++    runner, adapter, _ = lifecycle
++    source = _add_task(runner, "-1001", "7")
++    seen = []
++
++    @contextmanager
++    def scope(session_key):
++        seen.append(session_key)
++        yield False
++
++    runner._brai_shutdown_notice_scope = scope
++    await runner._notify_active_sessions_of_shutdown()
++    assert seen == [build_session_key(source)]
++    assert adapter.sent_calls == []
++
++
++@pytest.mark.asyncio
++async def test_finished_agent_is_not_warned_after_route_lookup(lifecycle):
++    runner, adapter, _ = lifecycle
++    source = _add_task(runner, "-1001", "7")
++    key = build_session_key(source)
++    lookup = runner._shutdown_notification_target
++
++    async def finish_during_lookup(session_key):
++        target = await lookup(session_key)
++        runner._running_agents.pop(key)
++        return target
++
++    runner._shutdown_notification_target = finish_during_lookup
++    await runner._notify_active_sessions_of_shutdown()
++    assert adapter.sent_calls == []
++
++
++@pytest.mark.asyncio
 +@pytest.mark.parametrize("legacy", [
 +    {"requested_at": 1},
 +    {"recipients": [{"platform": "telegram", "chat_id": "-1003", "thread_id": None, "notice_id": "old"}]},
@@ -41794,6 +41851,14 @@ index 00000000..a60c2a32
 +    adapter.send = AsyncMock(return_value=SendResult(success=False, error="offline"))
 +    await runner._notify_active_sessions_of_shutdown()
 +    assert not marker.exists()
++
++
++@pytest.mark.parametrize("language", "af ar de es fr ga hu it ja ko pt tr uk zh-hant zh".split())
++def test_other_languages_do_not_ask_for_input_after_restart(language):
++    catalog = (Path(__file__).resolve().parents[2] / "locales" / f"{language}.yaml").read_text()
++    notices = re.findall(r'^    notice_(?:shutdown|restart): "([^"\n]+)"$', catalog, re.MULTILINE)
++    assert len(notices) == 2
++    assert all(re.fullmatch(r"[^.。]+[.。]", text) for text in notices)
 +
 +
 +@pytest.mark.parametrize("reason", ["restart_timeout", "shutdown_timeout", "restart_interrupted"])
@@ -42300,3 +42365,228 @@ index 8318c471..5313c05b 100644
  
    startup:
      handoff_thread_title: "Hermes — {title}"
+diff --git a/locales/af.yaml b/locales/af.yaml
+index 31af11a4..9fb55c8d 100644
+--- a/locales/af.yaml
++++ b/locales/af.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "besig om af te sluit"
+     action_restarting: "besig om te herbegin"
+     cron_interrupted: "⚠️ Geskeduleerde taak '{job}' is kortgeknip omdat Hermes {action} is; geen resultaat vir hierdie lopie nie. Dit sal weer volgens skedule loop, of voer dit nou uit met `hermes cron run {job}` sodra Hermes terug is."
+-    notice_shutdown: "⚠️ Hermes sluit af — jou huidige taak sal onderbreek word. Wanneer dit weer aanlyn is, stuur enige boodskap en ek sal probeer voortgaan waar ons opgehou het."
+-    notice_restart: "⚠️ Hermes herbegin — jou huidige taak sal onderbreek word. Stuur enige boodskap na die herbegin en ek sal probeer voortgaan waar jy opgehou het."
++    notice_shutdown: "⚠️ Hermes sluit af — jou huidige taak sal onderbreek word."
++    notice_restart: "⚠️ Hermes herbegin — jou huidige taak sal onderbreek word."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway suksesvol herbegin. Jou sessie gaan voort."
+diff --git a/locales/ar.yaml b/locales/ar.yaml
+index 044d6504..3493f144 100644
+--- a/locales/ar.yaml
++++ b/locales/ar.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "قيد إيقاف التشغيل"
+     action_restarting: "قيد إعادة التشغيل"
+     cron_interrupted: "⚠️ قُطعت المهمة المجدولة '{job}' لأن Hermes {action}؛ لا نتيجة لهذا التشغيل. ستعمل مجددًا في موعدها، أو شغّلها الآن بـ `hermes cron run {job}` بعد عودة Hermes."
+-    notice_shutdown: "⚠️ Hermes قيد إيقاف التشغيل — ستُقطع مهمتك الحالية. عند عودته إلى الاتصال، أرسل أي رسالة وسأحاول المتابعة من حيث توقفنا."
+-    notice_restart: "⚠️ Hermes قيد إعادة التشغيل — ستُقطع مهمتك الحالية. أرسل أي رسالة بعد إعادة التشغيل وسأحاول الاستئناف من حيث توقفت."
++    notice_shutdown: "⚠️ Hermes قيد إيقاف التشغيل — ستُقطع مهمتك الحالية."
++    notice_restart: "⚠️ Hermes قيد إعادة التشغيل — ستُقطع مهمتك الحالية."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ أُعيد تشغيل البوّابة بنجاح. جلستك مستمرة."
+diff --git a/locales/de.yaml b/locales/de.yaml
+index 17c884bb..6f7cbd9c 100644
+--- a/locales/de.yaml
++++ b/locales/de.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "herunterfährt"
+     action_restarting: "neu startet"
+     cron_interrupted: "⚠️ Der geplante Job '{job}' wurde abgebrochen, weil Hermes gerade {action}; kein Ergebnis in diesem Lauf. Er läuft wieder nach Zeitplan, oder Sie starten ihn mit `hermes cron run {job}`, sobald Hermes zurück ist."
+-    notice_shutdown: "⚠️ Hermes wird heruntergefahren — Ihre aktuelle Aufgabe wird unterbrochen. Sobald Hermes wieder online ist, senden Sie eine beliebige Nachricht und ich versuche, dort weiterzumachen, wo wir aufgehört haben."
+-    notice_restart: "⚠️ Hermes wird neu gestartet — Ihre aktuelle Aufgabe wird unterbrochen. Senden Sie nach dem Neustart eine beliebige Nachricht und ich versuche, dort weiterzumachen, wo Sie aufgehört haben."
++    notice_shutdown: "⚠️ Hermes wird heruntergefahren — Ihre aktuelle Aufgabe wird unterbrochen."
++    notice_restart: "⚠️ Hermes wird neu gestartet — Ihre aktuelle Aufgabe wird unterbrochen."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway erfolgreich neu gestartet. Ihre Sitzung wird fortgesetzt."
+diff --git a/locales/es.yaml b/locales/es.yaml
+index 54b600db..82dbb8e4 100644
+--- a/locales/es.yaml
++++ b/locales/es.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "apagándose"
+     action_restarting: "reiniciándose"
+     cron_interrupted: "⚠️ La tarea programada '{job}' se interrumpió porque Hermes se está {action}; esta vez no hay resultado. Volverá a ejecutarse según lo programado, o puedes lanzarla ahora con `hermes cron run {job}` cuando Hermes vuelva a estar disponible."
+-    notice_shutdown: "⚠️ Hermes se está apagando — tu tarea actual se interrumpirá. Cuando vuelva a estar en línea, envía cualquier mensaje e intentaré continuar donde lo dejamos."
+-    notice_restart: "⚠️ Hermes se está reiniciando — tu tarea actual se interrumpirá. Envía cualquier mensaje después del reinicio e intentaré retomar donde lo dejaste."
++    notice_shutdown: "⚠️ Hermes se está apagando — tu tarea actual se interrumpirá."
++    notice_restart: "⚠️ Hermes se está reiniciando — tu tarea actual se interrumpirá."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway reiniciado correctamente. Tu sesión continúa."
+diff --git a/locales/fr.yaml b/locales/fr.yaml
+index 07c542af..6356b4f7 100644
+--- a/locales/fr.yaml
++++ b/locales/fr.yaml
+@@ -994,8 +994,8 @@ gateway:
+     action_shutting_down: "en cours d'arrêt"
+     action_restarting: "en cours de redémarrage"
+     cron_interrupted: "⚠️ La tâche planifiée '{job}' a été interrompue car Hermes est {action} ; aucun résultat pour cette exécution. Elle se relancera selon son planning, ou lancez-la maintenant avec `hermes cron run {job}` une fois Hermes de retour."
+-    notice_shutdown: "⚠️ Hermes s'arrête — votre tâche en cours va être interrompue. Une fois de retour en ligne, envoyez n'importe quel message et j'essaierai de reprendre là où nous en étions."
+-    notice_restart: "⚠️ Hermes redémarre — votre tâche en cours va être interrompue. Envoyez n'importe quel message après le redémarrage et j'essaierai de reprendre là où vous en étiez."
++    notice_shutdown: "⚠️ Hermes s'arrête — votre tâche en cours va être interrompue."
++    notice_restart: "⚠️ Hermes redémarre — votre tâche en cours va être interrompue."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway redémarré avec succès. Votre session continue."
+diff --git a/locales/ga.yaml b/locales/ga.yaml
+index ba573336..604e916e 100644
+--- a/locales/ga.yaml
++++ b/locales/ga.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "ag múchadh"
+     action_restarting: "ag atosú"
+     cron_interrupted: "⚠️ Gearradh an tasc sceidealta '{job}' go gairid mar tá Hermes {action}; gan toradh an rith seo. Rithfidh sé arís de réir an sceidil, nó rith anois é le `hermes cron run {job}` nuair a bheidh Hermes ar ais."
+-    notice_shutdown: "⚠️ Tá Hermes ag múchadh — cuirfear isteach ar do thasc reatha. Nuair a bheidh sé ar líne arís, seol teachtaireacht ar bith agus déanfaidh mé iarracht leanúint ar aghaidh ón áit ar stopamar."
+-    notice_restart: "⚠️ Tá Hermes ag atosú — cuirfear isteach ar do thasc reatha. Seol teachtaireacht ar bith tar éis an atosaithe agus déanfaidh mé iarracht leanúint ar aghaidh ón áit ar stop tú."
++    notice_shutdown: "⚠️ Tá Hermes ag múchadh — cuirfear isteach ar do thasc reatha."
++    notice_restart: "⚠️ Tá Hermes ag atosú — cuirfear isteach ar do thasc reatha."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Atosaíodh an gateway go rathúil. Leanann do sheisiún ar aghaidh."
+diff --git a/locales/hu.yaml b/locales/hu.yaml
+index f6136215..d5a4044d 100644
+--- a/locales/hu.yaml
++++ b/locales/hu.yaml
+@@ -850,8 +850,8 @@ gateway:
+     action_shutting_down: "leáll"
+     action_restarting: "újraindul"
+     cron_interrupted: "⚠️ A(z) '{job}' ütemezett feladat megszakadt, mert a Hermes {action}; ebben a futásban nincs eredmény. Ütemezés szerint újra lefut, vagy futtasd most a `hermes cron run {job}` paranccsal, amint a Hermes visszatért."
+-    notice_shutdown: "⚠️ A Hermes leáll — a jelenlegi feladatod megszakad. Amikor újra elérhető, küldj egy tetszőleges üzenetet, és megpróbálom onnan folytatni, ahol abbahagytuk."
+-    notice_restart: "⚠️ A Hermes újraindul — a jelenlegi feladatod megszakad. Az újraindítás után küldj egy tetszőleges üzenetet, és megpróbálom onnan folytatni, ahol abbahagytad."
++    notice_shutdown: "⚠️ A Hermes leáll — a jelenlegi feladatod megszakad."
++    notice_restart: "⚠️ A Hermes újraindul — a jelenlegi feladatod megszakad."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Az átjáró sikeresen újraindult. A munkameneted folytatódik."
+diff --git a/locales/it.yaml b/locales/it.yaml
+index 407f7810..1586e22e 100644
+--- a/locales/it.yaml
++++ b/locales/it.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "in arresto"
+     action_restarting: "in riavvio"
+     cron_interrupted: "⚠️ Il job pianificato '{job}' è stato interrotto perché Hermes è {action}; nessun risultato per questa esecuzione. Verrà eseguito di nuovo come pianificato, oppure eseguilo subito con `hermes cron run {job}` quando Hermes sarà tornato."
+-    notice_shutdown: "⚠️ Hermes si sta arrestando — la tua attività corrente verrà interrotta. Quando sarà di nuovo online, invia un messaggio qualsiasi e proverò a riprendere da dove eravamo rimasti."
+-    notice_restart: "⚠️ Hermes si sta riavviando — la tua attività corrente verrà interrotta. Invia un messaggio qualsiasi dopo il riavvio e proverò a riprendere da dove eri rimasto."
++    notice_shutdown: "⚠️ Hermes si sta arrestando — la tua attività corrente verrà interrotta."
++    notice_restart: "⚠️ Hermes si sta riavviando — la tua attività corrente verrà interrotta."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway riavviato correttamente. La tua sessione continua."
+diff --git a/locales/ja.yaml b/locales/ja.yaml
+index 31b16313..9e5489ce 100644
+--- a/locales/ja.yaml
++++ b/locales/ja.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "シャットダウン中"
+     action_restarting: "再起動中"
+     cron_interrupted: "⚠️ Hermes が{action}のため、スケジュールジョブ '{job}' は途中で打ち切られました。今回の実行結果はありません。次回のスケジュールで再実行されます。Hermes の復帰後に `hermes cron run {job}` で今すぐ実行することもできます。"
+-    notice_shutdown: "⚠️ Hermes はシャットダウン中です — 現在のタスクは中断されます。オンラインに戻ったら何かメッセージを送ってください。中断したところから再開を試みます。"
+-    notice_restart: "⚠️ Hermes は再起動中です — 現在のタスクは中断されます。再起動後に何かメッセージを送ってください。中断したところから再開を試みます。"
++    notice_shutdown: "⚠️ Hermes はシャットダウン中です — 現在のタスクは中断されます。"
++    notice_restart: "⚠️ Hermes は再起動中です — 現在のタスクは中断されます。"
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ ゲートウェイの再起動に成功しました。セッションは継続します。"
+diff --git a/locales/ko.yaml b/locales/ko.yaml
+index 9cd83fba..4ed85831 100644
+--- a/locales/ko.yaml
++++ b/locales/ko.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "종료 중"
+     action_restarting: "재시작 중"
+     cron_interrupted: "⚠️ Hermes가 {action}이어서 예약 작업 '{job}'이(가) 중단되었고, 이번 실행의 결과는 없어요. 예약대로 다시 실행되며, Hermes가 돌아온 뒤 `hermes cron run {job}`으로 지금 실행할 수도 있어요."
+-    notice_shutdown: "⚠️ Hermes가 종료 중이에요 — 현재 작업이 중단돼요. 다시 온라인이 되면 아무 메시지나 보내 주세요. 중단된 곳부터 이어서 진행해 볼게요."
+-    notice_restart: "⚠️ Hermes가 재시작 중이에요 — 현재 작업이 중단돼요. 재시작 후 아무 메시지나 보내 주시면 중단된 곳부터 이어서 진행해 볼게요."
++    notice_shutdown: "⚠️ Hermes가 종료 중이에요 — 현재 작업이 중단돼요."
++    notice_restart: "⚠️ Hermes가 재시작 중이에요 — 현재 작업이 중단돼요."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ 게이트웨이가 성공적으로 재시작되었어요. 세션은 계속 이어져요."
+diff --git a/locales/pt.yaml b/locales/pt.yaml
+index 77a9a44b..c04abe46 100644
+--- a/locales/pt.yaml
++++ b/locales/pt.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "sendo encerrado"
+     action_restarting: "sendo reiniciado"
+     cron_interrupted: "⚠️ A tarefa agendada '{job}' foi interrompida porque o Hermes está {action}; sem resultado nesta execução. Ela rodará de novo conforme o agendamento, ou execute agora com `hermes cron run {job}` quando o Hermes voltar."
+-    notice_shutdown: "⚠️ O Hermes está sendo encerrado — sua tarefa atual será interrompida. Quando ele voltar a ficar online, envie qualquer mensagem e tentarei continuar de onde paramos."
+-    notice_restart: "⚠️ O Hermes está sendo reiniciado — sua tarefa atual será interrompida. Envie qualquer mensagem após o reinício e tentarei retomar de onde você parou."
++    notice_shutdown: "⚠️ O Hermes está sendo encerrado — sua tarefa atual será interrompida."
++    notice_restart: "⚠️ O Hermes está sendo reiniciado — sua tarefa atual será interrompida."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway reiniciado com sucesso. Sua sessão continua."
+diff --git a/locales/tr.yaml b/locales/tr.yaml
+index 3b07045b..19d49812 100644
+--- a/locales/tr.yaml
++++ b/locales/tr.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "kapanıyor"
+     action_restarting: "yeniden başlatılıyor"
+     cron_interrupted: "⚠️ Zamanlanmış '{job}' işi Hermes {action} olduğu için yarıda kesildi; bu çalıştırmada sonuç yok. Zamanı geldiğinde yeniden çalışacak; Hermes geri geldiğinde `hermes cron run {job}` ile hemen de çalıştırabilirsiniz."
+-    notice_shutdown: "⚠️ Hermes kapanıyor — geçerli göreviniz yarıda kesilecek. Yeniden çevrimiçi olduğunda herhangi bir mesaj gönderin; kaldığımız yerden devam etmeyi deneyeceğim."
+-    notice_restart: "⚠️ Hermes yeniden başlatılıyor — geçerli göreviniz yarıda kesilecek. Yeniden başlatmadan sonra herhangi bir mesaj gönderin; kaldığınız yerden sürdürmeyi deneyeceğim."
++    notice_shutdown: "⚠️ Hermes kapanıyor — geçerli göreviniz yarıda kesilecek."
++    notice_restart: "⚠️ Hermes yeniden başlatılıyor — geçerli göreviniz yarıda kesilecek."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Gateway başarıyla yeniden başlatıldı. Oturumunuz devam ediyor."
+diff --git a/locales/uk.yaml b/locales/uk.yaml
+index 3e34c793..fbea533b 100644
+--- a/locales/uk.yaml
++++ b/locales/uk.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "вимикається"
+     action_restarting: "перезапускається"
+     cron_interrupted: "⚠️ Заплановане завдання '{job}' перервано, бо Hermes {action}; цього разу результату немає. Воно знову виконається за розкладом, або запустіть його зараз командою `hermes cron run {job}`, коли Hermes знову запрацює."
+-    notice_shutdown: "⚠️ Hermes вимикається — ваше поточне завдання буде перервано. Коли він знову буде онлайн, надішліть будь-яке повідомлення, і я спробую продовжити з того місця, де ми зупинилися."
+-    notice_restart: "⚠️ Hermes перезапускається — ваше поточне завдання буде перервано. Після перезапуску надішліть будь-яке повідомлення, і я спробую продовжити з того місця, де ви зупинилися."
++    notice_shutdown: "⚠️ Hermes вимикається — ваше поточне завдання буде перервано."
++    notice_restart: "⚠️ Hermes перезапускається — ваше поточне завдання буде перервано."
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ Шлюз успішно перезапущено. Ваш сеанс продовжується."
+diff --git a/locales/zh-hant.yaml b/locales/zh-hant.yaml
+index 309bba5d..f35eeade 100644
+--- a/locales/zh-hant.yaml
++++ b/locales/zh-hant.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "關閉中"
+     action_restarting: "重新啟動中"
+     cron_interrupted: "⚠️ 排程任務 '{job}' 因 Hermes 正在{action}而中斷；本次沒有結果。它會依排程再次執行，或在 Hermes 恢復後用 `hermes cron run {job}` 立即執行。"
+-    notice_shutdown: "⚠️ Hermes 正在關閉 — 你目前的任務將被中斷。恢復上線後，傳送任何訊息，我會試著從中斷處繼續。"
+-    notice_restart: "⚠️ Hermes 正在重新啟動 — 你目前的任務將被中斷。重新啟動後傳送任何訊息，我會試著從中斷處繼續。"
++    notice_shutdown: "⚠️ Hermes 正在關閉 — 你目前的任務將被中斷。"
++    notice_restart: "⚠️ Hermes 正在重新啟動 — 你目前的任務將被中斷。"
+   startup:
+     handoff_thread_title: "Hermes — {title}"
+     restarted: "♻ 閘道已成功重新啟動。你的工作階段將繼續。"
+diff --git a/locales/zh.yaml b/locales/zh.yaml
+index e8904057..1f8d8922 100644
+--- a/locales/zh.yaml
++++ b/locales/zh.yaml
+@@ -838,8 +838,8 @@ gateway:
+     action_shutting_down: "正在关闭"
+     action_restarting: "正在重启"
+     cron_interrupted: "⚠️ 定时任务 '{job}' 因 Hermes {action}而被中断；本次运行没有结果。它会按计划再次运行，或在 Hermes 恢复后用 `hermes cron run {job}` 立即运行。"
+-    notice_shutdown: "⚠️ Hermes 正在关闭——你当前的任务将被中断。恢复上线后，发送任意消息，我会尝试从中断处继续。"
+-    notice_restart: "⚠️ Hermes 正在重启——你当前的任务将被中断。重启后发送任意消息，我会尝试从你离开的地方继续。"
++    notice_shutdown: "⚠️ Hermes 正在关闭——你当前的任务将被中断。"
++    notice_restart: "⚠️ Hermes 正在重启——你当前的任务将被中断。"
+   startup:
+     handoff_thread_title: "Hermes——{title}"
+     restarted: "♻ 网关已成功重启。你的会话继续有效。"

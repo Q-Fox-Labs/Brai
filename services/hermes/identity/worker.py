@@ -16,6 +16,7 @@ import time
 from types import SimpleNamespace
 import uuid
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 from .adapter import make_adapter
 from .ipc import MAX_FRAME, Peer, RpcError, peer_uid
@@ -248,6 +249,7 @@ class Worker:
         self.runner._brai_identity_recovery_allowed = lambda source: self.route_allowed(source, recovery=True)
         self._install_failure_recovery(self.runner)
         self.runner._brai_return_notice_state = self.return_notice_state
+        self.runner._brai_shutdown_notice_scope = self.shutdown_notice_scope
         self.runner._brai_consent_generation = lambda source: (
             self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
             if self.route_allowed(source) else -1)
@@ -940,6 +942,25 @@ class Worker:
                 or type(state.get('generation')) is not int or state['generation'] < 0
                 or type(state.get('recoveryBlocked')) is not bool):
             raise RpcError(-32602, 'Invalid chat state')
+
+    @contextmanager
+    def shutdown_notice_scope(self, session_key):
+        """Выбрать действующий ingress scope этого хода без фонового маршрута."""
+        from .scope import delivery_scope
+        matches = [(token, task) for token, (key, task, _) in self.active.items()
+                   if key == session_key and task is not None and not task.done()
+                   and self.turn_scopes.get(token)]
+        if len(matches) != 1:
+            yield False
+            return
+        turn, task = matches[0]
+        scope = self.turn_scopes[turn]
+        token = delivery_scope.set(scope)
+        try:
+            yield (self.active.get(turn, (None, None))[1] is task
+                   and not task.done() and self.turn_scopes.get(turn) == scope)
+        finally:
+            delivery_scope.reset(token)
 
     def return_notice_state(self, chat, thread):
         """Вернуть известное поколение маршрута без создания нового состояния."""
