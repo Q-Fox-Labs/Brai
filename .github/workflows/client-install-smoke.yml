@@ -1,0 +1,67 @@
+# ABOUTME: Проверяет чистую клиентскую установку на одноразовом Ubuntu раннере GitHub.
+# ABOUTME: Использует штатный Ansible, отдельные тестовые входы и открытые сводки без секретов.
+name: Client install smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Brai SHA declared in the test client manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  install:
+    if: github.repository == 'Q-Fox-Labs/Brai'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check installer access and revision
+        env:
+          ADMIN_REPOSITORY: ${{ vars.BRAI_CI_ADMIN_REPOSITORY }}
+          ADMIN_SHA: ${{ vars.BRAI_CI_ADMIN_SHA }}
+          ADMIN_TOKEN: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
+        run: |
+          [[ "$ADMIN_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$ADMIN_SHA" =~ ^[a-f0-9]{40}$ && -n "$ADMIN_TOKEN" ]] || {
+            echo 'Set BRAI_CI_ADMIN_REPOSITORY, BRAI_CI_ADMIN_SHA and BRAI_CI_ADMIN_TOKEN.' >&2
+            exit 1
+          }
+      - name: Check out the installer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ vars.BRAI_CI_ADMIN_REPOSITORY }}
+          ref: ${{ vars.BRAI_CI_ADMIN_SHA }}
+          token: ${{ secrets.BRAI_CI_ADMIN_TOKEN }}
+          path: installer
+          persist-credentials: false
+      - name: Measure and free disk on the runner
+        run: |
+          df -h /
+          sudo rm -rf -- /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h /
+          # The installer installs Ubuntu's docker.io. Remove conflicting packages from the Actions image.
+          packages=()
+          for package in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; do
+            if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null)" == installed ]]; then
+              packages+=("$package")
+            fi
+          done
+          if ((${#packages[@]})); then
+            sudo apt-get purge -y "${packages[@]}"
+          fi
+      - name: Prepare the test inputs and run the client installer
+        env:
+          BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
+          BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
+          BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
+          BRAI_CI_REGISTRY_TOKEN: ${{ secrets.BRAI_CI_REGISTRY_TOKEN }}
+          BRAI_CI_REGISTRY_USER: ${{ vars.BRAI_CI_REGISTRY_USER }}
+          CI_PACKAGES_TOKEN: ${{ github.token }}
+        run: bash deploy/ci/run-client-install-smoke.sh "$GITHUB_WORKSPACE/installer"
