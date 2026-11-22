@@ -368,6 +368,85 @@ class ReleaseWorkersTest(unittest.IsolatedAsyncioTestCase):
 
 
 class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_release_startup_proves_polling_without_advancing_updater(self):
+        try:
+            from telegram.ext import Updater
+        except ImportError:
+            self.skipTest('Нужен установленный закреплённый python-telegram-bot')
+        from unittest.mock import patch
+
+        received = SimpleNamespace(update_id=42)
+        progress = asyncio.Event()
+        adapter = SimpleNamespace(
+            _check_polling_stall=AsyncMock(), _probe_pending_updates=AsyncMock(),
+            _verifier_stale=lambda *args: False, _escalate_stuck_consumer=lambda *args: None,
+            _schedule_polling_recovery=lambda *args, **kwargs: None, _updates_received_total=0,
+        )
+
+        async def readiness(observed, error, failures):
+            await asyncio.wait_for(observed.wait(), timeout=1)
+
+        adapter._await_cold_start_readiness = readiness
+
+        class FakeBot:
+            id = 123
+            calls = []
+            async def initialize(self): pass
+            async def shutdown(self): pass
+            async def get_updates(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs['offset'] > received.update_id:
+                    if kwargs['timeout'].total_seconds():
+                        await asyncio.Event().wait()
+                    return []
+                adapter._updates_received_total += 1
+                progress.set()
+                return [received]
+
+        async def bootstrap(*args, **kwargs): pass
+
+        bot, queue = FakeBot(), asyncio.Queue()
+        updater = Updater(bot, queue)
+        gate = ReleaseGate(SimpleNamespace(bot=bot, updater=updater, update_queue=queue))
+        mirror = SimpleNamespace(hydrate_held=AsyncMock(), hydrate=AsyncMock(), capture=AsyncMock())
+        gate.resolver = SimpleNamespace(mirror=mirror, release_resume=AsyncMock(return_value=True))
+        gate.install_watchdogs(adapter)
+        gate.install()
+        self.addCleanup(gate.restore)
+        gate.hold('op', probe_polling=True)
+        await updater.initialize()
+        with patch.object(Updater, '_bootstrap', bootstrap):
+            await updater.start_polling()
+        await adapter._await_cold_start_readiness(progress, asyncio.Event(), [])
+        await asyncio.wait_for(gate.drain, timeout=1)
+        self.assertEqual(bot.calls, [{'offset': 0, 'limit': 1, 'timeout': 0}])
+        self.assertEqual(adapter._updates_received_total, 0)
+        self.assertTrue(queue.empty())
+        mirror.capture.assert_not_awaited()
+
+        await gate.resume('op')
+        self.assertIs(await asyncio.wait_for(queue.get(), timeout=1), received)
+        mirror.capture.assert_awaited_once_with([received], bot.id)
+        self.assertEqual(bot.calls[1]['offset'], 0)
+        await updater.stop()
+        await updater.shutdown()
+
+    async def test_release_startup_transport_failure_keeps_gate_closed(self):
+        class FailedBot:
+            async def get_updates(self, **kwargs):
+                raise OSError('transport unavailable')
+
+        bot = FailedBot()
+        gate = ReleaseGate(SimpleNamespace(bot=bot, update_queue=asyncio.Queue()))
+        gate.install()
+        self.addCleanup(gate.restore)
+        gate.hold('op', probe_polling=True)
+        with self.assertRaisesRegex(OSError, 'transport unavailable'):
+            await bot.get_updates(offset=0)
+        self.assertFalse(gate.held.is_set())
+        self.assertEqual((await gate.status('op'))['state'], 'draining')
+        await gate.resume('op')
+
     async def test_real_updater_stops_with_only_cleanup_allowed(self):
         try:
             from telegram.ext import Updater

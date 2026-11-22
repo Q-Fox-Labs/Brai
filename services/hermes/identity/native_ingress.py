@@ -59,6 +59,7 @@ class ReleaseGate:
     def __init__(self, app):
         self.app = app
         self.operation = None
+        self.probe_held_startup = False
         self.held = asyncio.Event()
         self.poll_held = False
         self.hydration_failed = False
@@ -97,9 +98,9 @@ class ReleaseGate:
                 return
             return methods['_schedule_polling_recovery'](*args, **kwargs)
         async def readiness(progress, strict_error_event, strict_error):
-            # Startup hold is intentional; the poll and hydration remain fenced.
-            # Delegate any existing progress or strict error to the native verifier.
-            if self.operation is not None and not progress.is_set() and not strict_error and not strict_error_event.is_set():
+            # Legacy startup holds have no read-only polling probe.
+            if (self.operation is not None and not self.probe_held_startup
+                    and not progress.is_set() and not strict_error and not strict_error_event.is_set()):
                 return
             return await methods['_await_cold_start_readiness'](progress, strict_error_event, strict_error)
         wrappers = dict(zip(names,(stall,pending,stale,escalate,recovery,readiness)))
@@ -140,6 +141,18 @@ class ReleaseGate:
                         self.held.set()
                         raise
                     self.hydration_failed = False
+                    if self.probe_held_startup and not self.held.is_set():
+                        try:
+                            # Offset zero confirms no positive update IDs. PTB cannot
+                            # advance its cursor until the gated call returns a batch.
+                            pending = await original(instance, offset=0, limit=1, timeout=0)
+                            if pending and self.watchdog_adapter is not None:
+                                # Native transport counted the preview. It will count
+                                # these updates again when ordinary polling delivers them.
+                                self.watchdog_adapter._updates_received_total -= len(pending)
+                        except BaseException:
+                            self.poll_held = False
+                            raise
                     self.held.set()
                     try:
                         await self.unlocked.wait()
@@ -187,7 +200,7 @@ class ReleaseGate:
         await self.held.wait()
         await self.app.update_queue.join()
 
-    def hold(self, operationId):
+    def hold(self, operationId, *, probe_polling=False):
         """Закрыть poll синхронно до startup; worker barrier запрашивается отдельно."""
         from .ipc import RpcError
         self._validate(operationId)
@@ -195,6 +208,7 @@ class ReleaseGate:
             raise RpcError(-32602, 'Another release operation holds ingress')
         if self.operation is None:
             self.operation = operationId
+            self.probe_held_startup = probe_polling
             self.committed = False
             self.held.clear()
             self.unlocked.clear()
@@ -282,6 +296,7 @@ class ReleaseGate:
                 adapter._polling_pending_stuck_count = 0
                 adapter._polling_not_running_count = 0
             self.operation = None
+            self.probe_held_startup = False
             self.poll_held = False
             self.committed = False
             self.unlocked.set()
@@ -382,7 +397,7 @@ def register(ctx, *, build_resolver=None, admit_update=None):
                     or source != Path('/opt/brai-profile/runtime/services/hermes/identity/native_ingress.py')
                     or hashlib.sha256(source.read_bytes()).hexdigest() != bootstrap_source):
                 raise RuntimeError('Root startup release binding unavailable')
-            gate.hold(bootstrap_operation)
+            gate.hold(bootstrap_operation, probe_polling=os.environ.get('BRAI_IDENTITY_INSTANCE') == 'release')
         gate.install_watchdogs(adapter)
         gate.install()
         resolver.release_gate = gate
