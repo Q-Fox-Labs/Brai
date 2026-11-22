@@ -80,6 +80,21 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  return response(user.id);
 }
 
+/** Проверяет схему и права обработчика очереди без захвата задания. */
+export async function lifecycleReadiness(pool:Pool) {
+ const result=await pool.query(`
+  SELECT has_table_privilege('brai_user_operation','SELECT') AS queue_read,
+         has_table_privilege('brai_user_operation','UPDATE') AS queue_write,
+         has_table_privilege('brai_identity','SELECT') AS identity_read,
+         has_table_privilege('brai_identity','UPDATE') AS identity_write,
+         EXISTS(SELECT id,lease_expires_at,required_policy_version FROM brai_user_operation LIMIT 0) AS queue_schema
+ `);
+ const access=result.rows[0];
+ if(!access?.queue_read||!access.queue_write||!access.identity_read||!access.identity_write||access.queue_schema!==false)
+  throw new Error('Lifecycle queue unavailable');
+ return {ready:true as const};
+}
+
 /** Выдаёт единственную глобальную аренду на 45 секунд и отклоняет устаревшие подтверждения. */
 export async function lifecycleWorker(pool:Pool,action:'claim'|'renew'|'complete',input:{rolePolicyVersion?:1;workerId?:string;operationId?:string;leaseToken?:string;success?:boolean;errorCode?:string}) {
  const client=await pool.connect();

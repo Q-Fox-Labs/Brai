@@ -272,6 +272,7 @@ channels:
           $ref: "./schemas/messages.schema.json#/definitions/AdminOperationRequest"
   lifecycleClaim:
     address: brai.auth.v2.lifecycle-claim
+    description: Доверенный обработчик может проверить схему и права очереди без захвата задания.
     bindings:
       nats:
         bindingVersion: "0.1.0"

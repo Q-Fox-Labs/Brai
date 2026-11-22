@@ -56,3 +56,24 @@ test("trusted lifecycle and web admin DTOs enforce exact boundaries",async()=>{
  await assert.rejects(()=>v2("lifecycle-claim",{workerId:"w",headers:{}},cfg,{},()=>{}),/Invalid/);
  await assert.rejects(()=>v2("users-revoke",{headers:{},body:{userId:"u"}},cfg,{},()=>{}),/Invalid/);
 });
+
+test("trusted readiness checks queue permissions without claiming or writing",async()=>{
+ const config={identityMode:"telegram"};
+ const request={checkAvailability:true};
+ const queries=[];
+ const privileges={queue_read:true,queue_write:true,identity_read:true,identity_write:true,queue_schema:false};
+ const pool={query:async sql=>{queries.push(sql);return {rows:[privileges]};}};
+ validate("LifecycleClaimRequest",request);
+ const result=await v2("lifecycle-claim",request,config,pool,()=>{});
+ assert.deepEqual(result,{ready:true});
+ validate("LifecycleClaimResponse",result);
+ assert.equal(queries.length,1);
+ assert.match(queries[0],/FROM brai_user_operation LIMIT 0/);
+ for(const name of ["queue_read","queue_write","identity_read","identity_write"]){
+  privileges[name]=false;
+  await assert.rejects(v2("lifecycle-claim",request,config,pool,()=>{}),/Lifecycle queue unavailable/);
+  privileges[name]=true;
+ }
+ await assert.rejects(v2("lifecycle-claim",request,config,{query:async()=>{throw new Error("disconnected");}},()=>{}),/disconnected/);
+ await assert.rejects(v2("lifecycle-claim",{...request,workerId:"w"},config,pool,()=>{}),/Invalid/);
+});
