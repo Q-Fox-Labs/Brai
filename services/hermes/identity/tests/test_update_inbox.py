@@ -60,6 +60,38 @@ class InboxTests(unittest.TestCase):
             self.inbox.capture(changed,update(1),'123')
         self.assertEqual(self.inbox.observe(PROFILE,'123',1)['state'],'captured')
 
+    def test_reply_source_selects_its_message_and_preserves_auth_snapshot(self):
+        for ident in (1, 2):
+            self.capture(ident)
+            self.inbox.claim_for_delivery(PROFILE, '123', ident)
+        batch = self.inbox.bind_delivery(PROFILE, '123', [1, 2])
+        source = self.inbox.delivery_source(PROFILE, batch['delivery_id'], reply_to=2)
+        self.assertEqual(source['update_id'], '2')
+        self.assertEqual((source['auth_author'], source['auth_role'], source['auth_generation']),
+                         ('42', 'member', 1))
+        self.assertEqual(self.inbox.delivery_source(PROFILE, batch['delivery_id'])['update_id'], '1')
+
+    def test_reply_anchor_uses_root_consent_and_can_share_a_native_batch(self):
+        for ident, anchor in ((1, 77), (2, 78)):
+            raw = update(ident).to_dict()
+            raw['message'].update(message_thread_id=anchor, is_topic_message=False)
+            telegram_update = Update.de_json(raw, Bot('123:abc'))
+            captured = self.inbox.capture(PROFILE, telegram_update, '123')
+            if ident == 1:
+                # Повтор после обновления должен принять точную запись прежнего DEV.
+                db = self.journal.database(PROFILE)
+                try:
+                    with db:
+                        db.execute('UPDATE release_inbox SET thread=? WHERE seq=?',
+                                   (str(anchor), captured['seq']))
+                finally:
+                    db.close()
+                self.assertEqual(self.inbox.capture(PROFILE, telegram_update, '123'), captured)
+            self.assertEqual(self.inbox.observe(PROFILE, '123', ident)['thread'], '')
+            self.inbox.claim_for_delivery(PROFILE, '123', ident)
+        batch = self.inbox.bind_delivery(PROFILE, '123', [1, 2])
+        self.assertEqual(self.inbox.delivery_source(PROFILE, batch['delivery_id'], 2)['update_id'], '2')
+
     def test_zero_update_id_is_valid_and_preserved(self):
         self.capture(0)
         self.assertEqual(self.inbox.observe(PROFILE,'123',0)['update_id'],'0')

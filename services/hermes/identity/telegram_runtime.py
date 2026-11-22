@@ -491,6 +491,10 @@ class Resolver:
                                if bridge.task is not None), return_exceptions=True)
         self.ledger.close()
 
+    def _startup_held(self):
+        operation = os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION')
+        return operation is not None and getattr(self.release_gate, 'operation', None) == operation
+
     async def _supervise(self):
         """Обрыв одного worker не отключает расписания соседних владельцев."""
         semaphore = asyncio.Semaphore(8)
@@ -502,7 +506,7 @@ class Resolver:
                     await peer.call('health', {'require_tools': True}, timeout=240)
                     self.ready_profiles.add(profile['uid'])
                     await self.retry_pending_close(profile, bridge)
-                    if self.mirror is not None and self.mirror.restartable:
+                    if self.mirror is not None and self.mirror.restartable and not self._startup_held():
                         turn = self.turns.get(profile['uid'])
                         if turn is not None and turn.get('delivery'):
                             await self.reconcile_delivery(profile, turn['delivery'])
@@ -521,10 +525,11 @@ class Resolver:
                 if not isinstance(profiles, list) or len(profiles) > 10000:
                     raise ValueError('Invalid active profiles')
                 await asyncio.gather(*(ready(profile) for profile in profiles))
-                if self.mirror is not None:
-                    await self.mirror.pump()
-                if self.reply_outbox is not None:
-                    await self.reply_outbox.flush()
+                if not self._startup_held():
+                    if self.mirror is not None:
+                        await self.mirror.pump()
+                    if self.reply_outbox is not None:
+                        await self.reply_outbox.flush()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -579,7 +584,12 @@ class Resolver:
             if not isinstance(status, dict) or status.get('ready') is not True:
                 return False
         turn = self.turns.get(profile['uid'])
-        return turn is None or (turn['route'] == route and turn.get('actor', profile['telegramId']) == profile['telegramId'])
+        if turn is None:
+            return True
+        chat, thread = turn['route']
+        canonical_route = (route[0], '' if route[1] == '1' else route[1])
+        return ((chat, '' if thread == '1' else thread) == canonical_route
+                and turn.get('actor', str(profile['telegramId'])) == str(profile['telegramId']))
 
     async def retry_pending_close(self, profile, bridge):
         """Повторять лишь завершение хода, у которого нет активного dispatch/worker."""
@@ -610,31 +620,43 @@ class Resolver:
         profile = {**profile, 'authorTelegramId': profile.get('authorTelegramId', profile['telegramId'])}
         if owner != profile['userId'] or self.reply_outbox is None:
             raise PermissionError('Reply owner mismatch')
-        source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id)
+        source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id, payload.get('reply_to'))
         original = json.loads(source['payload']).get('message', {})
-        if group_chat_id(source['chat']):
-            # AIDEV-NOTE: Chat ID не идентифицирует владельца общей темы после restart.
+        chat = source['chat']
+        grouped = group_chat_id(chat)
+        if str(payload.get('chat_id')) != chat or (not grouped and source.get('actor_id') != chat):
+            raise PermissionError('Reply input route changed')
+        if grouped:
+            # Chat ID не идентифицирует владельца общей темы после перезапуска.
             if (source.get('auth_author') != str(profile['authorTelegramId'])
                     or not isinstance(source.get('auth_role'), str)
                     or type(source.get('auth_generation')) is not int):
                 raise PermissionError('Group reply has no admitted author binding')
             profile.update(telegramId=source['actor_id'], role=source['auth_role'], generation=source['auth_generation'])
-            metadata_group = original.get('chat', {})
-            thread_id = message_thread(SimpleNamespace(**metadata_group), SimpleNamespace(**original))
-            anchor = str(original.get('message_id') or '')
-        else:
-            thread_id = str(original.get('message_thread_id') or '')
-            anchor = None
-        route = (source['chat'], thread_id)
-        if str(payload.get('chat_id')) != route[0]:
-            raise PermissionError('Reply input route changed')
+        topic = message_thread(SimpleNamespace(**original.get('chat', {})), SimpleNamespace(**original))
+        route = (chat, topic)
+        anchor = str(original.get('message_id') or '') if grouped else None
+        auth = (str(profile['authorTelegramId']), profile.get('role'), profile.get('generation'))
+        if auth != (source.get('auth_author'), source.get('auth_role'), source.get('auth_generation')):
+            raise PermissionError('Reply input binding changed')
+        if source['state'] == 'handing_off':
+            # AIDEV-NOTE: Native может отправить ответ внутри dispatch до входной квитанции.
+            turn = self.turns.get(profile['uid'])
+            if (turn is None or request_scope.get() != turn['id'] or turn['route'] != route
+                    or (turn.get('delivery') or {}).get('delivery_id') != source_id):
+                return {'success': False, 'retryable': True, 'error': 'Waiting for input acceptance'}
+        elif source['state'] != 'accepted':
+            raise PermissionError('Reply input not accepted')
         supplied = payload.get('metadata') or {}
         thread = supplied.get('thread_id') or supplied.get('message_thread_id') or supplied.get('direct_messages_topic_id')
         if thread is not None and str(thread) != route[1]:
             raise PermissionError('Reply input thread changed')
         metadata = self.ledger.metadata(profile, route)
+        if metadata is None or (payload.get('reply_to') and not self.ledger.owns(profile, route, payload['reply_to'])):
+            metadata = await self._recover_reply_admission(profile, route, source, original, payload.get('reply_to'), metadata)
         if metadata is None:
             raise PermissionError('Reply input admission unavailable')
+        self.authorize_delivery(profile, action, payload)
         if supplied.get('_interim_send') is True:
             metadata['_interim_send'] = True
             if supplied.get('_brai_progress') is True:
@@ -647,12 +669,61 @@ class Resolver:
             values['reply_to'] = anchor
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
         key = self.ledger.owner(profile)
-        self.reply_outbox.enqueue(ident, key, body)
+        from .delivery_journal import delivery_id
+        digest = delivery_id([key, auth, source_id, action, payload])
+
+        def matches_saved_reply(saved):
+            # Сверяем устойчивые данные доставки. Метаданные действующего маршрута могут обновиться.
+            saved_profile = saved['profile']
+            if (self.ledger.owner(saved_profile) != key
+                    or (grouped and saved_profile.get('telegramId') != profile['telegramId'])
+                    or (saved_profile.get('role'), saved_profile.get('generation')) != auth[1:]
+                    or saved.get('action') != action or saved.get('generation') != source['chat_generation']):
+                return False
+            old_values = dict(saved['payload'])
+            old_metadata = old_values.pop('metadata')
+            old_thread = str(old_metadata.get('thread_id') or old_metadata.get('message_thread_id')
+                             or old_metadata.get('direct_messages_topic_id') or '')
+            if old_thread != route[1] or any(
+                    (old_metadata.get(flag) is True) != (metadata.get(flag) is True)
+                    for flag in ('_interim_send', '_brai_progress')):
+                return False
+            expected = {name: value for name, value in values.items() if name != 'metadata'}
+            if grouped and action != 'edit_message':
+                # Прежний DEV отвечал на первый вход native batch.
+                first = str(source.get('batch_first_message_id') or anchor)
+                if str(old_values.get('reply_to')) == first:
+                    expected['reply_to'] = old_values['reply_to']
+            return old_values == expected
+
+        self.reply_outbox.enqueue(ident, key, body, request_digest=digest, matches=matches_saved_reply)
         previous = self.reply_outbox.result(ident)
         if previous and previous.get('success') and previous.get('message_id'):
             return previous
         await self.reply_outbox.flush_owner(key)
         return self.reply_outbox.result(ident) or {'success': False, 'retryable': True, 'error': 'Delivery pending'}
+
+    async def _recover_reply_admission(self, profile, route, source, original, reply_to, metadata):
+        """Восстановить запись только для подтверждённого входа сохранённого ответа."""
+        chat = route[0]
+        message_id = str(original.get('message_id') or '')
+        if (group_chat_id(chat) or chat == str(profile['authorTelegramId']) or source['state'] != 'accepted'
+                or not message_id or (reply_to and str(reply_to) != message_id)):
+            return metadata
+        legacy = {**profile, 'authorTelegramId': chat}
+        old_metadata = self.ledger.metadata(legacy, route)
+        if old_metadata is None or not self.ledger.owns(legacy, route, message_id, outgoing=False):
+            return metadata
+        active = await self._account(profile, chat)
+        if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
+            raise PermissionError('Reply owner binding changed')
+        self._chat_generation(profile, route, source['chat_generation'])
+        # AIDEV-NOTE: После проверки Auth оставляем более свежие параметры канонического маршрута.
+        metadata = self.ledger.metadata(profile, route)
+        if metadata is None:
+            metadata = old_metadata
+        self.ledger.admit(profile, route, metadata, message_id)
+        return metadata
 
     async def _deliver_saved_reply(self, body):
         """Восстановить доставку готового ответа при актуальных Auth и поколении беседы."""
@@ -700,8 +771,10 @@ class Resolver:
         """Закрепить единственный канал worker за стабильным владельцем UID."""
         uid = profile['uid']
         if uid not in self.bridges:
+            author = profile.get('authorTelegramId', profile['telegramId'])
             async def prepare(event):
-                return await self.prepare({**profile, 'telegramId': str(event.source.user_id)}, event)
+                return await self.prepare({**profile, 'authorTelegramId': author,
+                                           'telegramId': str(event.source.user_id)}, event)
             async def deliver(owner, action, payload):
                 return await self.deliver(profile, owner, action, payload)
             async def started(turn_id):
@@ -713,9 +786,8 @@ class Resolver:
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
-            bridge = Bridge(profile['userId'], profile.get('authorTelegramId', profile['telegramId']), uid, profile['workerSocket'],
-                            deliver, prepare, on_turn_start=started, on_turn_end=ended,
-                            worker_telegram_id=profile.get('authorTelegramId', profile['telegramId']))
+            bridge = Bridge(profile['userId'], author, uid, profile['workerSocket'],
+                            deliver, prepare, on_turn_start=started, on_turn_end=ended)
             bridge.profile_id = profile.get('profileId')
             self.bridges[uid] = bridge
         bridge = self.bridges[uid]
