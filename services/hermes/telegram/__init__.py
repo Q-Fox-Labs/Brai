@@ -107,13 +107,13 @@ class Config:
         """Проверить обязательные параметры; секреты остаются в окружении child process."""
         owner = os.environ.get("BRAI_TELEGRAM_OWNER_ID", "")
         chat = os.environ.get("BRAI_TELEGRAM_CHAT_ID", "")
-        native_chat = os.environ.get("TELEGRAM_ALLOWED_CHATS", "").strip()
-        legacy_group = not chat and re.fullmatch(r"-[1-9][0-9]*", native_chat) is not None
-        if legacy_group:
-            chat = native_chat
         # AIDEV-NOTE: Native allowlist восстанавливает маршрут владельца. Общий доступ требует явного маршрута Brai.
-        allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "") if not legacy_group else ""
+        allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "") if chat else ""
         users = tuple(allowed.split(",")) if allowed else ()
+        if not chat:
+            native_chat = os.environ.get("TELEGRAM_ALLOWED_CHATS", "").strip()
+            if re.fullmatch(r"-[1-9][0-9]*", native_chat):
+                chat = native_chat
         state = Path(os.environ.get("BRAI_TELEGRAM_STATE_DIR", ""))
         entry = os.environ.get("BRAI_HERMES_TRUSTED_ENTRY", "")
         node = os.environ.get("BRAI_HERMES_NODE_EXECUTABLE", "")

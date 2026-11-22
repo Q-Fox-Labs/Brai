@@ -1005,10 +1005,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                          (old_route, self.entry.session_id, GROUP, "77"))
 
         with patch.dict(os.environ, env, clear=True):
-            os.environ["TELEGRAM_ALLOWED_USERS"] = "123"
             for value in ("123", "*", f"{GROUP},-1008765432100"):
                 os.environ["TELEGRAM_ALLOWED_CHATS"] = value
-                self.assertEqual(mod.Config.from_env().chat, "123")
+                config = mod.Config.from_env()
+                self.assertEqual(config.chat, "123")
+                self.assertFalse(config.allows("456"))
 
     async def test_foreign_owner_group_and_business_never_publish(self):
         for changes in ({"user_id": "456"}, {"chat_id": "456"}, {"chat_type": "group"}):
