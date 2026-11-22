@@ -4,11 +4,12 @@ import importlib
 import json
 import multiprocessing as mp
 import os
+import queue
 import sqlite3
 import sys
 import tempfile
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -242,20 +243,28 @@ class AutomationQuotaTests(unittest.TestCase):
             self.assertIn("3-е срабатывание", deliver.call_args_list[2].args[1])
 
     def test_managed_worker_cannot_turn_off_quota_via_personal_environment(self):
+        from cron import scheduler_delivery
+        from gateway.config import GatewayConfig
+
         self.set_limit(0)
-        self.home.joinpath("profile-config.json").write_text("{}")
-        job = self.jobs.create_job("Original action", "every 1m", name="Отчёт")
+        marker = self.home / "profile-config.json"
+        marker.write_text("{}")
+        job = self.jobs.create_job("Original action", "every 1m", name="Отчёт", deliver="bot-chat")
         with (
-            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "other"}),
-            patch.object(self.scheduler, "_BRAI_WORKER_CONFIG", self.home / "profile-config.json"),
+            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "other", "BRAI_IDENTITY_TELEGRAM_ID": "123"}),
+            patch("hermes_constants.BRAI_WORKER_CONFIG_PATH", marker),
             patch.object(self.scheduler, "run_job") as run,
-            patch.object(self.scheduler, "_deliver_result", return_value=None) as deliver,
+            patch.object(scheduler_delivery, "_prepare_target_delivery", return_value=None) as prepare,
+            patch.object(scheduler_delivery, "_deliver_to_bot_chat") as bot_chat,
+            patch("gateway.config.load_gateway_config", return_value=GatewayConfig()),
             patch("agent.auxiliary_client.call_llm", side_effect=ConnectionError) as explain,
         ):
             self.assertTrue(self.scheduler.run_one_job(job))
         run.assert_not_called()
+        bot_chat.assert_not_called()
         explain.assert_called_once()
-        self.assertIn("не более 0 запусков", deliver.call_args.args[1])
+        self.assertEqual(prepare.call_args.args[1]["chat_id"], "123")
+        self.assertIn("не более 0 запусков", prepare.call_args.kwargs["mirror_text"])
 
     def test_auth_unavailable_preserves_one_shot_and_does_not_inject_bot_chat(self):
         self.role.side_effect = ConnectionError("Auth unavailable")
@@ -276,6 +285,19 @@ class AutomationQuotaTests(unittest.TestCase):
         self.assertEqual(after["repeat"]["completed"], 0)
         self.assertEqual(after["next_run_at"], job["next_run_at"])
         self.assertEqual(self.executions.latest_execution(job["id"])["delivery_outcome"], "quota_unavailable")
+
+    def test_unavailable_auth_and_execution_finish_never_wake_bot_chat(self):
+        self.role.side_effect = ConnectionError("Auth unavailable")
+        job = self.jobs.create_job("Original action", "every 1m", name="Отчёт", deliver="bot-chat")
+        with (
+            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "worker"}),
+            patch.object(self.scheduler, "finish_execution", side_effect=OSError("SQLite unavailable")),
+            patch.object(self.scheduler, "run_job") as run,
+            patch.object(self.scheduler, "_deliver_crash_failure") as crash_notice,
+        ):
+            self.assertFalse(self.scheduler.run_one_job(job))
+        run.assert_not_called()
+        crash_notice.assert_not_called()
 
     def test_detached_worker_loss_recovers_static_notice_without_model(self):
         from cron.scheduler_worker_failure import record_unknown_worker_outcome
@@ -306,23 +328,51 @@ class AutomationQuotaTests(unittest.TestCase):
 
         self.set_limit(0)
         job = self.jobs.create_job("Original action", "every 1m", name="Сводка")
-        claimed = self.jobs.claim_job_for_fire(job["id"], manual=True, return_job=True)
+
+        def run_now(callback):
+            future = Future()
+            future.set_result(callback())
+            return future
+
         with (
             patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "worker"}),
+            patch.object(async_delegation, "_records", {}),
+            patch.object(async_delegation, "_get_executor", return_value=SimpleNamespace(submit=run_now)),
+            patch.object(async_delegation, "_push_completion_event") as wake,
             patch.object(self.scheduler, "run_job") as run,
             patch.object(self.scheduler, "_deliver_result", return_value=None),
             patch("agent.auxiliary_client.call_llm", side_effect=ConnectionError),
         ):
-            result = cronjob_tools._run_claimed_job(claimed)
+            result = json.loads(cronjob_tools.cronjob("run", job_id=job["id"], session_id="origin"))
+            self.assertEqual(result["job"]["execution_mode"], "background")
+            with closing(async_delegation._connect()) as conn:
+                row = conn.execute(
+                    "SELECT state, delivery_state, event_json FROM async_delegations WHERE delegation_id=?",
+                    (result["job"]["delegation_id"],),
+                ).fetchone()
+            self.assertEqual(row, ("completed", "dropped", None))
+            self.assertEqual(async_delegation.restore_undelivered_completions(queue.Queue()), 0)
         run.assert_not_called()
-        block = cronjob_tools._manual_run_completion(result, job["id"], "Сводка", "origin", 0)
-        self.assertTrue(block["_brai_quota_no_wake"])
-        with (
-            patch.object(async_delegation, "_records", {"demo": {"status": "running", "role": "cron_run"}}),
-            patch.object(async_delegation, "_push_completion_event") as wake,
-        ):
-            async_delegation._finalize("demo", block, "completed")
         wake.assert_not_called()
+
+    def test_abandoned_managed_manual_run_leaves_recovery_to_cron(self):
+        from tools import async_delegation
+
+        for delegation_id, role in (("cron", "cron_run"), ("other", "delegate_task")):
+            async_delegation._persist_dispatch({
+                "delegation_id": delegation_id, "role": role, "session_key": "origin", "dispatched_at": 1,
+            })
+        with (
+            patch.dict(os.environ, {"BRAI_IDENTITY_MODE": "worker"}),
+            patch.object(async_delegation, "_owner_liveness", return_value=lambda *args: False),
+        ):
+            self.assertEqual(async_delegation.recover_abandoned_delegations(), 2)
+        with closing(async_delegation._connect()) as conn:
+            rows = conn.execute(
+                "SELECT delegation_id, state, delivery_state, event_json IS NULL "
+                "FROM async_delegations ORDER BY delegation_id",
+            ).fetchall()
+        self.assertEqual(rows, [("cron", "unknown", "dropped", 1), ("other", "unknown", "pending", 0)])
 
     def test_missing_model_response_uses_fixed_notice_and_no_second_model_call(self):
         job = {"id": "weather", "name": "Сводка погоды"}

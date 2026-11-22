@@ -1684,11 +1684,9 @@ diff --git a/cron/scheduler.py b/cron/scheduler.py
 +        mark_kwargs["automation_occurrence"] = job["_brai_quota_occurrence"]
      if not d.success and job.pop("_model_unreachable", False):
          # Never-reached-the-model failure: schedule the Cowork-style bounded re-run
-@@ -3294,4 +3303,41 @@
+@@ -3294,4 +3303,39 @@
 
 
-+_BRAI_WORKER_CONFIG = Path("/opt/brai-profile/profile-config.json")
-+
 +def _complete_quota_skip(job, quota, execution_id, fence, *, adapters=None, loop=None) -> bool:
 +    """Доставить пропуск и закрыть текущее срабатывание обычным забором владения."""
 +    from cron.unreachable_retry import is_retry_run
@@ -1726,13 +1724,15 @@ diff --git a/cron/scheduler.py b/cron/scheduler.py
 +
  def _run_one_job_body(
      job: dict, *, adapters=None, loop=None, verbose: bool = False,
-@@ -3342,4 +3388,34 @@
+@@ -3342,4 +3386,36 @@
              logger.warning("Cron job %s lost execution ownership before start; skipping", job["id"])
              return True
 +
 +        # The managed worker owns a read-only bind. Personal dotenv cannot turn off quota
 +        # by replacing a mode variable before the ticker or a child CLI loads the profile.
-+        if _BRAI_WORKER_CONFIG.is_file() or os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from hermes_constants import is_brai_managed_worker
++
++        if is_brai_managed_worker():
 +            from cron.jobs import release_unadmitted_automation
 +            from identity.automation_quota import reserve
 +
@@ -1768,25 +1768,49 @@ diff --git a/cron/scheduler.py b/cron/scheduler.py
 +        delivery_outcome = job.get("_brai_automation_admission") or "suppressed"
          # Owner fencing: a stale worker whose claim was taken over (or transport-cancelled) must not
          # send a failure alert on top of the replacement run's; fall through to fenced bookkeeping.
+@@ -3467,4 +3543,5 @@
+             isinstance(e, Exception)
+             and not delivery_attempted
++            and not job.get("_brai_automation_admission")
+             and not isinstance(e, _FireClaimLostDuringSideEffect)
+             and not _fire_claim_ownership_lost()
 
 diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 --- a/cron/scheduler_delivery.py
 +++ b/cron/scheduler_delivery.py
-@@ -1651,5 +1651,5 @@
+@@ -481,5 +481,7 @@
+     """Home target chat id: env var (first, so operator overrides win) → legacy env var →
+     config.yaml ``home_channel``."""
+-    if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform_name.lower() == "telegram":
++    from hermes_constants import is_brai_managed_worker
++
++    if platform_name.lower() == "telegram" and is_brai_managed_worker():
+         home = _get_config_home_channel(platform_name)
+         return str(home.chat_id) if home is not None else ""
+@@ -502,5 +504,7 @@
+     """
+     if platform_name.lower() == "telegram":
+-        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from hermes_constants import is_brai_managed_worker
++
++        if is_brai_managed_worker():
+             return None  # Automatic topic is resolved by the trusted Brai ingress.
+         cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)
+@@ -1651,5 +1655,5 @@
  def _deliver_via_live_adapter(
      t: _TargetDelivery, cleaned_text: str, media_files: list, *, target_errors: list,
 -    delivery_errors: list, unverified_targets: list,
 +    delivery_errors: list, unverified_targets: list, cancel_hint: str = "",
  ) -> bool:
      """Deliver one target via the live gateway adapter; True once delivered. ``target_errors`` =
-@@ -1658,4 +1658,6 @@
+@@ -1658,4 +1662,6 @@
      job = t.job
      route_thread_id, route_metadata, media_metadata = _live_route_metadata(t)
 +    if cancel_hint and t.platform_name == "telegram" and os.environ.get("BRAI_IDENTITY_MODE") == "worker":
 +        route_metadata["_brai_scheduled_cancel_hint"] = cancel_hint
      delivered = False
      try:
-@@ -1976,4 +1978,43 @@
+@@ -1976,4 +1982,43 @@
 
 
 +def _scheduled_task_name(job: dict) -> str:
@@ -1830,7 +1854,7 @@ diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 +
  def _deliver_result(
      job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
-@@ -1986,4 +2027,12 @@
+@@ -1986,4 +2031,16 @@
      job.pop("_notification_all_targets_suppressed", None)
      targets = _resolve_delivery_targets(job, for_failure=for_failure)
 +    quota_notice = job.get("_brai_quota_notice") is True
@@ -1841,9 +1865,13 @@ diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 +            origin_job = {**job, "deliver": "origin"}
 +            targets = [target for target in _resolve_delivery_targets(origin_job)
 +                       if target["platform"] != BOT_CHAT_PLATFORM]
++        if not targets:
++            chat_id = _get_home_target_chat_id("telegram")
++            if chat_id:
++                targets = [_home_target("telegram", chat_id, "origin_fallback")]
      if not targets:
          _record_delivery_verification(job, [])
-@@ -2025,16 +2074,9 @@
+@@ -2025,16 +2082,9 @@
      # persisted as ``last_delivery_unverified`` so `hermes cron list` shows it.
      unverified_targets: list = []
 -    if wrap_response:
@@ -1865,7 +1893,7 @@ diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 +            delivery_content = f"{delivery_content}\n\n{cancel_hint}"
 
      from gateway.platforms.base import BasePlatformAdapter
-@@ -2049,4 +2091,8 @@
+@@ -2049,4 +2099,8 @@
      # failing curl with an API key, summarised a config file) sent it verbatim to the chat.
      cleaned_delivery_content = _redact_cron_payload(cleaned_delivery_content, "delivery content")
 +    if cancel_hint:
@@ -1874,7 +1902,7 @@ diff --git a/cron/scheduler_delivery.py b/cron/scheduler_delivery.py
 +        cancel_hint = sanitized_hint if separator else ""
      requested_media = len(media_files)
      media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-@@ -2113,5 +2159,5 @@
+@@ -2113,5 +2167,5 @@
              t, cleaned_delivery_content, media_files,
              target_errors=target_errors, delivery_errors=delivery_errors,
 -            unverified_targets=unverified_targets,
@@ -2174,7 +2202,7 @@ diff --git a/locales/zh.yaml b/locales/zh.yaml
 diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 --- a/tools/cronjob_tools.py
 +++ b/tools/cronjob_tools.py
-@@ -401,8 +401,14 @@
+@@ -401,13 +401,22 @@
          # these runs, and a bare success=False with error=None reads as an unexplained failure). See #83993.
          ok = last_status in {"ok", "delivery_queued"}
 +        if last_status == "quota_skipped":
@@ -2190,14 +2218,23 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +        return result
      except Exception as e:
          logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
-@@ -507,4 +513,6 @@
+         with contextlib.suppress(Exception):
+             mark_job_run(job_id, False, str(e), expected_fire_owner=fire_owner)
+-        return {"claimed": True, "success": False, "error": str(e)}
++        result = {"claimed": True, "success": False, "error": str(e)}
++        if job.get("_brai_automation_admission"):
++            result["_brai_quota_no_wake"] = True
++        return result
+     finally:
+         # Setup failures and BaseException must release only our registration.
+@@ -507,4 +516,6 @@
      res: dict[str, Any], job_id: str, job_name: str, deliver: str, started_at: float) -> dict[str, Any]:
      """Async-delegation completion block for a finished background manual run."""
 +    if res.get("_brai_quota_no_wake") is True:
 +        return {"status": "completed", "_brai_quota_no_wake": True}
      duration = round(time.time() - started_at, 2)
      refreshed = get_job(job_id) or {}
-@@ -727,4 +735,9 @@
+@@ -727,4 +738,9 @@
          _result.update(_gateway_liveness_notice(plural=True))
      return _dumps(_result)
 +
@@ -2207,14 +2244,14 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +    return _dumps({"success": True, "job": {**_format_job(job), "prompt": job.get("prompt") or ""}})
 
 
-@@ -957,5 +970,5 @@
+@@ -957,5 +973,5 @@
  _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
  _JOB_ACTIONS = {
 -    "remove": _action_remove, "update": _action_update,
 +    "get": _action_get, "remove": _action_remove, "update": _action_update,
      "run": _action_run, "run_now": _action_run, "trigger": _action_run,
      "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
-@@ -1058,5 +1071,13 @@
+@@ -1058,5 +1074,13 @@
      "description": """Manage scheduled cron jobs: action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
 
 -Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless pinned.
@@ -2229,7 +2266,7 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +user did not ask to change. Confirm the change or removal only after the tool succeeds.
 
  Jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless the user pins one. Prefer updating an existing job over creating near-duplicates.""",
-@@ -1068,9 +1089,9 @@
+@@ -1068,9 +1092,9 @@
              "action": {
                  "type": "string",
 -                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
@@ -2241,7 +2278,7 @@ diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
 +                "description": "Required for get/update/pause/resume/remove/run. Use the selected ID from list."
              },
              "pinned": {
-@@ -1089,5 +1110,5 @@
+@@ -1089,5 +1113,5 @@
              "name": {
                  "type": "string",
 -                "description": "Optional human-friendly name"
@@ -2548,10 +2585,64 @@ diff --git a/cron/scheduler_worker_failure.py b/cron/scheduler_worker_failure.py
              return True
          error = error or execution["error"]
 
+diff --git a/gateway/config.py b/gateway/config.py
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -703,5 +703,7 @@
+
+     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
+-        if os.environ.get("BRAI_IDENTITY_MODE") == "worker" and platform == Platform.TELEGRAM:
++        from hermes_constants import is_brai_managed_worker
++
++        if platform == Platform.TELEGRAM and is_brai_managed_worker():
+             configured = self.platforms.get(platform)
+             home = configured.home_channel if configured else None
+
+diff --git a/hermes_constants.py b/hermes_constants.py
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -22,4 +22,11 @@
+ INDICATOR_STYLES: tuple[str, ...] = ("ascii", "emoji", "kaomoji", "unicode")
+ DEFAULT_INDICATOR_STYLE: str = "kaomoji"
++
++BRAI_WORKER_CONFIG_PATH = Path("/opt/brai-profile/profile-config.json")
++
++
++def is_brai_managed_worker() -> bool:
++    """Recognize a personal Brai runtime even when profile dotenv overrides its mode."""
++    return os.environ.get("BRAI_IDENTITY_MODE") == "worker" or BRAI_WORKER_CONFIG_PATH.is_file()
+
+
+
 diff --git a/tools/async_delegation.py b/tools/async_delegation.py
 --- a/tools/async_delegation.py
 +++ b/tools/async_delegation.py
-@@ -950,5 +950,11 @@
+@@ -214,4 +214,11 @@
+
+
++def _drop_completion(conn, delegation_id, status, result, now):
++    conn.execute("""UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
++           result_json=?, event_json=NULL, delivery_state='dropped'
++           WHERE delegation_id=?""",
++        (status, now, now, json.dumps(result), delegation_id))
++
++
+ def record_unit_child(delegation_id: str, entry: dict[str, Any]) -> None:
+     """Durably record ONE finished child of a still-running multi-child unit on the unit's own row, so a crash before
+@@ -276,4 +283,12 @@
+             task = json.loads(task_json or "{}")
+             error = "Delegation owner exited before recording a terminal result; outcome unknown."
++            if task.get("role") == "cron_run":
++                from hermes_constants import is_brai_managed_worker
++
++                if is_brai_managed_worker():
++                    # Cron owns delivery and recovery for this run, including a known quota skip.
++                    _drop_completion(conn, delegation_id, "unknown", {"error": error}, now)
++                    recovered += 1
++                    continue
+             recovered_results = _recovered_results(task, result_json, error)
+             if recovered_results:
+@@ -950,5 +965,17 @@
          record["progress_fn"] = None  # stop stale-monitor sampling
          snapshot = dict(record)
 -    _push_completion_event(snapshot, result(snapshot) if callable(result) else result, status)
@@ -2560,7 +2651,13 @@ diff --git a/tools/async_delegation.py b/tools/async_delegation.py
 +        snapshot.get("role") == "cron_run" and isinstance(completion, dict)
 +        and completion.get("_brai_quota_no_wake") is True
 +    )
-+    if not quota_skip:
++    if quota_skip:
++        try:
++            with _DB_LOCK, _transaction() as conn:
++                _drop_completion(conn, delegation_id, status, completion, time.time())
++        except Exception:
++            logger.exception("Async delegation %s: could not record suppressed completion", delegation_id)
++    else:
 +        _push_completion_event(snapshot, completion, status)
      with _records_lock:
          if delegation_id in _records:
