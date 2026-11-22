@@ -120,7 +120,9 @@ class JournalTests(unittest.TestCase):
     def test_backup_restores_unsent_composed_response_and_anchor(self):
         self.store.begin_input(IDENT, DIGEST)
         self.store.save_continuation('session', IDENT, 3)
-        self.store.save_response('session', IDENT, 'answer MEDIA:file', {'message_id': '71'})
+        preview = {'text_content': 'answer', 'media_files': [['/tmp/file.pdf', False]],
+                   'images': [], 'local_files': [], 'force_document_attachments': False, 'pre_extract': 'answer MEDIA:file'}
+        self.store.save_response('session', IDENT, 'answer MEDIA:file', {'message_id': '71'}, preview=preview)
         self.store.save_response_plan('session', IDENT, {'batches': [{'kind': 'single', 'items': [
             {'artifact': {'artifact_id': 'file'}, 'caption': '', 'presentation': 'document'}]}]})
         backup = self.path.parent / 'composed.sqlite3'
@@ -132,6 +134,7 @@ class JournalTests(unittest.TestCase):
         self.assertEqual((restored['ready_response'], restored['response_event']['message_id']),
                          ('answer MEDIA:file', '71'))
         self.assertEqual(journal.prepared_response('session', IDENT)['plan']['batches'][0]['items'][0]['artifact']['artifact_id'], 'file')
+        self.assertEqual(journal.prepared_response('session', IDENT)['preview'], preview)
 
     def test_new_input_keeps_previous_prepared_response_and_outbox(self):
         self.store.begin_input(IDENT, DIGEST)
@@ -162,6 +165,24 @@ class JournalTests(unittest.TestCase):
                 (conflict, 'send_file_set', {'payload': {'chat_id': '42'}})])
         self.assertIsNone(self.store.output(first))
         self.assertEqual(self.store.prepared_response('session', IDENT)['phase'], 'prepared')
+
+    def test_streamed_media_preserves_native_audio_and_document_routing(self):
+        from identity.adapter import _streamed_batches
+        def item(name, mime, presentation):
+            return {'file': {'artifactId': name, 'filename': name, 'mimeType': mime},
+                    'caption': '', 'presentation': presentation}
+        source = NS(platform='telegram')
+        samples = [item('sample.ogg', 'audio/ogg', 'voice'), item('song.mp3', 'audio/mpeg', 'audio'),
+                   item('voice.wav', 'audio/wav', 'document'), item('image.png', 'image/png', 'photo'),
+                   item('movie.mp4', 'video/mp4', 'video')]
+        media = [('sample.ogg', False), ('song.mp3', False), ('voice.wav', True),
+                 ('image.png', False), ('movie.mp4', False)]
+        batches, _ = _streamed_batches(samples, media, source, True)
+        self.assertEqual([batch.get('action', 'send_file_set') for batch in batches],
+                         ['send_file_set', 'send_file_set', 'send_voice', 'send_file_set', 'send_file_set'])
+        self.assertEqual([batch['items'][0]['presentation'] for batch in batches if 'items' in batch],
+                         ['document', 'audio', 'document', 'video'])
+        self.assertTrue(batches[2]['is_voice'])
 
 
 class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -319,6 +340,8 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             adapter = make_adapter(NS(), 'telegram', peer, None)
         adapter._brai_delivery_journal = self.worker.delivery_journal
         adapter._streaming_tts_turn_completed = lambda *args: False
+        adapter._preview_prepared_response = AsyncMock(return_value={'text_content': 'answer', 'images': [],
+            'media_files': [], 'local_files': [], 'force_document_attachments': False, 'pre_extract': 'answer'})
         self.runner._delivery_adapter_for = lambda source: adapter
         self.runner._should_send_voice_reply = lambda *args, **kwargs: True
         source = SessionSource(platform=Platform.TELEGRAM, chat_id='42', user_id='42', thread_id='7')
@@ -636,7 +659,8 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.worker.delivery_journal.save_continuation('session', IDENT, 3)
         response = 'answer\nMEDIA:' + str(local)
         self.worker.delivery_journal.save_response('session', IDENT, response, {'message_id': '71'}, source.to_dict())
-        with patch.dict(os.environ, {'HERMES_HOME': str(root)}), patch.object(native, '_store', None), \
+        with patch.dict(os.environ, {'HERMES_HOME': str(root),
+                'HERMESCUSTOM_ROOT': str(Path(__file__).resolve().parents[2] / 'extensions')}), patch.object(native, '_store', None), \
                 patch.object(native, 'schedule_recovery'), patch.dict(sys.modules, {
                     'brai_files': native, 'plugins.platforms.telegram.adapter': module}):
             native.configure(config, Backend(cache))
@@ -714,9 +738,99 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                          ['send_file_set', 'send'])
                     finally:
                         input_delivery.reset(next_token)
+                    for row in self.worker.delivery_journal.pending_outputs():
+                        self.worker.delivery_journal.output_state(row['id'], 'sent', {'success': True, 'message_id': '91'})
+                    footer_input = delivery_id('footer-input')
+                    self.worker.delivery_journal.begin_input(footer_input, delivery_id('footer-digest'))
+                    self.worker.delivery_journal.save_continuation('footer-session', footer_input, 3)
+                    footer_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='75')
+                    footer_token = input_delivery.set(footer_input)
+                    try:
+                        with patch.object(self.worker.delivery_journal, 'enqueue_response', side_effect=sqlite3.OperationalError('temporary')):
+                            with self.assertRaises(sqlite3.OperationalError):
+                                await self.runner._hmwa_deliver_turn_response(footer_event, source, NS(session_id='id'),
+                                    'footer-session', 0, {'already_sent': True}, [], 'streamed body', 'footer only', False)
+                        saved_footer = self.worker.delivery_journal.prepared_response('footer-session', footer_input)
+                        self.assertEqual(saved_footer['phase'], 'prepared')
+                        footer_result = await adapter._extract_response_content('streamed body', footer_event, 'footer-session', is_ephemeral_response=False)
+                        await adapter._deliver_attachments(footer_event, footer_result, {'thread_id': '7'},
+                            anything_sent=True, record_delivery=lambda _: None)
+                        self.assertEqual([row['payload']['payload']['content'] for row in self.worker.delivery_journal.pending_outputs()], ['footer only'])
+                    finally:
+                        input_delivery.reset(footer_token)
+                    for row in self.worker.delivery_journal.pending_outputs():
+                        self.worker.delivery_journal.output_state(row['id'], 'sent', {'success': True, 'message_id': '92'})
+                    empty_input = delivery_id('empty-stream-input')
+                    self.worker.delivery_journal.begin_input(empty_input, delivery_id('empty-stream-digest'))
+                    self.worker.delivery_journal.save_continuation('empty-session', empty_input, 3)
+                    empty_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='77')
+                    empty_token = input_delivery.set(empty_input)
+                    try:
+                        await self.runner._hmwa_deliver_turn_response(empty_event, source, NS(session_id='id'),
+                            'empty-session', 0, {'already_sent': True}, [], '', 'footer without body', False)
+                        self.assertEqual([row['payload']['payload']['content'] for row in self.worker.delivery_journal.pending_outputs()],
+                                         ['footer without body'])
+                    finally:
+                        input_delivery.reset(empty_token)
                 finally:
                     prepared_response.reset(nested_response)
                     input_delivery.reset(nested_input)
+                pre_input = delivery_id('preview-input')
+                self.worker.delivery_journal.begin_input(pre_input, delivery_id('preview-digest'))
+                self.worker.delivery_journal.save_continuation('preview-session', pre_input, 3)
+                original_file = workspace / 'preview.pdf'
+                original_file.write_bytes(b'%PDF-1.4 preview')
+                rendered = native.final_text('answer\nMEDIA:' + str(original_file), 'preview-operation')
+                preview_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='76')
+                pi, pp = input_delivery.set(pre_input), prepared_response.set(None)
+                try:
+                    value = await self.runner._hmwa_deliver_turn_response(preview_event, source, NS(session_id='id'),
+                        'preview-session', 0, {'completed': True}, [], rendered, '', False)
+                    self.assertEqual(value, rendered)
+                    preview = self.worker.delivery_journal.prepared_response('preview-session', pre_input)['preview']
+                finally:
+                    prepared_response.reset(pp)
+                    input_delivery.reset(pi)
+                self.assertEqual(len(preview['media_files']), 1)
+                temp_path = preview['media_files'][0][0]
+                items, _ = native.output_items([temp_path])
+                native.release_set(items[0]['_setId'])
+                self.assertFalse(Path(temp_path).exists())
+                pi, pp = input_delivery.set(pre_input), prepared_response.set(('preview-session', pre_input, rendered))
+                try:
+                    restored_media = await adapter._extract_response_content(rendered, preview_event, 'preview-session', is_ephemeral_response=False)
+                    self.assertEqual(len(restored_media.media_files), 1)
+                    self.assertEqual(len(self.worker.delivery_journal.prepared_response('preview-session', pre_input)['plan']['batches']), 1)
+                finally:
+                    prepared_response.reset(pp)
+                    input_delivery.reset(pi)
+                for filename, directive, expected_action, expected_presentation in (
+                    ('sound.ogg', '', 'send_file_set', 'document'),
+                    ('sound.mp3', '', 'send_file_set', 'audio'),
+                    ('voice.wav', '[[audio_as_voice]]', 'send_voice', None),
+                    ('image.png', '[[as_document]]', 'send_file_set', 'document'),
+                ):
+                    media_path = workspace / filename
+                    media_path.write_bytes(b'synthetic media')
+                    media_input = delivery_id(['media-input', filename])
+                    key = 'media-' + filename
+                    self.worker.delivery_journal.begin_input(media_input, delivery_id(['media-digest', filename]))
+                    self.worker.delivery_journal.save_continuation(key, media_input, 3)
+                    media_event = MessageEvent(text='original', message_type=MessageType.TEXT, source=source, message_id='78')
+                    mi, mr = input_delivery.set(media_input), prepared_response.set(None)
+                    try:
+                        await self.runner._hmwa_deliver_turn_response(media_event, source, NS(session_id='id'), key, 0,
+                            {'already_sent': True}, [], 'streamed\nMEDIA:' + str(media_path) + '\n' + directive, '', False)
+                        queued = [row for row in self.worker.delivery_journal.pending_outputs()
+                                  if row['payload']['input_delivery_id'] == media_input]
+                        self.assertEqual([row['action'] for row in queued], [expected_action])
+                        if expected_presentation is not None:
+                            self.assertEqual(queued[0]['payload']['payload']['items'][0]['presentation'], expected_presentation)
+                        else:
+                            self.assertTrue(queued[0]['payload']['payload']['is_voice'])
+                    finally:
+                        prepared_response.reset(mr)
+                        input_delivery.reset(mi)
                 from identity.scope import prepared_voice
                 voice_input = delivery_id('native-voice-input')
                 self.worker.delivery_journal.begin_input(voice_input, delivery_id('native-voice-digest'))

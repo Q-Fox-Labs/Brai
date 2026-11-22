@@ -14,6 +14,44 @@ from .scope import delivery_scope, input_delivery, ephemeral_input, final_text_s
 from .telegram_proxy import BotProxy
 
 
+def _streamed_batches(items, media, source, force_document):
+    """Сохранить native типы и порядок явно запрошенных потоковых файлов."""
+    from files.store import delivery_plan
+    from gateway.platforms.base import should_send_media_as_audio
+    from gateway.run_notifications import _IMAGE_EXTS, _VIDEO_EXTS
+    animations, photos, rest = [], [], []
+    for index, item in enumerate(items):
+        path, voice = media[index] if index < len(media) else (item['file']['filename'], False)
+        ext = Path(path).suffix.lower()
+        if ext in _IMAGE_EXTS and not voice and not force_document:
+            value = {**item, 'presentation': 'animation' if ext == '.gif' else 'photo'}
+            (animations if ext == '.gif' else photos).append(value)
+        elif should_send_media_as_audio(source.platform, ext, is_voice=voice):
+            rest.append(({**item, 'presentation': 'voice' if voice else 'audio'}, bool(voice)))
+        elif ext in _VIDEO_EXTS:
+            rest.append((item, False))
+        else:
+            rest.append(({**item, 'presentation': 'document'}, False))
+    batches = []
+    def append_batch(batch, fallback=False):
+        batches.append({'kind': batch['kind'], 'fallback': fallback, 'items': [
+            {'artifact': {'artifact_id': item['file']['artifactId']},
+             'caption': item.get('caption', ''), 'presentation': item['presentation']}
+            for item in batch['items']]})
+    for item in animations:
+        append_batch({'kind': 'single', 'items': [item]})
+    if photos:
+        for batch in delivery_plan(photos, 'album', supports_album=True)['batches']:
+            append_batch(batch)
+    for item, voice in rest:
+        if voice:
+            batches.append({'action': 'send_voice', 'artifact': {'artifact_id': item['file']['artifactId']},
+                            'caption': item.get('caption', ''), 'is_voice': True})
+        else:
+            append_batch({'kind': 'single', 'items': [item]})
+    return batches, [*animations, *photos, *(item for item, voice in rest if not voice)]
+
+
 def make_adapter(config, platform, peer, publish_file):
     """Создать native adapter, отправляющий действия по двустороннему RPC."""
     from gateway.platforms.base import SendResult
@@ -48,6 +86,20 @@ def make_adapter(config, platform, peer, publish_file):
                 if token is not None:
                     input_delivery.reset(token)
 
+        async def _preview_prepared_response(self, response, event, session_key, *, streamed=False, media=None):
+            """Сохранить проверенные пути до checkpoint, пока файлы ещё существуют."""
+            if streamed:
+                media = list(media or [])
+                force = '[[as_document]]' in response
+                result = SimpleNamespace(text_content='', images=[], media_files=media,
+                    local_files=[], force_document_attachments=force, pre_extract=response)
+            else:
+                from tools.approval_conversation import brand_response
+                result = await super()._extract_response_content(brand_response(event, response), event, session_key,
+                    is_ephemeral_response=False)
+            return {key: getattr(result, key, None) for key in
+                    ('text_content', 'images', 'media_files', 'local_files', 'force_document_attachments', 'pre_extract')}
+
         async def _extract_response_content(self, response, event, session_key, **kwargs):
             """Закрепить содержимое и опубликованные вложения до первой отправки."""
             staged = prepared_response.get()
@@ -55,16 +107,13 @@ def make_adapter(config, platform, peer, publish_file):
             saved = journal.prepared_response(staged[0], staged[1]) if staged and journal else None
             if saved and saved.get('plan'):
                 result = SimpleNamespace(**saved['plan']['extracted'])
+            elif saved and saved.get('preview') is not None:
+                result = SimpleNamespace(**saved['preview'])
             elif getattr(event, '_brai_streamed_response', False):
                 media, _ = self.extract_media(response)
-                media = self.filter_media_delivery_paths(media)
-                force = '[[as_document]]' in response
-                from gateway.platforms.base import _IMAGE_EXTS
-                photos = [(path, voice) for path, voice in media
-                          if Path(path).suffix.lower() in _IMAGE_EXTS and not voice and not force]
-                rest = [(path, voice) for path, voice in media if (path, voice) not in photos]
-                result = SimpleNamespace(text_content='', images=[], media_files=photos + rest,
-                    local_files=[], force_document_attachments=force, pre_extract=response)
+                preview = await self._preview_prepared_response(response, event, session_key, streamed=True,
+                    media=[] if getattr(event, '_brai_skip_stream_media', False) else self.filter_media_delivery_paths(media))
+                result = SimpleNamespace(**preview)
             else:
                 result = await super()._extract_response_content(response, event, session_key, **kwargs)
             event._brai_single_text = not (result.images or result.media_files or result.local_files)
@@ -75,7 +124,9 @@ def make_adapter(config, platform, peer, publish_file):
                     ('message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id')}
                 source = getattr(event, 'source', None)
                 source = source.to_dict() if callable(getattr(source, 'to_dict', None)) else None
-                journal.save_response(session_key, ident, response, event_fields, source)
+                preview = {key: getattr(result, key, None) for key in
+                    ('text_content', 'images', 'media_files', 'local_files', 'force_document_attachments', 'pre_extract')}
+                journal.save_response(session_key, ident, response, event_fields, source, preview)
                 staged = (session_key, ident, response)
                 prepared_response.set(staged)
                 saved = journal.prepared_response(session_key, ident)
@@ -87,23 +138,25 @@ def make_adapter(config, platform, peer, publish_file):
                         import brai_files
                         from files.store import delivery_plan
                         items, mode = await asyncio.to_thread(brai_files.output_items, paths)
-                        if getattr(result, 'force_document_attachments', False):
+                        if getattr(event, '_brai_streamed_response', False):
+                            batches, checked = _streamed_batches(items, result.media_files, event.source,
+                                getattr(result, 'force_document_attachments', False))
+                            brai_files.validate_telegram(checked)
+                        elif getattr(result, 'force_document_attachments', False):
                             items = [{**item, 'presentation': 'document'} for item in items]
-                        elif getattr(event, '_brai_streamed_response', False):
-                            items = [{**item, 'presentation': 'voice'}
-                                     if index < len(result.media_files) and result.media_files[index][1] else item
-                                     for index, item in enumerate(items)]
-                        brai_files.validate_telegram(items)
+                        if not getattr(event, '_brai_streamed_response', False):
+                            brai_files.validate_telegram(items)
                         set_ids = sorted({item['_setId'] for item in items if '_setId' in item})
                         public_items = [{key: value for key, value in item.items() if key != '_setId'} for item in items]
                         cleanup_identity = brai_files.key([brai_files.source_of(event),
                             str(getattr(event, 'ledger_message_id', None) or event.message_id), public_items, mode])
-                        plan = delivery_plan(items, mode, supports_album=True)
-                        for batch in plan['batches']:
-                            batches.append({'kind': batch['kind'], 'fallback': plan['fallback'], 'items': [
-                                {'artifact': {'artifact_id': item['file']['artifactId']},
-                                 'caption': item.get('caption', ''), 'presentation': item['presentation']}
-                                for item in batch['items']]})
+                        if not getattr(event, '_brai_streamed_response', False):
+                            plan = delivery_plan(items, mode, supports_album=True)
+                            for batch in plan['batches']:
+                                batches.append({'kind': batch['kind'], 'fallback': plan['fallback'], 'items': [
+                                    {'artifact': {'artifact_id': item['file']['artifactId']},
+                                     'caption': item.get('caption', ''), 'presentation': item['presentation']}
+                                    for item in batch['items']]})
                     fields = {key: getattr(result, key, None) for key in
                         ('text_content', 'images', 'media_files', 'local_files', 'force_document_attachments', 'pre_extract')}
                     journal.save_response_plan(staged[0], staged[1], {'extracted': fields, 'batches': batches,
@@ -151,10 +204,16 @@ def make_adapter(config, platform, peer, publish_file):
                     return None
                 outputs = []
                 for index, batch in enumerate(saved['plan']['batches']):
-                    payload = {'chat_id': str(event.source.chat_id), 'items': batch['items'],
-                               'kind': batch['kind'], 'fallback': batch['fallback'], 'metadata': metadata}
+                    action = batch.get('action', 'send_file_set')
+                    if action == 'send_voice':
+                        payload = {'chat_id': str(event.source.chat_id), 'artifact': batch['artifact'],
+                                   'caption': batch['caption'], 'reply_to': None,
+                                   'is_voice': True, 'metadata': metadata}
+                    else:
+                        payload = {'chat_id': str(event.source.chat_id), 'items': batch['items'],
+                                   'kind': batch['kind'], 'fallback': batch['fallback'], 'metadata': metadata}
                     wire = {'payload': payload, 'scope_id': None, 'input_delivery_id': staged[1]}
-                    outputs.append((delivery_id(['prepared-files', saved['id'], index]), 'send_file_set', wire))
+                    outputs.append((delivery_id(['prepared-files', saved['id'], index]), action, wire))
                 footer = saved['plan'].get('footer')
                 if footer:
                     wire = {'payload': {'chat_id': str(event.source.chat_id), 'content': footer,

@@ -346,15 +346,18 @@ class Worker:
                 ident = input_delivery.get()
                 adapter = runner._delivery_adapter_for(source)
                 streaming_media = []
+                footer = (args[2] if len(args) > 2 else kwargs.get('_footer_line')) or None
                 if (event._brai_successful_turn and result.get('already_sent')
                         and not result.get('media_already_delivered') and isinstance(response, str)
                         and adapter is not None):
                     media, _ = adapter.extract_media(response)
                     streaming_media = adapter.filter_media_delivery_paths(media)
-                if (event._brai_successful_turn and (not result.get('already_sent') or streaming_media)
+                streaming_result = bool(result.get('already_sent') and (streaming_media or footer))
+                if (event._brai_successful_turn and (not result.get('already_sent') or streaming_result)
                         and not intentional_silence and not diagnostic_wake_muted(event)
-                        and isinstance(response, str) and response
+                        and isinstance(response, str) and (response or footer)
                         and ident is not None and self.delivery_journal is not None
+                        and adapter is not None and callable(getattr(adapter, '_preview_prepared_response', None))
                         and callable(getattr(source, 'to_dict', None))):
                     fields = {key: getattr(event, key, None) for key in
                         ('message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id')}
@@ -366,18 +369,23 @@ class Worker:
                         lambda *_args, **_kwargs: False)(session_key, generation))
                     fields['auto_voice'] = 'yes' if (not streamed and callable(voice)
                         and voice(event, response, messages, already_sent=bool(result.get('already_sent')))) else 'no'
-                    if streaming_media:
+                    if streaming_result:
                         fields['already_streamed'] = 'yes'
-                        fields['stream_footer'] = (args[2] if len(args) > 2 else kwargs.get('_footer_line')) or None
-                    self.delivery_journal.save_response(session_key, ident, response, fields, source.to_dict())
-                    prepared_response.set((session_key, ident, response))
-                    if streaming_media:
+                        fields['stream_footer'] = footer
+                        fields['skip_stream_media'] = 'yes' if not streaming_media else 'no'
+                    saved_response = response or footer
+                    preview = await adapter._preview_prepared_response(saved_response, event, session_key,
+                        streamed=streaming_result, media=streaming_media)
+                    self.delivery_journal.save_response(session_key, ident, saved_response, fields, source.to_dict(), preview)
+                    prepared_response.set((session_key, ident, saved_response))
+                    if streaming_result:
                         event._brai_streamed_response = True
                         event._brai_stream_footer = fields['stream_footer']
+                        event._brai_skip_stream_media = fields['skip_stream_media'] == 'yes'
                         if fields['auto_voice'] == 'yes':
                             await runner._send_voice_reply(event, response)
                             event._brai_voice_done = True
-                        extracted = await adapter._extract_response_content(response, event, session_key,
+                        extracted = await adapter._extract_response_content(saved_response, event, session_key,
                             is_ephemeral_response=False)
                         await adapter._deliver_attachments(event, extracted, runner._event_thread_metadata(event, source),
                             anything_sent=True, record_delivery=lambda _result: None)
@@ -495,6 +503,8 @@ class Worker:
                         event._brai_streamed_response = value == 'yes'
                     elif name == 'stream_footer':
                         event._brai_stream_footer = value
+                    elif name == 'skip_stream_media':
+                        event._brai_skip_stream_media = value == 'yes'
                     else:
                         setattr(event, name, value)
             source_token = input_delivery.set(binding['input_id'])

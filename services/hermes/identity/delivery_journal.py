@@ -109,15 +109,17 @@ class DeliveryJournal:
             result['response_event'] = binding.get('response_event', {})
         return result
 
-    def save_response(self, session_key, input_id, response, event_fields=None, source=None):
+    def save_response(self, session_key, input_id, response, event_fields=None, source=None, preview=None):
         """До первой части сохранить составной готовый ответ для доставки после сбоя."""
         if not isinstance(response, str) or not response:
             raise ValueError('CONTINUATION_RESPONSE_INVALID')
+        if preview is not None and not isinstance(preview, dict):
+            raise ValueError('CONTINUATION_PREVIEW_INVALID')
         if event_fields is None:
             event_fields = {}
         if (not isinstance(event_fields, dict) or set(event_fields) - {
                 'message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id', 'message_type',
-                'auto_voice', 'already_streamed', 'stream_footer'}
+                'auto_voice', 'already_streamed', 'stream_footer', 'skip_stream_media'}
                 or any(value is not None and not isinstance(value, str) for value in event_fields.values())):
             raise ValueError('CONTINUATION_EVENT_INVALID')
         with self.open() as db:
@@ -136,6 +138,8 @@ class DeliveryJournal:
                     raise ValueError('CONTINUATION_BINDING_CONFLICT')
                 prepared = {'session_key': session_key, 'input_id': input_id, 'response': response,
                             'event': event_fields, 'source': source, 'chat_generation': binding['chat_generation']}
+                if preview is not None:
+                    prepared['preview'] = preview
                 db.execute("INSERT INTO output_deliveries(id,action,payload,phase) VALUES(?,'prepared_response',?,'prepared')",
                            (prepared_id, canonical(prepared)))
             if binding and binding.get('input_id') == input_id:
