@@ -35,6 +35,7 @@ async def run(config, fixture, native, receipt):
     from gateway.platforms.event import MessageType
 
     source = Path(config['sourceRoot'])
+    source_sha = config['sourceSha']
     root = fixture.RUN_BASE / str(uuid.uuid4())
     root.parent.mkdir(mode=0o711, parents=True, exist_ok=True)
     root.mkdir(mode=0o711)
@@ -45,7 +46,7 @@ async def run(config, fixture, native, receipt):
     connection_errors = []
     consumer = supervisor = None
     resolver = None
-    proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': config['sourceSha'],
+    proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': source_sha,
              'realNativeWorker': True, 'realTelegram': False, 'realInference': False,
              'backend': 'synthetic', 'scenarios': []}
     stage = 'prepare'
@@ -522,6 +523,11 @@ peer.close();channel.close()
         if cleanup_errors:
             proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
         else:
-            fixture.remove_owned_root(root, identity)
-            proof['cleaned'] = True
+            try:
+                fixture.remove_owned_root(root, identity)
+            except Exception as error:
+                proof.update(state='failed', cleaned=False, fixtureRoot=str(root),
+                             cleanupErrors=[{'type': type(error).__name__, 'code': fixture.safe_error_code(error)}])
+            else:
+                proof['cleaned'] = True
     return proof
