@@ -287,7 +287,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(payload['caption'].encode('utf-16-le')) // 2, 1024)
 
     async def test_scheduled_pdf_keeps_cancellation_in_visible_caption(self):
-        from identity import long_reply
+        long_reply = importlib.import_module('identity.long_reply')
 
         deliver = AsyncMock(return_value={'success': True, 'message_id': '400'})
         worker = self.adapter(deliver)
