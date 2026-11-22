@@ -29,6 +29,7 @@
       "services/auth/src/admin.ts",
       "services/auth/src/auth.ts",
       "services/auth/src/bootstrap.ts",
+      "services/auth/src/owner-bootstrap.ts",
       "services/auth/src/bootstrap-first-profile.ts",
       "services/auth/src/bridge.ts",
       "services/auth/src/config.ts",
