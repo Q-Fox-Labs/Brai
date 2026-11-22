@@ -19,12 +19,13 @@ export async function boundedBytes(body:ReadableStream<Uint8Array>|null,limit:nu
 }
 const sha=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex');
 /** Только доверенные exact origins; metadata и HTTP завершаются в конечный срок. */
-export function artifactsPort(nc:Pick<NatsConnection,'request'>,config:{internalOrigin:string;uploadOrigin:string}):ArtifactPort {
+export function artifactsPort(nc:Pick<NatsConnection,'request'>,config:{internalOrigin:string;uploadOrigin:string},connected:()=>boolean=()=>true):ArtifactPort {
   function origin(value:string){const u=new URL(value);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.pathname!=='/'||u.search||u.hash)throw new Error('INVALID_ARTIFACT_ORIGIN');return u.origin;}
   const internal=origin(config.internalOrigin),upload=origin(config.uploadOrigin);
   function url(value:string,expected:string,path:RegExp){const u=new URL(value);if(u.origin!==expected||u.username||u.password||u.search||u.hash||!path.test(u.pathname))throw new Error('ARTIFACT_ORIGIN');return u;}
   async function call(subject:string,input:unknown,signal:AbortSignal){
     signal.throwIfAborted();if(!validateRequest(subject,input))throw new Error('ARTIFACT_REQUEST');
+    if(!connected())throw new Error('ARTIFACT_UNAVAILABLE');
     const msg=await nc.request(subject,new TextEncoder().encode(JSON.stringify(input)),{timeout:ARTIFACT_LIMITS.timeoutMs});signal.throwIfAborted();
     if(msg.headers?.get('Nats-Service-Error'))throw new Error('ARTIFACT_SERVICE');
     if(msg.data.byteLength>131072)throw new Error('ARTIFACT_METADATA_LIMIT');

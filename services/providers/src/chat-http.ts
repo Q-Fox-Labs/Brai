@@ -32,8 +32,8 @@ export function createChatHttp(operations:Operations,identities:readonly HttpIde
       const supplied=typeof header==='string'&&header.startsWith('Bearer ')?Buffer.from(header.slice(7)):Buffer.alloc(0);
       const identity=credentials.find(i=>supplied.length===i.bytes.length&&timingSafeEqual(supplied,i.bytes));
       if(!identity)throw new Failure('UNAUTHORIZED','not_sent');
-      if(active>=8)throw new Failure('OVERLOADED','not_sent');active++;held=true;
       if(req.method==='GET'&&req.url==='/internal/readiness'&&ready){const available=await ready();send(available?200:503,{ready:available});return;}
+      if(active>=8)throw new Failure('OVERLOADED','not_sent');active++;held=true;
       const recover=/^\/v1\/operations\/([0-9a-fA-F-]{36})$/.exec(req.url??'');
       if(req.method==='GET'&&recover&&uuid.test(recover[1])){
         const op=await operations.get(identity.ownerId,recover[1]);

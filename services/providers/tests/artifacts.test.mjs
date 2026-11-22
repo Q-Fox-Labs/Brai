@@ -20,3 +20,12 @@ test('lost prepare and PUT responses and partial upload reuse exact requestId/by
  const port=artifactsPort(nc,{internalOrigin:origin,uploadOrigin:origin}),pending={ownerId:'fixture',operationId:randomUUID(),inputHash:'a'.repeat(64),requestId,bytes,sha256:sha(bytes),expiresAt:Date.now()+86400000};
  try{await assert.rejects(port.save(pending,AbortSignal.timeout(1000)));mode='partial';await assert.rejects(port.save(pending,AbortSignal.timeout(1000)));mode='lost-put';const result=await port.save(pending,AbortSignal.timeout(1000));assert.equal(result.artifactId,id);assert.ok(saved.equals(bytes));assert.equal(uploads,2);assert.equal(prepareCalls,3);assert.equal((await port.save(pending,AbortSignal.timeout(1000))).artifactId,id);assert.equal(uploads,2);}finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
+
+test('artifact prepare не отправляется при отключённом NATS',async()=>{
+ let sends=0;
+ const nc={request:async()=>{sends++;throw Error('unexpected send');}};
+ const port=artifactsPort(nc,{internalOrigin:'http://127.0.0.1:12345',uploadOrigin:'http://127.0.0.1:12345'},()=>false);
+ const output={ownerId:'fixture',operationId:randomUUID(),inputHash:'a'.repeat(64),requestId:'fixture-request',bytes:Buffer.from('fake'),sha256:'b'.repeat(64),expiresAt:Date.now()+1000};
+ await assert.rejects(port.save(output,new AbortController().signal),/ARTIFACT_UNAVAILABLE/);
+ assert.equal(sends,0);
+});

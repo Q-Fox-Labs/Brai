@@ -16,7 +16,7 @@ const assets = [
   'services/providers/migrations/003_observation.sql',
   'services/artifacts/contracts/index.mjs', 'services/artifacts/contracts/index.d.mts', 'services/artifacts/schemas/messages.schema.json',
 ];
-const entrypoints = ['main.js', 'migrate.js', 'chat-http.js', 'observation.js', 'observation-postgres.js'];
+const entrypoints = ['main.js', 'migrate.js', 'chat-http.js', 'observation.js', 'observation-postgres.js', 'health.js', 'nats-connection.js'];
 const fail = code => { throw new Error(code); };
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const accepted = (revision, path) => execFileSync('/usr/bin/git', ['show', `${revision}:${path}`], { cwd: root, timeout: 10000, maxBuffer: 16 * 1024 * 1024 });

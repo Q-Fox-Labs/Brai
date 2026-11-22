@@ -8,6 +8,7 @@
     "prod"
   ],
   "executableSources": [
+    "services/providers/src/health.ts",
     "services/providers/src/main.ts",
     "services/providers/src/migrate.ts",
     "services/providers/src/catalog.ts",
@@ -35,11 +36,13 @@
       "services/providers/src/core.ts",
       "services/providers/src/egress.ts",
       "services/providers/src/http.ts",
+      "services/providers/src/health.ts",
       "services/providers/src/image.ts",
       "services/providers/src/index.ts",
       "services/providers/src/json.ts",
       "services/providers/src/main.ts",
       "services/providers/src/migrate.ts",
+      "services/providers/src/nats-connection.ts",
       "services/providers/src/nats-v1.ts",
       "services/providers/src/nats.ts",
       "services/providers/src/observation-postgres.ts",
@@ -67,6 +70,7 @@
       "services/providers/tests/observation.test.mjs",
       "services/providers/tests/operations.test.mjs",
       "services/providers/tests/postgres.test.mjs",
+      "services/providers/tests/readiness.test.mjs",
       "services/providers/tests/v0.test.mjs",
       "services/providers/codex-auth/test_credentials.py"
     ]
@@ -106,6 +110,8 @@
     ],
     "entrypoints": [
       "services/providers/dist/main.js",
+      "services/providers/dist/health.js",
+      "services/providers/dist/nats-connection.js",
       "services/providers/dist/migrate.js",
       "services/providers/dist/chat-http.js",
       "services/providers/dist/observation.js",
@@ -128,7 +134,7 @@
     "migrations": [
       "services/providers/migrations"
     ],
-    "health": "No model health endpoint; operation-specific health only"
+    "health": "Authenticated readiness checks NATS, storage and LiteLLM without invoking a model."
   },
   "npm": {
     "workspaces": [

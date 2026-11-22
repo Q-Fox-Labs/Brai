@@ -253,3 +253,17 @@ test('readiness health probe rejects a disconnected coordinator and recovers', a
   await verifyReadiness(env);
   await assert.rejects(verifyReadiness({...env,TRANSCRIPTION_AUTH_BINDINGS_JSON:JSON.stringify([{token:'bad'}])}));
 });
+
+test('readiness remains available when all user operation slots are occupied', async (t) => {
+  let release, entered;
+  const held = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const h = await listener(t, {maxConcurrent:1}, async () => { entered(); await held; return outputs['settings.get']; }, () => true);
+  const pending = h.send('settings.get');
+  await started;
+  try {
+    const result = await h.send('unused', {}, {}, '/internal/readiness');
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(result.body, {ready:true});
+  } finally { release(); await pending; }
+});

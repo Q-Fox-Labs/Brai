@@ -179,7 +179,8 @@ export async function startHttpTransport(config: CoordinatorRuntimeConfig['http'
       if (!Object.hasOwn(methodMap.public, method)) throw { errorCode: 'NOT_FOUND' };
       send(res, 200, await gateway.invoke(method, body, principal), config.responseBytes);
     };
-    void gateway.withCapacity(operation).catch((error) => {
+    // AIDEV-NOTE: Проверка готовности не занимает слоты пользовательских операций.
+    void (req.url === '/internal/readiness' ? operation() : gateway.withCapacity(operation)).catch((error) => {
       const failure = safeError(error);
       send(res, errorStatus(failure.errorCode), failure, config.responseBytes);
     }).finally(() => { if (timer) clearTimeout(timer); });
