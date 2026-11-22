@@ -60,6 +60,17 @@ class InboxTests(unittest.TestCase):
             self.inbox.capture(changed,update(1),'123')
         self.assertEqual(self.inbox.observe(PROFILE,'123',1)['state'],'captured')
 
+    def test_reply_source_selects_its_message_and_preserves_auth_snapshot(self):
+        for ident in (1, 2):
+            self.capture(ident)
+            self.inbox.claim_for_delivery(PROFILE, '123', ident)
+        batch = self.inbox.bind_delivery(PROFILE, '123', [1, 2])
+        source = self.inbox.delivery_source(PROFILE, batch['delivery_id'], reply_to=2)
+        self.assertEqual(source['update_id'], '2')
+        self.assertEqual((source['auth_author'], source['auth_role'], source['auth_generation']),
+                         ('42', 'member', 1))
+        self.assertEqual(self.inbox.delivery_source(PROFILE, batch['delivery_id'])['update_id'], '1')
+
     def test_zero_update_id_is_valid_and_preserved(self):
         self.capture(0)
         self.assertEqual(self.inbox.observe(PROFILE,'123',0)['update_id'],'0')

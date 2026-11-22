@@ -138,6 +138,40 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(resolver.ledger.owns(registered, route, '57'))
                 self.assertFalse(resolver.ledger.owns(registered, route, '58'))
 
+    async def test_durable_reply_checks_input_even_with_existing_canonical_route(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        primary = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 2}
+        route = ('456', '77')
+        source_id = delivery_id('active-input')
+        source = {'chat': '456', 'actor_id': '456', 'chat_generation': 0,
+                  'state': 'handing_off', 'auth_author': '123', 'auth_role': 'user', 'auth_generation': 2,
+                  'payload': json.dumps({'message': {'message_thread_id': 77, 'message_id': 55}})}
+        resolver.ledger.admit(primary, route, {'thread_id': '77'}, '55')
+        resolver.mirror = NS(restartable=True, accepted=AsyncMock(),
+                             inbox=NS(delivery_source=lambda *args: source))
+        deliver = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, deliver)
+        bridge = resolver._bridge(primary)
+        resolver.turns[primary['uid']] = {'id': 'active-turn', 'route': route,
+                                         'delivery': {'delivery_id': source_id}}
+        payload = {'chat_id': '456', 'content': 'Ответ', 'metadata': {'thread_id': '77'}}
+        options = {'delivery_id': delivery_id('outbound'), 'input_delivery_id': source_id}
+        pending = await bridge.send('send', payload, scope_id='stale-turn', **options)
+        self.assertEqual(pending, {'success': False, 'retryable': True, 'error': 'Waiting for input acceptance'})
+        deliver.assert_not_awaited()
+        self.assertIsNone(resolver.reply_outbox.result(options['delivery_id']))
+        result = await bridge.send('send', payload, scope_id='active-turn', **options)
+        self.assertEqual(result, {'success': True, 'message_id': '56'})
+        for state, generation in (('handled', 2), ('accepted', 1)):
+            with self.subTest(state=state, generation=generation):
+                source.update(state=state, auth_generation=generation)
+                options['delivery_id'] = delivery_id([state, generation])
+                with self.assertRaises(PermissionError):
+                    await bridge.send('send', payload, scope_id='active-turn', **options)
+                self.assertIsNone(resolver.reply_outbox.result(options['delivery_id']))
+        deliver.assert_awaited_once()
+
     async def test_saved_reply_rejects_changed_owner_role_and_generation(self):
         restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
         for change in ({'uid': 202}, {'userId': 'foreign'}, {'profileId': 'foreign'},
@@ -160,7 +194,8 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         restored = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 0}
         active = {**restored, 'authorTelegramId': '123'}
         resolver.mirror = NS(restartable=True, accepted=AsyncMock(), inbox=NS(
-            delivery_source=lambda *args: {'chat': '123', 'chat_generation': 0,
+            delivery_source=lambda *args: {'chat': '123', 'actor_id': '123', 'chat_generation': 0,
+                'state': 'accepted', 'auth_author': '123', 'auth_role': 'user', 'auth_generation': 0,
                 'payload': json.dumps({'message': {'message_thread_id': 77}})}))
         resolver.ledger.admit(restored, ('123', '77'), {'thread_id': '77'}, '55')
         resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})

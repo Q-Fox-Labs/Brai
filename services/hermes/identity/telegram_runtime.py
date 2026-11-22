@@ -599,14 +599,25 @@ class Resolver:
         source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id, payload.get('reply_to'))
         original = json.loads(source['payload']).get('message', {})
         route = (source['chat'], str(original.get('message_thread_id') or ''))
-        if str(payload.get('chat_id')) != route[0]:
+        if str(payload.get('chat_id')) != route[0] or source.get('actor_id') != route[0]:
             raise PermissionError('Reply input route changed')
+        auth = (str(profile['authorTelegramId']), profile.get('role'), profile.get('generation'))
+        if auth != (source.get('auth_author'), source.get('auth_role'), source.get('auth_generation')):
+            raise PermissionError('Reply input binding changed')
+        if source['state'] == 'handing_off':
+            # AIDEV-NOTE: Native может отправить ответ внутри dispatch до входной квитанции.
+            turn = self.turns.get(profile['uid'])
+            if (turn is None or request_scope.get() != turn['id'] or turn['route'] != route
+                    or (turn.get('delivery') or {}).get('delivery_id') != source_id):
+                return {'success': False, 'retryable': True, 'error': 'Waiting for input acceptance'}
+        elif source['state'] != 'accepted':
+            raise PermissionError('Reply input not accepted')
         supplied = payload.get('metadata') or {}
         thread = supplied.get('thread_id') or supplied.get('message_thread_id') or supplied.get('direct_messages_topic_id')
         if thread is not None and str(thread) != route[1]:
             raise PermissionError('Reply input thread changed')
         metadata = self.ledger.metadata(profile, route)
-        if metadata is None or payload.get('reply_to') and not self.ledger.owns(profile, route, payload['reply_to']):
+        if metadata is None or (payload.get('reply_to') and not self.ledger.owns(profile, route, payload['reply_to'])):
             metadata = await self._recover_reply_admission(profile, route, source, original, payload.get('reply_to'), metadata)
         if metadata is None:
             raise PermissionError('Reply input admission unavailable')
@@ -629,11 +640,8 @@ class Resolver:
         """Восстановить запись только для подтверждённого входа сохранённого ответа."""
         chat = route[0]
         message_id = str(original.get('message_id') or '')
-        if (chat == str(profile['authorTelegramId']) or source.get('state') != 'accepted'
-                or source.get('actor_id') != chat or not message_id or reply_to and str(reply_to) != message_id):
-            return metadata
-        auth = (str(profile['authorTelegramId']), profile.get('role'), profile.get('generation'))
-        if auth != (source.get('auth_author'), source.get('auth_role'), source.get('auth_generation')):
+        if (chat == str(profile['authorTelegramId']) or source['state'] != 'accepted'
+                or not message_id or (reply_to and str(reply_to) != message_id)):
             return metadata
         legacy = {**profile, 'authorTelegramId': chat}
         old_metadata = self.ledger.metadata(legacy, route)
