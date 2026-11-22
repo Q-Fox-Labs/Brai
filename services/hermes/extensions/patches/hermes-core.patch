@@ -41228,7 +41228,7 @@ index 3b94f09d..bedcfec9 100644
              # Exit 75 + ``RestartForceExitStatus=75``: systemd replaces us without a racing helper.
              self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
-index 177d0000..815f7a02 100644
+index 177d0000..91f15bc1 100644
 --- a/gateway/run_notifications.py
 +++ b/gateway/run_notifications.py
 @@ -1,3 +1,5 @@
@@ -41254,7 +41254,7 @@ index 177d0000..815f7a02 100644
      """Process/completion/update notifications, media delivery and async-delegation delivery for GatewayRunner."""
  
      # Coalescing keys: process completions (short-window fan-in) and async delegations (+ parent session).
-@@ -804,57 +807,10 @@ class GatewayNotificationsMixin:
+@@ -804,57 +807,13 @@ class GatewayNotificationsMixin:
          return True
  
      async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
@@ -41264,7 +41264,9 @@ index 177d0000..815f7a02 100644
 -        notify_path = _hermes_home / ".restart_notify.json"
 -        if not notify_path.exists():
 -            return None
--        try:
++        """Удалить прежнюю квитанцию перезапуска без отдельного сообщения."""
++        from gateway.run import _hermes_home
+         try:
 -            data = json.loads(notify_path.read_text(encoding="utf-8-sig"))
 -            platform_str = data.get("platform")
 -            chat_id = data.get("chat_id")
@@ -41309,14 +41311,14 @@ index 177d0000..815f7a02 100644
 -            return None
 -        finally:
 -            notify_path.unlink(missing_ok=True)
-+        """Удалить прежнюю квитанцию перезапуска без отдельного сообщения."""
-+        from gateway.run import _hermes_home
-+        (_hermes_home / ".restart_notify.json").unlink(missing_ok=True)
++            (_hermes_home / ".restart_notify.json").unlink(missing_ok=True)
++        except OSError:
++            logger.warning("Could not remove obsolete restart notification", exc_info=True)
 +        return None
  
      def _home_channel_transports(self):
          """Yield ``(platform, platform_cfg, home, transport)`` for every home channel with a live transport."""
-@@ -938,47 +894,6 @@ class GatewayNotificationsMixin:
+@@ -938,47 +897,6 @@ class GatewayNotificationsMixin:
              return None
          return t("gateway.startup.free_tier_line")
  
@@ -41445,10 +41447,10 @@ index 445c9319..86f3e327 100644
      def _native_image_run_message(self):
 diff --git a/gateway/return_notices.py b/gateway/return_notices.py
 new file mode 100644
-index 00000000..e8fc8fda
+index 00000000..f51f18f5
 --- /dev/null
 +++ b/gateway/return_notices.py
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,180 @@
 +# ABOUTME: Отправляет предупреждения об остановке и продолжает прерванные ходы.
 +# ABOUTME: Прежние маркеры возврата удаляет без отправки уведомлений.
 +"""Восстановление ходов и совместимость прежних маркеров уведомлений."""
@@ -41456,10 +41458,8 @@ index 00000000..e8fc8fda
 +from __future__ import annotations
 +
 +import asyncio
-+import contextlib
 +import json
 +import logging
-+import math
 +import time
 +from typing import Optional
 +from pathlib import Path
@@ -41472,7 +41472,7 @@ index 00000000..e8fc8fda
 +    """Вернуть ожидающие адреса; None означает отсутствие нового формата.
 +
 +    Повреждённый файл вызывает исключение и не заменяется пустым состоянием.
-+    Старый planned-restart marker обрабатывается штатным отправителем.
++    Старый planned-restart marker удаляется без уведомления.
 +    """
 +    try:
 +        data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -41561,7 +41561,8 @@ index 00000000..e8fc8fda
 +    elif interactive:
 +        resume_guidance = (
 +            "Review the conversation history and CONTINUE the interrupted task to completion "
-+            "without asking the user to say 'continue'. Do not restart completed or cancelled work, "
++            "without announcing the restoration or asking the user to say 'continue'. "
++            "Do not restart completed or cancelled work, "
 +            "and preserve any pending request for user input or approval.")
 +        tail_guidance = (
 +            "Do NOT re-run tool calls whose results already appear in the history. "
@@ -41615,7 +41616,7 @@ index 00000000..e8fc8fda
 +        from gateway.run import _planned_restart_notification_path
 +
 +        while self._running:
-+            if read_return_notices(_planned_restart_notification_path()) is not None:
++            if _planned_restart_notification_path().exists():
 +                await self._replay_pending_planned_restart_notification()
 +            await asyncio.sleep(interval)
 +
@@ -41626,9 +41627,12 @@ index 00000000..e8fc8fda
 +        if self._planned_restart_notice_lock is None:
 +            self._planned_restart_notice_lock = asyncio.Lock()
 +        async with self._planned_restart_notice_lock:
-+            _planned_restart_notification_path().unlink(missing_ok=True)
++            try:
++                _planned_restart_notification_path().unlink(missing_ok=True)
++            except OSError:
++                logger.warning("Could not remove obsolete restart notice", exc_info=True)
 diff --git a/tests/gateway/test_restart_resume_pending.py b/tests/gateway/test_restart_resume_pending.py
-index f0edf004..22f2dcc5 100644
+index f0edf004..8ecf9832 100644
 --- a/tests/gateway/test_restart_resume_pending.py
 +++ b/tests/gateway/test_restart_resume_pending.py
 @@ -1,3 +1,5 @@
@@ -41647,12 +41651,47 @@ index f0edf004..22f2dcc5 100644
  from gateway.session import SessionEntry, SessionSource, SessionStore
  from tests.gateway.restart_test_helpers import (
      RestartTestAdapter,
+@@ -981,7 +983,7 @@ async def test_warmup_disabled_by_nonpositive_timeout(monkeypatch):
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_restart_notifies_home_channel_even_without_active_sessions():
++async def test_restart_does_not_notify_home_without_active_sessions():
+     runner, adapter = make_restart_runner()
+     runner._restart_requested = True
+     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+@@ -992,12 +994,11 @@ async def test_restart_notifies_home_channel_even_without_active_sessions():
+ 
+     await runner._notify_active_sessions_of_shutdown()
+ 
+-    assert len(adapter.sent) == 1
+-    assert "restarting" in adapter.sent[0] and "Send any message" in adapter.sent[0]
++    assert adapter.sent == []
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_restart_home_channel_notification_not_deduped_across_threads():
++async def test_restart_warns_only_active_thread():
+     runner, adapter = make_restart_runner()
+     runner._restart_requested = True
+     session_key = "agent:main:telegram:group:999"
+@@ -1019,9 +1020,8 @@ async def test_restart_home_channel_notification_not_deduped_across_threads():
+ 
+     await runner._notify_active_sessions_of_shutdown()
+ 
+-    assert len(adapter.sent) == 2
++    assert len(adapter.sent) == 1
+     assert adapter.sent_calls[0][2] == {"thread_id": "topic-7", "_interim_send": True}
+-    assert adapter.sent_calls[1][2] == {"_interim_send": True}
+ 
+ 
+ # ---------------------------------------------------------------------------
 diff --git a/tests/gateway/test_return_notices.py b/tests/gateway/test_return_notices.py
 new file mode 100644
-index 00000000..f460d4ff
+index 00000000..a60c2a32
 --- /dev/null
 +++ b/tests/gateway/test_return_notices.py
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,163 @@
 +# ABOUTME: Проверяет парные уведомления остановки и запуска по реальным маршрутам.
 +# ABOUTME: Использует native gateway и временный профиль без отправок в Telegram.
 +"""Регрессии возврата в несколько чатов/топиков и продолжения без сообщения."""
@@ -41661,7 +41700,7 @@ index 00000000..f460d4ff
 +import json
 +from datetime import datetime
 +from types import SimpleNamespace
-+from unittest.mock import AsyncMock, Mock
++from unittest.mock import AsyncMock, Mock, patch
 +
 +import pytest
 +
@@ -41739,6 +41778,16 @@ index 00000000..f460d4ff
 +
 +
 +@pytest.mark.asyncio
++async def test_undeliverable_old_markers_do_not_block_saved_answers(lifecycle):
++    runner, adapter, marker = lifecycle
++    marker.write_text("{}")
++    with patch("pathlib.Path.unlink", side_effect=OSError("read-only")):
++        await _boot(runner)
++    runner._redeliver_claimed_obligations.assert_awaited_once()
++    assert adapter.sent_calls == []
++
++
++@pytest.mark.asyncio
 +async def test_failed_warning_never_creates_return_notice(lifecycle):
 +    runner, adapter, marker = lifecycle
 +    _add_task(runner, "-1001", "7")
@@ -41751,7 +41800,8 @@ index 00000000..f460d4ff
 +def test_telegram_recovery_continues_work_and_checks_unknown_action_results(reason):
 +    note, stored = gateway_run._prepare_resume_pending_message(reason, "", interactive=True)
 +    assert "CONTINUE the interrupted task to completion" in note
-+    assert "without asking the user" in note
++    assert "without announcing the restoration" in note
++    assert "asking the user" in note
 +    assert "inspect its current state before retrying" in note
 +    assert "pending request for user input or approval" in note
 +    assert "skip any unfinished work" not in note
@@ -41798,10 +41848,455 @@ index 00000000..f460d4ff
 +                          persist_user_message=message, persist_user_timestamp=None)
 +    stored, _ = TurnRunner(runner, ctx)._prepare_turn_message([])
 +    if message:
-+        assert "NEW message below FIRST" in ctx.message
++        assert "Address the user's NEW message" in ctx.message
 +        assert ctx.message.endswith(message)
 +        assert stored == message
 +    else:
 +        assert "CONTINUE the interrupted task to completion" in ctx.message
-+        assert "without asking the user" in ctx.message
++        assert "without announcing the restoration" in ctx.message
 +        assert stored == ctx.message
+diff --git a/tests/gateway/test_restart_notification.py b/tests/gateway/test_restart_notification.py
+index b2278f9a..3b65cd8d 100644
+--- a/tests/gateway/test_restart_notification.py
++++ b/tests/gateway/test_restart_notification.py
+@@ -1,3 +1,5 @@
++# ABOUTME: Проверяет маршрутизацию команд и предупреждений остановки gateway.
++# ABOUTME: Использует тестовые адаптеры без отправки сообщений пользователям.
+ """Tests for /restart notification — the gateway notifies the requester on comeback."""
+ 
+ import json
+@@ -244,7 +246,7 @@ async def test_relay_fronted_logical_home_gets_startup_notification(tmp_path, mo
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_relay_restart_notification_uses_logical_platform_and_owner(tmp_path, monkeypatch):
++async def test_relay_restart_marker_is_removed_without_notification(tmp_path, monkeypatch):
+     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+     notify_path = tmp_path / ".restart_notify.json"
+     notify_path.write_text(
+@@ -274,12 +276,8 @@ async def test_relay_restart_notification_uses_logical_platform_and_owner(tmp_pa
+ 
+     delivered_target = await runner._send_restart_notification()
+ 
+-    assert delivered_target == ("slack", "D123", None)
+-    relay.send_for_platform.assert_awaited_once()
+-    assert relay.send_for_platform.await_args.args[0:2] == (Platform.SLACK, "D123")
+-    metadata = relay.send_for_platform.await_args.kwargs["metadata"]
+-    assert metadata["user_id"] == "U123"
+-    assert metadata["scope_id"] == "T123"
++    assert delivered_target is None
++    relay.send_for_platform.assert_not_awaited()
+     assert not notify_path.exists()
+ 
+ 
+@@ -341,10 +339,8 @@ async def test_shutdown_notifications_use_cached_live_thread_source_when_origin_
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_shutdown_home_channel_broadcast_carries_interim_marker():
+-    """Active-chat and home-channel shutdown sends are interim sends (#98432): a
+-    stream-is-the-message adapter must not seal an in-flight answer with the advisory,
+-    including when the home channel has no thread routing metadata."""
++async def test_shutdown_warns_active_chat_with_interim_marker():
++    """Предупреждение активного чата не завершает поток ответа."""
+     runner, adapter = make_restart_runner()
+     source = make_restart_source(chat_id="active-42", chat_type="dm")
+     session_key = build_session_key(source)
+@@ -361,7 +357,7 @@ async def test_shutdown_home_channel_broadcast_carries_interim_marker():
+     await runner._notify_active_sessions_of_shutdown()
+ 
+     targets = [c.args[0] for c in adapter.send.await_args_list]
+-    assert targets == ["active-42", "home-42"]
++    assert targets == ["active-42"]
+     for call in adapter.send.await_args_list:
+         assert call.kwargs["metadata"]["_interim_send"] is True
+ 
+diff --git a/tests/gateway/test_planned_restart_notice_multiplex.py b/tests/gateway/test_planned_restart_notice_multiplex.py
+index 34f591f3..332ad5fd 100644
+--- a/tests/gateway/test_planned_restart_notice_multiplex.py
++++ b/tests/gateway/test_planned_restart_notice_multiplex.py
+@@ -1,10 +1,6 @@
+-"""A planned restart notifies EVERY served profile's home channels, not just the launch profile's.
+-
+-One host process multiplexes every profile, so ``self.config`` — the launch profile's — is not
+-the fleet: the owed set and the online notice were both built from it alone, and a secondary
+-profile's chat never heard that its gateway had restarted. The marker must also survive until
+-every served profile was reached, or the missed channels are lost for good.
+-"""
++# ABOUTME: Проверяет восстановление gateway с несколькими профилями.
++# ABOUTME: Старые маркеры уведомлений не вызывают отправку в домашние чаты.
++"""Проверки группового gateway и прежних маркеров перезапуска."""
+ 
+ import json
+ from types import SimpleNamespace
+@@ -57,104 +53,12 @@ def multiplex_runner(tmp_path, monkeypatch):
+     return runner, marker
+ 
+ 
+-@pytest.mark.asyncio
+-async def test_planned_restart_notifies_every_served_profile(multiplex_runner):
+-    runner, marker = multiplex_runner
+-    launch, coder = _adapter(), _adapter()
+-    runner.adapters[Platform.DISCORD] = launch
+-    runner._profile_adapters["coder"][Platform.TELEGRAM] = coder
+-
+-    await runner._replay_pending_planned_restart_notification()
+ 
+-    launch.send.assert_awaited_once()
+-    coder.send.assert_awaited_once(), "a served profile's home channel is owed the restart notice"
+-    assert coder.send.await_args.args[:2] == ("coder-home", ONLINE_NOTICE)
+-    assert not marker.exists(), "every owed target was notified — the obligation is discharged"
+ 
+ 
+-@pytest.mark.asyncio
+-async def test_marker_survives_until_a_served_profile_is_reachable(multiplex_runner):
+-    """A served profile whose platform is down at boot keeps the notice owed for its reconnect."""
+-    runner, marker = multiplex_runner
+-    launch = _adapter()
+-    runner.adapters[Platform.DISCORD] = launch
+ 
+-    await runner._replay_pending_planned_restart_notification()
+ 
+-    launch.send.assert_awaited_once()
+-    assert marker.exists(), "coder's channel was never notified; the marker must not be consumed"
+-    delivered = json.loads(marker.read_text(encoding="utf-8"))["delivered_targets"]
+-    assert [target for target in delivered if target[0] == "discord"], "the reached target is recorded"
+ 
+-    coder = _adapter()
+-    runner._profile_adapters["coder"][Platform.TELEGRAM] = coder
+-    await runner._replay_pending_planned_restart_notification()
+-
+-    coder.send.assert_awaited_once()
+-    assert launch.send.await_count == 1, "a reached home is never notified twice"
+-    assert not marker.exists()
+-
+-
+-@pytest.mark.asyncio
+-@pytest.mark.parametrize("outcome", ["success", "failure"])
+-async def test_private_home_notices_reach_both_bots(multiplex_runner, outcome):
+-    """Equal positive Telegram chat ids under two bots are two conversations, not one shared chat.
+-
+-    A Telegram private chat id names the USER, so the launch bot and a served profile's bot with
+-    the same home id each owe their own notice; a delivery dedupe that collapses them discharged
+-    the served profile's obligation without ever sending it (#118233).
+-    """
+-    runner, marker = multiplex_runner
+-    runner.config = _home_config(Platform.TELEGRAM, "8776018003")
+-    launch, coder = _adapter(), _adapter()
+-    runner.adapters = {Platform.TELEGRAM: launch}
+-    runner._profile_configs = {"coder": _home_config(Platform.TELEGRAM, "8776018003")}
+-    runner._profile_adapters = {"coder": {Platform.TELEGRAM: coder}}
+-    if outcome == "failure":
+-        coder.send.return_value = SendResult(success=False, error="temporary failure")
+-
+-    await runner._replay_pending_planned_restart_notification()
+-
+-    launch.send.assert_awaited_once()
+-    coder.send.assert_awaited_once()
+-    if outcome == "failure":
+-        assert marker.exists(), "the second bot's conversation is still owed its notice"
+-        recorded = json.loads(marker.read_text(encoding="utf-8"))["delivered_targets"]
+-        assert ["telegram", "8776018003", None] in recorded
+-        assert ["coder:telegram", "8776018003", None] not in recorded
+-        coder.send.reset_mock()
+-        coder.send.return_value = SendResult(success=True, message_id="recovered")
+-        await runner._replay_pending_planned_restart_notification()
+-        coder.send.assert_awaited_once()
+-        launch.send.assert_awaited_once()
+-    assert not marker.exists()
+-
+-
+-@pytest.mark.asyncio
+-async def test_profiles_sharing_one_home_chat_get_one_notice(tmp_path, monkeypatch):
+-    """One host process restarting once owes a shared chat ONE notice, not one per profile.
+-
+-    A single Telegram group as the home channel of both the launch profile and a served profile
+-    is a common setup; keyed per profile it received two "Gateway online" messages.
+-    """
+-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+-    runner = object.__new__(gateway_run.GatewayRunner)
+-    runner.config = _home_config(Platform.TELEGRAM, "-100999")
+-    runner.config.sessions_dir = tmp_path / "sessions"
+-    launch, coder = _adapter(), _adapter()
+-    runner.adapters = {Platform.TELEGRAM: launch}
+-    runner._profile_configs = {"coder": _home_config(Platform.TELEGRAM, "-100999")}
+-    runner._profile_adapters = {"coder": {Platform.TELEGRAM: coder}}
+-    runner._free_tier_startup_line = Mock(return_value=None)
+-    runner._planned_restart_notice_lock = None
+-    marker = tmp_path / ".restart_pending.json"
+-    marker.write_text("{}", encoding="utf-8")
+-
+-    await runner._replay_pending_planned_restart_notification()
+-
+-    assert launch.send.await_count + coder.send.await_count == 1, "one chat, one restart, one notice"
+-    assert not marker.exists(), "the shared chat was reached, so every owed profile is discharged"
+ 
+ 
+ @pytest.mark.asyncio
+@@ -211,33 +115,15 @@ async def test_unserved_profile_config_is_pruned_from_the_fan_out(tmp_path, monk
+         (None, Platform.DISCORD, runner.config.platforms[Platform.DISCORD])]
+ 
+ 
+-@pytest.mark.asyncio
+-async def test_a_served_profiles_reconnect_replays_the_owed_notice(multiplex_runner):
+-    """A served profile whose bot was down at boot keeps the notice owed "for its reconnect" -- but only
+-    the primary reconnect replayed it, so the marker outlived the outage and the notice never went out."""
+-    import asyncio
+ 
++
++@pytest.mark.asyncio
++async def test_legacy_restart_marker_is_cleared_for_all_profiles(multiplex_runner):
+     runner, marker = multiplex_runner
+-    runner.adapters[Platform.DISCORD] = _adapter()
+-    await runner._replay_pending_planned_restart_notification()  # boot: coder's Telegram is down
+-    assert marker.exists()
+-
+-    coder = SimpleNamespace(send_path_degraded=False, has_fatal_error=False, fatal_error_retryable=True,
+-                            send=AsyncMock(return_value=SendResult(success=True, message_id="n")))
+-    runner._running = True
+-    runner._background_tasks = set()
+-    runner._profile_failed_platforms = {}
+-    runner._failed_platforms = {}
+-    runner._sync_voice_mode_state_to_adapter = Mock()
+-    runner._redeliver_failed_obligations_for_platform = AsyncMock(return_value=0)
+-    runner._schedule_resume_pending_sessions = Mock(return_value=0)
+-    runner._secondary_reconnect_attempt = AsyncMock(return_value=(coder, True))
+-
+-    await runner._run_secondary_profile_reconnect("coder", Platform.TELEGRAM)
+-    for _ in range(50):
+-        await asyncio.sleep(0)
+-
+-    assert runner._profile_adapters["coder"][Platform.TELEGRAM] is coder
+-    coder.send.assert_awaited_once()
+-    assert coder.send.await_args.args[:2] == ("coder-home", ONLINE_NOTICE)
+-    assert not marker.exists(), "the owed target was reached on reconnect: the obligation is discharged"
++    launch, coder = _adapter(), _adapter()
++    runner.adapters[Platform.DISCORD] = launch
++    runner._profile_adapters["coder"][Platform.TELEGRAM] = coder
++    await runner._replay_pending_planned_restart_notification()
++    launch.send.assert_not_awaited()
++    coder.send.assert_not_awaited()
++    assert not marker.exists()
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -3814,6 +3814,13 @@
+         except Exception as fmt_err:
+             if "not modified" in str(fmt_err).lower():
+                 return True
++            # A transport refusal is independent of formatting. Retrying it as plain
++            # text spends the same flood budget and can leave the live preview frozen.
++            if not any(marker in str(fmt_err).lower() for marker in (
++                "can't parse entities", "cannot parse entities", "can't find end",
++                "unsupported start tag", "entity bounds", "parse entities",
++            )):
++                raise
+             logger.warning(warn_fmt, self.name, _redact_telegram_error_text(fmt_err))
+             await self._edit_text(chat_id, message_id, plain)
+         return False
+@@ -3884,7 +3891,9 @@
+             self._last_overflow_preview.pop(_preview_key, None)
+         try:
+             if not finalize:
+-                await self._edit_text(chat_id, message_id, content)
++                await self._edit_markdown_or_plain(
++                    chat_id, message_id, self.format_message(content), _strip_mdv2(content),
++                    "[%s] MarkdownV2 preview edit failed, falling back to plain text: %s")
+                 if _saturated_preview:
+                     self._last_overflow_preview[_preview_key] = content
+                 return SendResult(success=True, message_id=message_id)
+@@ -3915,16 +3924,22 @@
+             retry_after = getattr(e, "retry_after", None)
+             if retry_after is not None or "retry after" in err_str:
+                 wait = retry_after if retry_after else 1.0
+-                if wait > _FLOOD_INLINE_WAIT_CAP_SECS:
++                # A final edit replaces an existing preview; a fresh send would leave
++                # that preview beside the answer. Wait once, bounded to a minute, while
++                # other chats keep running. The gateway grants this finalize 125s.
++                wait_cap = 60.0 if finalize else _FLOOD_INLINE_WAIT_CAP_SECS
++                if wait > wait_cap:
+                     # Log AFTER the cap check: "waiting 33.0s" followed by no wait misled an investigation.
+                     logger.warning(
+                         "[%s] Telegram flood control, refusing edit (retry_after %.1fs > %.0fs inline cap)",
+-                        self.name, wait, _FLOOD_INLINE_WAIT_CAP_SECS)
++                        self.name, wait, wait_cap)
+                     return _flood_cap_result(wait)
+                 logger.warning("[%s] Telegram flood control, waiting %.1fs", self.name, wait)
+                 await asyncio.sleep(wait)
+                 try:
+-                    await self._edit_text(chat_id, message_id, content)
++                    await self._edit_markdown_or_plain(
++                        chat_id, message_id, self.format_message(content), _strip_mdv2(content),
++                        "[%s] MarkdownV2 retry edit failed, falling back to plain text: %s")
+                     return SendResult(success=True, message_id=message_id)
+                 except Exception as retry_err:
+                     safe_retry_error = _redact_telegram_error_text(retry_err)
+@@ -5556,6 +5571,10 @@
+         """Arm/re-arm this chat's slot after an actual send/edit API call fires."""
+         slot_until: dict[str, float] = self.__dict__.setdefault("_telegram_chat_outbound_slot_until", {})
+         budget = getattr(self, "_telegram_chat_outbound_slot_secs", _TELEGRAM_CHAT_OUTBOUND_BUDGET_SECS)
++        # Groups share a lower sustained allowance across sends and edits. Pace both
++        # with the same slot so progress plus streaming cannot exhaust it separately.
++        if isinstance(normalize_telegram_chat_id(chat_id), int) and normalize_telegram_chat_id(chat_id) < 0:
++            budget = max(3.2, budget)
+         slot_until[str(normalize_telegram_chat_id(chat_id))] = (
+             asyncio.get_running_loop().time() + max(0.0, budget))
+ 
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3266,10 +3266,10 @@
+             await asyncio.sleep(0.05)
+ 
+     @staticmethod
+-    async def _await_stream_task(stream_task) -> None:
+-        """Give the stream consumer task 5s to flush, then cancel it."""
++    async def _await_stream_task(stream_task, *, timeout: float = 5.0) -> None:
++        """Bound final delivery without cancelling a permitted platform retry."""
+         try:
+-            await asyncio.wait_for(stream_task, timeout=5.0)
++            await asyncio.wait_for(stream_task, timeout=timeout)
+         except (asyncio.TimeoutError, asyncio.CancelledError):
+             stream_task.cancel()
+             with suppress(asyncio.CancelledError):
+@@ -3743,7 +3743,7 @@
+         _sc = turn_ctx.stream_consumer_holder[0]
+         if _sc and stream_task:
+             try:
+-                await self._await_stream_task(stream_task)
++                await self._await_stream_task(stream_task, timeout=125.0 if turn_ctx.source.platform == Platform.TELEGRAM else 5.0)
+             except Exception as e:
+                 logger.debug("Stream consumer wait before queued message failed: %s", e)
+         # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
+@@ -3993,7 +3993,7 @@
+                 with suppress(asyncio.CancelledError):
+                     await stream_task
+             else:
+-                await self._await_stream_task(stream_task)
++                await self._await_stream_task(stream_task, timeout=125.0 if turn_ctx.source.platform == Platform.TELEGRAM else 5.0)
+ 
+         # Abort + bounded wait for streaming TTS: covers paths where normal finalisation was skipped.
+         _stts_finally = turn_ctx.streaming_tts_consumer_holder[0]
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -3358,12 +3358,31 @@
+ 
+     @staticmethod
+     def strip_media_directives_for_display(text: str) -> str:
+-        """Strip MEDIA: directives from streamed/display text. Known-extension tags are
+-        removed unconditionally (as ``MEDIA_TAG_CLEANUP_RE``); extension-less tags only when
+-        ``validate_media_delivery_path`` accepts the path, so undeliverable paths stay visible."""
+-        if not _has_media_directives(text):
++        """Hide delivery instructions in visible text without changing attachment extraction.
++
++        Display never needs a file to exist. Keep examples masked; withhold unfinished
++        directives while their streamed path or closing quote is still arriving.
++        """
++        if not text:
+             return text
+-        return re.sub(r'\n{3,}', '\n\n', _strip_media_tag_directives(text)).rstrip()
++        masked = _mask_media_scan_text(text)
++        spans = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
++        spans.extend(m.span() for m in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked))
++        spans.extend(m.span() for m in re.finditer(
++            r"\[\[(?:audio_as_voice|as_document)\]\]", masked))
++        # Local Markdown destinations are not usable links in chat. Show their label only.
++        for match in re.finditer(
++                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:file://)?/[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:file://)?/[^\n)]*(?:\)|\Z))', masked):
++            spans.extend([(match.start(), match.start("label")), (match.end("label"), match.end())])
++        # An unterminated quoted path or an empty MEDIA: must not flash in a preview.
++        tail = re.search(r"(?i)(?<!\w)MEDIA:[ \t]*(?:[`\"']?(?:~/|/|[A-Za-z]:[/\\])[^\n]*|[`\"']?)\Z", masked)
++        if tail and not any(a <= tail.start() < b for a, b in spans):
++            spans.append(tail.span())
++        tail = re.search(r"\[\[[a-z_]*\]?\]?\Z", masked)
++        if tail and any(tag.startswith(tail.group()) for tag in
++                        ("[[audio_as_voice]]", "[[as_document]]")):
++            spans.append(tail.span())
++        return re.sub(r'\n{3,}', '\n\n', _delete_spans(text, spans)).rstrip()
+ 
+     @staticmethod
+     def extract_local_files(content: str) -> tuple[list[str], str]:
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -3620,6 +3620,10 @@
+     async def send(
+         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> SendResult:
+         """Send a message to a Telegram chat."""
++        raw_content = content
++        content = self.strip_media_directives_for_display(content)
++        if not content.strip() and raw_content and "MEDIA:" in raw_content and not (metadata or {}).get("_interim_send"):
++            content = "Вложение не отправлено: файл недоступен."
+         if not self._bot:
+             live = self._replacement_telegram_adapter()
+             if live is not None:
+@@ -3833,6 +3837,14 @@
+         Telegram caps a message at 4096 UTF-16 codeunits. Streaming replies that outgrow it must NOT be truncated
+         silently nor fail (the consumer would re-send a duplicate): edit with the first chunk, send the rest as
+         continuations, and return the final chunk's id as the next edit target."""
++        content = self.strip_media_directives_for_display(content).strip()
++        if not content:
++            # Media-only finals have no text bubble. Remove an existing preview, not the media.
++            if finalize:
++                deleted = await self.delete_message(chat_id, message_id)
++                return SendResult(success=deleted, message_id=None,
++                                  error=None if deleted else "preview_cleanup_failed")
++            return SendResult(success=True, message_id=message_id, raw_response={"skipped": True})
+         if not self._bot:
+             return SendResult(success=False, error="Not connected")
+         # Shared per-chat budget (#116312): an interim (preview) edit is SKIPPED when the slot is busy —
+@@ -4091,6 +4103,9 @@
+         ``sendMessageDraft``; reusing ``draft_id`` animates the preview. The caller sends the final text."""
+         if not self._bot:
+             return SendResult(success=False, error="not_connected")
++        content = self.strip_media_directives_for_display(content)
++        if not content.strip():
++            return SendResult(success=True, message_id=None)
+         # Rich draft fast-path; any failure degrades to the plain draft below. Drafts have no message_id.
+         if self._should_attempt_rich_draft(content) and await self._try_send_rich_draft(chat_id, draft_id, content, metadata):
+             return SendResult(success=True, message_id=None)
+@@ -4159,6 +4174,7 @@
+         self, chat_id: str, text: str, *, parse_mode: Any, thread_id: Optional[str], metadata: Optional[dict[str, Any]],
+         reply_markup: Any = None, reply_to_mode: Optional[str] = None):
+         """Send a control-style message (prompt/picker) with topic routing + thread fallback."""
++        text = self.strip_media_directives_for_display(text)
+         reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=reply_to_mode)
+         kwargs: dict[str, Any] = {
+             "chat_id": normalize_telegram_chat_id(chat_id), "text": text, "parse_mode": parse_mode, **self._link_preview_kwargs()}
+@@ -4355,6 +4371,7 @@
+ 
+     async def _edit_result_text(self, query, result_text: str) -> None:
+         """Replace a picker message with ``result_text`` (MarkdownV2, then plain, then give up), keyboard removed."""
++        result_text = self.strip_media_directives_for_display(result_text)
+         try:
+             await query.edit_message_text(text=self.format_message(result_text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=None)
+         except Exception:
+@@ -5150,6 +5167,7 @@
+ 
+     @staticmethod
+     def _caption_1024(caption: Optional[str]) -> Optional[str]:
++        caption = BasePlatformAdapter.strip_media_directives_for_display(caption) if caption else None
+         return caption[:1024] if caption else None
+ 
+     async def _send_voice_bubble(self, audio_file, chat_id, reply_to, metadata, caption, duration_secs):
+@@ -5159,6 +5177,7 @@
+         # literal *asterisks* and [links](...) without a parse_mode. Format to MarkdownV2 when it fits the
+         # 1024-char caption cap; fall back to the raw text (previous behaviour) when formatting would
+         # overflow or the Bot API rejects the entities.
++        caption = self.strip_media_directives_for_display(caption) if caption else None
+         _caption_variants: list[tuple] = []
+         if caption:
+             try:
+diff --git a/locales/en.yaml b/locales/en.yaml
+index 8318c471..5313c05b 100644
+--- a/locales/en.yaml
++++ b/locales/en.yaml
+@@ -864,8 +864,8 @@ gateway:
+     action_shutting_down: "shutting down"
+     action_restarting: "restarting"
+     cron_interrupted: "⚠️ Scheduled job '{job}' was cut short because Hermes is {action}; no result this run. It will run again on schedule, or run it now with `hermes cron run {job}` once Hermes is back."
+-    notice_shutdown: "⚠️ Hermes is shutting down — your current task will be interrupted. When it is back online, send any message and I'll try to pick up where we left off."
+-    notice_restart: "⚠️ Hermes is restarting — your current task will be interrupted. Send any message after the restart and I'll try to resume where you left off."
++    notice_shutdown: "⚠️ The agent is stopping. Your current task may be interrupted. After startup, I will check its state and try to continue automatically."
++    notice_restart: "⚠️ The agent is restarting. Your current task may be interrupted. After startup, I will check its state and try to continue automatically."
+ 
+   startup:
+     handoff_thread_title: "Hermes — {title}"

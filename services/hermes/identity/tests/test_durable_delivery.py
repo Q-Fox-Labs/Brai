@@ -257,7 +257,7 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                        cwd=root, check=True, capture_output=True)
         node = next(node for node in ast.walk(ast.parse(target.read_text()))
                     if isinstance(node, ast.AsyncFunctionDef) and node.name == '_return_notice_watcher')
-        scope = {'read_return_notices': Mock(side_effect=ValueError('broken notice')), 'logger': Mock()}
+        scope = {'logger': Mock()}
         async def tick(_):
             fake._running = False
         scope['asyncio'] = NS(sleep=tick)
@@ -266,11 +266,12 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         async def release_source():
             yield
         fake = NS(_running=True, _brai_release_source=release_source,
+                  _replay_pending_planned_restart_notification=AsyncMock(side_effect=ValueError('broken notice')),
                   _brai_retry_failed_sessions=self.worker._retry_failed_sessions)
         self.entry.resume_pending, self.entry.resume_reason = True, 'brai_technical_failure'
         self.worker.delivery_journal.save_continuation('session', IDENT, 3)
         from gateway import run
-        with patch.object(run, '_planned_restart_notification_path', return_value=Path('/unused')), \
+        with patch.object(run, '_planned_restart_notification_path', return_value=Mock(exists=Mock(return_value=True))), \
                 patch('identity.native_policy.principal', return_value={'role': 'user'}):
             await scope['_return_notice_watcher'](fake)
             await asyncio.gather(*self.tasks)
