@@ -19,13 +19,19 @@ try{
 }finally{closeSync(fd);}
 const input=dataSchema.parse(JSON.parse(raw));
 const queueProfile=process.env.AUTH_BOOTSTRAP_QUEUE_PROFILE==="true";
-if(queueProfile&&(!input.userId||input.profileId))throw new Error("Queued owner bootstrap requires a stable user ID and no profile ID");
+if(queueProfile&&(!input.userId||!/^[A-Za-z0-9_-]{1,128}$/.test(input.userId)
+ ||!/^[1-9][0-9]{0,19}$/.test(input.telegramId)||input.profileId||input.role==="admin"))throw new Error("Invalid queued owner profile identity");
+const ownerRole=input.role??(queueProfile?"creator":"admin");
 const pool=new Pool({connectionString:databaseURL,connectionTimeoutMillis:5000});
 
 async function enqueueOwnerProfile(client:PoolClient,userId:string){
- const result=await requestLifecycle(client,"operator","users-add",{
-  telegramId:input.telegramId,requestId:"operator-bootstrap-profile:"+userId
- });
+ const prefix="operator-bootstrap-profile:"+createHash("sha256").update(userId).digest("hex");
+ const {rows:[previous]}=await client.query(
+  "SELECT id,request_id,state FROM brai_user_operation WHERE user_id=$1 ORDER BY generation DESC LIMIT 1",[userId]);
+ if(previous&&((previous.request_id!==prefix&&!previous.request_id.startsWith(prefix+":"))
+  ||!["pending","running","failed"].includes(previous.state)))throw new Error("Owner provisioning requires operator review");
+ const requestId=previous?.state==="failed"?prefix+":"+previous.id:previous?.request_id??prefix;
+ const result=await requestLifecycle(client,"operator","users-add",{telegramId:input.telegramId,requestId});
  if(result.status!==200)throw new Error("Owner profile could not be queued");
 }
 
@@ -40,7 +46,7 @@ try{
   if(prior.rowCount){
    const saved=prior.rows[0];
    if(!input.userId||saved.user_id!==input.userId||saved.telegram_id!==input.telegramId||!['admin','creator'].includes(saved.role)||(input.profileId&&saved.profile_id!==input.profileId))throw new Error("Owner already configured");
-   if(input.role==='creator'&&saved.role!=='creator'){
+   if(ownerRole==='creator'&&saved.role!=='creator'){
     if(saved.status!=='active'||(await client.query("SELECT 1 FROM brai_identity WHERE role='creator' LIMIT 1")).rowCount)throw new Error('Creator already configured');
     const result=await requestLifecycle(client,'operator','role-set',{userId:saved.user_id,role:'creator',requestId:'operator-first-creator:'+saved.user_id});
     if(result.status!==200)throw new Error('Creator unavailable');
@@ -53,7 +59,7 @@ try{
   const existing=await client.query('SELECT id FROM "user" WHERE id=$1 FOR UPDATE',[id]);
   if(!existing.rowCount)await client.query('INSERT INTO "user"(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,false,now(),now())',[id,input.name,email]);
   if((await client.query('SELECT 1 FROM brai_identity WHERE user_id=$1',[id])).rowCount)throw new Error("Identity conflict");
-  await client.query("INSERT INTO brai_identity(user_id,telegram_id,profile_id,role,status) VALUES($1,$2,$3,$5,$4)",[id,input.telegramId,input.profileId??null,input.profileId?"active":"provisioning",input.role??"admin"]);
+  await client.query("INSERT INTO brai_identity(user_id,telegram_id,profile_id,role,status) VALUES($1,$2,$3,$5,$4)",[id,input.telegramId,input.profileId??null,input.profileId?"active":"provisioning",ownerRole]);
   await client.query("INSERT INTO brai_owner_bootstrap(user_id) VALUES($1)",[id]);
   await client.query("INSERT INTO brai_identity_audit(id,actor_id,target_id,action) VALUES($1,'operator',$2,'owner-bootstrap')",[randomUUID(),id]);
   if(queueProfile)await enqueueOwnerProfile(client,id);

@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bootstrap-owner": "node dist/bootstrap.js",
+    "bootstrap-first-profile": "node dist/bootstrap-first-profile.js",
     "import-identities": "node dist/import-identities.js",
     "provision-identities": "node dist/provision-identities.js",
     "ready-profiles": "node dist/ready-profiles.js",
