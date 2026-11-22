@@ -104,7 +104,43 @@ class DeliveryJournal:
         result = {'input_id': binding['input_id'], 'chat_generation': binding['chat_generation']}
         if binding.get('ready_output'):
             result['ready_output'] = binding['ready_output']
+        if 'ready_response' in binding:
+            result['ready_response'] = binding['ready_response']
+            result['response_event'] = binding.get('response_event', {})
         return result
+
+    def save_response(self, session_key, input_id, response, event_fields=None):
+        """До первой части сохранить составной готовый ответ для доставки после сбоя."""
+        if not isinstance(response, str) or not response:
+            raise ValueError('CONTINUATION_RESPONSE_INVALID')
+        if event_fields is None:
+            event_fields = {}
+        if (not isinstance(event_fields, dict) or set(event_fields) - {
+                'message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id'}
+                or any(value is not None and not isinstance(value, str) for value in event_fields.values())):
+            raise ValueError('CONTINUATION_EVENT_INVALID')
+        with self.open() as db:
+            db.execute('BEGIN IMMEDIATE')
+            ident = delivery_id(['continuation', session_key])
+            row = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='continuation' AND phase='continuation'", (ident,)).fetchone()
+            binding = json.loads(row[0]) if row else None
+            if not binding or binding.get('session_key') != session_key or binding.get('input_id') != input_id:
+                raise ValueError('CONTINUATION_BINDING_CONFLICT')
+            binding['ready_response'] = response
+            binding['response_event'] = event_fields
+            db.execute('UPDATE output_deliveries SET payload=? WHERE id=?', (canonical(binding), ident))
+
+    def clear_response(self, session_key, input_id, response):
+        """Не удалять готовый ответ более нового хода этой сессии."""
+        with self.open() as db:
+            db.execute('BEGIN IMMEDIATE')
+            ident = delivery_id(['continuation', session_key])
+            row = db.execute("SELECT payload FROM output_deliveries WHERE id=? AND action='continuation' AND phase='continuation'", (ident,)).fetchone()
+            binding = json.loads(row[0]) if row else None
+            if binding and binding.get('input_id') == input_id and binding.get('ready_response') == response:
+                binding.pop('ready_response', None)
+                binding.pop('response_event', None)
+                db.execute('UPDATE output_deliveries SET payload=? WHERE id=?', (canonical(binding), ident))
 
     def clear_continuation(self, session_key):
         """Удалить привязку только после подтверждённого завершения native хода."""

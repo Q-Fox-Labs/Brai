@@ -36,6 +36,7 @@ class Worker:
         self.typing = {}
         self.turn_scopes = {}
         self.recovery_scopes = {}
+        self.restart_retries = {}
         self.tools_ready = False
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
@@ -183,6 +184,7 @@ class Worker:
                     self.active.clear()
                     self.turn_scopes.clear()
                     self.recovery_scopes.clear()
+                    self.restart_retries.clear()
                     self.operational.clear()
                     self.adapter = self.runner = self.peer = None
                     self.peer_released.set()
@@ -341,6 +343,15 @@ class Worker:
 
     def _install_restart_recovery(self, runner):
         """Привязать начатый native ход к входу и восстановить его маршрут после рестарта."""
+        handle = getattr(runner, '_handle_message_with_agent', None)
+        if callable(handle):
+            async def handle_saved_response(event, source, session_key, *args, **kwargs):
+                response = getattr(event, '_brai_ready_response', None)
+                if response is not None:
+                    event._brai_successful_turn = True
+                    return response
+                return await handle(event, source, session_key, *args, **kwargs)
+            runner._handle_message_with_agent = handle_saved_response
         mark = getattr(runner, '_mark_durable_active_turn', None)
         if callable(mark):
             async def mark_bound(event, session_key):
@@ -371,12 +382,14 @@ class Worker:
             route = self._chat_route(event.source)
             if (binding is None or not self.route_allowed(event.source, recovery=True)
                     or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
+                self.restart_retries.pop(session_key, None)
                 state = runner._peek_session_state(session_key)
                 if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
                     runner._release_running_agent_state(session_key)
                 logging.getLogger(__name__).warning('HERMES_RECOVERY_INPUT_UNAVAILABLE session=%s', session_key)
                 return
             if binding.get('ready_output'):
+                self.restart_retries.pop(session_key, None)
                 try:
                     await runner.async_session_store.clear_resume_pending(session_key)
                 finally:
@@ -393,6 +406,7 @@ class Worker:
                         or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
                     raise PermissionError('Recovery authorization changed')
             except (OSError, ConnectionError, TimeoutError, RpcError, PermissionError):
+                self.restart_retries[session_key] = (binding['input_id'], binding['chat_generation'])
                 state = runner._peek_session_state(session_key)
                 if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
                     runner._release_running_agent_state(session_key)
@@ -403,7 +417,12 @@ class Worker:
                 if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
                     runner._release_running_agent_state(session_key)
                 raise
+            self.restart_retries.pop(session_key, None)
             event._brai_chat_generation = binding['chat_generation']
+            if 'ready_response' in binding:
+                event._brai_ready_response = binding['ready_response']
+                for name, value in binding.get('response_event', {}).items():
+                    setattr(event, name, value)
             source_token = input_delivery.set(binding['input_id'])
             scope_token = delivery_scope.set(None)
             continuation_token = continuation_turn.set(True)
@@ -423,6 +442,44 @@ class Worker:
                 delivery_scope.reset(scope_token)
                 input_delivery.reset(source_token)
         runner._run_startup_resume_event = resume_bound
+        runner._brai_retry_saved_response = self._retry_saved_response
+
+    def _retry_saved_response(self, session_key, input_id, response):
+        """Дать watcher повторить только ещё не доставленный сохранённый ответ."""
+        binding = self.delivery_journal.continuation(session_key) if self.delivery_journal else None
+        if (binding and binding['input_id'] == input_id
+                and binding.get('ready_response') == response):
+            self.restart_retries[session_key] = (input_id, binding['chat_generation'])
+
+    def _retry_restart_sessions(self, runner, adapter):
+        """Повторить только уже запланированные native ходы после временной ошибки допуска."""
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        from gateway.platforms.event import MessageEvent, MessageType
+        for key, expected in list(self.restart_retries.items()):
+            with runner.session_store._lock:
+                runner.session_store._ensure_loaded_locked()
+                entry = runner.session_store._entries.get(key)
+                if entry is None or not entry.resume_pending or entry.suspended or entry.origin is None:
+                    self.restart_retries.pop(key, None)
+                    continue
+            binding = self.delivery_journal.continuation(key) if self.delivery_journal else None
+            if binding is None or (binding['input_id'], binding['chat_generation']) != expected:
+                self.restart_retries.pop(key, None)
+                continue
+            source = runner._restored_source(entry)
+            if (not self.route_allowed(source, recovery=True)
+                    or expected[1] != self.chat_states.get(self._chat_route(source), {}).get('generation', 0)):
+                self.restart_retries.pop(key, None)
+                continue
+            if (runner._is_session_running(key) or not runner._resume_owner_authorized(key, source)
+                    or runner._delivery_adapter_for(source) is not adapter):
+                continue
+            state = runner._session_state(key)
+            state.turn.agent = _AGENT_PENDING_SENTINEL
+            state.turn.started_ts = time.time()
+            runner._persist_active_agents()
+            event = MessageEvent(text='', message_type=MessageType.TEXT, source=source, internal=True)
+            runner._retain_background_task(asyncio.create_task(runner._run_startup_resume_event(adapter, event, key)))
 
     async def _retry_failed_sessions(self):
         """Вернуть сохранённые попытки в native turn после проверки владельца и маршрута."""
@@ -436,7 +493,7 @@ class Worker:
                 entries = [entry for entry in runner.session_store._entries.values()
                            if entry.resume_pending and not entry.suspended and entry.origin is not None
                            and entry.resume_reason == 'brai_technical_failure']
-            if not entries:
+            if not entries and not self.restart_retries:
                 return
             from .native_policy import principal
             await asyncio.to_thread(principal)
@@ -445,6 +502,7 @@ class Worker:
                 return
             if self.delivery_journal is None:
                 self._enable_delivery()
+            self._retry_restart_sessions(runner, adapter)
             from gateway.run import _AGENT_PENDING_SENTINEL
             from gateway.platforms.event import MessageEvent, MessageType
             for entry in entries:

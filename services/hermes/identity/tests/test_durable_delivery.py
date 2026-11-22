@@ -117,6 +117,18 @@ class JournalTests(unittest.TestCase):
                          {'input_id': IDENT, 'chat_generation': 3, 'ready_output': output})
         self.assertEqual(restored.pending_outputs()[0]['id'], output)
 
+    def test_backup_restores_unsent_composed_response_and_anchor(self):
+        self.store.begin_input(IDENT, DIGEST)
+        self.store.save_continuation('session', IDENT, 3)
+        self.store.save_response('session', IDENT, 'answer MEDIA:file', {'message_id': '71'})
+        backup = self.path.parent / 'composed.sqlite3'
+        with sqlite3.connect(self.path) as source, sqlite3.connect(backup) as target:
+            source.backup(target)
+        backup.chmod(0o600)
+        restored = DeliveryJournal(backup, 'owner').continuation('session')
+        self.assertEqual((restored['ready_response'], restored['response_event']['message_id']),
+                         ('answer MEDIA:file', '71'))
+
 
 class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -251,7 +263,8 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         adapter._brai_delivery_journal = self.worker.delivery_journal
         token = input_delivery.set(IDENT)
         try:
-            result = await adapter._send_final_text(NS(_brai_single_text=True, _brai_successful_turn=True), 'session')
+            result = await adapter._send_final_text(NS(_brai_single_text=True, _brai_successful_turn=True),
+                'session', 'done', {'thread_id': '7'}, False, 0, lambda result: None)
         finally:
             input_delivery.reset(token)
         self.assertTrue(result.success)
@@ -277,6 +290,56 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             input_delivery.reset(old_input)
             delivery_scope.reset(old_scope)
+
+    async def test_composed_response_resumes_delivery_without_repeating_text_or_model(self):
+        from identity.scope import input_delivery
+        from identity.adapter import make_adapter
+        class Base:
+            def __init__(self, config):
+                self.crash = True
+            async def _extract_response_content(self, response, event, key, **kwargs):
+                return NS(text_content='answer', images=[], media_files=[('file', False)], local_files=[])
+            async def _send_final_text(self, event, key, text, metadata, ephemeral, ttl, record):
+                record(await self._action('send', {'chat_id': '42', 'content': text,
+                                                   'reply_to': event.message_id, 'metadata': metadata}))
+            async def _deliver_attachments(self, event, extracted, metadata, *, anything_sent, record_delivery):
+                record_delivery(await self._action('send_file_set', {'chat_id': '42', 'metadata': metadata,
+                    'items': [{'artifact': {'artifact_id': 'file'}, 'caption': '', 'presentation': 'document'}],
+                    'kind': 'single', 'fallback': False}))
+            async def _process_message_background(self, event, key):
+                extracted = await self._extract_response_content('answer MEDIA:file', event, key)
+                await self._send_final_text(event, key, extracted.text_content, {'thread_id': '7'}, False, 0, lambda _: None)
+                if self.crash:
+                    raise RuntimeError('synthetic crash')
+                await self._deliver_attachments(event, extracted, {'thread_id': '7'}, anything_sent=True, record_delivery=lambda _: None)
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        peer = NS(call=AsyncMock(side_effect=[{'success': True, 'message_id': '1'},
+                                              {'success': True, 'message_id': '2'}]))
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', peer, None)
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        adapter._brai_delivery_journal = self.worker.delivery_journal
+        adapter.gateway_runner = self.runner
+        self.runner._brai_retry_saved_response = self.worker._retry_saved_response
+        self.runner.async_session_store.clear_resume_pending = AsyncMock()
+        event = NS(internal=True, _brai_successful_turn=True, message_id='71')
+        token = input_delivery.set(IDENT)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'synthetic crash'):
+                await adapter._process_message_background(event, 'session')
+            self.assertEqual(self.worker.delivery_journal.continuation('session')['ready_response'], 'answer MEDIA:file')
+            self.assertEqual(self.worker.restart_retries['session'], (IDENT, 3))
+            self.worker.restart_retries.clear()
+            self.worker.delivery_journal = DeliveryJournal(Path(self.tmp.name) / 'delivery.sqlite3', 'owner')
+            adapter._brai_delivery_journal = self.worker.delivery_journal
+            adapter.crash = False
+            await adapter._process_message_background(NS(internal=True, _brai_successful_turn=True, message_id='71'), 'session')
+        finally:
+            input_delivery.reset(token)
+        self.assertEqual([call.args[1]['action'] for call in peer.call.await_args_list], ['send', 'send_file_set'])
+        self.assertNotIn('ready_response', self.worker.delivery_journal.continuation('session'))
+        self.runner.async_session_store.clear_resume_pending.assert_awaited_once_with('session')
 
     async def test_restart_rebinds_running_turn_and_rejects_stale_route(self):
         from identity.scope import input_delivery, continuation_turn, ephemeral_input
@@ -326,6 +389,40 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         original.assert_not_awaited()
         self.runner.async_session_store.clear_resume_pending.assert_awaited_once_with('session')
         self.assertEqual(self.worker.delivery_journal.pending_outputs()[0]['id'], output)
+
+    async def test_restart_retries_after_transient_authorization_failure(self):
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        self.entry.resume_pending, self.entry.resume_reason = True, 'restart_timeout'
+        self.slot.turn.agent = _AGENT_PENDING_SENTINEL
+        self.runner._peek_session_state = lambda key: self.slot
+        self.runner._release_running_agent_state = lambda key: setattr(self.slot.turn, 'agent', None)
+        self.worker.peer.call.side_effect = [ConnectionError('temporary'), {'allowed': True}]
+        original = self.runner._run_startup_resume_event
+        self.worker._install_restart_recovery(self.runner)
+        await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
+        self.assertIn('session', self.worker.restart_retries)
+        original.assert_not_awaited()
+        with patch('identity.native_policy.principal', return_value={'role': 'user'}):
+            await self.worker._retry_failed_sessions()
+        await asyncio.gather(*self.tasks)
+        original.assert_awaited_once()
+        self.assertNotIn('session', self.worker.restart_retries)
+
+    async def test_saved_composed_response_bypasses_model_on_restart(self):
+        self.worker.delivery_journal.save_continuation('session', IDENT, 3)
+        self.worker.delivery_journal.save_response('session', IDENT, 'answer MEDIA:file',
+            {'message_id': '71', 'reply_to_message_id': None})
+        self.runner._peek_session_state = lambda key: self.slot
+        self.runner._release_running_agent_state = Mock()
+        model = self.runner._handle_message_with_agent = AsyncMock()
+        async def resume(adapter, event, key):
+            self.assertEqual(event.message_id, '71')
+            self.assertEqual(await self.runner._handle_message_with_agent(event, event.source, key), 'answer MEDIA:file')
+        self.runner._run_startup_resume_event.side_effect = resume
+        self.worker._install_restart_recovery(self.runner)
+        await self.runner._run_startup_resume_event(self.adapter, NS(source=self.source), 'session')
+        model.assert_not_awaited()
 
     async def test_interrupted_stream_and_exhausted_retries_resume_without_followup(self):
         from identity.scope import input_delivery
@@ -599,6 +696,35 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['success'])
         self.assertEqual(resolver._deliver_route.await_args.args[3], route)
         self.assertEqual(resolver.ledger.db.execute('SELECT count(*) FROM reply_outbox').fetchone()[0], 0)
+        resolver.ledger.record(PROFILE, route, '51', outgoing=True)
+        edited = await bridge.send('edit_message', {'chat_id': '-55', 'message_id': '51',
+            'content': 'final', 'finalize': True, 'metadata': {'thread_id': '7'}},
+            scope_id=None, input_delivery_id=source)
+        self.assertTrue(edited['success'])
+        from identity.adapter import make_adapter
+        from identity.scope import input_delivery, delivery_scope
+        class Base:
+            def __init__(self, config):
+                pass
+        class Peer:
+            async def call(self, method, params):
+                return await bridge.send(**params)
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', Peer(), None)
+        source_token, scope_token = input_delivery.set(source), delivery_scope.set(None)
+        try:
+            result = await adapter._action('edit_message', {'chat_id': '-55', 'message_id': '51',
+                'content': 'streamed final', 'finalize': True, 'metadata': {'thread_id': '7'}})
+        finally:
+            delivery_scope.reset(scope_token)
+            input_delivery.reset(source_token)
+        self.assertTrue(result.success)
+        with self.assertRaises(PermissionError):
+            await bridge.send('edit_message', {'chat_id': '-55', 'message_id': '999',
+                'content': 'foreign', 'finalize': True, 'metadata': {'thread_id': '7'}},
+                scope_id=None, input_delivery_id=source)
         resolver._account.return_value = {**PROFILE, 'generation': 2}
         with self.assertRaises(PermissionError):
             await bridge.check_recovery(source, '-55', '7')

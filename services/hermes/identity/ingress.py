@@ -284,7 +284,7 @@ class Bridge:
             if delivery_id is not None or input_delivery_id is not None:
                 if not callable(self.durable_delivery):
                     raise RpcError(-32602, 'Durable delivery unavailable')
-                if delivery_id is None and (action != 'send' or scope_id is not None):
+                if delivery_id is None and (action not in {'send', 'edit_message'} or scope_id is not None):
                     raise RpcError(-32602, 'Invalid transient input delivery')
                 result = await self.durable_delivery(self.owner, action, payload, delivery_id, input_delivery_id)
             else:
