@@ -976,9 +976,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         env = {"BRAI_TELEGRAM_OWNER_ID": "123", "BRAI_TELEGRAM_STATE_DIR": str(self.config.state_dir),
                "BRAI_HERMES_TRUSTED_ENTRY": self.config.entry, "BRAI_HERMES_NODE_EXECUTABLE": self.config.node,
                "BRAI_TELEGRAM_RESULT_ROOT": self.config.result_root, "TELEGRAM_ALLOWED_CHATS": GROUP,
-               "TELEGRAM_ALLOWED_USERS": "123,456"}
+               "TELEGRAM_ALLOWED_USERS": "123, 456"}
         with patch.dict(os.environ, env, clear=True):
             self.plugin.config = mod.Config.from_env()
+            os.environ["TELEGRAM_ALLOWED_USERS"] = "123,456"
             os.environ["BRAI_TELEGRAM_CHAT_ID"] = "-1008765432100"
             self.assertEqual(mod.Config.from_env().chat, "-1008765432100")
 

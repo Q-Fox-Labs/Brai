@@ -111,7 +111,8 @@ class Config:
         legacy_group = not chat and re.fullmatch(r"-[1-9][0-9]*", native_chat) is not None
         if legacy_group:
             chat = native_chat
-        allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "")
+        # AIDEV-NOTE: Native allowlist восстанавливает маршрут владельца. Общий доступ требует явного маршрута Brai.
+        allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "") if not legacy_group else ""
         users = tuple(allowed.split(",")) if allowed else ()
         state = Path(os.environ.get("BRAI_TELEGRAM_STATE_DIR", ""))
         entry = os.environ.get("BRAI_HERMES_TRUSTED_ENTRY", "")
@@ -134,8 +135,7 @@ class Config:
             game_core_enabled = json.loads(Path(tools_config).read_text()).get('gameCore', {}).get('enabled', True)
             if type(game_core_enabled) is not bool:
                 raise ValueError('BRAI_TELEGRAM_CONFIG_INVALID')
-        # AIDEV-NOTE: Native allowlist восстанавливает маршрут владельца. Общий доступ требует явного маршрута Brai.
-        return cls(owner, state, entry, node, root, chat, () if legacy_group else users, game_core_enabled)
+        return cls(owner, state, entry, node, root, chat, users, game_core_enabled)
 
     @classmethod
     def from_identity(cls):
