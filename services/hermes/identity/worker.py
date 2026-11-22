@@ -16,6 +16,7 @@ import time
 from types import SimpleNamespace
 import uuid
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 from .adapter import make_adapter
 from .ipc import MAX_FRAME, Peer, RpcError, peer_uid
@@ -34,6 +35,7 @@ class Worker:
         self.active = {}
         self.typing = {}
         self.turn_scopes = {}
+        self.recovery_scopes = {}
         self.tools_ready = False
         self.tools_lock = asyncio.Lock()
         self.operational = asyncio.Event()
@@ -180,6 +182,7 @@ class Worker:
                     self.typing.clear()
                     self.active.clear()
                     self.turn_scopes.clear()
+                    self.recovery_scopes.clear()
                     self.operational.clear()
                     self.adapter = self.runner = self.peer = None
                     self.peer_released.set()
@@ -247,7 +250,9 @@ class Worker:
             and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
         self.runner._brai_identity_recovery_allowed = lambda source: self.route_allowed(source, recovery=True)
         self._install_failure_recovery(self.runner)
+        self._install_restart_recovery(self.runner)
         self.runner._brai_return_notice_state = self.return_notice_state
+        self.runner._brai_shutdown_notice_scope = self.shutdown_notice_scope
         self.runner._brai_consent_generation = lambda source: (
             self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
             if self.route_allowed(source) else -1)
@@ -305,10 +310,6 @@ class Worker:
             if review_unavailable and not result.get('interrupted'):
                 # Native regards a controlled guardrail halt as complete; restore the marker afterwards.
                 await remember(source, session_key)
-            elif (isinstance(result, dict) and not result.get('failed') and not result.get('interrupted')
-                    and not result.get('partial') and not result.get('error')
-                    and result.get('completed') is not False and session_key and self.delivery_journal is not None):
-                self.delivery_journal.clear_continuation(session_key)
             return value
 
         runner._hmwa_shape_agent_response = shape
@@ -322,17 +323,234 @@ class Worker:
             runner._hmwa_agent_error_reply = error_reply
         original_deliver = getattr(runner, '_hmwa_deliver_turn_response', None)
         if callable(original_deliver):
+            original_voice_check = getattr(runner, '_should_send_voice_reply', None)
+            if callable(original_voice_check):
+                def voice_check(event, *args, **kwargs):
+                    return False if getattr(event, '_brai_voice_done', False) else original_voice_check(event, *args, **kwargs)
+                runner._should_send_voice_reply = voice_check
             async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
-                from .scope import continuation_turn
+                from .scope import continuation_turn, input_delivery, prepared_response
                 guardrail = result.get('guardrail') if isinstance(result, dict) else None
+                event._brai_successful_turn = (isinstance(result, dict)
+                    and not any(result.get(key) for key in ('failed', 'partial', 'error', 'interrupted'))
+                    and result.get('completed') is not False
+                    and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable'))
                 if (continuation_turn.get() and isinstance(result, dict)
                         and (result.get('failed') or (result.get('partial') and result.get('error'))
                              or (isinstance(guardrail, dict)
                              and guardrail.get('code') == 'brai_review_unavailable'))):
                     return None
+                response = args[1] if len(args) > 1 else kwargs.get('response')
+                intentional_silence = args[3] if len(args) > 3 else kwargs.get('_intentional_silence', False)
+                from gateway.warning_notifications import diagnostic_wake_muted
+                ident = input_delivery.get()
+                adapter = runner._delivery_adapter_for(source)
+                streaming_media = []
+                footer = (args[2] if len(args) > 2 else kwargs.get('_footer_line')) or None
+                if (event._brai_successful_turn and result.get('already_sent')
+                        and not result.get('media_already_delivered') and isinstance(response, str)
+                        and adapter is not None):
+                    media, _ = adapter.extract_media(response)
+                    streaming_media = adapter.filter_media_delivery_paths(media)
+                streaming_result = bool(result.get('already_sent') and (streaming_media or footer))
+                if (event._brai_successful_turn and (not result.get('already_sent') or streaming_result)
+                        and not intentional_silence and not diagnostic_wake_muted(event)
+                        and isinstance(response, str) and (response or footer)
+                        and ident is not None and self.delivery_journal is not None
+                        and adapter is not None and callable(getattr(adapter, '_preview_prepared_response', None))
+                        and callable(getattr(source, 'to_dict', None))):
+                    fields = {key: getattr(event, key, None) for key in
+                        ('message_id', 'reply_to_message_id', 'reply_anchor_override', 'ledger_message_id')}
+                    kind = getattr(event, 'message_type', None)
+                    fields['message_type'] = getattr(kind, 'value', kind)
+                    voice = getattr(runner, '_should_send_voice_reply', None)
+                    messages = args[0] if args else kwargs.get('agent_messages', [])
+                    streamed = bool(adapter and getattr(adapter, '_streaming_tts_turn_completed',
+                        lambda *_args, **_kwargs: False)(session_key, generation))
+                    fields['auto_voice'] = 'yes' if (not streamed and callable(voice)
+                        and voice(event, response, messages, already_sent=bool(result.get('already_sent')))) else 'no'
+                    if streaming_result:
+                        fields['already_streamed'] = 'yes'
+                        fields['stream_footer'] = footer
+                        fields['skip_stream_media'] = 'yes' if not streaming_media else 'no'
+                    saved_response = response or footer
+                    preview = await adapter._preview_prepared_response(saved_response, event, session_key,
+                        streamed=streaming_result, media=streaming_media)
+                    self.delivery_journal.save_response(session_key, ident, saved_response, fields, source.to_dict(), preview)
+                    prepared_response.set((session_key, ident, saved_response))
+                    if streaming_result:
+                        event._brai_streamed_response = True
+                        event._brai_stream_footer = fields['stream_footer']
+                        event._brai_skip_stream_media = fields['skip_stream_media'] == 'yes'
+                        if fields['auto_voice'] == 'yes':
+                            await runner._send_voice_reply(event, response)
+                            event._brai_voice_done = True
+                        extracted = await adapter._extract_response_content(saved_response, event, session_key,
+                            is_ephemeral_response=False)
+                        await adapter._deliver_attachments(event, extracted, runner._event_thread_metadata(event, source),
+                            anything_sent=True, record_delivery=lambda _result: None)
+                        result = {**result, 'media_already_delivered': True}
+                        if len(args) > 2:
+                            args = (*args[:2], '', *args[3:])
+                        else:
+                            kwargs['_footer_line'] = ''
                 return await original_deliver(event, source, entry, session_key, generation, result, *args, **kwargs)
             runner._hmwa_deliver_turn_response = deliver
         runner._brai_retry_failed_sessions = self._retry_failed_sessions
+
+    def _install_restart_recovery(self, runner):
+        """Привязать начатый native ход к входу и восстановить его маршрут после рестарта."""
+        handle = getattr(runner, '_handle_message_with_agent', None)
+        if callable(handle):
+            async def handle_saved_response(event, source, session_key, *args, **kwargs):
+                response = getattr(event, '_brai_ready_response', None)
+                if response is not None:
+                    from .scope import input_delivery, prepared_response
+                    prepared_response.set((session_key, input_delivery.get(), response))
+                    event._brai_successful_turn = True
+                    if getattr(event, '_brai_auto_voice', False):
+                        await runner._send_voice_reply(event, response)
+                    return response
+                return await handle(event, source, session_key, *args, **kwargs)
+            runner._handle_message_with_agent = handle_saved_response
+        mark = getattr(runner, '_mark_durable_active_turn', None)
+        if callable(mark):
+            async def mark_bound(event, session_key):
+                from .scope import input_delivery
+                input_id = input_delivery.get()
+                if input_id is not None and self.delivery_journal is not None:
+                    generation = getattr(event, '_brai_chat_generation', None)
+                    if generation is None:
+                        binding = self.delivery_journal.continuation(session_key)
+                        generation = binding['chat_generation'] if binding else None
+                    if type(generation) is not int:
+                        raise ValueError('CONTINUATION_GENERATION_UNKNOWN')
+                    self.delivery_journal.save_continuation(session_key, input_id, generation)
+                elif self.delivery_journal is not None:
+                    self.delivery_journal.clear_continuation(session_key)
+                return await mark(event, session_key)
+            runner._mark_durable_active_turn = mark_bound
+        resume = getattr(runner, '_run_startup_resume_event', None)
+        if not callable(resume):
+            return
+
+        async def resume_bound(adapter, event, session_key):
+            from .scope import input_delivery, delivery_scope, continuation_turn
+            from gateway.run import _AGENT_PENDING_SENTINEL
+            if self.delivery_journal is None and os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+                self._enable_delivery()
+            current_binding = self.delivery_journal.continuation(session_key) if self.delivery_journal else None
+            detached = getattr(event, '_brai_detached_input', None)
+            candidate = detached or (current_binding['input_id'] if current_binding else None)
+            saved = self.delivery_journal.prepared_response(session_key, candidate) if candidate and self.delivery_journal else None
+            binding = ({'input_id': saved['input_id'], 'chat_generation': saved['chat_generation'],
+                        'ready_response': saved['response'], 'response_event': saved['event']} if saved else current_binding)
+            route = self._chat_route(event.source)
+            if (binding is None or not self.route_allowed(event.source, recovery=True)
+                    or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
+                state = runner._peek_session_state(session_key)
+                if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                    runner._release_running_agent_state(session_key)
+                logging.getLogger(__name__).warning('HERMES_RECOVERY_INPUT_UNAVAILABLE session=%s', session_key)
+                return
+            if saved and saved['phase'] == 'prepared_enqueued':
+                try:
+                    if current_binding and current_binding['input_id'] == saved['input_id']:
+                        await runner.async_session_store.clear_resume_pending(session_key)
+                    self.delivery_journal.clear_response(session_key, saved['input_id'], saved['response'])
+                finally:
+                    state = runner._peek_session_state(session_key)
+                    if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                        runner._release_running_agent_state(session_key)
+                return
+            if binding.get('ready_output'):
+                try:
+                    await runner.async_session_store.clear_resume_pending(session_key)
+                finally:
+                    state = runner._peek_session_state(session_key)
+                    if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                        runner._release_running_agent_state(session_key)
+                return
+            try:
+                if self.peer is None or self.peer.closed:
+                    raise ConnectionError('Ingress unavailable')
+                authorized = await self.peer.call('recovery.check', {'input_delivery_id': binding['input_id'],
+                    'chat_id': route[0], 'thread_id': str(getattr(event.source, 'thread_id', None) or '')})
+                if (authorized != {'allowed': True} or not self.route_allowed(event.source, recovery=True)
+                        or binding['chat_generation'] != self.chat_states.get(route, {}).get('generation', 0)):
+                    raise PermissionError('Recovery authorization changed')
+            except (OSError, ConnectionError, TimeoutError, RpcError, PermissionError):
+                state = runner._peek_session_state(session_key)
+                if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                    runner._release_running_agent_state(session_key)
+                logging.getLogger(__name__).warning('HERMES_RECOVERY_AUTH_UNAVAILABLE session=%s', session_key)
+                return
+            except BaseException:
+                state = runner._peek_session_state(session_key)
+                if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                    runner._release_running_agent_state(session_key)
+                raise
+            event._brai_chat_generation = binding['chat_generation']
+            if 'ready_response' in binding:
+                event._brai_ready_response = binding['ready_response']
+                for name, value in binding.get('response_event', {}).items():
+                    if name == 'message_type' and value is not None:
+                        from gateway.platforms.event import MessageType
+                        event.message_type = MessageType(value)
+                    elif name == 'auto_voice':
+                        event._brai_auto_voice = value == 'yes'
+                    elif name == 'already_streamed':
+                        event._brai_streamed_response = value == 'yes'
+                    elif name == 'stream_footer':
+                        event._brai_stream_footer = value
+                    elif name == 'skip_stream_media':
+                        event._brai_skip_stream_media = value == 'yes'
+                    else:
+                        setattr(event, name, value)
+            source_token = input_delivery.set(binding['input_id'])
+            scope_token = delivery_scope.set(None)
+            continuation_token = continuation_turn.set(True)
+            current = asyncio.current_task()
+            previous = self.recovery_scopes.get(session_key)
+            self.recovery_scopes[session_key] = (current, binding['input_id'], event.source)
+            try:
+                adapter.bind_source(event.source)
+                await resume(adapter, event, session_key)
+            finally:
+                if self.recovery_scopes.get(session_key, (None,))[0] is current:
+                    if previous is None:
+                        self.recovery_scopes.pop(session_key, None)
+                    else:
+                        self.recovery_scopes[session_key] = previous
+                continuation_turn.reset(continuation_token)
+                delivery_scope.reset(scope_token)
+                input_delivery.reset(source_token)
+        runner._run_startup_resume_event = resume_bound
+
+    def _retry_prepared_responses(self, runner, adapter):
+        """Возобновить готовые ответы, пережившие новый input или перезапуск worker."""
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        from gateway.platforms.event import MessageEvent, MessageType
+        from gateway.session import SessionSource
+        for saved in self.delivery_journal.prepared_responses():
+            key = saved['session_key']
+            if not isinstance(saved.get('source'), dict):
+                continue
+            source = SessionSource.from_dict(saved['source'])
+            task = getattr(adapter, '_session_tasks', {}).get(key)
+            if ((task is not None and not task.done()) or runner._is_session_running(key)
+                    or not self.route_allowed(source, recovery=True)
+                    or saved['chat_generation'] != self.chat_states.get(self._chat_route(source), {}).get('generation', 0)
+                    or not runner._resume_owner_authorized(key, source)
+                    or runner._delivery_adapter_for(source) is not adapter):
+                continue
+            state = runner._session_state(key)
+            state.turn.agent = _AGENT_PENDING_SENTINEL
+            state.turn.started_ts = time.time()
+            runner._persist_active_agents()
+            event = MessageEvent(text='', message_type=MessageType.TEXT, source=source, internal=True)
+            event._brai_detached_input = saved['input_id']
+            runner._retain_background_task(asyncio.create_task(runner._run_startup_resume_event(adapter, event, key)))
 
     async def _retry_failed_sessions(self):
         """Вернуть сохранённые попытки в native turn после проверки владельца и маршрута."""
@@ -345,25 +563,29 @@ class Worker:
                 runner.session_store._ensure_loaded_locked()
                 entries = [entry for entry in runner.session_store._entries.values()
                            if entry.resume_pending and not entry.suspended and entry.origin is not None
-                           and entry.resume_reason == 'brai_technical_failure']
-            if not entries:
+                           and entry.resume_reason in {'brai_technical_failure', 'restart_timeout', 'shutdown_timeout', 'restart_interrupted'}]
+            if self.delivery_journal is None:
+                home = os.environ.get('HERMES_HOME')
+                if not entries and (not home or not (Path(home) / 'identity-delivery.sqlite3').exists()):
+                    return
+                self._enable_delivery()
+            if not entries and not self.delivery_journal.prepared_responses():
                 return
             from .native_policy import principal
             await asyncio.to_thread(principal)
             if (self.runner is not runner or self.adapter is not adapter or self.peer is not peer
                     or peer.closed or not self.operational.is_set() or self.policy_stopping):
                 return
-            if self.delivery_journal is None:
-                self._enable_delivery()
             from gateway.run import _AGENT_PENDING_SENTINEL
             from gateway.platforms.event import MessageEvent, MessageType
             for entry in entries:
                 with runner.session_store._lock:
                     current = runner.session_store._entries.get(entry.session_key)
                     if (current is not entry or not entry.resume_pending or entry.suspended
-                            or entry.resume_reason != 'brai_technical_failure'):
+                            or entry.resume_reason not in {'brai_technical_failure', 'restart_timeout', 'shutdown_timeout', 'restart_interrupted'}):
                         continue
-                if runner._is_session_running(entry.session_key):
+                task = getattr(adapter, '_session_tasks', {}).get(entry.session_key)
+                if (task is not None and not task.done()) or runner._is_session_running(entry.session_key):
                     continue
                 source = runner._restored_source(entry)
                 binding = self.delivery_journal.continuation(entry.session_key) if self.delivery_journal else None
@@ -381,6 +603,7 @@ class Worker:
                 runner._retain_background_task(asyncio.create_task(
                     self._resume_failed_turn(runner, adapter, event, entry.session_key, binding['input_id'])))
                 logging.getLogger(__name__).info('HERMES_FAILED_TURN_RECOVERY_STARTED session=%s', entry.session_key)
+            self._retry_prepared_responses(runner, adapter)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -392,10 +615,14 @@ class Worker:
         source_token = input_delivery.set(input_id)
         scope_token = delivery_scope.set(None)
         continuation_token = continuation_turn.set(True)
+        current = asyncio.current_task()
+        self.recovery_scopes[session_key] = (current, input_id, event.source)
         try:
             adapter.bind_source(event.source)
             await runner._run_startup_resume_event(adapter, event, session_key)
         finally:
+            if self.recovery_scopes.get(session_key, (None,))[0] is current:
+                self.recovery_scopes.pop(session_key, None)
             continuation_turn.reset(continuation_token)
             delivery_scope.reset(scope_token)
             input_delivery.reset(source_token)
@@ -786,6 +1013,8 @@ class Worker:
         fields['user_id'] = self.telegram_id
         self.adapter.bind_source(source)
         message = MessageEvent(source=source, message_type=MessageType(event.get('message_type', 'text')), **fields)
+        from .scope import input_delivery
+        message._brai_identity_input_id = input_delivery.get()
         from gateway.platforms import base as native_base
         coerce = getattr(native_base, 'coerce_plaintext_gateway_command', None)
         if callable(coerce):
@@ -816,6 +1045,7 @@ class Worker:
                 and (not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128)):
             raise RpcError(-32602, 'Delivery scope required')
         from .scope import delivery_scope
+        message._brai_delivery_scope = scope_id
         scope_token = delivery_scope.set(scope_id)
         typing = None
         route = self._chat_route(source)
@@ -940,6 +1170,36 @@ class Worker:
                 or type(state.get('generation')) is not int or state['generation'] < 0
                 or type(state.get('recoveryBlocked')) is not bool):
             raise RpcError(-32602, 'Invalid chat state')
+
+    @contextmanager
+    def shutdown_notice_scope(self, session_key):
+        """Выбрать действующий ingress scope этого хода без фонового маршрута."""
+        from .scope import delivery_scope, ephemeral_input
+        matches = [(token, task) for token, (key, task, _) in self.active.items()
+                   if key == session_key and task is not None and not task.done()
+                   and self.turn_scopes.get(token)]
+        if len(matches) != 1:
+            recovery = self.recovery_scopes.get(session_key)
+            if (matches or recovery is None or recovery[0].done()
+                    or not self.route_allowed(recovery[2], recovery=True)):
+                yield False
+                return
+            token = ephemeral_input.set(recovery[1])
+            scope_token = delivery_scope.set(None)
+            try:
+                yield self.recovery_scopes.get(session_key) is recovery and not recovery[0].done()
+            finally:
+                delivery_scope.reset(scope_token)
+                ephemeral_input.reset(token)
+            return
+        turn, task = matches[0]
+        scope = self.turn_scopes[turn]
+        token = delivery_scope.set(scope)
+        try:
+            yield (self.active.get(turn, (None, None))[1] is task
+                   and not task.done() and self.turn_scopes.get(turn) == scope)
+        finally:
+            delivery_scope.reset(token)
 
     def return_notice_state(self, chat, thread):
         """Вернуть известное поколение маршрута без создания нового состояния."""
