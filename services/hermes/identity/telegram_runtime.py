@@ -16,6 +16,7 @@ import struct
 import time
 import uuid
 import sqlite3
+from types import SimpleNamespace
 
 from .ingress import Bridge, serve_chat_control
 from .ipc import RpcError
@@ -23,7 +24,7 @@ from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
-from .ordinary_admission import start_command, disabled_command
+from .ordinary_admission import disabled_command, group_chat_id, group_message, message_thread, start_command
 
 MAX_FRAME = 2 * 1024 * 1024
 _resolvers = {}
@@ -112,19 +113,21 @@ async def admit_update(update, adapter):
     user = getattr(update, 'effective_user', None)
     chat = getattr(update, 'effective_chat', None)
     if (message is None or user is None or chat is None or getattr(user, 'is_bot', False)
-            or getattr(chat, 'type', None) != 'private' or str(chat.id) != str(user.id)
             or getattr(message, 'sender_chat', None) or getattr(message, 'business_connection_id', None)):
         return False
     telegram = str(getattr(user, 'id', ''))
-    if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
+    private = getattr(chat, 'type', None) == 'private' and str(chat.id) == telegram
+    grouped = group_message(chat, message)
+    if not (private or grouped) or not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
         return False
-    if disabled_command(getattr(message, 'text', None)):
+    text = getattr(message, 'text', None)
+    starting = start_command(text)
+    if disabled_command(text) or grouped and starting:
         return False
-    starting = start_command(getattr(message, 'text', None))
     resolver = _resolvers.get(id(adapter))
     mirror = getattr(resolver, 'mirror', None)
     snapshot = mirror.snapshot(f'{adapter._bot.id}:{update.update_id}') if mirror is not None else None
-    if snapshot is not None and snapshot.get('state') == 'forbidden':
+    if snapshot is not None and snapshot.get('state') in ('outside', 'forbidden'):
         return False
     if snapshot is not None:
         try:
@@ -144,7 +147,8 @@ async def admit_update(update, adapter):
                     await asyncio.to_thread(mirror.transport.transition, adapter._bot.id, update.update_id,
                                             'handing_off','blocked')
                 snapshot['state'] = 'binding_changed'
-                await _notice(adapter, telegram, message, 'Состояние доступа изменилось. Отправьте сообщение ещё раз после проверки доступа.')
+                if private:
+                    await _notice(adapter, telegram, message, 'Состояние доступа изменилось. Отправьте сообщение ещё раз после проверки доступа.')
                 return False
         except Exception:
             if snapshot.get('state') == 'known':
@@ -196,7 +200,7 @@ async def admit_update(update, adapter):
         if resolver is not None and resolver.journal is not None:
             try:
                 await asyncio.to_thread(resolver.journal.incoming, profile, message, chat, user)
-                route = (str(chat.id), str(getattr(message, 'message_thread_id', None) or ''))
+                route = (str(chat.id), message_thread(chat, message))
                 if route[1] == '1':
                     route = (route[0], '')
                 if starting:
@@ -222,7 +226,7 @@ async def admit_update(update, adapter):
     # Приглашение принимается только из личного сообщения самого нового пользователя.
     raw = getattr(message, 'text', '') or ''
     invitation = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+(?:invite_)?([A-Za-z0-9_-]{16,128})', raw.strip())
-    if str(getattr(chat, 'id', '')) == telegram and invitation:
+    if private and invitation:
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
@@ -232,7 +236,7 @@ async def admit_update(update, adapter):
                 snapshot['state'] = 'outcome_unknown'
             await _control_reply(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False
-    if str(getattr(chat, 'id', '')) == telegram:
+    if private:
         reply = _control_reply if starting else _notice
         await reply(adapter, telegram, message, 'Здравствуйте! Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
@@ -575,7 +579,7 @@ class Resolver:
             if not isinstance(status, dict) or status.get('ready') is not True:
                 return False
         turn = self.turns.get(profile['uid'])
-        return turn is None or turn['route'] == route
+        return turn is None or (turn['route'] == route and turn.get('actor', profile['telegramId']) == profile['telegramId'])
 
     async def retry_pending_close(self, profile, bridge):
         """Повторять лишь завершение хода, у которого нет активного dispatch/worker."""
@@ -608,7 +612,16 @@ class Resolver:
             raise PermissionError('Reply owner mismatch')
         source = await asyncio.to_thread(self.mirror.inbox.delivery_source, profile, source_id)
         original = json.loads(source['payload']).get('message', {})
-        route = (source['chat'], str(original.get('message_thread_id') or ''))
+        if group_chat_id(source['chat']):
+            # AIDEV-NOTE: Chat ID не идентифицирует владельца общей темы после restart.
+            profile['telegramId'] = source['actor_id']
+            metadata_group = original.get('chat', {})
+            thread_id = message_thread(SimpleNamespace(**metadata_group), SimpleNamespace(**original))
+            anchor = str(original.get('message_id') or '')
+        else:
+            thread_id = str(original.get('message_thread_id') or '')
+            anchor = None
+        route = (source['chat'], thread_id)
         if str(payload.get('chat_id')) != route[0]:
             raise PermissionError('Reply input route changed')
         supplied = payload.get('metadata') or {}
@@ -623,6 +636,10 @@ class Resolver:
             if supplied.get('_brai_progress') is True:
                 metadata['_brai_progress'] = True
         values = {**payload, 'metadata': metadata}
+        if anchor is not None and action != 'edit_message':
+            if not self.ledger.owns(profile, route, anchor, outgoing=False):
+                raise PermissionError('Group reply has no admitted input')
+            values['reply_to'] = anchor
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
         key = self.ledger.owner(profile)
         self.reply_outbox.enqueue(ident, key, body)
@@ -637,7 +654,7 @@ class Resolver:
         profile, payload = body['profile'], body['payload']
         metadata = payload['metadata']
         route = (str(payload['chat_id']), str(metadata.get('thread_id') or metadata.get('message_thread_id') or metadata.get('direct_messages_topic_id') or ''))
-        active = await self._account(profile, route[0])
+        active = await self._account(profile, profile['telegramId'] if group_chat_id(route[0]) else route[0])
         # _account уже сверил UID, профиль, владельца и канонического автора
         # через RouteLedger.owner; supervisor profile может не дублировать автора.
         if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
@@ -648,7 +665,8 @@ class Resolver:
             self._chat_generation(profile, route, body['generation'])
         current.generation = body['generation']
         turn = self.turns.get(profile['uid'])
-        if turn is not None and turn['route'] == route and request_scope.get() == turn['id']:
+        if (not group_chat_id(route[0]) and turn is not None and turn['route'] == route
+                and request_scope.get() == turn['id']):
             return await self.deliver(profile, profile['userId'], body['action'], payload)
         return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current)
 
@@ -706,7 +724,7 @@ class Resolver:
     async def _account(self, profile, telegram_id):
         """Проверить фактический канал через Auth, сохранив стабильного автора."""
         if not re.fullmatch(r'[1-9][0-9]{0,19}', str(telegram_id)):
-            raise PermissionError('Only private Telegram chats are supported')
+            raise PermissionError('Invalid Telegram account')
         active = await broker_call('identity.resolve', {'telegramId': str(telegram_id)})
         if (str(active['telegramId']) != str(telegram_id)
                 or self.ledger.owner(active) != self.ledger.owner(profile)):
@@ -721,14 +739,17 @@ class Resolver:
             return await self._prepare(profile, event)
 
     async def _prepare(self, profile, event):
-        """Допустить только личный чат владельца и скопировать его media в профиль."""
-        if (getattr(event.source, 'chat_type', '') != 'dm'
-                or str(event.source.chat_id) != str(profile['telegramId'])):
-            raise PermissionError('Only private Telegram chats are supported')
-        uid = profile['uid']
+        """Проверить автора и маршрут, затем скопировать его media в профиль."""
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
+        chat_type = getattr(event.source, 'chat_type', '')
+        private = chat_type == 'dm' and route[0] == str(profile['telegramId'])
+        grouped = (chat_type in ('group', 'supergroup', 'forum') and group_chat_id(route[0])
+                   and str(getattr(event.source, 'user_id', '')) == str(profile['telegramId']))
+        if not (private or grouped):
+            raise PermissionError('Invalid Telegram conversation')
+        uid = profile['uid']
         turn = self.turns.get(uid)
-        if turn and turn['route'] != route:
+        if turn and (turn['route'] != route or grouped and turn.get('actor') != str(profile['telegramId'])):
             raise PermissionError('Another conversation is active')
         if not turn:
             turn = {'id': uuid.uuid4().hex, 'route': route}
@@ -743,6 +764,10 @@ class Resolver:
         origin = {'messageId': str(event.message_id), 'text': getattr(event, 'text', '') or '',
                   'inputs': [{k: item[k] for k in ('itemId', 'caption', 'groupId') if k in item}
                              for item in inputs]}
+        if grouped:
+            origin.update(chatId=route[0], threadId=route[1])
+            turn['actor'] = str(profile['telegramId'])
+            turn['replyTo'] = str(event.message_id)
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
         answer = getattr(event, 'text', '') or ''
@@ -750,8 +775,8 @@ class Resolver:
         turn.pop('questionReceipt', None)
         turn.pop('accountOfferId', None)
         await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
-            'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
-            'accountAnswer': answer if isinstance(answer, str) and len(answer) <= 8192 else '',
+            'privateChat': private, 'turnId': turn['id'],
+            'accountAnswer': answer if private and isinstance(answer, str) and len(answer) <= 8192 else '',
             'accountRefused': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
                 ('нет', 'отмена', 'не подтверждаю', 'не разрешаю', 'не подключай', 'не отвязывай'),
             **({'threadId': int(route[1])} if route[1] else {})})
@@ -760,6 +785,8 @@ class Resolver:
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
         data = {key: getattr(event, key) for key in fields if getattr(event, key, None) is not None}
+        if grouped:
+            data.pop('reply_to_message_id', None)
         data['delivery_scope'] = turn['id']
         data['message_type'] = getattr(event.message_type, 'value', event.message_type)
         timestamp = getattr(event, 'timestamp', None)
@@ -829,6 +856,9 @@ class Resolver:
         state = await broker_call('ingress.status', {'uid': uid, 'turnId': turn['id'],
             **({'inputId': input_id} if input_id else {})})
         current()
+        if 'actor' in turn:
+            await self._account(profile, turn['actor'])
+            current()
         turn['accountOfferId'] = state.get('accountOfferId') if state.get('needsAccountConsent') is True else None
         interim = metadata.get('_interim_send') is True
         progress = interim and metadata.get('_brai_progress') is True
@@ -901,6 +931,8 @@ class Resolver:
         input_id = turn.get('inputId') if turn else None
         offer_id = turn.get('accountOfferId') if turn else None
         file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
+        if turn is not None and turn.get('replyTo') and action in ('send', 'send_file_set', *file_actions):
+            payload = {**payload, 'reply_to': turn['replyTo']}
         if action == 'send_file_set' or action in file_actions:
             from files.native import telegram_sender, validate_telegram, presentation
             if action == 'send_file_set':

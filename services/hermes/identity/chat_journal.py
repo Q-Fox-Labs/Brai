@@ -16,6 +16,8 @@ import time
 import uuid
 from types import SimpleNamespace
 
+from .ordinary_admission import group_chat_id, message_thread
+
 _scope = ContextVar('brai_telegram_journal_scope', default=None)
 _log = logging.getLogger(__name__)
 _METHODS = ('send_message', 'edit_message_text', 'edit_message_caption', 'send_photo',
@@ -274,8 +276,9 @@ class IdentityJournal:
 
     def incoming(self, profile, message, chat, user):
         """Записать оригинал до ASR, обёрток и объединения native очередями."""
-        self.routes[str(chat.id)] = profile
-        route = (str(chat.id), str(getattr(message, 'message_thread_id', None) or ''))
+        if not group_chat_id(chat.id):
+            self.routes[str(chat.id)] = profile
+        route = (str(chat.id), message_thread(chat, message))
         if route[1] == '1':
             route = (route[0], '')
         db = self.database(profile)
@@ -296,7 +299,7 @@ class IdentityJournal:
         """Записать фактический text/caption, включая пробелы и пустую правку."""
         chat = str(message.chat.id)
         mid = str(message.message_id)
-        thread = str(getattr(message, 'message_thread_id', None) or '')
+        thread = message_thread(message.chat, message)
         active = _scope.get()
         if not thread and direction == 'out' and active and active[0] is self and active[1]['profileId'] == profile['profileId']:
             thread = active[4]

@@ -5,6 +5,8 @@ import json
 import os
 import uuid
 
+from .ordinary_admission import group_message, message_thread
+
 SCHEMA = '''CREATE TABLE IF NOT EXISTS release_inbox (
  seq INTEGER PRIMARY KEY AUTOINCREMENT,
  bot_id TEXT NOT NULL, update_id TEXT NOT NULL,
@@ -166,9 +168,10 @@ class UpdateInbox:
             raise ValueError('INVALID_UPDATE')
         actor = number(getattr(getattr(update, 'effective_user', None), 'id', None), 'ACTOR')
         chat_obj = getattr(update, 'effective_chat', None)
-        chat = number(getattr(chat_obj, 'id', None) if chat_obj is not None else actor, 'CHAT')
         message = getattr(update, 'effective_message', None)
-        thread = str(getattr(message, 'message_thread_id', None) or '')
+        chat = (str(chat_obj.id) if group_message(chat_obj, message)
+                else number(getattr(chat_obj, 'id', None) if chat_obj is not None else actor, 'CHAT'))
+        thread = message_thread(chat_obj, message)
         if thread == '1': thread = ''
         if thread and (not thread.isascii() or not thread.isdecimal()):
             raise ValueError('INVALID_THREAD')

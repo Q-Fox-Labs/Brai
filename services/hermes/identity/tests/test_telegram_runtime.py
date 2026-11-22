@@ -78,6 +78,28 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         await resolver._deliver_saved_reply(body)
                 resolver._deliver_route.assert_not_awaited()
 
+    async def test_saved_group_reply_uses_bound_actor_and_original_message_after_restart(self):
+        actor = {**profile(), 'profileId': 'profile', 'role': 'user', 'generation': 1,
+                 'telegramId': '456', 'authorTelegramId': '123'}
+        adapter = NS(send=AsyncMock(return_value={'success': True, 'message_id': '81'}))
+        resolver = runtime.Resolver(adapter)
+        self.addCleanup(resolver.ledger.close)
+        resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: {
+            'chat': '-10012', 'actor_id': '456', 'chat_generation': 0,
+            'payload': json.dumps({'message': {'message_id': 70, 'message_thread_id': 77,
+                'chat': {'id': -10012, 'type': 'supergroup', 'is_forum': True}}})}))
+        resolver.ledger.admit(actor, ('-10012', '77'), {'thread_id': '77'}, '70')
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        broker = AsyncMock(return_value=actor)
+        with patch.object(runtime, 'broker_call', broker):
+            result = await resolver.durable_reply({**actor, 'telegramId': '123'}, 'owner', 'send',
+                {'chat_id': '-10012', 'content': 'Готово', 'metadata': {'thread_id': '77'}},
+                delivery_id('group-reply'), delivery_id('group-input'))
+        self.assertTrue(result['success'])
+        broker.assert_awaited_once_with('identity.resolve', {'telegramId': '456'})
+        adapter.send.assert_awaited_once_with(chat_id='-10012', content='Готово', reply_to='70',
+                                              metadata={'thread_id': '77'})
+
     async def test_supervisor_bridge_saves_explicit_author_before_first_send(self):
         resolver = runtime.Resolver(NS())
         self.addCleanup(resolver.ledger.close)
@@ -198,10 +220,12 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         broker.assert_awaited_once_with('ingress.resolve-known',{'telegramId':'123'},timeout=None)
         self.assertEqual(snapshot['state'],'binding_changed')
 
-    async def test_non_private_updates_are_ignored_before_broker_or_notice(self):
+    async def test_invalid_routes_and_group_commands_are_ignored_before_broker_or_notice(self):
         for chat_type, chat_id in [('group', -10), ('supergroup', -100), ('channel', -100),
                                    ('private', 456), (None, 123)]:
             for text in ['hello', '/start invite_abcdefghijklmnop', '/link', '/unlink', '/start link_' + 'a' * 43]:
+                if chat_type in ('group', 'supergroup') and text == 'hello':
+                    continue
                 with self.subTest(chat_type=chat_type, text=text):
                     update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
                                 effective_user=NS(id=123, is_bot=False),
@@ -212,7 +236,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     broker.assert_not_awaited()
                     adapter.send.assert_not_awaited()
 
-    async def test_non_private_event_cannot_register_turn_or_prepare_media(self):
+    async def test_invalid_source_cannot_register_turn_or_prepare_media(self):
         for chat_type, chat_id in [('group', '-10'), ('supergroup', '-100'), ('channel', '-100'),
                                    ('dm', '456'), ('', '123')]:
             with self.subTest(chat_type=chat_type, chat_id=chat_id):
@@ -220,10 +244,64 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 incoming.source.chat_type, incoming.source.chat_id = chat_type, chat_id
                 resolver = runtime.Resolver(NS())
                 with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
-                    with self.assertRaisesRegex(PermissionError, 'Only private Telegram'):
+                    with self.assertRaisesRegex(PermissionError, 'Invalid Telegram conversation'):
                         await resolver.prepare(profile(), incoming)
                 broker.assert_not_awaited()
                 self.assertEqual(resolver.turns, {})
+
+    async def test_two_group_senders_get_isolated_workers_and_replies_in_the_same_topic(self):
+        first = {**profile(), 'profileId': 'p1', 'authorTelegramId': '123', 'role': 'user', 'generation': 1}
+        second = {**first, 'uid': 102, 'profileId': 'p2', 'userId': 'second', 'telegramId': '456',
+                  'authorTelegramId': '456', 'workerSocket': '/tmp/worker-2'}
+        profiles = {'123': first, '456': second}
+        send = AsyncMock(side_effect=[{'success': True, 'message_id': '81'}, {'success': True, 'message_id': '82'}])
+        adapter = NS(send=send)
+        resolver = runtime.Resolver(adapter)
+        self.addCleanup(resolver.ledger.close)
+        async def root(method, params):
+            if method == 'identity.resolve':
+                return profiles[params['telegramId']]
+            if method == 'ingress.admit':
+                self.assertFalse(params['privateChat'])
+                self.assertEqual(params['accountAnswer'], '')
+                self.assertEqual((params['chatId'], params['threadId']), ('-10012', 77))
+                return profiles[params['telegramId']]
+            self.assertEqual(method, 'ingress.status')
+            return {}
+        chat = NS(id=-10012, type='supergroup', is_forum=True)
+        with patch.object(runtime, 'broker_call', root):
+            for sender in (123, 456, 789):
+                incoming = NS(effective_user=NS(id=sender), effective_chat=chat,
+                              effective_message=NS(text='Вопрос'))
+                self.assertEqual(await runtime.admit_update(incoming, adapter), sender != 789)
+            bridges = []
+            for sender, message_id in (('123', '70'), ('456', '71')):
+                source = NS(chat_id='-10012', chat_type='group', user_id=sender, thread_id='77',
+                            platform=NS(value='telegram'), is_bot=False)
+                source.to_dict = lambda source=source: {'chat_id': source.chat_id, 'chat_type': source.chat_type,
+                                                         'user_id': source.user_id, 'thread_id': source.thread_id}
+                bridge = await resolver(source)
+                bridges.append(bridge)
+                async def accept(method, params, sender=sender):
+                    self.assertEqual(method, 'dispatch')
+                    self.assertEqual(params['owner'], profiles[sender]['userId'])
+                    self.assertEqual(params['event']['text'], 'Вопрос от ' + sender)
+                    self.assertNotIn('reply_to_text', params['event'])
+                    self.assertNotIn('reply_to_message_id', params['event'])
+                    return {'accepted': True, 'turn_id': 'turn-' + sender}
+                bridge.connect = AsyncMock(return_value=NS(call=accept))
+                incoming = NS(source=source, message_type='text', text='Вопрос от ' + sender,
+                              message_id=message_id, reply_to_message_id='65', reply_to_text='Чужое')
+                self.assertTrue((await bridge.dispatch(incoming))['accepted'])
+            for sender, bridge, other_message in (('123', bridges[0], '71'), ('456', bridges[1], '70')):
+                current = resolver.turns[profiles[sender]['uid']]
+                payload = {'chat_id': '-10012', 'content': sender, 'metadata': {'thread_id': '77'}}
+                with self.assertRaises(PermissionError):
+                    await bridge.send('send', {**payload, 'reply_to': other_message}, current['id'])
+                await bridge.send('send', payload, current['id'])
+        self.assertEqual([(call.kwargs['chat_id'], call.kwargs['reply_to'], call.kwargs['metadata'])
+                          for call in send.await_args_list],
+                         [('-10012', '70', {'thread_id': '77'}), ('-10012', '71', {'thread_id': '77'})])
 
     async def test_link_commands_are_private_transport_operations_without_agent_dispatch(self):
         for text, method, result in [('/start link_' + 'a' * 43, 'identity.link-redeem', {'user': {'id': 'owner'}})]:

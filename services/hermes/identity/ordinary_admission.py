@@ -27,6 +27,27 @@ def disabled_command(text):
     return name is not None and not start_command(text)
 
 
+def group_chat_id(value):
+    """Проверить отрицательный Telegram ID группы."""
+    return re.fullmatch(r'-[1-9][0-9]{0,19}', str(value)) is not None
+
+
+def group_message(chat, message):
+    """Распознать сообщение группы по доверенному Telegram chat."""
+    return (message is not None and getattr(chat, 'type', None) in ('group', 'supergroup')
+            and group_chat_id(getattr(chat, 'id', None)))
+
+
+def message_thread(chat, message):
+    """Вернуть адрес темы. В обычной группе ID якоря цитаты не является темой."""
+    raw = getattr(message, 'message_thread_id', None)
+    if group_message(chat, message):
+        if getattr(chat, 'is_forum', False) is True:
+            return str(raw or 1)
+        return str(raw or '') if getattr(message, 'is_topic_message', False) else ''
+    return str(raw or '')
+
+
 class Tracker:
     def __init__(self, authorize, stage=None, on_release=None):
         self.authorize = authorize
@@ -428,18 +449,23 @@ class Mirror:
                         continue
                     chat = getattr(update, 'effective_chat', None)
                     message = getattr(update, 'effective_message', None)
-                    if ((chat is not None and (getattr(chat, 'type', None) != 'private' or getattr(chat, 'id', None) != actor))
+                    grouped = group_message(chat, message) and getattr(update, 'callback_query', None) is None
+                    if ((chat is not None and not grouped
+                         and (getattr(chat, 'type', None) != 'private' or getattr(chat, 'id', None) != actor))
                             or (message is not None and (getattr(message, 'sender_chat', None)
                                 or getattr(message, 'business_connection_id', None)))):
                         staged.append((update, {'state':'outside'}))
                         continue
-                    if disabled_command(getattr(message, 'text', None)):
+                    text = getattr(message, 'text', None)
+                    if disabled_command(text) or grouped and start_command(text):
                         staged.append((update, {'state': 'outside'}))
                         continue
                     resolved = await self.resolve(str(actor))
                     if not isinstance(resolved, dict) or resolved.get('state') not in ('known','unregistered','forbidden'):
                         raise ValueError('INGRESS_IDENTITY_UNAVAILABLE')
                     snapshot = dict(resolved)
+                    if grouped and snapshot['state'] == 'unregistered':
+                        snapshot = {'state': 'outside'}
                     if snapshot['state'] == 'known':
                         profile = snapshot.get('profile')
                         if not isinstance(profile, dict) or str(profile.get('telegramId')) != str(actor):
@@ -531,7 +557,7 @@ class Mirror:
             from .durable_inputs import ordinary
             if ordinary(update):
                 self.auto_inputs.add(key)
-                route = (str(update.effective_chat.id), str(getattr(update.effective_message, 'message_thread_id', None) or ''))
+                route = (str(update.effective_chat.id), message_thread(update.effective_chat, update.effective_message))
                 row = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update.update_id)
                 if row['state'] != 'captured':
                     return True

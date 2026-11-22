@@ -3,6 +3,8 @@
 import asyncio
 import json
 
+from .ordinary_admission import message_thread
+
 
 def ordinary(update):
     """Обычные сообщения допускают отложенную передачу; команды и callbacks сохраняют свой контракт."""
@@ -74,8 +76,9 @@ async def pump(mirror):
                     observed = await asyncio.to_thread(mirror.inbox.observe, profile, row['bot_id'], row['update_id'])
                     if observed['state'] != 'captured':
                         return
-                    route = (str(getattr(update.effective_chat, 'id', '')), str(getattr(update.effective_message, 'message_thread_id', None) or ''))
-                    state = await asyncio.to_thread(mirror.inbox.journal.chat_state, profile, route)
+                    route = (observed['chat'], message_thread(update.effective_chat, update.effective_message))
+                    state = await asyncio.to_thread(mirror.inbox.journal.chat_state, profile,
+                                                    (observed['chat'], observed['thread']))
                     if state['paused'] or state['generation'] != observed['chat_generation']:
                         return
                     if mirror.input_ready is not None and not await mirror.input_ready(profile, route):

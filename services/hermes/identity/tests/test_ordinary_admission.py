@@ -130,6 +130,53 @@ class TestRealPTBClaims(unittest.IsolatedAsyncioTestCase):
         self.assertIn('123:3',self.adapter._inflight_update_ids)
 
 class MirrorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_same_group_topic_is_recovered_under_each_senders_profile(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.transport_inbox import TransportInbox
+        from identity.update_inbox import UpdateInbox
+        first = {'profileId': '11111111-1111-4111-8111-111111111111', 'userId': 'u1',
+                 'uid': 1001, 'telegramId': '42', 'authorTelegramId': '42', 'role': 'user', 'generation': 1}
+        second = {**first, 'profileId': '22222222-2222-4222-8222-222222222222', 'userId': 'u2',
+                  'uid': 1002, 'telegramId': '43', 'authorTelegramId': '43'}
+        profiles = {value['telegramId']: value for value in (first, second)}
+        async def resolve(actor):
+            return {'state': 'known', 'profile': profiles[actor]} if actor in profiles else {'state': 'unregistered'}
+        bot = Bot('123:abc')
+        bot._bot_user = User(123, 'synthetic', True)
+        def update(ident, sender, *, forum=True, thread=77):
+            chat = {'id': -10012, 'type': 'supergroup', 'title': 'Synthetic', 'is_forum': forum}
+            message = {'message_id': ident, 'date': 1, 'chat': chat, 'message_thread_id': thread,
+                       'from': {'id': sender, 'is_bot': False, 'first_name': 'Synthetic'}, 'text': str(sender)}
+            return Update.de_json({'update_id': ident, 'message': message}, bot)
+        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ', {'BRAI_IDENTITY_INSTANCE': 'dev'}):
+            journal = IdentityJournal(Path(directory) / 'chats')
+            inbox = UpdateInbox(journal)
+            transport = TransportInbox(journal)
+            mirror = Mirror(inbox, resolve, transport=transport)
+            await mirror.capture([update(10, 42), update(11, 43), update(12, 44),
+                                 update(13, 42, forum=False, thread=55), update(14, 43, thread=None)], 123)
+            self.assertEqual(mirror.snapshot('123:12'), {'state': 'outside'})
+            for old, foreign, owner in ((10, 11, first), (11, 10, second)):
+                row = inbox.observe(owner, 123, old)
+                self.assertEqual((row['chat'], row['thread']), ('-10012', '77'))
+                with self.assertRaisesRegex(ValueError, 'INBOX_NOT_FOUND'):
+                    inbox.observe(owner, 123, foreign)
+            self.assertEqual(inbox.observe(first, 123, 13)['thread'], '')
+            self.assertEqual(inbox.observe(second, 123, 14)['thread'], '')
+            # После нового процесса очереди исходный Auth и группа восстанавливаются по сохранённому update.
+            restarted = Mirror(UpdateInbox(IdentityJournal(journal.root)), resolve, transport=transport)
+            restarted.hydrated = True
+            restarted.app = SimpleNamespace(bot=bot, update_queue=asyncio.Queue())
+            await restarted.pump()
+            recovered = {}
+            while not restarted.app.update_queue.empty():
+                item = restarted.app.update_queue.get_nowait()
+                binding = restarted.snapshot(f'123:{item.update_id}')['profile']
+                self.assertEqual(str(item.effective_user.id), binding['telegramId'])
+                self.assertEqual(item.effective_chat.id, -10012)
+                recovered[item.update_id] = binding['uid']
+            self.assertEqual(recovered, {10: 1001, 11: 1002, 13: 1001, 14: 1002})
+
     async def test_reserved_profile_collision_is_rejected_before_global_journal_open(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox, ProfileGateStore
