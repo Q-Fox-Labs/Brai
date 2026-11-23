@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: 7288bee29f362f1dc66d28b0e25f592452aa27fed882823770827e155b81079d
+      STOCK_PATCH_SHA256: ec0f7561205d09fff98a23e1deafd9ff6b15cc9af5ae27815302a53533c9e14c
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
