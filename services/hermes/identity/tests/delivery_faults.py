@@ -113,7 +113,8 @@ for _name in ('gateway', 'agent', 'run_agent'):
                     lengths = [line.split(b':', 1)[1].strip() for line in lines
                                if line.lower().startswith(b'content-length:')]
                     fixture.require(len(lengths) == 1 and lengths[0].isdigit(), 'INVALID_LENGTH')
-                    model.requests.append(json.loads(await reader.readexactly(int(lengths[0]))))
+                    json.loads(await reader.readexactly(int(lengths[0])))
+                    # Outage attempts are counted separately; they are not successful fixture responses.
                     provider_failures.append(503)
                     payload = b'{"error":{"message":"synthetic provider outage","type":"server_error"}}'
                     writer.write(b'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
