@@ -111,7 +111,6 @@
     "entrypoints": [
       "services/providers/dist/main.js",
       "services/providers/dist/health.js",
-      "services/providers/dist/nats-connection.js",
       "services/providers/dist/migrate.js",
       "services/providers/dist/chat-http.js",
       "services/providers/dist/observation.js",
@@ -119,7 +118,8 @@
     ],
     "smokeImports": [
       "services/providers/dist/catalog.js",
-      "services/providers/dist/artifacts.js"
+      "services/providers/dist/artifacts.js",
+      "services/providers/dist/nats-connection.js"
     ],
     "systemRequirements": [
       "Node.js 24.22.1",
