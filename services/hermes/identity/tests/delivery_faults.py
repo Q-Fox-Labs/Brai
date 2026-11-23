@@ -14,9 +14,9 @@ import uuid
 from unittest.mock import patch
 
 
-async def eventually(check, label, watch=None):
+async def eventually(check, label, watch=None, timeout=180):
     """Дождаться наблюдаемого исхода; срок относится только к исполнению fixture."""
-    async with asyncio.timeout(180):
+    async with asyncio.timeout(timeout):
         while not check():
             if watch is not None and watch.returncode is not None:
                 raise ValueError('WORKER_EXITED')
@@ -456,7 +456,8 @@ peer.close();channel.close()
             await eventually(lambda: len(deliveries) >= 7, 'provider-failure-notice', watch=process)
             fixture.require(len(provider_failures) >= 1 and 'SYNTHETIC_OK' not in deliveries[6].get('content', ''),
                             'PROVIDER_FAILURE_NOT_OBSERVED')
-            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process)
+            # Native owns the complete provider retry schedule; do not end the test mid-retry.
+            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process, timeout=None)
             requests_before_recovery = len(model.requests)
             provider_unavailable = False
             await eventually(lambda: any('SYNTHETIC_OK' in item.get('content', '') for item in deliveries[7:]),

@@ -7,7 +7,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from identity.tests.delivery_faults import run
+from identity.tests.delivery_faults import eventually, run
 
 
 class DeliveryFaultCleanupTests(unittest.TestCase):
@@ -54,6 +54,10 @@ class DeliveryFaultCleanupTests(unittest.TestCase):
             self.assertFalse(result['cleaned'])
             self.assertEqual(result['cleanupErrors'], [{'type': 'OSError', 'code': 'CLEANUP_FAILED'}])
             self.assertEqual(list(root.iterdir()), [Path(result['fixtureRoot'])])
+
+    def test_wait_without_deadline_still_detects_a_dead_worker(self):
+        with self.assertRaisesRegex(ValueError, 'WORKER_EXITED'):
+            asyncio.run(eventually(lambda: False, 'retry', watch=SimpleNamespace(returncode=1), timeout=None))
 
     def test_missing_source_does_not_create_a_fixture_directory(self):
         with tempfile.TemporaryDirectory() as directory:
