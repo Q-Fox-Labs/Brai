@@ -79,6 +79,9 @@ class TopicNamingTest(unittest.IsolatedAsyncioTestCase):
             broker.assert_awaited_once()
         self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=88,
                                                           name='План сада', icon_custom_emoji_id='90')
+        self.resolver.observe_topic_edit(self.update(88, forum_topic_edited=NS(name='План сада')))
+        row = self.resolver.ledger.db.execute("SELECT state FROM topic_names WHERE thread='88'").fetchone()
+        self.assertEqual(row, ('applied',))
 
     async def test_late_result_cannot_overwrite_observed_manual_edit(self):
         self.resolver.observe_topic(self.update(88, chat='-124', forum_topic_created=NS(is_name_implicit=True)), self.owner)

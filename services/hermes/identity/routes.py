@@ -88,7 +88,8 @@ class RouteLedger:
     def cancel_topic_name(self, route):
         """Сохранить отмену, в том числе доставленную раньше события создания."""
         self.db.execute("INSERT INTO topic_names VALUES (?,?,?,NULL,'cancelled') "
-                        "ON CONFLICT(bot,chat,thread) DO UPDATE SET state='cancelled'", route)
+                        "ON CONFLICT(bot,chat,thread) DO UPDATE SET state='cancelled' "
+                        "WHERE topic_names.state IN ('pending','claimed')", route)
 
     def close(self):
         self.db.close()
