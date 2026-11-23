@@ -116,9 +116,6 @@
       "services/providers/dist/observation.js",
       "services/providers/dist/catalog.js"
     ],
-    "runtimeHooks": [
-      { "kind": "container-health", "path": "services/providers/dist/health.js" }
-    ],
     "smokeImports": [
       "services/providers/dist/catalog.js",
       "services/providers/dist/artifacts.js",
