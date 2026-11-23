@@ -11,7 +11,7 @@ import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
 export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string;personal?:{
   userId:string;profileId:string;authorize:()=>Promise<void>;operatorToken?:string;
-  suggestTopic?:(input:unknown,signal:AbortSignal)=>Promise<{title:string;icon:number}>;
+  suggestTopic?:(input:unknown,signal:AbortSignal)=>Promise<{title:string;icon:number|null}>;
 }};
 /** Запускает MCP; тесты могут использовать временный port=0. */
 export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfig,log:(entry:Record<string,unknown>)=>void=entry=>console.error(JSON.stringify(entry))) {

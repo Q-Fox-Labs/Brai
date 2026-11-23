@@ -46,8 +46,8 @@ test('topic endpoint authenticates the profile and never returns a revoked propo
    authorize:async()=>{if(!allowed)throw new Error('Auth denied');},
    suggestTopic:input=>suggestTopic(input,{structured:async(request,config)=>{
     requests.push({request:JSON.parse(request),schema:config.schema});
-    if(requests.length===2)allowed=false;
-    return '{"title":"План сада","icon":1}';
+    if(requests.length===3)allowed=false;
+    return JSON.stringify({title:'План сада',icon:requests.at(-1).request.icons.length?1:null});
    }})}};
  const listener=await startMcp({},cfg),url=new URL('/telegram-topic-suggestion',listener.url);
  cfg.hosts.push(url.host);cfg.origins.push(url.origin);
@@ -64,9 +64,12 @@ test('topic endpoint authenticates the profile and never returns a revoked propo
   assert.deepEqual(await response.json(),{title:'План сада',icon:1});
   assert.deepEqual(requests[0].request,request);
   assert.deepEqual(requests[0].schema.properties.icon.enum,[0,1]);
+  const rename=await post(headers,{request:'План сада',icons:[]});
+  assert.deepEqual(await rename.json(),{title:'План сада',icon:null});
+  assert.equal(requests[1].schema.properties.icon.type,'null');
   const revoked=await post(headers);
   assert.equal(revoked.status,500);
   assert.equal(await revoked.text(),'');
-  assert.equal(requests.length,2);
+  assert.equal(requests.length,3);
  }finally{await listener.close();}
 });

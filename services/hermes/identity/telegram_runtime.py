@@ -378,22 +378,25 @@ class Resolver:
             lock = self.topic_locks[route] = asyncio.Lock()
         return lock
 
-    async def _suggest_topic(self, bot, profile, actor, text):
-        stickers = await bot.get_forum_topic_icon_stickers()
-        icons = [{'id': str(item.custom_emoji_id), 'emoji': item.emoji} for item in stickers
-                 if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
-        if not icons:
-            raise ValueError('Topic icons unavailable')
+    async def _suggest_topic(self, profile, actor, text, *, bot=None):
+        icons = []
+        if bot is not None:
+            stickers = await bot.get_forum_topic_icon_stickers()
+            icons = [{'id': str(item.custom_emoji_id), 'emoji': item.emoji} for item in stickers
+                     if getattr(item, 'custom_emoji_id', None) and getattr(item, 'emoji', None)]
+            if not icons:
+                raise ValueError('Topic icons unavailable')
         result = await broker_call('ingress.topic-suggestion', {'telegramId': actor, 'profileId': profile['profileId'],
             'input': {'request': text, 'icons': [icon['emoji'] for icon in icons]}}, timeout=1800)
         return self.topic_names.validate_suggestion(result, icons)
 
     async def _name_topic(self, profile, route, text):
+        state, outcome = 'claimed', 'skipped'
         try:
             bot = self.adapter._bot
             actor = str(profile['telegramId'])
             generation = self._chat_generation(profile, route[1:])
-            suggestion = await self._suggest_topic(bot, profile, actor, text)
+            suggestion = await self._suggest_topic(profile, actor, text, bot=bot)
             async with self._topic_lock(route):
                 active = await self._account(profile, actor)
                 self._chat_generation(profile, route[1:], generation)
@@ -401,11 +404,19 @@ class Resolver:
                         or any(active.get(key) != profile.get(key) for key in ('role', 'generation'))
                         or not self.ledger.topic_name_current(route, profile)):
                     return
+                self.ledger.change_topic_name_state(route, profile, state, 'editing')
+                state, outcome = 'editing', 'unconfirmed'
                 if await bot.edit_forum_topic(chat_id=int(route[1]), message_thread_id=int(route[2]),
                         name=suggestion['title'], icon_custom_emoji_id=suggestion['iconId']) is not True:
                     raise ValueError('Telegram edit unconfirmed')
+                outcome = 'applied'
         except Exception as error:
             _logger.warning('BRAI_TELEGRAM_TOPIC_FAILED error=%s', type(error).__name__)
+        finally:
+            try:
+                self.ledger.change_topic_name_state(route, profile, state, outcome)
+            except sqlite3.Error as error:
+                _logger.warning('BRAI_TELEGRAM_TOPIC_RECEIPT_FAILED error=%s', type(error).__name__)
 
     async def rename_current_topic(self, profile, owner, payload, scope_id):
         """Применить запрос от личного worker только к теме его текущего хода."""
@@ -437,22 +448,21 @@ class Resolver:
                     and (member.status != 'administrator' or getattr(member, 'can_manage_topics', False) is not True)):
                 raise PermissionError('Current topic edit is not permitted')
             current()
-        await check_group_access()
-        self.ledger.cancel_topic_name(route)
         title = args.get('title')
         if title is None:
+            await check_group_access()
             try:
-                title = (await self._suggest_topic(bot, profile, actor, args['text']))['title']
+                title = (await self._suggest_topic(profile, actor, args['text']))['title']
             except Exception:
                 return {'ok': False, 'code': 'TOPIC_GENERATOR_UNAVAILABLE'}
         async with self._topic_lock(route):
             active = await self._account(profile, actor)
-            if 'text' in args:
-                await check_group_access()
+            await check_group_access()
             current()
             if (self.closed or self.adapter._bot is not bot
                     or any(active.get(key) != profile.get(key) for key in ('role', 'generation'))):
                 raise PermissionError('Current topic scope changed')
+            self.ledger.cancel_topic_name(route)
             if await bot.edit_forum_topic(chat_id=int(chat), message_thread_id=int(thread), name=title) is not True:
                 raise ValueError('Telegram edit unconfirmed')
         return {'ok': True, 'title': title}

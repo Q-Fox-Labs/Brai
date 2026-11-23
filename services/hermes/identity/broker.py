@@ -31,6 +31,7 @@ except ImportError:
 TOOL_POLICY = json.loads((Path(__file__).with_name('tool-policy.json')).read_text())
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
+REQUEST_SLOTS = 32
 
 # AIDEV-NOTE: В журнал попадают только заранее утверждённые категории; текст ошибки может содержать данные.
 _INGRESS_DENIAL_CODES = {
@@ -180,7 +181,7 @@ class ControlPort:
         self.command, self.config = command, config
         self.process = self.reader = None
         self.pending = {}
-        self.pending_budgets = {False: 0, True: 0}
+        self.pending_budgets = {False: 0, True: 0, 'topic': 0}
         self.write_lock = asyncio.Lock()
         self.counter = 0
 
@@ -226,12 +227,12 @@ class ControlPort:
 
     async def call(self, method, params, timeout=35):
         """Послать один вызов с ограниченным сроком и без повтора."""
-        authorization = method == 'authorize'
+        budget = 'topic' if method == 'dialogues.topic-suggestion' else method == 'authorize'
         # AIDEV-NOTE: Ожидающие tools.call требуют обратного Auth; его ёмкость резервируется отдельно.
         if (not self.process or self.process.returncode is not None
-                or self.pending_budgets[authorization] >= (96 if authorization else 32)):
+                or self.pending_budgets[budget] >= (96 if budget is True else REQUEST_SLOTS)):
             raise ConnectionError('Control unavailable')
-        self.pending_budgets[authorization] += 1
+        self.pending_budgets[budget] += 1
         self.counter += 1
         request_id = self.counter
         future = asyncio.get_running_loop().create_future()
@@ -244,7 +245,7 @@ class ControlPort:
             return await asyncio.wait_for(future, timeout)
         finally:
             self.pending.pop(request_id, None)
-            self.pending_budgets[authorization] -= 1
+            self.pending_budgets[budget] -= 1
 
     async def close(self):
         """Завершить дочерний процесс вместе с broker."""
@@ -1233,7 +1234,8 @@ async def serve(config):
             await asyncio.sleep(30)
             await broker.generated.reap()
     generation_reaper = asyncio.create_task(reap_generated())
-    slots = asyncio.Semaphore(32)
+    slots = asyncio.Semaphore(REQUEST_SLOTS)
+    topic_slots = asyncio.Semaphore(REQUEST_SLOTS)
     # AIDEV-NOTE: tools.call может ждать обратной авторизации обработчика; общий бюджет дал бы взаимную блокировку.
     personal_slots = asyncio.Semaphore(64)
     async def accept(reader, writer, personal_only=False):
@@ -1242,7 +1244,8 @@ async def serve(config):
             if budget.locked():
                 sys.stderr.write(json.dumps({'event': 'identity_connection_rejected', 'code': 'CAPACITY', 'personal': personal_only}) + '\n')
                 return
-            async with budget:
+            async with contextlib.AsyncExitStack() as capacity:
+                await capacity.enter_async_context(budget)
                 pid, uid, _ = struct.unpack('3i', writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                 raw = await asyncio.wait_for(reader.readline(), 5)
                 if len(raw) > (8192 if personal_only else MAX_FRAME) or not raw.endswith(b'\n'):
@@ -1259,6 +1262,13 @@ async def serve(config):
                 if isinstance(header, dict) and header.get('method') == 'ingress.open-artifact':
                     await artifact_response(broker, uid, header, writer)
                     return
+                if (not personal_only and isinstance(header, dict) and header.get('method') == 'ingress.topic-suggestion'
+                        and uid == config['ingressUid']):
+                    # Модель ждёт отдельно от коротких запросов доставки и Auth.
+                    await capacity.aclose()
+                    if topic_slots.locked():
+                        raise ConnectionError('Topic suggestions busy')
+                    await capacity.enter_async_context(topic_slots)
                 response = await rpc_frame(broker, uid, raw, pid=pid)
                 if response is None:
                     return

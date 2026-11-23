@@ -108,6 +108,21 @@ class TopicNamingTest(unittest.IsolatedAsyncioTestCase):
             broker.assert_not_awaited()
         self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=-124, message_thread_id=88, name='  Мой сад  ')
 
+    async def test_generated_rename_keeps_existing_icon_without_reading_icon_catalogue(self):
+        route = ('123', '77')
+        self.resolver.ledger.admit(self.owner, route, {'thread_id':'77'}, '90')
+        self.resolver.turns[self.owner['uid']] = {'id':'scope', 'messageId':'90', 'route':route}
+        self.resolver.delivery_context = AsyncMock(return_value=(None, None, None, lambda: None, None))
+        generator = AsyncMock(return_value={'title':'Мой сад', 'icon':None})
+        with patch.object(runtime, 'broker_call', generator):
+            result = await self.resolver.rename_current_topic(self.owner, 'owner',
+                {'messageId':'90', 'args':{'text':'Советы по саду'}}, 'scope')
+        self.assertEqual(result, {'ok':True, 'title':'Мой сад'})
+        generator.assert_awaited_once_with('ingress.topic-suggestion', {'telegramId':'123', 'profileId':'profile-a',
+            'input':{'request':'Советы по саду', 'icons':[]}}, timeout=1800)
+        self.bot.get_forum_topic_icon_stickers.assert_not_awaited()
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name='Мой сад')
+
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_restored_profile_reply_uses_canonical_owner_and_reaches_transport(self):

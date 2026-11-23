@@ -52,7 +52,10 @@ def validate_suggestion(result, icons):
         raise ValueError('TOPIC_SUGGESTION_FAILED')
     title, icon = result['title'], result['icon']
     if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 60
-            or any(unicodedata.category(char) in {'Cc', 'Cs', 'Zl', 'Zp'} for char in title)
-            or type(icon) is not int or not 0 <= icon < len(icons)):
+            or any(unicodedata.category(char) in {'Cc', 'Cs', 'Zl', 'Zp'} for char in title)):
+        raise ValueError('TOPIC_RESULT_INVALID')
+    if not icons and icon is None:
+        return {'title': title.strip()}
+    if type(icon) is not int or not 0 <= icon < len(icons):
         raise ValueError('TOPIC_RESULT_INVALID')
     return {'title': title.strip(), 'iconId': icons[icon]['id']}

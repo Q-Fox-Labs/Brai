@@ -928,22 +928,25 @@ export async function handlePrivateRpc(runtime, input) {
 export async function servePrivateRpc(runtime, source, destination) {
   const { createInterface } = await import('node:readline');
   const input = createInterface({ input: source, crlfDelay: Infinity });
-  const pending = new Set();
+  const pending = new Set(), topics = new Set();
   try {
     for await (const line of input) {
-      while (pending.size >= 64) await Promise.race(pending);
+      let request;
+      try { if (Buffer.byteLength(line) <= 2*1024*1024+65536) request = JSON.parse(line); } catch {}
+      const lane = request?.method === 'dialogues.topic-suggestion' ? topics : pending;
+      while (lane.size >= 64) await Promise.race(lane);
       const work = (async () => {
         let result;
         try {
-          if (Buffer.byteLength(line) > 2*1024*1024+65536) throw new Error();
-          result = await handlePrivateRpc(runtime, JSON.parse(line));
+          if (request === undefined) throw new Error();
+          result = await handlePrivateRpc(runtime, request);
         } catch { result = { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }; }
         if (result !== null && !destination.write(JSON.stringify(result) + '\n')) await once(destination, 'drain');
       })();
-      pending.add(work);
-      void work.then(() => pending.delete(work), () => pending.delete(work));
+      lane.add(work);
+      void work.then(() => lane.delete(work), () => lane.delete(work));
     }
-  } finally { await Promise.allSettled(pending); }
+  } finally { await Promise.allSettled([...pending, ...topics]); }
 }
 
 /** Запустить приватный JSON-RPC только для доверенного управляющего процесса. */

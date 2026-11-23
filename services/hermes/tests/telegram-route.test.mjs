@@ -24,6 +24,6 @@ test('native Telegram topic naming and requested renames keep the verified route
   ], { cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /Ran 17 tests\b/);
+  assert.match(result.stderr, /Ran 18 tests\b/);
   assert.doesNotMatch(result.stderr, /\bskipped\b/i);
 });

@@ -1338,23 +1338,28 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             async def drain(self):
                 pass
         control.process = SimpleNamespace(returncode=None, stdin=Input())
-        tools = [asyncio.create_task(control.call('tools.call', {'uid': i})) for i in range(32)]
+        topics = [asyncio.create_task(control.call('dialogues.topic-suggestion', {'uid': i}))
+                  for i in range(broker_module.REQUEST_SLOTS)]
+        tools = [asyncio.create_task(control.call('tools.call', {'uid': i}))
+                 for i in range(broker_module.REQUEST_SLOTS)]
         await asyncio.sleep(0)
         try:
-            self.assertEqual(len(control.pending), 32)
+            self.assertEqual(len(control.pending), 2 * broker_module.REQUEST_SLOTS)
             with self.assertRaises(ConnectionError):
                 await control.call('tools.call', {})
+            with self.assertRaises(ConnectionError):
+                await control.call('dialogues.topic-suggestion', {})
             authorization = asyncio.create_task(control.call('authorize', {'uid': WORKER_UID}))
             await asyncio.sleep(0)
-            self.assertEqual(len(control.pending), 33)
+            self.assertEqual(len(control.pending), 2 * broker_module.REQUEST_SLOTS + 1)
             control.pending[control.counter].set_result({'allowed': True})
             self.assertEqual(await authorization, {'allowed': True})
             self.assertEqual(control.pending_budgets[True], 0)
         finally:
-            for task in tools:
+            for task in [*tools, *topics]:
                 task.cancel()
-            await asyncio.gather(*tools, return_exceptions=True)
-        self.assertEqual(control.pending_budgets, {False: 0, True: 0})
+            await asyncio.gather(*tools, *topics, return_exceptions=True)
+        self.assertEqual(control.pending_budgets, {False: 0, True: 0, 'topic': 0})
 
     async def test_late_control_response_does_not_break_current_request(self):
         control = broker_module.ControlPort([], '/unused')

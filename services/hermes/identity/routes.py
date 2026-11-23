@@ -80,6 +80,11 @@ class RouteLedger:
         return self.db.execute("SELECT 1 FROM topic_names WHERE bot=? AND chat=? AND thread=? "
             "AND owner=? AND state='claimed'", (*route, self.owner(profile))).fetchone() is not None
 
+    def change_topic_name_state(self, route, profile, previous, state):
+        """Записать исход попытки, сохраняя более новую отмену."""
+        self.db.execute("UPDATE topic_names SET state=? WHERE bot=? AND chat=? AND thread=? AND owner=? AND state=?",
+                        (state, *route, self.owner(profile), previous))
+
     def cancel_topic_name(self, route):
         """Сохранить отмену, в том числе доставленную раньше события создания."""
         self.db.execute("INSERT INTO topic_names VALUES (?,?,?,NULL,'cancelled') "
