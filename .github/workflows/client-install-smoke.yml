@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: stock-prod-clean-install
     env:
-      STOCK_ADMIN_SHA: 2a7fe619aa41802c7a77fe1d0ca7d9196d464b56
+      STOCK_ADMIN_SHA: 4cb42a77193b6eba03e57a3e0f3d97168e529582
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -150,6 +150,10 @@ jobs:
                 {
                   cat "$work/ansible.log"
                   if [[ -f "$work/verify.log" ]]; then cat "$work/verify.log"; fi
+                  if sudo -n test -f /var/lib/brai-install/command-failure.json; then
+                    printf '\n--- ROOT COMMAND FAILURE ---\n'
+                    sudo -n cat /var/lib/brai-install/command-failure.json
+                  fi
                 } > "$work/failure.log"
                 if ! openssl cms -encrypt -aes-256-gcm -binary -in "$work/failure.log" \
                   -outform DER -out "$RUNNER_TEMP/stock-install-failure.cms" \
@@ -176,7 +180,8 @@ jobs:
             exec "$@"
           ' bash "$RUNNER_TEMP/stock-collections" "$RUNNER_TEMP/stock-ansible/bin/ansible-playbook" \
             -i "$work/hosts.ini" client/install.yml \
-            --extra-vars "@$work/inputs.yml" 2>&1 | tee "$work/ansible.log" | python3 -u -c '
+            --extra-vars "@$work/inputs.yml" --extra-vars brai_install_capture_failure=true \
+            2>&1 | tee "$work/ansible.log" | python3 -u -c '
           import re, sys
           from pathlib import Path
           names = {
