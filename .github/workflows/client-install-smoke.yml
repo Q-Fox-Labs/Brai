@@ -18,7 +18,8 @@ jobs:
     runs-on: ubuntu-24.04
     environment: stock-prod-clean-install
     env:
-      STOCK_ADMIN_SHA: f05230004bcd24b423d3c055ccc9d641569690a9
+      STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
+      STOCK_PATCH_SHA256: 544c9fce5ea46001f93f9212a0d1a4840e5d0f763046b19cfe3347f791593198
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -28,6 +29,22 @@ jobs:
           ssh-key: ${{ secrets.STOCK_PROD_ADMIN_READ_KEY }}
           ref: ${{ env.STOCK_ADMIN_SHA }}
           persist-credentials: false
+      - name: Apply the verified private Admin candidate
+        shell: bash
+        env:
+          STOCK_ADMIN_PATCH: ${{ secrets.STOCK_PROD_ADMIN_PATCH }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$STOCK_ADMIN_SHA"
+          test -n "$STOCK_ADMIN_PATCH"
+          umask 077
+          patch_file=$(mktemp "$RUNNER_TEMP/admin-candidate.XXXXXXXX")
+          trap 'rm -f -- "$patch_file"' EXIT
+          printf '%s' "$STOCK_ADMIN_PATCH" | base64 --decode | gzip --decompress > "$patch_file"
+          unset STOCK_ADMIN_PATCH
+          printf '%s  %s\n' "$STOCK_PATCH_SHA256" "$patch_file" | sha256sum --check --status
+          git apply --check --whitespace=error "$patch_file"
+          git apply --whitespace=error "$patch_file"
       - name: Install Ansible and its ACL module, then check protected YAML
         shell: bash
         run: |
@@ -51,6 +68,9 @@ jobs:
           test "$RUNNER_OS" = Linux
           printf 'CPU cores: %s\n' "$(nproc)"
           df -h /
+          test ! -e /var/lib/brai-install/owner.json
+          test ! -e /opt/supabase/deployment/volumes/db/data/PG_VERSION
+          printf '127.0.0.1 brai-ci.localhost\n' | sudo tee -a /etc/hosts >/dev/null
           sudo setfacl --remove-default -- /opt
           sudo chmod go-w /opt
           conflicting=()
@@ -195,9 +215,23 @@ jobs:
           test -n "$INPUT_PART_1"
           printf '%s' "$INPUT_PART_1$INPUT_PART_2$INPUT_PART_3" | base64 --decode | gzip --decompress > "$work/inputs.yml"
           unset INPUT_PART_1 INPUT_PART_2 INPUT_PART_3
+          "$RUNNER_TEMP/stock-ansible/bin/python" -B - "$work/inputs.yml" <<'INPUTS'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'ansible/roles/fresh_install/files')
+          from protected_bundle import dumps, loads
+          path = Path(sys.argv[1])
+          values = loads(path.read_text())
+          inputs = values['fresh_install_inputs']
+          if inputs.get('public_origin') != 'https://brai-ci.localhost':
+              raise SystemExit('Unexpected isolated HTTPS origin.')
+          inputs['public_urls'] = ['https://brai-ci.localhost/api/timer']
+          path.write_text(dumps(values))
+          INPUTS
           printf '[managed]\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3\n' > "$work/hosts.ini"
           cd ansible
-          sudo -n /bin/bash -c '
+          run_installer() {
+            sudo -n /bin/bash -c '
             umask 022
             export ANSIBLE_NOCOLOR=1 PYTHONUNBUFFERED=1
             export ANSIBLE_COLLECTIONS_PATH="$1"
@@ -218,13 +252,21 @@ jobs:
               match = re.fullmatch(r"TASK \[([^\[\]\n]+)\] \*+\n", line)
               if match and match.group(1).rsplit(" : ", 1)[-1] in names:
                   print(line, end="")
-          '
+            '
+          }
+          run_installer
           sudo test -f /var/lib/brai-install/completed.json
+          sudo -n docker exec --user postgres supabase-db psql -X -q -U supabase_admin -d postgres \
+            -v ON_ERROR_STOP=1 -c "CREATE TABLE public.brai_ci_reinstall_probe (marker text PRIMARY KEY); INSERT INTO public.brai_ci_reinstall_probe VALUES ('first-install');"
+          echo 'First clean install completed, including the authenticated HTTPS check.'
+          run_installer
+          test "$(sudo -n docker exec --user postgres supabase-db psql -X -qAt -U supabase_admin -d postgres \
+            -v ON_ERROR_STOP=1 -c 'SELECT marker FROM public.brai_ci_reinstall_probe;')" = first-install
           sudo -n /usr/bin/env BRAI_INSTALL_CAPTURE_FAILURE=1 \
             /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
             --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
             > "$work/verify.log" 2>&1
-          echo 'Stock PROD install and independent verify passed.'
+          echo 'Clean install, repeat install with retained PostgreSQL data, and independent verify passed.'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: failure() && steps.installer.outcome == 'failure'
         with:
