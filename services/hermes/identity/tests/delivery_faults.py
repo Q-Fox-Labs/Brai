@@ -113,7 +113,8 @@ for _name in ('gateway', 'agent', 'run_agent'):
                     lengths = [line.split(b':', 1)[1].strip() for line in lines
                                if line.lower().startswith(b'content-length:')]
                     fixture.require(len(lengths) == 1 and lengths[0].isdigit(), 'INVALID_LENGTH')
-                    model.requests.append(json.loads(await reader.readexactly(int(lengths[0]))))
+                    json.loads(await reader.readexactly(int(lengths[0])))
+                    # Outage attempts are counted separately; they are not successful fixture responses.
                     provider_failures.append(503)
                     payload = b'{"error":{"message":"synthetic provider outage","type":"server_error"}}'
                     writer.write(b'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
@@ -444,6 +445,7 @@ peer.close();channel.close()
             binding = resolver.mirror.inbox.delivery_for(profile, 123, 7)
             fixture.require(binding is not None and binding == resolver.mirror.inbox.delivery_for(profile, 123, 8), 'MERGED_BINDING_SPLIT')
             fixture.require(len(model.requests) > requests_before, 'MERGED_MODEL_NOT_CALLED')
+            merged_model_requests = len(model.requests) - requests_before
             fixture.require(resolver.journal.chat_state(profile, ('123', '13'))['paused'], 'PAUSE_LOST_ON_RESTART')
             proof['scenarios'].append('ingress-and-worker-restart-two-messages-one-native-turn')
             fixture.require(len(deliveries) == 6 and all('SYNTHETIC_OK' in p.get('content', '') for p in deliveries), 'REPLIES_UNPROVEN')
@@ -468,7 +470,8 @@ peer.close();channel.close()
             proof['providerFailures'] = len(provider_failures)
             proof.update(state='verified', delivered=len(deliveries), uniqueInputs=len(set(consumed)),
                          processKills=3, mergedInputs=2, mergedNativeTurns=len(batch_dispatches),
-                         mergedModelRequests=len(model.requests)-requests_before, modelRequests=len(model.requests), manualQueueResets=0)
+                         mergedModelRequests=merged_model_requests, modelHandledRequests=len(model.requests),
+                         modelRequests=len(model.requests)+len(provider_failures), manualQueueResets=0)
     except BaseException as error:
         proof.update(state='failed', stage=stage, errorType=type(error).__name__, code=fixture.safe_error_code(error))
         proof['syntheticReplyAttempts'] = locals().get('reply_attempts', [])
