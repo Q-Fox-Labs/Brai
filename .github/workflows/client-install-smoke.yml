@@ -18,8 +18,9 @@ jobs:
     runs-on: ubuntu-24.04
     environment: stock-prod-clean-install
     env:
-      STOCK_ADMIN_SHA: 5fe573ffed40994f48a248aea015ba6cefb4be2e
+      STOCK_ADMIN_SHA: 5fd9cd44927bf11b004e142e29e81bd4fb053d0a
       STOCK_ANSIBLE_CORE: '2.21.6'
+      STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -27,7 +28,7 @@ jobs:
           ssh-key: ${{ secrets.STOCK_PROD_ADMIN_READ_KEY }}
           ref: ${{ env.STOCK_ADMIN_SHA }}
           persist-credentials: false
-      - name: Install pinned Ansible and check protected YAML
+      - name: Install Ansible and its ACL module, then check protected YAML
         shell: bash
         run: |
           set -euo pipefail
@@ -35,6 +36,10 @@ jobs:
           venv="$RUNNER_TEMP/stock-ansible"
           python3 -m venv "$venv"
           "$venv/bin/python" -m pip --disable-pip-version-check install "ansible-core==$STOCK_ANSIBLE_CORE"
+          export ANSIBLE_COLLECTIONS_PATH="$RUNNER_TEMP/stock-collections"
+          "$venv/bin/ansible-galaxy" collection install --collections-path "$ANSIBLE_COLLECTIONS_PATH" \
+            "ansible.posix:==$STOCK_ANSIBLE_POSIX"
+          "$venv/bin/ansible-doc" -t module ansible.posix.acl >/dev/null
           ANSIBLE_LOCAL_TEMP="$RUNNER_TEMP/stock-ansible-synthetic" "$venv/bin/python" -B \
             -m unittest discover -s ansible/roles/fresh_install/tests -p test_protected_bundle.py -v
           "$venv/bin/ansible-playbook" --version | sed -n '1p'
@@ -87,8 +92,11 @@ jobs:
           sudo -n /bin/bash -c '
             umask 022
             export ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true
+            export ANSIBLE_COLLECTIONS_PATH="$1"
+            shift
             exec "$@"
-          ' bash "$RUNNER_TEMP/stock-ansible/bin/ansible-playbook" -i "$work/hosts.ini" client/install.yml \
+          ' bash "$RUNNER_TEMP/stock-collections" "$RUNNER_TEMP/stock-ansible/bin/ansible-playbook" \
+            -i "$work/hosts.ini" client/install.yml \
             --extra-vars "@$work/inputs.yml" > "$work/ansible.log" 2>&1
           sudo test -f /var/lib/brai-install/completed.json
           sudo /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
