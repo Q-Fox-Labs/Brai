@@ -1086,7 +1086,9 @@ def final_text(text, operation):
     active_sub(_DESCRIPTOR, descriptor, masked)
     if not items:
         return text
-    identity = key([operation, items])
+    # Явный набор и обычный MEDIA могут содержать те же файлы в одном ходе,
+    # но не должны перезаписывать правила доставки друг друга.
+    identity = key([operation, items, 'explicit', mode]) if explicit else key([operation, items])
     scope = ['egress', identity]
     workspace = files.cache / '.delivery' / identity
     workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1108,7 +1110,8 @@ def final_text(text, operation):
     with files.db() as db:
         db.execute('CREATE TABLE IF NOT EXISTS output_sets (identity TEXT PRIMARY KEY, paths TEXT, payload TEXT)')
         db.execute('INSERT OR REPLACE INTO output_sets VALUES (?,?,?)',
-                   (identity, paths_key(paths), canonical({'mode': mode, 'items': items, 'scope': scope})))
+                   (identity, paths_key(paths), canonical({'mode': mode, 'items': items, 'scope': scope,
+                                                           'explicit': bool(explicit)})))
     for start, end, indexes in sorted(replacements, reverse=True):
         text = text[:start] + '\n'.join('MEDIA:' + json.dumps(paths[index], ensure_ascii=False) for index in indexes) + text[end:]
     return text
@@ -1128,6 +1131,15 @@ def output_items(paths, captions=None):
         values = [files.resolve(path, ['delivery', _operation.get(), path]) for path in paths]
         return [{'file': files.checked(value), 'caption': (captions or [''] * len(paths))[index],
                  'presentation': presentation(value)} for index, value in enumerate(values)], 'files'
+
+
+def explicit_output_set(paths):
+    """Сохранить mode и порядок явного набора; старые записи читаются совместимо."""
+    paths = [local_path(path) for path in paths]
+    with store().db() as db:
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='output_sets'").fetchone()
+        row = db.execute('SELECT payload FROM output_sets WHERE paths=?', (paths_key(paths),)).fetchone() if exists else None
+    return bool(row and json.loads(row['payload']).get('explicit', True))
 
 
 def release_set(identity):

@@ -6,6 +6,117 @@
   },
   "methods": [
     {
+      "name": "telegram_topic_rename",
+      "summary": "Личный worker передаёт текущий ход. Адрес темы определяет общий ingress.",
+      "params": [
+        {
+          "name": "payload",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "messageId",
+              "args"
+            ],
+            "properties": {
+              "messageId": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "args": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "title"
+                    ],
+                    "properties": {
+                      "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "text"
+                    ],
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "name": "scope_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "result": {
+        "name": "renameResult",
+        "schema": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "ok",
+                "title"
+              ],
+              "properties": {
+                "ok": {
+                  "const": true
+                },
+                "title": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "ok",
+                "code"
+              ],
+              "properties": {
+                "ok": {
+                  "const": false
+                },
+                "code": {
+                  "const": "TOPIC_GENERATOR_UNAVAILABLE"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "recovery.check",
+      "summary": "Проверить права исходного отправителя и маршрут перед восстановлением хода.",
+      "params": [
+        {"name": "input_delivery_id", "required": true, "schema": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+        {"name": "chat_id", "required": true, "schema": {"type": "string", "minLength": 1}},
+        {"name": "thread_id", "required": true, "schema": {"type": "string"}}
+      ],
+      "result": {"name": "result", "schema": {"type": "object", "required": ["allowed"], "properties": {"allowed": {"const": true}}, "additionalProperties": false}}
+    },
+    {
       "name": "dispatch",
       "summary": "Доставить допущенное Telegram событие в личный runner.",
       "params": [

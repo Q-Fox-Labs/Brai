@@ -754,13 +754,25 @@ export async function startControl(config, adapters = {}) {
       })();
     },
   });
-  return { control, authCall, registry, async stop() { await service.stop(); control.closeMemorySnapshots(); await nc.drain(); } };
+  return { control, authCall, registry, suggestTopic:adapters.suggestTopic,
+    async stop() { await service.stop(); control.closeMemorySnapshots(); await nc.drain(); } };
 }
 
 /** Приватный протокол доступен только управляющему процессу через его stdin/stdout. */
 export async function privateCall(runtime, method, params) {
   if (!object(params)) throw new Error('INVALID_ARGUMENT');
   const { control, authCall, registry } = runtime;
+  if(method==='dialogues.topic-suggestion'){
+    if(Object.keys(params).sort().join(',')!=='input,profileId,uid'||!Number.isSafeInteger(params.uid)||params.uid<=0||
+       !text(params.profileId)||!object(params.input))
+      throw new Error('INVALID_ARGUMENT');
+    const user=await privateCall(runtime,'authorize',{uid:params.uid});
+    const data=await registry(),profile=data?.profiles?.[String(params.uid)];
+    if(!profile||profile.userId!==user.userId||profile.profileId!==user.profileId||
+       profile.profileId!==params.profileId||profile.status!=='active'||
+       typeof runtime.suggestTopic!=='function')throw new Error('FORBIDDEN');
+    return runtime.suggestTopic({...profile,workerUid:params.uid},params.input);
+  }
   if (method === 'identity.link-redeem') {
     if (Object.keys(params).some(key=>!['telegramId','code'].includes(key)) ||
         !/^[1-9][0-9]{0,19}$/.test(params.telegramId ?? '') || !/^[A-Za-z0-9_-]{43}$/.test(params.code ?? '')) throw new Error('INVALID_ARGUMENT');
@@ -916,22 +928,25 @@ export async function handlePrivateRpc(runtime, input) {
 export async function servePrivateRpc(runtime, source, destination) {
   const { createInterface } = await import('node:readline');
   const input = createInterface({ input: source, crlfDelay: Infinity });
-  const pending = new Set();
+  const pending = new Set(), topics = new Set();
   try {
     for await (const line of input) {
-      while (pending.size >= 64) await Promise.race(pending);
+      let request;
+      try { if (Buffer.byteLength(line) <= 2*1024*1024+65536) request = JSON.parse(line); } catch {}
+      const lane = request?.method === 'dialogues.topic-suggestion' ? topics : pending;
+      while (lane.size >= 64) await Promise.race(lane);
       const work = (async () => {
         let result;
         try {
-          if (Buffer.byteLength(line) > 2*1024*1024+65536) throw new Error();
-          result = await handlePrivateRpc(runtime, JSON.parse(line));
+          if (request === undefined) throw new Error();
+          result = await handlePrivateRpc(runtime, request);
         } catch { result = { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }; }
         if (result !== null && !destination.write(JSON.stringify(result) + '\n')) await once(destination, 'drain');
       })();
-      pending.add(work);
-      void work.then(() => pending.delete(work), () => pending.delete(work));
+      lane.add(work);
+      void work.then(() => lane.delete(work), () => lane.delete(work));
     }
-  } finally { await Promise.allSettled(pending); }
+  } finally { await Promise.allSettled([...pending, ...topics]); }
 }
 
 /** Запустить приватный JSON-RPC только для доверенного управляющего процесса. */

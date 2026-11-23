@@ -282,6 +282,52 @@ class NotificationsTest(unittest.IsolatedAsyncioTestCase):
         finally:
             request_scope.reset(token)
 
+    async def test_shutdown_scope_routes_live_group_warning_to_original_author(self):
+        from identity.worker import Worker
+
+        class Base:
+            def __init__(self, config):
+                self.config = config
+        module, platform = ModuleType('plugins.platforms.telegram.adapter'), ModuleType('gateway.platforms.base')
+        module.TelegramAdapter, platform.SendResult = Base, NS
+        active = {**profile(), 'role': 'user', 'generation': 1}
+        native = NS(_bot=self.bot, send=AsyncMock(return_value={'success': True, 'message_id': '42'}))
+        resolver = runtime.Resolver(native, ledger=self.ledger)
+        route = ('-100123', '7')
+        self.ledger.admit(active, route, {'thread_id': '7'}, '55')
+        resolver.turns[101] = {'id': 'turn', 'route': route, 'metadata': {'thread_id': '7'},
+                               'actor': '123', 'auth': ('user', 1), 'replyTo': '55'}
+        bridge = Bridge('owner', '123', 101, '/unused',
+            lambda owner, action, payload: resolver.deliver(active, owner, action, payload), None)
+        bridge.configure_delivery(require_scope=True, authorize_delivery=
+            lambda action, payload: resolver.authorize_delivery(active, action, payload))
+        class Peer:
+            async def call(self, method, params):
+                return await bridge.send(**params)
+        with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': module, 'gateway.platforms.base': platform}):
+            adapter = make_adapter(NS(), 'telegram', Peer(), None)
+        worker = Worker(os.getuid() + 1, 'owner', '123', None)
+        task = NS(done=lambda: False)
+        worker.active['worker-turn'] = ('session', task, {})
+        worker.turn_scopes['worker-turn'] = 'turn'
+        async def broker(method, params, **kwargs):
+            if method == 'ingress.status':
+                return {}
+            self.assertEqual((method, params), ('identity.resolve', {'telegramId': '123'}))
+            return active
+        with patch.object(runtime, 'broker_call', broker):
+            with worker.shutdown_notice_scope('session') as allowed:
+                self.assertTrue(allowed)
+                result = await adapter.send(route[0], 'warning', metadata={'thread_id': '7', '_interim_send': True})
+        self.assertTrue(result.success)
+        native.send.assert_awaited_once_with(chat_id=route[0], content='warning', reply_to='55',
+            metadata={'thread_id': '7', '_interim_send': True})
+        self.bot.create_forum_topic.assert_not_awaited()
+        task.done = lambda: True
+        with worker.shutdown_notice_scope('session') as allowed:
+            self.assertFalse(allowed)
+        self.assertIsNone(delivery_scope.get())
+
     async def test_worker_marks_only_background_root_deliveries_through_bridge(self):
         # Исполняется настоящий IpcAdapter/Bridge/Resolver, без отдельного Bot у worker.
         class Base:

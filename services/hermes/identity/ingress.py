@@ -44,6 +44,7 @@ class Bridge:
         self.input_receipt = None
         self.before_delivery = None
         self.durable_delivery = None
+        self.recovery_authorize = None
         if not self.worker_telegram_id.isascii():
             raise ValueError('invalid worker Telegram identity')
 
@@ -58,7 +59,9 @@ class Bridge:
                 await writer.wait_closed()
                 raise PermissionError('Unexpected worker UID')
             peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended,
-                             'telegram_api': self.call_telegram_api, 'chat_states': self.read_chat_states})
+                             'telegram_api': self.call_telegram_api, 'telegram_topic_rename': self.call_telegram_topic_rename,
+                             'chat_states': self.read_chat_states,
+                             'recovery.check': self.check_recovery})
             task = asyncio.create_task(peer.run())
             # close() должен отменять и ещё не завершившийся handshake.
             self.task = task
@@ -84,6 +87,12 @@ class Bridge:
         if owner != self.owner or not callable(self.chat_states):
             raise RpcError(-32602, 'Chat state unavailable')
         return {'owner': self.owner, 'routes': self.chat_states()}
+
+    async def check_recovery(self, input_delivery_id, chat_id, thread_id):
+        """Проверить исходный вход и права до запуска восстановленной задачи."""
+        if not callable(self.recovery_authorize):
+            raise RpcError(-32602, 'Recovery authorization unavailable')
+        return await self.recovery_authorize(self.owner, input_delivery_id, chat_id, thread_id)
 
     def configure_delivery(self, *, authorize_delivery=None, telegram_api=None, require_scope=False):
         """Подключить доверенные порты до открытия IPC-соединения."""
@@ -210,6 +219,10 @@ class Bridge:
             raise RpcError(-32601, 'Interactive API unavailable')
         return await self.telegram_api(self.owner, method, payload, scope_id)
 
+    async def call_telegram_topic_rename(self, payload, scope_id):
+        """Переименовать тему только через проверку активного хода в ingress."""
+        return await self.call_telegram_api('rename_current_topic', payload, scope_id)
+
     async def send(self, action, payload, scope_id=UNSCOPED, delivery_id=None, input_delivery_id=None):
         """Доставить только в разрешённый исходный chat/thread и вернуть реальный результат."""
         if action not in _ACTIONS or not isinstance(payload, dict):
@@ -224,7 +237,7 @@ class Bridge:
         thread = str(metadata.get('thread_id') or metadata.get('message_thread_id') or '')
         route = (str(payload.get('chat_id') or ''), thread)
         persistent = callable(self.authorize_delivery)
-        if persistent:
+        if persistent and delivery_id is None:
             self.authorize_delivery(action, payload)
         if not persistent and route not in self.routes:
             raise RpcError(-32602, 'Unauthorized destination')
@@ -273,9 +286,11 @@ class Bridge:
                 raise RpcError(-32602, 'Artifact required')
         token = request_scope.set(scope_id)
         try:
-            if delivery_id is not None:
+            if delivery_id is not None or input_delivery_id is not None:
                 if not callable(self.durable_delivery):
                     raise RpcError(-32602, 'Durable delivery unavailable')
+                if delivery_id is None and (action not in {'send', 'edit_message'} or scope_id is not None):
+                    raise RpcError(-32602, 'Invalid transient input delivery')
                 result = await self.durable_delivery(self.owner, action, payload, delivery_id, input_delivery_id)
             else:
                 result = await self.deliver(self.owner, action, payload)

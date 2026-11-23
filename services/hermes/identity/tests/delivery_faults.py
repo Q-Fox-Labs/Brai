@@ -14,9 +14,9 @@ import uuid
 from unittest.mock import patch
 
 
-async def eventually(check, label, watch=None):
+async def eventually(check, label, watch=None, timeout=180):
     """Дождаться наблюдаемого исхода; срок относится только к исполнению fixture."""
-    async with asyncio.timeout(180):
+    async with asyncio.timeout(timeout):
         while not check():
             if watch is not None and watch.returncode is not None:
                 raise ValueError('WORKER_EXITED')
@@ -35,16 +35,18 @@ async def run(config, fixture, native, receipt):
     from gateway.platforms.event import MessageType
 
     source = Path(config['sourceRoot'])
+    source_sha = config['sourceSha']
     root = fixture.RUN_BASE / str(uuid.uuid4())
     root.parent.mkdir(mode=0o711, parents=True, exist_ok=True)
     root.mkdir(mode=0o711)
     identity = root.stat().st_dev, root.stat().st_ino
     workers, servers, log_tasks = [], [], []
+    broker_runs = []
     deliveries = []
     connection_errors = []
     consumer = supervisor = None
     resolver = None
-    proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': config['sourceSha'],
+    proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': source_sha,
              'realNativeWorker': True, 'realTelegram': False, 'realInference': False,
              'backend': 'synthetic', 'scenarios': []}
     stage = 'prepare'
@@ -132,6 +134,8 @@ for _name in ('gateway', 'agent', 'run_agent'):
                    'telegramId': fixture.TELEGRAM, 'authorTelegramId': fixture.TELEGRAM,
                    'role': 'user', 'generation': 0, 'workerSocket': str(home / 'control/worker.sock')}
         bot = Bot('123:fixture'); bot._bot_user = User(123, 'fixture', True)
+        topic_started, topic_release = asyncio.Event(), asyncio.Event()
+        topic_requests = []
         deliveries, consumed, dispatches = [], [], []
         fail_send = False
         reply_attempts = []
@@ -168,7 +172,13 @@ for _name in ('gateway', 'agent', 'run_agent'):
             if method == 'ingress.input-ready':
                 return {'ready': True}
             if method == 'identity.resolve': return profile
-            if method in ('ingress.admit', 'ingress.close', 'ingress.status'): return {}
+            if method == 'ingress.topic-suggestion':
+                topic_requests.append(params)
+                topic_started.set()
+                await topic_release.wait()
+                return {'title': 'Синтетическая тема', 'icon': 0}
+            if method == 'ingress.close': return {'closed': True}
+            if method in ('ingress.admit', 'ingress.status'): return {}
             raise AssertionError('Unexpected fixture Auth operation: ' + method)
 
         ingress = root / 'ingress'; ingress.mkdir(mode=0o700)
@@ -177,11 +187,11 @@ for _name in ('gateway', 'agent', 'run_agent'):
                                               journal=IdentityJournal(ingress / 'chats'))
             value.mirror.app = NS(bot=bot, update_queue=asyncio.Queue())
             return value
-        def item(ident, thread=11):
+        def item(ident, thread=11, **fields):
             return Update.de_json({'update_id': ident, 'message': {'message_id': ident, 'date': 1,
-                'message_thread_id': thread, 'chat': {'id': 123, 'type': 'private'},
+                'message_thread_id': thread, 'is_topic_message': True, 'chat': {'id': 123, 'type': 'private'},
                 'from': {'id': 123, 'is_bot': False, 'first_name': 'Fixture'},
-                'text': 'Reply with SYNTHETIC_OK.'}}, bot)
+                'text': 'Reply with SYNTHETIC_OK.', **fields}}, bot)
         async def consume_batch(event, ident):
             adapter = batch_owner.adapter
             key = 'restart-topic'
@@ -453,7 +463,8 @@ peer.close();channel.close()
             await eventually(lambda: len(deliveries) >= 7, 'provider-failure-notice', watch=process)
             fixture.require(len(provider_failures) >= 1 and 'SYNTHETIC_OK' not in deliveries[6].get('content', ''),
                             'PROVIDER_FAILURE_NOT_OBSERVED')
-            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process)
+            # Native owns the complete provider retry schedule; do not end the test mid-retry.
+            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process, timeout=None)
             requests_before_recovery = len(model.requests)
             provider_unavailable = False
             await eventually(lambda: any('SYNTHETIC_OK' in item.get('content', '') for item in deliveries[7:]),
@@ -462,6 +473,40 @@ peer.close();channel.close()
             fixture.require(len(model.requests) > requests_before_recovery, 'RECOVERY_MODEL_NOT_CALLED')
             proof['scenarios'].append('provider-503-auto-continue-without-new-message')
             proof['providerFailures'] = len(provider_failures)
+
+            stage = 'topic-naming-with-pending-proposal'
+            await eventually(lambda: not resolver.turns, 'recovered-turn-idle', watch=process)
+            plugin_root = runtime / 'services/hermes/telegram'
+            names = fixture.module(plugin_root / 'topic_names.py', 'fixture_topic_names')
+            rename = fixture.module(plugin_root / 'topic_rename.py', 'fixture_topic_rename')
+            resolver.enable_topic_naming(names, rename)
+            created = item(16, 16, text=None, forum_topic_created={
+                'name': 'Временное имя', 'icon_color': 7322096, 'is_name_implicit': True})
+            raw = item(17, 16)
+            async def edit_topic(_bot, **payload):
+                edits.append(payload)
+                return True
+            async def topic_icons(_bot):
+                return [NS(custom_emoji_id='90', emoji='🌿')]
+            edits = []
+            with patch.dict(telegram_runtime._resolvers, {id(resolver.adapter): resolver}), \
+                 patch.object(Bot, 'edit_forum_topic', edit_topic), \
+                 patch.object(Bot, 'get_forum_topic_icon_stickers', topic_icons):
+                fixture.require(await telegram_runtime.admit_update(created, resolver.adapter), 'TOPIC_CREATE_DENIED')
+                fixture.require(await telegram_runtime.admit_update(raw, resolver.adapter), 'TOPIC_MESSAGE_DENIED')
+                await asyncio.wait_for(topic_started.wait(), 5)
+                deliveries_before = len(deliveries)
+                await resolver.mirror.capture([raw], 123)
+                await resolver.mirror.app.update_queue.put(raw)
+                await eventually(lambda: len(deliveries) > deliveries_before, 'topic-native-reply', watch=process)
+                fixture.require(not edits and 'SYNTHETIC_OK' in deliveries[-1].get('content', ''), 'TOPIC_BLOCKED_REPLY')
+                topic_release.set()
+                await asyncio.gather(*resolver.topic_tasks)
+            fixture.require(topic_requests == [{'telegramId': '123', 'profileId': profile['profileId'],
+                'input': {'request': raw.message.text, 'icons': ['🌿']}}], 'TOPIC_UNEXPECTED_MODEL_INPUT')
+            fixture.require(edits == [{'chat_id': 123, 'message_thread_id': 16,
+                'name': 'Синтетическая тема', 'icon_custom_emoji_id': '90'}], 'TOPIC_WRONG_TELEGRAM_EDIT')
+            proof['scenarios'].append('implicit-topic-edit-follows-unblocked-native-reply')
             proof.update(state='verified', delivered=len(deliveries), uniqueInputs=len(set(consumed)),
                          processKills=3, mergedInputs=2, mergedNativeTurns=len(batch_dispatches),
                          mergedModelRequests=len(model.requests)-requests_before, modelRequests=len(model.requests), manualQueueResets=0)
@@ -487,6 +532,9 @@ peer.close();channel.close()
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
         if resolver is not None:
+            for task in resolver.topic_tasks:
+                task.cancel()
+            await asyncio.gather(*resolver.topic_tasks, return_exceptions=True)
             for bridge in resolver.bridges.values():
                 if bridge.peer is not None: bridge.peer.writer.close()
                 if bridge.task is not None: bridge.task.cancel()
@@ -521,6 +569,11 @@ peer.close();channel.close()
         if cleanup_errors:
             proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
         else:
-            fixture.remove_owned_root(root, identity)
-            proof['cleaned'] = True
+            try:
+                fixture.remove_owned_root(root, identity)
+            except Exception as error:
+                proof.update(state='failed', cleaned=False, fixtureRoot=str(root),
+                             cleanupErrors=[{'type': type(error).__name__, 'code': fixture.safe_error_code(error)}])
+            else:
+                proof['cleaned'] = True
     return proof
