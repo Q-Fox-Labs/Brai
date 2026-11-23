@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: 6c8cc4798b0daaf490f254d1855cc05eba6c9fbbaab0d9497378e85db1da37c8
+      STOCK_PATCH_SHA256: e5b1b7cc9f0db69a8886ceaf476b35fa07537613cd44d814d55b7a538ded3cf9
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -198,6 +198,7 @@ jobs:
                   done
                   sudo -n systemctl show brai-install-brai-infrastructure.service --property=ActiveState,SubState,Result,ExecMainStatus || true
                   sudo -n journalctl --unit brai-install-brai-infrastructure.service --lines 40 --no-pager || true
+                  sudo -n docker network inspect --format '{{json .Containers}}' brai_frontend brai_artifacts_private || true
                   printf '\n--- HERMES SERVICE DIAGNOSTICS ---\n'
                   for unit in brai-hermes-production-{codex-bridge,embeddings,memos,browser,intake}.service; do
                     sudo -n systemctl show "$unit" --property=Id,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts || true

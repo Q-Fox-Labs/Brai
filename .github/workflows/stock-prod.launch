@@ -1,1 +1,1 @@
-verify clean install with corrected transcription binding and encrypted startup diagnostics
+boot Caddy before application IP allocation and honor runtime nofile with valid JWT key sets
