@@ -3,6 +3,7 @@
 # ABOUTME: Привязывает входы к SHA кандидата, создаёт локальные секреты и сохраняет шаблоны Ansible.
 import argparse
 import base64
+from contextlib import contextmanager
 import gzip
 import hashlib
 from http.client import HTTPException
@@ -12,7 +13,9 @@ from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
+import subprocess
 import tarfile
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 from urllib.request import build_opener, HTTPRedirectHandler
 
@@ -21,6 +24,7 @@ import yaml
 ORIGIN = 'https://brai-ci.localhost'
 RESEND_INPUT = '/srv/projects/brai/.secrets/resend_api_key.env'
 LOCAL_SECRET = re.compile(r'@CI_SECRET\(([a-z0-9_-]+)\)@')
+TELEGRAM_TEST_TOKEN = '@TELEGRAM_TEST_BOT_TOKEN@'
 IDENTITY_FIELDS = {
     'instance': 'brai_identity_instance',
     'settings': 'brai_identity_settings',
@@ -183,6 +187,12 @@ def materialize(inputs):
         if isinstance(value, list):
             return [expand(item) for item in value]
         if isinstance(value, str):
+            if value == TELEGRAM_TEST_TOKEN:
+                token = os.environ.get('BRAI_CI_TELEGRAM_BOT_TOKEN', '')
+                if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', token):
+                    raise ValueError('Provide the dedicated Telegram test bot token')
+                return token
+
             def secret(match):
                 key = match.group(1)
                 if key not in generated:
@@ -203,13 +213,40 @@ class SDKRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+@contextmanager
+def open_archive(url, directory):
+    """Open a checked HTTPS stream, decrypting it locally when a CI passphrase is present."""
+    opener = build_opener(SDKRedirectHandler())
+    passphrase = os.environ.get('BRAI_CI_ARCHIVE_PASSPHRASE')
+    if not passphrase:
+        with opener.open(url, timeout=180) as response:
+            yield response
+        return
+    with TemporaryDirectory(prefix='archive-', dir=directory) as temporary:
+        temporary = Path(temporary)
+        encrypted = temporary / 'encrypted.gpg'
+        decoded = temporary / 'decoded.tar'
+        with opener.open(url, timeout=180) as response, encrypted.open('xb') as output:
+            shutil.copyfileobj(response, output)
+        process = subprocess.run(
+            ['gpg', '--homedir', str(temporary), '--batch', '--no-tty',
+             '--pinentry-mode', 'loopback', '--passphrase-fd', '0', '--no-symkey-cache',
+             '--output', str(decoded), '--decrypt', str(encrypted)],
+            input=passphrase.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if process.returncode:
+            raise ValueError('The encrypted test archive could not be opened')
+        encrypted.unlink()
+        with decoded.open('rb') as archive:
+            yield archive
+
+
 def stage_sdk(url, checksum, root):
     """Stage only the files declared by the candidate's pinned software manifest."""
     if not url or urlsplit(url).scheme != 'https':
         raise ValueError('Supply the temporary HTTPS source of the portable MemOS SDK')
     root.mkdir(mode=0o700)
-    opener = build_opener(SDKRedirectHandler())
-    with opener.open(url, timeout=180) as source, tarfile.open(fileobj=source, mode='r|') as archive:
+    with open_archive(url, root.parent) as source, tarfile.open(fileobj=source, mode='r|') as archive:
         entry = archive.next()
         if not entry or entry.name != 'distribution.json' or not entry.isfile() or entry.size > 1024 * 1024:
             raise ValueError('The MemOS SDK archive must start with distribution.json')
@@ -243,8 +280,7 @@ def stage_release_layout(manifest, checksum, run_directory):
     if not url or urlsplit(url).scheme != 'https':
         raise ValueError('Supply the temporary HTTPS source of the RELEASE OCI packages')
     path = run_directory / 'release-oci.tar'
-    opener = build_opener(SDKRedirectHandler())
-    with opener.open(url, timeout=180) as source, path.open('xb') as destination:
+    with open_archive(url, run_directory) as source, path.open('xb') as destination:
         shutil.copyfileobj(source, destination)
     with path.open('rb') as staged:
         if hashlib.file_digest(staged, 'sha256').hexdigest() != checksum:

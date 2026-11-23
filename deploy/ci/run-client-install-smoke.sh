@@ -47,7 +47,8 @@ sampler=$!
 trap report EXIT
 
 python3 -B "$fixture" unpack "$BRAI_CI_SOURCE_SHA" "$run_dir/inputs.yml"
-unset BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN BRAI_CI_MEMOS_SDK_URL BRAI_CI_RELEASE_PACKAGES_URL BRAI_CI_REGISTRY_TOKEN CI_PACKAGES_TOKEN
+unset BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN BRAI_CI_MEMOS_SDK_URL BRAI_CI_RELEASE_PACKAGES_URL
+unset BRAI_CI_REGISTRY_TOKEN CI_PACKAGES_TOKEN BRAI_CI_ARCHIVE_PASSPHRASE BRAI_CI_TELEGRAM_BOT_TOKEN
 if [[ -f "$run_dir/release-oci.tar" ]]; then
   sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT /usr/bin/python3 -B \
     "$(dirname "$fixture")/stage-release-packages.py" "$run_dir/release-oci.tar" \

@@ -20,9 +20,11 @@ Workflow **Client install smoke** запускает штатный `ansible/cli
    gh secret set BRAI_CI_INSTALL_BUNDLE --repo Q-Fox-Labs/Brai --env brai-clean-install < fixture.b64
    ```
 
-Для манифеста с Telegram заполните `identity_deployment` по [контракту клиентского установщика](https://github.com/Q-Fox-Labs/Q-Server/blob/main/ansible/client/IDENTITY.md). Укажите отдельный тестовый токен бота. Реестр Auth остаётся пустым. Ссылку на переносимый SDK берите из того же манифеста. В защищённом окружении Actions задайте `BRAI_CI_MEMOS_SDK_URL` с временной HTTPS-ссылкой на несжатый `.tar`. Первым в архиве должен идти `distribution.json`, за ним перечисленные в нём файлы. Записи каталогов не нужны. Раннер сверяет SHA-256 манифеста и каждого файла перед передачей штатному Ansible.
+Для манифеста с Telegram заполните `identity_deployment` по [контракту клиентского установщика](https://github.com/Q-Fox-Labs/Q-Server/blob/main/ansible/client/IDENTITY.md). Чтобы передать токен отдельным Actions secret `BRAI_CI_TELEGRAM_BOT_TOKEN`, укажите `@TELEGRAM_TEST_BOT_TOKEN@` в полях ingress и control. Реестр Auth остаётся пустым. Ссылку на переносимый SDK берите из того же манифеста. В защищённом окружении Actions задайте `BRAI_CI_MEMOS_SDK_URL` с временной HTTPS-ссылкой на несжатый `.tar`. Первым в архиве должен идти `distribution.json`, за ним перечисленные в нём файлы. Записи каталогов не нужны. Раннер сверяет SHA-256 манифеста и каждого файла перед передачей штатному Ansible.
 
 Для прогона из собранных пакетов RELEASE добавьте `release_oci_archive_sha256` в тестовые настройки и задайте секрет `BRAI_CI_RELEASE_PACKAGES_URL` с временной HTTPS-ссылкой на OCI tar. Раннер сверяет хеш архива, хеши каждого указанного OCI-пакета и его содержимое штатным валидатором. Установщик затем сверяет эти же payload при этапе `sources`. Внешние CLI устанавливаются штатно по закреплённому OCI digest.
+
+Для симметрично зашифрованных GPG-архивов задайте один пароль в `BRAI_CI_ARCHIVE_PASSPHRASE`. SHA-256 указывайте для исходных tar-файлов. Раннер расшифрует их во временном каталоге перед проверкой.
 
 Оставьте список `public_urls` пустым для локальной проверки Web. Полные журналы Ansible и тестовые настройки хранятся на одноразовом раннере.
 
@@ -31,7 +33,7 @@ Workflow **Client install smoke** запускает штатный `ansible/cli
 | Переменная репозитория | Значение |
 | --- | --- |
 | `BRAI_CI_ADMIN_REPOSITORY` | По умолчанию `Q-Fox-Labs/Q-Server`. Для переопределения укажите `владелец/репозиторий`. |
-| `BRAI_CI_ADMIN_SHA` | По умолчанию `8b0e16d38e29541a43caaabca4bf71641abc9317`, устанавливающий Codex 0.171.0. Для переопределения укажите полный SHA. |
+| `BRAI_CI_ADMIN_SHA` | По умолчанию `da1762ee80ac4a42ca2afa8a5369e5b9ca577ee8`, устанавливающий Codex 0.171.0. Для переопределения укажите полный SHA. |
 
 Ограничьте окружение Actions `brai-clean-install` веткой проверки. В этом окружении задайте `BRAI_CI_ADMIN_SSH_KEY` с ключом развёртывания только на чтение репозитория Admin или `BRAI_CI_ADMIN_TOKEN` с тем же доступом. Добавьте `BRAI_CI_HF_TOKEN` тестового аккаунта с доступом к закреплённому VAD. Workflow читает OCI через `GITHUB_TOKEN`. Для отдельного допуска к пакетам задайте секрет `BRAI_CI_REGISTRY_TOKEN` и переменную `BRAI_CI_REGISTRY_USER`.
 
