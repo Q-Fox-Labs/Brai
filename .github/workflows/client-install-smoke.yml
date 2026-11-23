@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: 5be0dc921901e9d285ed11ec3a42059a3ebc9d55b3113d5eed085bb8114e91de
+      STOCK_PATCH_SHA256: 7288bee29f362f1dc66d28b0e25f592452aa27fed882823770827e155b81079d
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -203,6 +203,29 @@ jobs:
                   for unit in brai-hermes-production-{codex-bridge,embeddings,memos,browser,intake}.service; do
                     sudo -n systemctl show "$unit" --property=Id,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts || true
                     sudo -n journalctl --unit "$unit" --lines 40 --no-pager || true
+                  done
+                  printf '\n--- APPLICATION PROGRAM STATE ---\n'
+                  for unit in brai-agent.service brai-hermes-production.service; do
+                    sudo -n systemctl show "$unit" --property=Id,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts || true
+                    sudo -n journalctl --unit "$unit" --lines 80 --no-pager | python3 -c '
+          import re, sys
+          journal = sys.stdin.read()
+          patterns = {
+              "telegram_poll_conflict": r"Conflict.*(?:getUpdates|other instance)|another bot instance",
+              "telegram_network": r"(?:api\.telegram\.org|Telegram).*(?:NetworkError|ConnectError|TimedOut|timed out|connection refused)",
+              "telegram_auth": r"HERMES_PRODUCTION_BOT_TOKEN_REQUIRED|InvalidToken|telegram.*(?:401|Unauthorized)",
+              "no_platforms_connected": r"no platforms connected|no chat platforms enabled|Failed to connect.*Telegram",
+              "already_running": r"gateway already running|another gateway|address already in use",
+              "dependency_missing": r"ModuleNotFoundError|ImportError|No such file or directory|Cannot find package",
+              "file_permissions": r"PermissionError|Permission denied",
+              "invalid_configuration": r"config(?:uration)?[^\n]*(?:invalid|not found)|JSONDecodeError",
+              "runtime_error": r"RuntimeError|Traceback|unhandled.*error",
+              "process_exit": r"Main process exited|Failed with result",
+          }
+          for code, pattern in patterns.items():
+              if re.search(pattern, journal, re.I):
+                  print(code)
+          ' || true
                   done
                   if sudo -n test -f /var/lib/brai-install/command-failure.json; then
                     printf '\n--- ROOT COMMAND FAILURE ---\n'
