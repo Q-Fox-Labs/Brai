@@ -29,6 +29,7 @@ class RouteLedger:
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute('CREATE TABLE IF NOT EXISTS routes (owner TEXT, chat TEXT, thread TEXT, metadata TEXT NOT NULL, PRIMARY KEY(owner,chat,thread))')
         self.db.execute('CREATE TABLE IF NOT EXISTS messages (owner TEXT, chat TEXT, thread TEXT, message TEXT, outgoing INTEGER NOT NULL, PRIMARY KEY(owner,chat,thread,message,outgoing))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS topic_names (bot TEXT, chat TEXT, thread TEXT, owner TEXT, state TEXT NOT NULL, PRIMARY KEY(bot,chat,thread))')
 
     @staticmethod
     def owner(profile):
@@ -62,6 +63,33 @@ class RouteLedger:
             query += ' AND outgoing=?'
             values += (int(outgoing),)
         return self.db.execute(query, values).fetchone() is not None
+
+    def stage_topic_name(self, route, profile):
+        """Учитывать подтверждённое Telegram создание только один раз."""
+        self.db.execute("INSERT OR IGNORE INTO topic_names VALUES (?,?,?,?,'pending')",
+                        (*route, self.owner(profile)))
+
+    def claim_topic_name(self, route, profile):
+        """Первое сообщение подтверждённого владельца занимает попытку."""
+        return self.db.execute("UPDATE topic_names SET state='claimed' "
+            "WHERE bot=? AND chat=? AND thread=? AND owner=? AND state='pending'",
+            (*route, self.owner(profile))).rowcount == 1
+
+    def topic_name_current(self, route, profile):
+        """Проверить, что подтверждённая ручная правка не отменила попытку."""
+        return self.db.execute("SELECT 1 FROM topic_names WHERE bot=? AND chat=? AND thread=? "
+            "AND owner=? AND state='claimed'", (*route, self.owner(profile))).fetchone() is not None
+
+    def change_topic_name_state(self, route, profile, previous, state):
+        """Записать исход попытки, сохраняя более новую отмену."""
+        self.db.execute("UPDATE topic_names SET state=? WHERE bot=? AND chat=? AND thread=? AND owner=? AND state=?",
+                        (state, *route, self.owner(profile), previous))
+
+    def cancel_topic_name(self, route):
+        """Сохранить отмену, в том числе доставленную раньше события создания."""
+        self.db.execute("INSERT INTO topic_names VALUES (?,?,?,NULL,'cancelled') "
+                        "ON CONFLICT(bot,chat,thread) DO UPDATE SET state='cancelled' "
+                        "WHERE topic_names.state IN ('pending','claimed')", route)
 
     def close(self):
         self.db.close()

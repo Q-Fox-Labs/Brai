@@ -177,6 +177,7 @@ class Mirror:
         self.auto_inputs, self.terminal_inputs = set(), set()
         self.input_routes = {}
         self.service_updates = {}
+        self.observe_topic_edit = None
         self.tracker = Tracker(self._authorize, self._stage, self._release_snapshot)
 
     def register_snapshot(self, key, snapshot):
@@ -511,6 +512,8 @@ class Mirror:
                     checked[key] = snapshot
                 for update, snapshot in staged:
                     self.register_snapshot(f'{bot_id}:{update.update_id}', snapshot)
+                    if self.observe_topic_edit is not None:
+                        self.observe_topic_edit(update)
                 self.pending = False
                 self.tracker.changed.set()
         except BaseException:
@@ -520,6 +523,8 @@ class Mirror:
             self._capturing = False
 
     def enter(self, key, update):
+        if self.observe_topic_edit is not None:
+            self.observe_topic_edit(update)
         return self.tracker.enter(key, update)
 
     async def classify(self, ticket, update):

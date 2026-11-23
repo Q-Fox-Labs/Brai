@@ -162,6 +162,25 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
  }
  return {
   perUserRuntime,
+  /** Служебный запрос к уже закреплённому личному обработчику Диалогов. */
+  async suggestTopic(profile, input){
+   const {tools}=validateProfile(profile,'active');
+   const endpoint=tools.dialogues;
+   if(endpoint?.enabled!==true)invalid();
+   const url=new URL(endpoint.url);
+   if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||url.pathname!=='/mcp'||
+       url.username||url.password||url.search||url.hash)invalid();
+   url.pathname='/telegram-topic-suggestion';
+   const response=await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(1800_000),
+    headers:{'Content-Type':'application/json',Authorization:'Bearer '+endpoint.token,
+     'x-brai-user-id':endpoint.userId,'x-brai-profile-id':endpoint.profileId},
+    body:JSON.stringify(input)});
+   if(!response.ok){
+    await response.body?.cancel();
+    throw new Error('TOPIC_GENERATOR_UNAVAILABLE');
+   }
+   return response.json();
+  },
   async bootstrapFilesConfiguration(profile){const {entry,tools}=validateProfile(profile,'provisioning');return checkedFiles(entry,tools);},
   async historyCall(profile,name,args,signal){
    if(!['history_list','history_get','history_categories_list','history_types_list','history_type_get'].includes(name))invalid();

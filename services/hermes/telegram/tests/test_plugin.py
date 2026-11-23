@@ -2760,6 +2760,28 @@ class ManualTopicRenameTests(unittest.IsolatedAsyncioTestCase):
         self.bot.get_forum_topic_icon_stickers.assert_not_awaited()
         self.assertEqual((await self.redeem(ticket))['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
 
+    async def test_personal_mcp_redeems_ticket_merged_with_native_arguments(self):
+        path = Path(__file__).resolve().parents[2] / 'identity' / 'tool_client.py'
+        spec = importlib.util.spec_from_file_location('topic_rename_client', path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        title = 'План отпуска'
+        (self.root / 'control').mkdir()
+        port = self.plugin.topic_rename_api.RenamePort(self.root / 'control' / 'topic.sock',
+                                                       self.plugin._apply_topic_rename)
+        await port.start()
+        try:
+            with patch.dict(os.environ, {'HOME': str(self.root)}), patch.object(self.plugin, 'topic_rename', port):
+                directive = self.authorize({'title': title})
+                args = {'title': 'Подмена после выдачи допуска', **directive['args']}
+                response = await asyncio.to_thread(client.handle, 'tools/call', {'name':client.TOPIC_RENAME, 'arguments':args})
+                repeat = await asyncio.to_thread(client.handle, 'tools/call', {'name':client.TOPIC_RENAME, 'arguments':args})
+        finally:
+            port.close()
+        self.assertEqual(response['structuredContent'], {'ok': True, 'title': title})
+        self.assertEqual(repeat['structuredContent']['code'], 'TOPIC_RENAME_CONTEXT_REQUIRED')
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=77, name=title)
+
     async def test_generated_name_uses_same_dialogues_socket_and_keeps_icon(self):
         async def respond(reader, writer):
             self.captured = json.loads(await reader.read())

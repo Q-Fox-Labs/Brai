@@ -1,7 +1,8 @@
 // ABOUTME: Получает актуальный каталог подписки для собственного исполнителя Luna.
 // ABOUTME: Access живёт только в памяти; файл содержит только метаданные моделей.
-import {writeFile} from 'node:fs/promises';
+import {rename,rm,writeFile} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
 import {promisify} from 'node:util';
 import {DialoguesFault} from './domain.js';
 import {credential,type SubscriptionConfig} from './subscription-luna.js';
@@ -19,5 +20,9 @@ export async function prepareSubscriptionCatalog(cfg:SubscriptionConfig){
   catalog=await reply.json();
  }finally{delete value.access;}
  if(!Array.isArray(catalog?.models)||!catalog.models.some((m:any)=>m.slug==='gpt-6-luna'))throw new DialoguesFault('LUNA_NOT_AVAILABLE');
- await writeFile(cfg.catalogPath,JSON.stringify(catalog),{mode:0o600});
+ const temporary=cfg.catalogPath+'.'+randomUUID();
+ try{
+  await writeFile(temporary,JSON.stringify(catalog),{mode:0o600,flag:'wx'});
+  await rename(temporary,cfg.catalogPath);
+ }finally{await rm(temporary,{force:true});}
 }

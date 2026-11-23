@@ -7,6 +7,76 @@
   },
   "methods": [
     {
+      "name": "dialogues.topic-suggestion",
+      "summary": "Проверяет действующий профиль по UID и запрашивает личные Диалоги. Возвращает индекс списка.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "input",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "request",
+              "icons"
+            ],
+            "properties": {
+              "request": {
+                "type": "string",
+                "minLength": 1
+              },
+              "icons": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "suggestion",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "title",
+            "icon"
+          ],
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "icon": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "identity.get",
       "summary": "Прочитать актуальную идентичность Auth по стабильному userId для root lifecycle; не доступен Unix worker.",
       "paramStructure": "by-name",

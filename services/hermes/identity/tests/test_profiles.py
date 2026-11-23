@@ -239,7 +239,11 @@ class ProfileTests(unittest.TestCase):
                 patch.object(module.Config, 'from_env', side_effect=AssertionError('legacy owner config read')), \
                 patch.object(module, 'TelegramPlugin', side_effect=AssertionError('legacy plugin constructed')):
             module.register(context)
-        register.assert_called_once_with(context)
+        self.assertEqual(register.call_args.args, (context,))
+        self.assertEqual(set(register.call_args.kwargs), {'topic_names', 'topic_rename'})
+        self.assertTrue(callable(register.call_args.kwargs['topic_names'].topic_update))
+        self.assertTrue(callable(register.call_args.kwargs['topic_rename'].rename_arguments))
+        self.assertEqual(register.call_count, 1)
 
     def test_parent_runner_rejects_legacy_mode_before_native_import(self):
         import os
