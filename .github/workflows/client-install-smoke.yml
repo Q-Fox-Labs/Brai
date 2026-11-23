@@ -1,4 +1,4 @@
-# ABOUTME: Runs the unmodified client PROD playbook on a fresh GitHub-hosted Ubuntu.
+# ABOUTME: Tests the private client PROD installer candidate on fresh GitHub-hosted Ubuntu.
 # ABOUTME: Passes the stock manifest and bounded test credentials as protected Ansible input.
 name: Stock PROD clean install
 
@@ -12,6 +12,10 @@ permissions:
   contents: read
   packages: read
 
+concurrency:
+  group: stock-prod-clean-install
+  cancel-in-progress: false
+
 jobs:
   install:
     if: github.repository == 'Q-Fox-Labs/Brai' && github.ref == 'refs/heads/feature/stock-prod-clean-20261123'
@@ -19,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: 544c9fce5ea46001f93f9212a0d1a4840e5d0f763046b19cfe3347f791593198
+      STOCK_PATCH_SHA256: 9374fdd708542b6c1ffed9ab490eca3c23ff4f0c44a2c73ff083053281a4596d
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -179,6 +183,7 @@ jobs:
                     sudo -n cat /var/lib/brai-install/model-operations.json
                   fi
                   local local_ai=brai-local-ai-op3-main-8683b1d1
+                  printf '\n--- LOCAL AI CONTAINER STATE ---\n'
                   if sudo -n docker inspect --format '{{json .State}}' "$local_ai" 2>/dev/null; then
                     printf '\n--- LOCAL AI LOG ---\n'
                     sudo -n docker logs --tail 120 "$local_ai" 2>&1 || true
@@ -258,7 +263,7 @@ jobs:
           sudo test -f /var/lib/brai-install/completed.json
           sudo -n docker exec --user postgres supabase-db psql -X -q -U supabase_admin -d postgres \
             -v ON_ERROR_STOP=1 -c "CREATE TABLE public.brai_ci_reinstall_probe (marker text PRIMARY KEY); INSERT INTO public.brai_ci_reinstall_probe VALUES ('first-install');"
-          echo 'First clean install completed, including the authenticated HTTPS check.'
+          echo 'First clean install completed, including the TLS-verified HTTPS check.'
           run_installer
           test "$(sudo -n docker exec --user postgres supabase-db psql -X -qAt -U supabase_admin -d postgres \
             -v ON_ERROR_STOP=1 -c 'SELECT marker FROM public.brai_ci_reinstall_probe;')" = first-install
@@ -267,6 +272,36 @@ jobs:
             --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
             > "$work/verify.log" 2>&1
           echo 'Clean install, repeat install with retained PostgreSQL data, and independent verify passed.'
+          local_ai_unit=$(sudo -n python3 -B -c 'import json; p=json.load(open("/var/lib/brai-install/compose-launch.json")); print("brai-install-"+p["local_ai"][0]["project"]+".service")')
+          sudo -n systemctl is-enabled --quiet "$local_ai_unit"
+          sudo -n systemctl restart "$local_ai_unit" brai-hermes-production.service
+          sudo -n /usr/bin/env BRAI_INSTALL_CAPTURE_FAILURE=1 \
+            /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
+            --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
+            >> "$work/verify.log" 2>&1
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          unit=brai-hermes-production.service
+          owner=$(sudo -n systemctl show "$unit" --property=User --value)
+          test "$owner" = brai-hermes-production
+          sudo -n systemctl is-active --quiet "$unit"
+          sudo -n systemctl is-enabled --quiet "$unit"
+          sudo -n systemctl is-enabled --quiet docker.service
+          if ! command -v espeak-ng >/dev/null; then
+            sudo -n apt-get install -y --no-install-recommends espeak-ng
+          fi
+          probe=$(sudo -n -u "$owner" mktemp -d /var/lib/brai/hermes/workspace/brai-ci-speech.XXXXXXXX)
+          espeak-ng -v ru -s 135 -w "$work/input.wav" 'Сегодня хорошая погода'
+          sudo -n install -m 0600 -o "$owner" -g "$owner" "$work/input.wav" "$probe/input.wav"
+          sudo -n systemd-run --wait --collect --quiet --pipe \
+             --property="User=$owner" --property="Group=$owner" \
+             --property=EnvironmentFile=/etc/brai/hermes/runtime.env \
+             --setenv=BRAI_HERMES_CONFIG=/etc/brai/hermes/tools.json \
+             --setenv=BRAI_HERMES_OWNER_ID=brai-ci-check \
+             /usr/local/bin/node /opt/brai-codeworks/prod-hermes/services/hermes/transcribe.mjs \
+             --input "$probe/input.wav" --output "$probe/output.txt" >> "$work/verify.log" 2>&1
+          sudo -n -u "$owner" grep -Eiq 'погод' "$probe/output.txt"
+          sudo -n -u "$owner" rm -rf -- "$probe"
+          printf '%s\n' 'Hermes file transcription through Local AI returned the expected synthetic speech.'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: failure() && steps.installer.outcome == 'failure'
         with:
