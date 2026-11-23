@@ -82,3 +82,19 @@ jobs:
           export BRAI_RECONNECT_FIXTURE_CONTAINER="$fixture"
           export BRAI_RECONNECT_FIXTURE_NATS="nats://${port}"
           node --test services/transcription/tests/integration/nats-reconnect.test.mjs
+
+  providers-sidecar:
+    name: Providers sidecar network
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - name: Test isolated Compose and LiteLLM
+        env:
+          BRAI_TEST_PROVIDER_SIDECAR: '1'
+        run: node --test deploy/components/providers-sidecar.integration.test.mjs
