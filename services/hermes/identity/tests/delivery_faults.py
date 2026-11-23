@@ -23,14 +23,6 @@ async def eventually(check, label, watch=None, timeout=180):
             await asyncio.sleep(.05)
 
 
-def without_worker_deadline(args):
-    """Keep fixture isolation while allowing the complete native retry schedule."""
-    value = '--property=RuntimeMaxSec=420'
-    if args.count(value) != 1:
-        raise ValueError('FIXTURE_RUNTIME_LIMIT_CHANGED')
-    return [item for item in args if item != value]
-
-
 async def run(config, fixture, native, receipt):
     """Root fixture с sealed candidate и штатными Worker, Resolver, Mirror и SQLite."""
     from telegram import Bot, Update, User
@@ -252,9 +244,9 @@ for _name in ('gateway', 'agent', 'run_agent'):
                 broker = fixture.FixtureBroker(uid, configuration)
                 broker_runs.append(broker)
             unit = 'brai-native-fixture-' + uuid.uuid4().hex
-            args = without_worker_deadline(fixture.worker_unit_args(unit, uid, ingress_uid, home, software, runtime, root / 'broker.sock',
+            args = fixture.worker_unit_args(unit, uid, ingress_uid, home, software, runtime, root / 'broker.sock',
                 root / 'model.sock', receipt['paths']['python'], lock, launcher,
-                dependency_paths={'venv': receipt['paths']['venv'], 'site-packages': receipt['paths']['sitePackages']}))
+                dependency_paths={'venv': receipt['paths']['venv'], 'site-packages': receipt['paths']['sitePackages']})
             args.insert(args.index('/usr/bin/env'), '--property=BindReadOnlyPaths=' + str(stable_instructions) + ':/opt/brai-profile/system-instructions')
             process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, env={'PATH': '/usr/bin:/bin'}, start_new_session=True)
