@@ -5,16 +5,30 @@ import argparse
 import base64
 import gzip
 import hashlib
+from http.client import HTTPException
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
+import shutil
+import tarfile
+from urllib.parse import urlsplit
+from urllib.request import build_opener, HTTPRedirectHandler
 
 import yaml
 
 ORIGIN = 'https://brai-ci.localhost'
+RESEND_INPUT = '/srv/projects/brai/.secrets/resend_api_key.env'
 LOCAL_SECRET = re.compile(r'@CI_SECRET\(([a-z0-9_-]+)\)@')
+IDENTITY_FIELDS = {
+    'instance': 'brai_identity_instance',
+    'settings': 'brai_identity_settings',
+    'control': 'brai_identity_control_config',
+    'services': 'brai_identity_service_configs',
+    'ingress': 'brai_identity_ingress_environment',
+    'managedMemos': 'brai_identity_managed_memos_config',
+}
 
 
 class Literal(str):
@@ -51,7 +65,7 @@ def service_names(manifest):
 def template(manifest):
     """Создать заготовку полей из выбранного манифеста для отдельного тестового экземпляра."""
     owners = sorted({database['owner'] for database in manifest['databases']})
-    return {
+    result = {
         'files': {path: dict(text=None, mode=None, uid=None, gid=None) for path in manifest['config_paths']},
         'environments': dict.fromkeys(sorted(service_names(manifest))),
         'program_environment': dict.fromkeys(sorted(manifest['programs'])),
@@ -61,6 +75,61 @@ def template(manifest):
         'public_origin': ORIGIN,
         'public_urls': [],
     }
+    if 'brai' in manifest.get('identity_telegram', {}).get('projects', {}):
+        result['files'].pop(RESEND_INPUT, None)
+        result.update(identity_mode='telegram', identity_auth_project='brai',
+                      identity_deployment={
+                          'instance': 'production',
+                          'settings': {'parentUnit': 'brai-hermes-production.service'},
+                          'control': None,
+                          'services': None,
+                          'ingress': None,
+                          'managedMemos': {
+                              'freshInstall': True,
+                              'technicalProviders': [],
+                              'providerDescriptor': {'variant': 'external-http-v1', 'llm': None, 'embedding': None},
+                              'sdkDistribution': manifest.get('identity_memos_sdk_distribution'),
+                          },
+                      })
+    return result
+
+
+def check_identity(manifest, inputs):
+    mode = inputs.get('identity_mode', 'email')
+    if 'identity_bootstrap' in inputs:
+        raise ValueError('Use an empty identity registry for the clean installation')
+    if mode == 'email':
+        if 'identity_deployment' in inputs or 'identity_auth_project' in inputs:
+            raise ValueError('Use Telegram mode with identity deployment settings')
+        return
+    if mode != 'telegram' or inputs.get('identity_auth_project') != 'brai':
+        raise ValueError('Use the standalone Telegram Auth project brai')
+    identity = manifest.get('identity_telegram', {})
+    if identity.get('format') != 'brai-identity-telegram-v1' or 'brai' not in identity.get('projects', {}):
+        raise ValueError('The candidate manifest does not declare Telegram support for brai')
+    deployment = inputs.get('identity_deployment')
+    if not isinstance(deployment, dict) or set(deployment) != set(IDENTITY_FIELDS):
+        raise ValueError('Complete the standalone Telegram deployment settings')
+    if (not isinstance(deployment['instance'], str)
+            or not re.fullmatch('[a-z][a-z0-9-]{0,31}', deployment['instance'])
+            or any(not isinstance(deployment[key], dict) for key in IDENTITY_FIELDS if key != 'instance')
+            or set(deployment['services']) != {'broker', 'egress', 'memory'}):
+        raise ValueError('Specify the identity instance and its three gateway settings')
+    if deployment['settings'].get('parentUnit') != 'brai-hermes-production.service':
+        raise ValueError('Use the standalone Hermes parent unit')
+    managed = deployment['managedMemos']
+    provider = managed.get('providerDescriptor', {})
+    if (managed.get('freshInstall') is not True or managed.get('technicalProviders') != []
+            or not isinstance(provider, dict) or provider.get('variant') != 'external-http-v1'
+            or any(not isinstance(provider.get(key), dict) for key in ('llm', 'embedding'))):
+        raise ValueError('Specify both providers for the external-http-v1 MemOS first installation')
+    distribution = manifest.get('identity_memos_sdk_distribution', {})
+    checksum = distribution.get('sha256', '')
+    if (not isinstance(checksum, str) or not re.fullmatch('[a-f0-9]{64}', checksum)
+            or distribution != {'path': f'/var/lib/brai-install/identity-sdk-distribution/{checksum}/distribution.json',
+                                'sha256': checksum}
+            or managed.get('sdkDistribution') != distribution):
+        raise ValueError('Use the same portable MemOS SDK in the manifest and test deployment')
 
 
 def check_settings(manifest, inputs):
@@ -69,9 +138,11 @@ def check_settings(manifest, inputs):
         raise ValueError('Use the local test origin and an empty public URL list')
     if 'registry' in inputs or 'git' in inputs or 'hf_token' in inputs:
         raise ValueError('Supply registry, Git and Hugging Face access separately through Actions')
-    if inputs.get('identity_mode', 'email') != 'email':
-        raise ValueError('This smoke workflow uses the standalone client entry without personal identity setup')
-    if set(inputs.get('files', {})) != set(manifest['config_paths']):
+    check_identity(manifest, inputs)
+    expected_files = set(manifest['config_paths'])
+    test_files = set(inputs.get('files', {}))
+    optional_files = {RESEND_INPUT} if inputs.get('identity_mode') == 'telegram' else set()
+    if not expected_files - optional_files <= test_files <= expected_files:
         raise ValueError('The test file paths differ from the manifest')
     for path, item in inputs['files'].items():
         if (not isinstance(item, dict) or set(item) != {'text', 'mode', 'uid', 'gid'}
@@ -118,6 +189,61 @@ def materialize(inputs):
     for item in result['files'].values():
         item['content'] = base64.b64encode(item.pop('text').encode()).decode()
     return result
+
+
+class SDKRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != 'https':
+            raise ValueError('The MemOS SDK download must stay on HTTPS')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def stage_sdk(url, checksum, root):
+    """Stage only the files declared by the candidate's pinned software manifest."""
+    if not url or urlsplit(url).scheme != 'https':
+        raise ValueError('Supply the temporary HTTPS source of the portable MemOS SDK')
+    root.mkdir(mode=0o700)
+    opener = build_opener(SDKRedirectHandler())
+    with opener.open(url, timeout=180) as source, tarfile.open(fileobj=source, mode='r|') as archive:
+        entry = archive.next()
+        if not entry or entry.name != 'distribution.json' or not entry.isfile() or entry.size > 1024 * 1024:
+            raise ValueError('The MemOS SDK archive must start with distribution.json')
+        manifest = archive.extractfile(entry).read()
+        if hashlib.sha256(manifest).hexdigest() != checksum:
+            raise ValueError('The staged MemOS distribution does not match the candidate manifest')
+        files = json.loads(manifest)['files']
+        write_private(root / entry.name, manifest)
+        for entry in iter(archive.next, None):
+            name = PurePosixPath(entry.name)
+            if name.is_absolute() or '..' in name.parts or str(name) != entry.name or not entry.isfile():
+                raise ValueError('The MemOS SDK archive contains an unexpected entry')
+            expected = files.pop(entry.name, None)
+            if expected is None or entry.size != expected['size']:
+                raise ValueError('The MemOS SDK archive contains an unexpected file')
+            destination = root / name
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with destination.open('xb') as output:
+                shutil.copyfileobj(archive.extractfile(entry), output)
+            with destination.open('rb') as staged:
+                if hashlib.file_digest(staged, 'sha256').hexdigest() != expected['sha256']:
+                    raise ValueError('A staged MemOS SDK file differs from its manifest')
+        if files:
+            raise ValueError('The MemOS SDK archive is incomplete')
+    return root
+
+
+def ansible_variables(manifest, inputs, run_directory):
+    output = {'brai_install_manifest': manifest, 'fresh_install_inputs': inputs}
+    if inputs.get('identity_mode') != 'telegram':
+        return output
+
+    checksum = manifest['identity_memos_sdk_distribution']['sha256']
+    sdk_root = stage_sdk(os.environ.get('BRAI_CI_MEMOS_SDK_URL'), checksum, run_directory / 'memos-sdk')
+    deployment = inputs.pop('identity_deployment')
+    output.update({variable: deployment[key] for key, variable in IDENTITY_FIELDS.items()})
+    output.update(brai_identity_enabled=True, brai_identity_auth_project=inputs['identity_auth_project'],
+                  brai_identity_memos_sdk_distribution_source=str(sdk_root.resolve()))
+    return output
 
 
 def literal_values(value):
@@ -177,7 +303,7 @@ def main():
             values = materialize(inputs)
             values.update(manifest_sha256=bundle['manifest_hash'], hf_token=hf_token,
                           registry={'username': registry_user, 'token': registry_token})
-            output = {'brai_install_manifest': manifest, 'fresh_install_inputs': values}
+            output = ansible_variables(manifest, values, args.output.parent)
             write_private(args.output, yaml.dump(literal_values(output), Dumper=AnsibleDumper, allow_unicode=True).encode())
         else:
             manifest = load_json(args.manifest)
@@ -193,7 +319,8 @@ def main():
                     raise ValueError('The packed bundle exceeds the GitHub Actions secret size limit')
                 write_private(args.output, packed)
         print(f'{args.action}: Brai {args.source} test inputs')
-    except (AttributeError, KeyError, TypeError, OSError, json.JSONDecodeError) as error:
+    except (AttributeError, KeyError, TypeError, OSError, json.JSONDecodeError, HTTPException,
+            EOFError, tarfile.TarError) as error:
         raise SystemExit(f'Test input preparation failed ({type(error).__name__})') from None
     except ValueError as error:
         raise SystemExit(f'Test input preparation failed: {error}') from None

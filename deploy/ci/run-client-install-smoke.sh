@@ -47,7 +47,7 @@ sampler=$!
 trap report EXIT
 
 python3 -B "$fixture" unpack "$BRAI_CI_SOURCE_SHA" "$run_dir/inputs.yml"
-unset BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN BRAI_CI_REGISTRY_TOKEN CI_PACKAGES_TOKEN
+unset BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN BRAI_CI_MEMOS_SDK_URL BRAI_CI_REGISTRY_TOKEN CI_PACKAGES_TOKEN
 printf '[managed]\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3\n' > "$run_dir/hosts.ini"
 
 cd "$installer/ansible"
@@ -55,6 +55,7 @@ printf 'Running client install from Admin %s\n' "$(git rev-parse HEAD)"
 ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true ansible-playbook -i "$run_dir/hosts.ini" client/install.yml \
   --extra-vars "@$run_dir/inputs.yml" > "$run_dir/ansible.log" 2>&1
 
+sudo test -f /var/lib/brai-install/completed.json
 printf 'Checking the installed Brai revision, containers, systemd services and the local Web endpoint\n'
 installed_sha=$(git -c safe.directory=/srv/projects/brai -C /srv/projects/brai rev-parse HEAD)
 if [[ "$installed_sha" != "$BRAI_CI_SOURCE_SHA" ]]; then

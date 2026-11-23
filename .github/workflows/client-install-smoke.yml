@@ -108,6 +108,7 @@ jobs:
         env:
           BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
           BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
+          BRAI_CI_MEMOS_SDK_URL: ${{ secrets.BRAI_CI_MEMOS_SDK_URL }}
           BRAI_CI_REGISTRY_TOKEN: ${{ secrets.BRAI_CI_REGISTRY_TOKEN }}
           BRAI_CI_REGISTRY_USER: ${{ vars.BRAI_CI_REGISTRY_USER }}
           CI_PACKAGES_TOKEN: ${{ github.token }}
