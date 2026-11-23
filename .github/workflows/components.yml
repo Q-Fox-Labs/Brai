@@ -77,7 +77,7 @@ jobs:
           set -euo pipefail
           fixture="brai-reconnect-fixture-$(openssl rand -hex 16)"
           trap 'docker rm -f "$fixture" >/dev/null 2>&1 || true' EXIT
-          docker run -d --name "$fixture" --label brai.test.fixture=nats-reconnect -p 127.0.0.1::4222 nats:2.15.0 >/dev/null
+          docker run -d --name "$fixture" --label brai.test.fixture=nats-reconnect -p 127.0.0.1:14222:4222 nats:2.15.0 >/dev/null
           port="$(docker port "$fixture" 4222/tcp)"
           export BRAI_RECONNECT_FIXTURE_CONTAINER="$fixture"
           export BRAI_RECONNECT_FIXTURE_NATS="nats://${port}"

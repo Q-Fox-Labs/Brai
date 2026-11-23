@@ -11,7 +11,7 @@ import {startNatsTransport} from '../../dist/coordinator/transport/nats.js';
 const container=process.env.BRAI_RECONNECT_FIXTURE_CONTAINER;
 const server=process.env.BRAI_RECONNECT_FIXTURE_NATS;
 
-test('the same service connections resubscribe after an isolated broker restart', {skip:!container||!server,timeout:30000},async t=>{
+test('the same service connections resubscribe after an isolated broker restart', {skip:!container||!server,timeout:90000},async t=>{
   const {connectBroker,monitorBroker,canSend:providerCanSend}=await import('../../../providers/dist/nats-connection.js');
   const {historySender}=await import('../../../providers/dist/observation.js');
   const {createDependencyPorts}=await import('../../dist/coordinator/transport/dependencies.js');
@@ -26,11 +26,21 @@ test('the same service connections resubscribe after an isolated broker restart'
   assert.ok(Array.isArray(published)&&published.length===1,'fixture must expose one broker port');
   assert.equal(published[0].HostIp,'127.0.0.1');
   assert.equal(server,`nats://127.0.0.1:${published[0].HostPort}`,'broker URL must belong to the fixture');
+  function checkPublishedPort(){
+    const current=JSON.parse(execFileSync('/usr/bin/docker',['inspect','--type','container',fixtureId],{encoding:'utf8',timeout:10000}))[0];
+    assert.deepEqual(current.NetworkSettings.Ports?.['4222/tcp'],published,'broker host port must remain stable');
+  }
+  async function bounded(promise,phase){
+    let timer;
+    try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`timeout: ${phase}`)),15000);})]);}
+    finally{clearTimeout(timer);}
+  }
   const deadline=Date.now()+10000;
   while(true){
     try {const probe=await connect({servers:server,timeout:500,maxReconnectAttempts:0});await probe.close();break;}
     catch(error){if(Date.now()>=deadline)throw error;await new Promise(resolve=>setTimeout(resolve,100));}
   }
+  t.diagnostic('fixture listener is ready');
   const a=await connection({servers:server,inboxPrefix:'_INBOX.reconnect_transcription'},3000);
   const b=await connectBroker({servers:server,inboxPrefix:'_INBOX.reconnect_providers'});
   const c=await connect({servers:server,inboxPrefix:'_INBOX.reconnect_client',maxReconnectAttempts:-1});
@@ -48,13 +58,16 @@ test('the same service connections resubscribe after an isolated broker restart'
     assert.ok(Array.isArray(JSON.parse(Buffer.from(y.data).toString()).models));
   }
   await check();
+  t.diagnostic('initial requests completed');
   function reconnected(nc){return new Promise((resolve,reject)=>{void(async()=>{let disconnected=false;for await(const event of nc.status()){
     if(event.type==='disconnect')disconnected=true;
     if(event.type==='reconnect'&&disconnected){resolve();return;}
   }reject(Error('status stream ended'));})().catch(reject);});}
   const restored=[a,b,c].map(reconnected);
   execFileSync('/usr/bin/docker',['restart','--time','1',fixtureId],{stdio:'ignore',timeout:10000});
-  await Promise.all(restored);
+  checkPublishedPort();
+  await bounded(Promise.all(restored),'reconnect after restart');
+  t.diagnostic('all connections restored after restart');
   await Promise.all([a.flush(),b.flush(),c.flush()]);
   await check();
 
@@ -65,7 +78,8 @@ test('the same service connections resubscribe after an isolated broker restart'
   function event(nc,type){return new Promise((resolve,reject)=>{void(async()=>{for await(const item of nc.status())if(item.type===type){resolve();return;}reject(Error('status stream ended'));})().catch(reject);});}
   const down=[a,b,c].map(nc=>event(nc,'disconnect'));
   execFileSync('/usr/bin/docker',['stop','--time','1',fixtureId],{stdio:'ignore',timeout:10000});
-  await Promise.all(down);
+  await bounded(Promise.all(down),'disconnect after stop');
+  t.diagnostic('all connections observed broker stop');
   const history=historySender(b,()=>providerCanSend(b));
   history.send({id:'synthetic'});
   assert.equal(history.status().dropped,1);
@@ -76,7 +90,9 @@ test('the same service connections resubscribe after an isolated broker restart'
   await assert.rejects(deps.history.append(fact),error=>error.errorCode==='HISTORY_DELIVERY_FAILED'&&error.outcome==='not_started');
   const up=[a,b,c].map(nc=>event(nc,'reconnect'));
   execFileSync('/usr/bin/docker',['start',fixtureId],{stdio:'ignore',timeout:10000});
-  await Promise.all(up);
+  checkPublishedPort();
+  await bounded(Promise.all(up),'reconnect after stop/start');
+  t.diagnostic('all connections restored after stop/start');
   await Promise.all([a.flush(),b.flush(),c.flush()]);
   await new Promise(resolve=>setTimeout(resolve,200));
   assert.equal(delivered,0,'отключённые запросы не должны доставляться после reconnect');
@@ -85,7 +101,8 @@ test('the same service connections resubscribe after an isolated broker restart'
   const monitor=monitorBroker(b);
   const downAgain=event(b,'disconnect');
   execFileSync('/usr/bin/docker',['stop','--time','1',fixtureId],{stdio:'ignore',timeout:10000});
-  await downAgain;
+  await bounded(downAgain,'provider disconnect after final stop');
+  t.diagnostic('provider connection observed final stop');
   monitor.beginShutdown();
   await providers.stop();
   assert.equal(b.isClosed(),true,'остановка во время обрыва должна закрыть соединение');
