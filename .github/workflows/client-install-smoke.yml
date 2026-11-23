@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: stock-prod-clean-install
     env:
-      STOCK_ADMIN_SHA: bd2703dafae083857a87bd8c6f6b63512d6025a1
+      STOCK_ADMIN_SHA: 2a7fe619aa41802c7a77fe1d0ca7d9196d464b56
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
