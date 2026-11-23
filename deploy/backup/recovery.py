@@ -406,15 +406,23 @@ def restore(bundle, target):
             os.chown(path, metadata['uid'], metadata['gid'], follow_symlinks=False)
         if not path.is_symlink():
             os.chmod(path, metadata['mode'])
-            os.utime(path, ns=(metadata['mtime_ns'], metadata['mtime_ns']))
-        for key, raw in metadata.get('xattrs', {}).items():
+        attrs = metadata['xattrs']
+        for key in set(os.listxattr(path, follow_symlinks=False)) - attrs.keys():
+            os.removexattr(path, key, follow_symlinks=False)
+        for key, raw in attrs.items():
             os.setxattr(path, key, bytes.fromhex(raw), follow_symlinks=False)
+        os.utime(path, ns=(metadata['mtime_ns'], metadata['mtime_ns']), follow_symlinks=False)
     actual = records(target)
     expected = {name.removeprefix('files/'): item for name, item in manifest['files'].items() if name.startswith('files/')}
     require(set(actual) == set(expected), 'RECOVERY_RESTORED_FILES_MISSING')
     payload = lambda item: {key: value for key, value in item.items()
                             if key not in ('uid', 'gid', 'mtime_ns', 'mode', 'xattrs', 'hardlink')}
     require(all(payload(actual[name]) == payload(item) for name, item in expected.items()), 'RECOVERY_RESTORED_FILE_CORRUPT')
+    for name, metadata in expected.items():
+        wanted = dict(metadata)
+        if 'hardlink' in wanted:
+            wanted['hardlink'] = wanted['hardlink'].removeprefix('files/')
+        require(actual[name] == wanted, 'RECOVERY_RESTORED_METADATA_CHANGED')
     return {'bundle_id': manifest['bundle_id'], 'files_restored': True, 'postgres': manifest['postgres'],
             'services_started': False, 'rebuild': manifest['plan'].get('exclude', [])}
 

@@ -236,6 +236,18 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(os.readlink(restored.parent / 'relative-link'), 'original')
         self.assertEqual(restored.stat().st_ino, (restored.parent / 'hardlink').stat().st_ino)
 
+    def test_restore_rejects_incorrect_permission_after_copy(self):
+        path = self.state / 'original'
+        path.write_bytes(b'exact')
+        path.chmod(0o640)
+        recovery.prepare(self.plan)
+        bundle = (self.staging / 'current').resolve()
+        archived = self.restored_path(bundle / 'files', path)
+        archived.chmod(0o600)
+        with patch.object(recovery.os, 'chmod'):
+            with self.assertRaisesRegex(Failure, 'RECOVERY_RESTORED_METADATA_CHANGED'):
+                recovery.restore(bundle, self.base / 'bad-permissions')
+
     def test_shared_cluster_is_rejected_instead_of_exporting_other_tenants(self):
         self.plan['components']['fixture']['postgres'] = [{'container': 'fixture-pg', 'user': 'postgres',
             'database': 'postgres', 'data_mounts': ['/data'], 'dedicated': False}]
