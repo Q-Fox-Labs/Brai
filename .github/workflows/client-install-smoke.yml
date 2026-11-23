@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: 32add27e1e3e36633cc9c8117dc825d88ae2d5fd2252ee8721e231c9d9d6b96a
+      STOCK_PATCH_SHA256: d6f1798c9b235b781939c286437ebbe4f923ec6f7fe48019caecd5967c0db1db
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -294,6 +294,7 @@ jobs:
           local_ai_unit=$(sudo -n python3 -B -c 'import json; p=json.load(open("/var/lib/brai-install/compose-launch.json")); print("brai-install-"+p["local_ai"][0]["project"]+".service")')
           sudo -n systemctl is-enabled --quiet "$local_ai_unit"
           sudo -n systemctl restart "$local_ai_unit" brai-hermes-production.service
+          curl --fail --silent --show-error http://127.0.0.1:19374/json/version >> "$work/verify.log"
           sudo -n /usr/bin/env BRAI_INSTALL_CAPTURE_FAILURE=1 \
             /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
             --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
