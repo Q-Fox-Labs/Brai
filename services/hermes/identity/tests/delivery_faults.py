@@ -170,7 +170,8 @@ for _name in ('gateway', 'agent', 'run_agent'):
             if method == 'ingress.input-ready':
                 return {'ready': True}
             if method == 'identity.resolve': return profile
-            if method in ('ingress.admit', 'ingress.close', 'ingress.status'): return {}
+            if method == 'ingress.close': return {'closed': True}
+            if method in ('ingress.admit', 'ingress.status'): return {}
             raise AssertionError('Unexpected fixture Auth operation: ' + method)
 
         ingress = root / 'ingress'; ingress.mkdir(mode=0o700)
