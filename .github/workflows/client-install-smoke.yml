@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: e5b1b7cc9f0db69a8886ceaf476b35fa07537613cd44d814d55b7a538ded3cf9
+      STOCK_PATCH_SHA256: 5be5682effcc97a8d0c32dc761c7f3bb6526f7edb63c64dfe24d5cb01ba281ce
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -191,7 +191,7 @@ jobs:
                   printf '\n--- COMPOSE SERVICE STATE ---\n'
                   sudo -n docker ps --all --format '{{.Names}} {{.Status}}' || true
                   printf '\n--- CONTAINER STARTUP DIAGNOSTICS ---\n'
-                  for container in caddy brai-transcription-production supabase-storage supabase-pooler realtime-dev.supabase-realtime supabase-db; do
+                  for container in caddy brai-transcription-production supabase-storage supabase-pooler realtime-dev.supabase-realtime supabase-db brai-hermes-production-memos; do
                     printf 'Container %s\n' "$container"
                     sudo -n docker inspect --format '{{json .State}}' "$container" || true
                     sudo -n docker logs --tail 80 "$container" 2>&1 || true
