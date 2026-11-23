@@ -81,3 +81,10 @@ test('Hermes packager includes the public skill and workflow closure',()=>{
   assert.equal(result.status,0,result.stderr||result.error?.message);
   assert.match(result.stderr,/Ran [1-9]\d* tests?/);
 });
+
+
+test('Book to Skill documentation is available to the system skill reader',()=>{
+  const skill=join(root,'docs/user-agent/instructions/hermes/skills/research/book-to-skill');
+  for(const name of ['SKILL.md','references/search-and-read.md','LICENSE.md'])
+    assert.ok(existsSync(join(skill,name)), `Missing Book to Skill documentation: ${name}`);
+});

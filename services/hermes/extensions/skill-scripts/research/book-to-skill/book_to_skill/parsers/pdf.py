@@ -1,0 +1,346 @@
+# ABOUTME: Извлекает текст и сведения из PDF доступными обработчиками.
+# ABOUTME: Не задаёт произвольного срока обработки документа.
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter
+
+from book_to_skill.sanitize import sanitize_extracted_text
+
+_PART_HEADER = re.compile(r"^part\s+(?:\d+|[ivxlcdm]+)\b", re.IGNORECASE)
+
+# A bare page number sitting alone on a line: Arabic, or a Roman numeral of the
+# kind used to number front matter.
+#
+# The Roman branch spells out the SHAPE of a canonical numeral instead of
+# listing the letters one may contain. `[ivxlcdm]{1,7}` matched any short word
+# built from those letters, so "MIX", "CIVIL", "DIM", "MILD" and "VIVID" were
+# all silently deleted whenever they landed on a page's first or last non-blank
+# line — a one-word line is exactly what a part title or a display heading looks
+# like. Deleting real text is a worse failure than leaving a stray numeral, so
+# the pattern is now exact.
+#
+# The range is 1-99, which is what front matter uses; "c"/"d"/"m" therefore no
+# longer match on their own, so a lone "C" or "M" line is now kept as text.
+# `(?=[ivxl])` is the non-empty guard: both groups are individually optional, so
+# without it the pattern would match a blank line.
+_ROMAN_1_99 = r"(?=[ivxl])(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"
+_PDF_PAGE_NUM = re.compile(rf"^\s*(?:\d{{1,4}}|{_ROMAN_1_99})\s*$", re.IGNORECASE)
+_PDF_HYPHEN_WRAP = re.compile(r"(\w)-\n(\w)")
+# A text-layer token with two decimal points can be two table cells whose
+# visual spacing was lost. It can also be legitimate notation: flag it, never
+# insert a guessed separator or alter the source text.
+_POSSIBLE_JOINED_DECIMALS = re.compile(r"(?<![\w.])\d+\.\d+\.\d+(?![\w.])")
+
+
+def clean_pdftotext(text: str) -> str:
+    """Clean pdftotext '-layout' output (pages are form-feed delimited): drop
+    repeated running headers/footers and edge page numbers, and join words split
+    across a line by a hyphen."""
+    pages = text.split("\f")
+    if len(pages) >= 3:
+        # A top/bottom line repeated on > half the pages is boilerplate.
+        edge = Counter()
+        for p in pages:
+            nb = [ln.strip() for ln in p.splitlines() if ln.strip()]
+            if nb:
+                edge[nb[0]] += 1
+                # On a single-line page the first and last line are the same
+                # line. Counting it twice would let one page cast two votes
+                # toward the "more than half the pages" threshold below, so a
+                # part-divider page occurring twice in four pages would reach 4
+                # votes instead of 2 and be stripped as boilerplate.
+                if len(nb) > 1:
+                    edge[nb[-1]] += 1
+        boiler = {ln for ln, c in edge.items() if c > len(pages) / 2}
+        # #113 keeps a genuine heading identical to the running header by
+        # stripping page edges only, which works because that heading sits
+        # mid-page. A chapter opening does not: it sits at the TOP of a page,
+        # exactly where the header is. So a long chapter whose title is the
+        # running header has every copy at an edge, lands in `boiler`, and the
+        # genuine opening is deleted with the headers -- the chapter then
+        # vanishes from detect_structure() with nothing logged.
+        #
+        # Keep the first edge occurrence of a boilerplate line that carries a
+        # number and drop the rest: the first is the opening, the rest are
+        # headers. A number is the signal because an unnumbered running header
+        # ("DESIGNING SYSTEMS", "O'Reilly Media") has none, so those keep their
+        # existing full removal. str.isdigit() is used rather than ASCII-only
+        # matching so Devanagari, Bengali and the other non-ASCII chapter
+        # numerals this extractor supports count too.
+        # ponytail: a numbered running header ("Section 3.2", "Smith 2019")
+        # leaves one copy behind; reuse the extractor's own _chapter_number if
+        # that bites, once it can be imported without an import cycle.
+        numbered_boiler = {
+            ln for ln in boiler if any(ch.isdigit() for ch in ln)
+        }
+        seen_numbered: set[str] = set()
+        kept = []
+        for p in pages:
+            lines = p.splitlines()
+            nb_idx = [i for i, ln in enumerate(lines) if ln.strip()]
+            first = nb_idx[0] if nb_idx else None
+            last = nb_idx[-1] if nb_idx else None
+            for i, ln in enumerate(lines):
+                # Running headers/footers and page numbers only ever occur at a
+                # page edge -- which is also the only place `boiler` is
+                # collected from. Removing a boilerplate string from every line
+                # meant that when a running header repeated the section title
+                # (common typesetting), the genuine mid-page heading was deleted
+                # along with the headers.
+                if i in (first, last):
+                    s = ln.strip()
+                    if s in numbered_boiler and s not in seen_numbered:
+                        seen_numbered.add(s)
+                    elif s in boiler or _PDF_PAGE_NUM.match(s):
+                        continue
+                kept.append(ln)
+        text = "\n".join(kept)
+    else:
+        text = text.replace("\f", "\n")
+    # ponytail: naive dehyphenation; may join a genuinely-hyphenated wrapped
+    # compound ("well-\nknown" -> "wellknown"). Dictionary-aware split if it bites.
+    return _PDF_HYPHEN_WRAP.sub(r"\1\2", text)
+
+
+def extract_with_pdftotext(pdf_path: str) -> str | None:
+    if not shutil.which("pdftotext"):
+        return None
+    try:
+        pdf_path = os.path.abspath(pdf_path)
+        result = subprocess.run(
+            ["pdftotext", "-layout", "-enc", "UTF-8", pdf_path, "-"],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return clean_pdftotext(result.stdout)
+    except Exception as e:
+        print(f"  [warn] extract_with_pdftotext failed: {type(e).__name__}: {e}", file=sys.stderr)
+    return None
+
+
+def looks_image_only(pdf_path: str, pages: int = 5) -> bool:
+    """True when the first `pages` pages yield no extractable text — the signature
+    of a scanned/image-only PDF. Cheap pre-flight so a scan fails in a second
+    instead of after the whole extraction chain has run. Best-effort: without
+    pdftotext it reports False and the normal chain (plus the final empty-text
+    guard) still applies."""
+    if not shutil.which("pdftotext"):
+        return False
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-f", "1", "-l", str(pages), "-enc", "UTF-8", os.path.abspath(pdf_path), "-"],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        return result.returncode == 0 and not result.stdout.strip()
+    except Exception:
+        return False
+
+
+def extract_with_pypdf(pdf_path: str) -> str | None:
+    try:
+        import pypdf
+        text_parts = []
+        with open(pdf_path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            for page in reader.pages:
+                try:
+                    text_parts.append(page.extract_text() or "")
+                except Exception:
+                    text_parts.append("")
+        # Join pages with a form feed so clean_pdftotext can strip repeated
+        # per-page headers/footers, not just dehyphenate.
+        return clean_pdftotext("\f".join(text_parts))
+    except ImportError:
+        return None
+    except Exception as e:
+        print(f"  [warn] extract_with_pypdf failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def extract_pypdf_page_records(pdf_path: str) -> list[dict] | None:
+    """Extract physical pages independently for optional evidence citation.
+
+    This is intentionally separate from ``extract_with_pypdf``: the latter's
+    cross-page cleanup and its returned full text remain byte-for-byte stable.
+    Text-layer ordering is not a verified table layout or an offset into
+    ``full_text.txt``.
+    """
+    try:
+        import pypdf
+
+        records = []
+        with open(pdf_path, "rb") as stream:
+            reader = pypdf.PdfReader(stream)
+            for number, page in enumerate(reader.pages, start=1):
+                reasons = []
+                try:
+                    raw = page.extract_text() or ""
+                except Exception:
+                    raw = ""
+                    reasons.append("page_extraction_failed")
+                text, removed = sanitize_extracted_text(raw)
+                if removed:
+                    reasons.append("sanitized_invisible_text")
+                if not text.strip():
+                    reasons.append("empty_page_text")
+                if _POSSIBLE_JOINED_DECIMALS.search(text):
+                    reasons.append("possible_joined_decimal_cells")
+                records.append({
+                    "physical_page": number,
+                    "text": text,
+                    "extraction_method": "pypdf",
+                    "low_confidence_reasons": reasons,
+                    "requires_manual_review": bool(reasons),
+                })
+        return records
+    except ImportError:
+        return None
+    except Exception as exc:
+        print(
+            f"  [warn] extract_pypdf_page_records failed: "
+            f"{type(exc).__name__}: {exc}", file=sys.stderr,
+        )
+        return None
+
+
+def pdf_outline_titles(pdf_path: str) -> list[str]:
+    """Top-level titles from the PDF's embedded outline (bookmarks), or [] when
+    there is none or pypdf is unavailable. A top-level entry with children that
+    is a "Part" is replaced by its children, so "Part I > Chapter 1..7" yields
+    the chapters, not the parts."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(pdf_path)
+        outline = reader.outline
+    except Exception:
+        return []
+    titles = []
+    for index, item in enumerate(outline):
+        if isinstance(item, list):
+            continue  # children of the preceding entry
+        title = (getattr(item, "title", "") or "").strip()
+        children = outline[index + 1] if index + 1 < len(outline) else None
+        if _PART_HEADER.match(title) and isinstance(children, list):
+            titles.extend(
+                (c.title or "").strip() for c in children if not isinstance(c, list)
+            )
+        elif title:
+            titles.append(title)
+    return [t for t in titles if t]
+
+
+def pdf_outline_all_titles(pdf_path: str) -> list[str]:
+    """Every bookmark title from the PDF outline, in document order."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(pdf_path)
+        outline = reader.outline
+    except Exception:
+        return []
+    if not outline:
+        return []
+
+    def walk(items: list) -> list[str]:
+        titles: list[str] = []
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if isinstance(item, list):
+                titles.extend(walk(item))
+                index += 1
+                continue
+            title = (getattr(item, "title", "") or "").strip()
+            if title:
+                titles.append(title)
+            index += 1
+            if index < len(items) and isinstance(items[index], list):
+                titles.extend(walk(items[index]))
+                index += 1
+        return titles
+
+    return walk(outline)
+
+
+def extract_with_pdfminer(pdf_path: str) -> str | None:
+    try:
+        from pdfminer.high_level import extract_text
+        text = extract_text(pdf_path)  # already form-feed delimited per page
+        return clean_pdftotext(text) if text else text
+    except ImportError:
+        return None
+    except Exception as e:
+        print(f"  [warn] extract_with_pdfminer failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def extract_with_docling(pdf_path: str) -> str | None:
+    """Layout-aware extraction using Docling. Best for technical books with tables and code."""
+    try:
+        from docling.document_converter import DocumentConverter
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.base_models import InputFormat
+        from docling.document_converter import PdfFormatOption
+    except ImportError:
+        return None
+
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_ocr = False
+    pipeline_options.do_table_structure = True
+
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
+    result = converter.convert(pdf_path)
+    return result.document.export_to_markdown()
+
+
+def count_pages(pdf_path: str) -> int:
+    """Return the number of pages in a PDF using progressively safer fallbacks."""
+    # Try pdfinfo first.
+    if shutil.which("pdfinfo"):
+        try:
+            pdf_path = os.path.abspath(pdf_path)
+            result = subprocess.run(
+                ["pdfinfo", pdf_path],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.splitlines():
+                if line.startswith("Pages:"):
+                    return int(line.split(":")[1].strip())
+        except Exception:
+            # Optional pdfinfo lookup failed or returned non-numeric output; fall through to Python fallbacks.
+            pass
+
+    # Fallback: count pages with pypdf.
+    try:
+        import pypdf
+
+        with open(pdf_path, "rb") as f:
+            return len(pypdf.PdfReader(f).pages)
+    except Exception:
+        pass
+
+    # Final fallback: pdfminer.extract_text() preserves page boundaries
+    # using form-feed characters, so the number of pages can be derived
+    # without requiring a separate PDF page-counting dependency.
+    try:
+        from pdfminer.high_level import extract_text
+
+        text = extract_text(pdf_path)
+        if text:
+            return text.count("\f") + (0 if text.endswith("\f") else 1)
+    except Exception:
+        # All page-counting methods are best-effort; preserve the historical 0 result.
+        pass
+
+    return 0

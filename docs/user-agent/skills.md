@@ -14,6 +14,7 @@
 - [Обратная связь](instructions/hermes/skills/creative/reply-feedback-learning/SKILL.md).
 - [YouTube](instructions/hermes/skills/media/youtube-content/SKILL.md).
 - [MemOS](instructions/hermes/skills/note-taking/memos-memory/SKILL.md).
+- [Book to Skill](instructions/hermes/skills/research/book-to-skill/SKILL.md) — создание практического навыка по книге или документам.
 - [Локальный голос](instructions/hermes/skills/silero-local-voice/SKILL.md).
 - [Instagram](instructions/hermes/skills/social-media/instaloader/SKILL.md).
 - [Проверка кода](instructions/hermes/skills/software-development/requesting-code-review/SKILL.md).
