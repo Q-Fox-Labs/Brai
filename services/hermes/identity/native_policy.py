@@ -160,7 +160,7 @@ def pin_telegram_plugin():
 
     def collect(self):
         other_plugins = [item for item in original(self)
-                         if item.name != name and manifest_key(item).replace('-', '_') != module_slug]
+                         if item.name != name and manifest_key(item) not in (name, module_slug)]
         return [*other_plugins, manifest]
 
     PluginManager._collect_directory_manifests = collect

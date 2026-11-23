@@ -165,10 +165,11 @@ class ExclusiveLoaderTests(unittest.TestCase):
         alias = types.SimpleNamespace(name='brai-telegram', key='group/local')
         collision = types.SimpleNamespace(name='local-telegram', key='brai_telegram')
         other = types.SimpleNamespace(name='local', key='local')
+        numeric = types.SimpleNamespace(name=42, key=42)
 
         class Manager:
             def _collect_directory_manifests(self):
-                return [stale, other, alias, collision]
+                return [stale, other, alias, collision, numeric]
 
         package = types.ModuleType('hermes_cli'); package.__path__ = []
         plugins = types.ModuleType('hermes_cli.plugins')
@@ -187,9 +188,10 @@ class ExclusiveLoaderTests(unittest.TestCase):
             directory = Path('/opt/brai-profile/runtime/services/hermes/telegram')
             plugins.parse_manifest_file.assert_called_once_with(directory / 'plugin.yaml', directory, 'bundled', '')
             found = Manager()._collect_directory_manifests()
-            self.assertEqual(len(found), 2)
+            self.assertEqual(len(found), 3)
             self.assertIs(found[0], other)
-            self.assertIs(found[1], telegram)
+            self.assertIs(found[1], numeric)
+            self.assertIs(found[2], telegram)
 
     def test_all_exclusive_groups_use_canonical_bundle_until_active(self):
         from unittest.mock import patch
