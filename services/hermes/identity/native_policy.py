@@ -155,9 +155,12 @@ def pin_telegram_plugin():
     if manifest is None or manifest.name != name or manifest_key(manifest) != name:
         raise RuntimeError('Trusted Telegram plugin unavailable')
     original = PluginManager._collect_directory_manifests
+    # Native loader maps hyphens to underscores in the module name.
+    module_slug = name.replace('-', '_')
 
     def collect(self):
-        other_plugins = [item for item in original(self) if item.name != name and manifest_key(item) != name]
+        other_plugins = [item for item in original(self)
+                         if item.name != name and manifest_key(item).replace('-', '_') != module_slug]
         return [*other_plugins, manifest]
 
     PluginManager._collect_directory_manifests = collect

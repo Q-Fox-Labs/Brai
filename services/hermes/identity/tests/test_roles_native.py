@@ -163,11 +163,12 @@ class ExclusiveLoaderTests(unittest.TestCase):
         telegram = types.SimpleNamespace(name='brai-telegram', key='brai-telegram')
         stale = types.SimpleNamespace(name='brai-telegram', key='brai-telegram')
         alias = types.SimpleNamespace(name='brai-telegram', key='group/local')
+        collision = types.SimpleNamespace(name='local-telegram', key='brai_telegram')
         other = types.SimpleNamespace(name='local', key='local')
 
         class Manager:
             def _collect_directory_manifests(self):
-                return [stale, other, alias]
+                return [stale, other, alias, collision]
 
         package = types.ModuleType('hermes_cli'); package.__path__ = []
         plugins = types.ModuleType('hermes_cli.plugins')
