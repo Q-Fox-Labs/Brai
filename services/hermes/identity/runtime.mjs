@@ -171,7 +171,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||url.pathname!=='/mcp'||
        url.username||url.password||url.search||url.hash)invalid();
    url.pathname='/telegram-topic-suggestion';
-   const response=await fetch(url,{method:'POST',redirect:'error',
+   const response=await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(1800_000),
     headers:{'Content-Type':'application/json',Authorization:'Bearer '+endpoint.token,
      'x-brai-user-id':endpoint.userId,'x-brai-profile-id':endpoint.profileId},
     body:JSON.stringify(input)});

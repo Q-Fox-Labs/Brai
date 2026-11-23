@@ -153,8 +153,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         'updates': {'check': False},
         'mcp_servers': {'brai': {'command': '/usr/bin/python3',
                                'args': ['-s', '-P', instructions_root + '/services/hermes/identity/tool_client.py'],
-                               'env': {'BRAI_IDENTITY_BROKER': '/run/brai-profile/control.sock',
-                                       'BRAI_TELEGRAM_RENAME_SOCKET': home + '/brai-telegram/rename-topic.sock'}}},
+                               'env': {'BRAI_IDENTITY_BROKER': '/run/brai-profile/control.sock'}}},
         'memory': {'provider': 'memos-rest'},
         'plugins': {'enabled': ['codex-cli-search', 'memos-rest', 'telegram-business', 'groq-voice', 'brai-telegram']},
         'agent': {'system_prompt': 'Ты — Brai, личный помощник пользователя. '

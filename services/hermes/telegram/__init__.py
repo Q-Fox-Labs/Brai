@@ -628,6 +628,8 @@ class TelegramPlugin:
                               remove_handler=lambda *args, **kwargs: None)
         self.session_store = getattr(getattr(adapter, 'gateway_runner', None), 'session_store', None)
         self.factory(app, adapter)
+        if self.topic_rename:
+            await self._start_topic_rename()
         if self.config.game_core_enabled:
             adapter._brai_human_callback = self.callback
 
@@ -638,7 +640,7 @@ class TelegramPlugin:
         for task in self.tasks:
             task.cancel()
         self.loop, self.bot, self.adapter = asyncio.get_running_loop(), app.bot, adapter
-        if self.topic_rename:
+        if self.topic_rename and not self.config.identity_worker:
             task = self.loop.create_task(self._start_topic_rename())
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
@@ -1025,8 +1027,9 @@ class TelegramPlugin:
 
     def enable_topic_rename(self):
         self.topic_rename_api = _topic_module('topic_rename')
-        self.topic_rename = self.topic_rename_api.RenamePort(
-            self.config.state_dir / 'rename-topic.sock', self._apply_topic_rename)
+        path = (self.config.state_dir.parent / 'control' / 'topic.sock' if self.config.identity_worker
+                else self.config.state_dir / 'rename-topic.sock')
+        self.topic_rename = self.topic_rename_api.RenamePort(path, self._apply_topic_rename)
 
     async def _start_topic_rename(self):
         try:

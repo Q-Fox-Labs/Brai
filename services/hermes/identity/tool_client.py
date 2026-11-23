@@ -18,14 +18,17 @@ TOPIC_RENAME = 'telegram_rename_current_topic'
 
 def rename_topic(arguments):
     """Передать локальному Telegram-плагину один допуск от native hook."""
-    path = os.environ.get('BRAI_TELEGRAM_RENAME_SOCKET')
+    path = Path.home() / 'control' / 'topic.sock'
     ticket = arguments.get('_topicTicket')
-    if (not path or not Path(path).is_absolute() or set(arguments) != {'_topicTicket'}
+    # Native pre_tool_call merges the ticket into the original tool arguments.
+    # The port uses the proposal already recorded with the ticket.
+    if (not path.is_absolute()
+            or set(arguments) not in ({'_topicTicket'}, {'_topicTicket', 'title'}, {'_topicTicket', 'text'})
             or not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', ticket)):
         return {'ok': False, 'code': 'TOPIC_RENAME_CONTEXT_REQUIRED'}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(1800)
-        conn.connect(path)
+        conn.connect(os.fspath(path))
         _, uid, _ = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         if uid != os.getuid():
             raise PermissionError('Unexpected topic port owner')
@@ -113,8 +116,7 @@ def handle(method, params):
                  'inputSchema': {'type':'object', 'properties':{'path':{'type':'string'}, 'requestId':{'type':'string'}}, 'required':['path'], 'additionalProperties':False}},
                 {'name': 'fetch_file', 'description': 'Получить собственный опубликованный файл.',
                  'inputSchema': {'type':'object', 'properties':{'artifactId':{'type':'string'}}, 'required':['artifactId'], 'additionalProperties':False}}]
-        if os.environ.get('BRAI_TELEGRAM_RENAME_SOCKET'):
-            client_tools.append({'name': TOPIC_RENAME,
+        client_tools.append({'name': TOPIC_RENAME,
                 'description': 'По явной просьбе переименовать текущую тему Telegram. Передай готовое имя в title или описание в text, чтобы Диалоги придумали имя.',
                 'inputSchema': {'type':'object', 'properties':{'title':{'type':'string','minLength':1,'maxLength':128},
                     'text':{'type':'string','minLength':1}}, 'oneOf':[{'required':['title']},{'required':['text']}],

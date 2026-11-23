@@ -2,6 +2,7 @@
 // ABOUTME: Использует подставные порты без реальных токенов, сети и root-файлов.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { createRuntimeAdapters } from '../runtime.mjs';
 import { Control, privateCall } from '../control.mjs';
 
@@ -58,6 +59,44 @@ test('factory refuses shared publisher and unverified MCP bearer',async()=>{
  f.records['/cfg/1'].gameCore={enabled:false};f.records['/pub/1002'].resultRoot='/result/1001';
  await assert.rejects(f.adapters.perUserRuntime(f.profile('1001')),/CONFIG_NOT_READY/);
 });
+
+test('topic suggestions use only the current registered personal Dialogues endpoint',async()=>{
+ const f=fixture(),requests=[];
+ const server=createServer(async (req,res)=>{
+  const chunks=[];
+  for await(const chunk of req)chunks.push(chunk);
+  const owner=req.headers['x-brai-user-id'];
+  requests.push({path:req.url,owner,profile:req.headers['x-brai-profile-id'],
+   authorization:req.headers.authorization,body:JSON.parse(Buffer.concat(chunks))});
+  res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({title:'Тема '+owner,icon:0}));
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const profiles={};
+ for(const uid of ['1001','1002']){
+  const profile=f.profile(uid);
+  profiles[uid]=profile;
+  f.records[profile.toolsConfigPath].dialogues={enabled:true,url:'http://127.0.0.1:'+server.address().port+'/mcp',
+   userId:profile.userId,profileId:profile.profileId,token:'fixture-token-'+profile.userId+'-012345678901234567890123456789'};
+ }
+ const runtime={control:{},registry:async()=>({version:1,profiles}),
+  authCall:async(_,args)=>{
+   const profile=Object.values(profiles).find(p=>p.userId===args.userId);
+   return {user:{id:profile.userId,profileId:profile.profileId,telegramId:profile.telegramId,status:'active',role:'user'}};
+  },suggestTopic:f.adapters.suggestTopic};
+ const input={request:'План',icons:['🌿']};
+ try{
+  await assert.rejects(privateCall(runtime,'dialogues.topic-suggestion',{uid:1001,profileId:'p2',input}),/FORBIDDEN/);
+  assert.equal(requests.length,0);
+  assert.deepEqual(await Promise.all([['1001','p1'],['1002','p2']].map(([uid,profileId])=>
+   privateCall(runtime,'dialogues.topic-suggestion',{uid:Number(uid),profileId,input}))),
+   [{title:'Тема u1',icon:0},{title:'Тема u2',icon:0}]);
+  assert.deepEqual(requests.sort((a,b)=>a.owner.localeCompare(b.owner)),Object.values(profiles).map(p=>({
+   path:'/telegram-topic-suggestion',owner:p.userId,profile:p.profileId,
+   authorization:'Bearer '+f.records[p.toolsConfigPath].dialogues.token,body:input
+  })));
+ }finally{await f.adapters.close();await new Promise(resolve=>server.close(resolve));}
+});
+
 test('control hides publisher from worker and routes private artifact operation after authorization',async()=>{
  const profile={userId:'u1',profileId:'p1',telegramId:'42',status:'active'},registry=async()=>({version:1,profiles:{'1001':profile}});
  const authCall=async()=>({user:{id:'u1',profileId:'p1',telegramId:'42',status:'active',role:'user'}});
