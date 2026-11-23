@@ -1,1 +1,1 @@
-rebase the accepted model mount even if the private input already names the canonical root
+execute the pinned Chrome with the native service confinement on fresh Ubuntu

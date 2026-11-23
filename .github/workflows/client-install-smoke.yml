@@ -124,6 +124,20 @@ jobs:
             exec "$@"
           ' bash "$PWD/client/roles" "$RUNNER_TEMP/stock-ansible/bin/ansible-playbook" \
             -i localhost, -c local "$probe/probe.yml"
+          chrome=/opt/agent-browser-tools/chrome/154.0.8037.92/chrome-linux64/chrome
+          profile=/var/lib/brai-ci-chrome
+          runner_user=$(id -un)
+          sudo -n install -d -m 0700 -o "$runner_user" -g "$(id -gn)" "$profile"
+          printf 'AppArmor user namespace restriction: '
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          sudo -n systemd-run --wait --collect --quiet --pipe \
+            --property="User=$runner_user" --property=NoNewPrivileges=true \
+            --property=ProtectSystem=strict --property=ProtectHome=true \
+            --property=PrivateTmp=true --property=PrivateDevices=true \
+            --property=CapabilityBoundingSet= --property="ReadWritePaths=$profile" \
+            --setenv="HOME=$profile" --setenv="XDG_CACHE_HOME=$profile/cache" \
+            "$chrome" --headless=new --no-first-run --disable-background-networking \
+            --user-data-dir="$profile" --dump-dom about:blank
       - name: Run the stock client PROD installer
         if: github.event.head_commit.message != 'Probe native Chrome prerequisites'
         id: installer
@@ -174,6 +188,11 @@ jobs:
                 {
                   cat "$work/ansible.log"
                   if [[ -f "$work/verify.log" ]]; then cat "$work/verify.log"; fi
+                  printf '\n--- HERMES SERVICE DIAGNOSTICS ---\n'
+                  for unit in brai-hermes-production-{codex-bridge,embeddings,memos,browser,intake}.service; do
+                    sudo -n systemctl show "$unit" --property=Id,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts || true
+                    sudo -n journalctl --unit "$unit" --lines 40 --no-pager || true
+                  done
                   if sudo -n test -f /var/lib/brai-install/command-failure.json; then
                     printf '\n--- ROOT COMMAND FAILURE ---\n'
                     sudo -n cat /var/lib/brai-install/command-failure.json
