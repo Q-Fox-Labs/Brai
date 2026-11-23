@@ -1,1 +1,1 @@
-reproduce Chrome and inspect installation-directory permissions
+full install with Chrome ACL and umask fix: 639f8a3a5cdf284ca238347f2d0f434770949c4a
