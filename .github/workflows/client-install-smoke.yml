@@ -91,6 +91,8 @@ jobs:
           fi
       - name: Prepare the disposable runner
         run: |
+          # The runner image leaves /opt writable by everyone. The client requires trusted parents.
+          sudo chmod go-w /opt
           sudo rm -rf -- /usr/local/lib/android /opt/ghc
           sudo apt-get clean
           df -B1 --output=target,size,avail / /var/lib/docker

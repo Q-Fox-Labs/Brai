@@ -75,7 +75,12 @@ printf '[managed]\nlocalhost ansible_connection=local ansible_python_interpreter
 
 cd "$installer/ansible"
 printf 'Running client install from Admin %s\n' "$(git rev-parse HEAD)"
-ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true ansible-playbook -i "$run_dir/hosts.ini" client/install.yml \
+ansible_playbook=$(command -v ansible-playbook)
+sudo -n /bin/bash -c '
+  umask 022
+  export ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true
+  exec "$@"
+' bash "$ansible_playbook" -i "$run_dir/hosts.ini" client/install.yml \
   --extra-vars "@$run_dir/inputs.yml" > "$run_dir/ansible.log" 2>&1
 
 sudo test -f /var/lib/brai-install/completed.json
