@@ -7,6 +7,77 @@
   },
   "methods": [
     {
+      "name": "ingress.topic-suggestion",
+      "summary": "Только UID общего Telegram-входа. Определяет действующий личный профиль по автору Telegram.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "input",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "request",
+              "icons"
+            ],
+            "properties": {
+              "request": {
+                "type": "string",
+                "minLength": 1
+              },
+              "icons": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "suggestion",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "title",
+            "icon"
+          ],
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "icon": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "dev.release",
       "description": "DEV-only creator/admin request to prepare and queue an exact source or read one operation. No caller path or command is accepted; a lost response requires status by the same operation ID.",
       "paramStructure": "by-name",

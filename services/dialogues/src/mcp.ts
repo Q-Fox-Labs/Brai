@@ -9,7 +9,10 @@ import { agentInstructions,toolDefinitions,invoke } from "./api.js";
 import { DialoguesFault,limits } from "./domain.js";
 import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
-export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string;personal?:{userId:string;profileId:string;authorize:()=>Promise<void>;operatorToken?:string}};
+export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string;personal?:{
+  userId:string;profileId:string;authorize:()=>Promise<void>;operatorToken?:string;
+  suggestTopic?:(input:unknown,signal:AbortSignal)=>Promise<{title:string;icon:number}>;
+}};
 /** Запускает MCP; тесты могут использовать временный port=0. */
 export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfig,log:(entry:Record<string,unknown>)=>void=entry=>console.error(JSON.stringify(entry))) {
   if(!["127.0.0.1","::1","0.0.0.0"].includes(cfg.host)||!cfg.owner||!cfg.hosts.length||!cfg.origins.length||!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.token))throw new Error("INVALID_MCP_CONFIG");
@@ -56,11 +59,15 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   const http=createServer(async(req,res)=>{
     try {
       if(req.url==="/health"&&req.method==="GET"){res.writeHead(200,{"content-type":"application/json"}).end(JSON.stringify({ready:true,tools:toolDefinitions.map(tool=>tool.name)}));return;}
-      if(req.url!=="/mcp"){res.writeHead(404).end();return;}
+      const suggest=req.url==="/telegram-topic-suggestion"&&req.method==="POST"?cfg.personal?.suggestTopic:undefined;
+      if(req.url!=="/mcp"&&!suggest){res.writeHead(404).end();return;}
       const supplied=Buffer.from(req.headers.authorization??"");
       const matches=(token:string)=>{const expected=Buffer.from("Bearer "+token);return supplied.length===expected.length&&timingSafeEqual(supplied,expected);};
-      const operator=cfg.personal?.operatorToken!==undefined&&matches(cfg.personal.operatorToken);
+      const operator=!suggest&&cfg.personal?.operatorToken!==undefined&&matches(cfg.personal.operatorToken);
       if(!matches(cfg.token)&&!operator){res.writeHead(401).end();return;}
+      if(suggest&&(!cfg.hosts.includes(req.headers.host??'')||req.headers.origin&&!cfg.origins.includes(req.headers.origin))){
+        res.writeHead(403).end();return;
+      }
       if(cfg.personal){
         if(!operator&&(req.headers['x-brai-user-id']!==cfg.personal.userId||req.headers['x-brai-profile-id']!==cfg.personal.profileId)){res.writeHead(403).end();return;}
         try{await cfg.personal.authorize();}catch(error){res.writeHead(error instanceof Error&&error.message==='PERSONAL_AUTH_UNAVAILABLE'?503:403).end();return;}
@@ -71,6 +78,14 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         for await(const chunk of req){const b=Buffer.from(chunk);size+=b.length;if(size>limits.requestBytes){res.writeHead(413).end();return;}chunks.push(b);}
         try {body=JSON.parse(Buffer.concat(chunks).toString("utf8"));}
         catch {res.writeHead(400).end();return;}
+      }
+      if(suggest){
+        const controller=new AbortController();
+        res.once('close',()=>controller.abort());
+        const result=await suggest(body,controller.signal);
+        await cfg.personal!.authorize();
+        if(!controller.signal.aborted)res.writeHead(200,{"content-type":"application/json"}).end(JSON.stringify(result));
+        return;
       }
       const sid=typeof req.headers["mcp-session-id"]==="string"?req.headers["mcp-session-id"]:undefined;
       let s=sid?sessions.get(sid):undefined;

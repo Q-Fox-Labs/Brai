@@ -603,6 +603,12 @@ class Broker:
             return await self.resolve_known(params['telegramId'])
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
+        if method == 'ingress.topic-suggestion' and ingress:
+            profile = await self.resolve(params['telegramId'])
+            if profile['profileId'] != params['profileId']:
+                raise PermissionError('Topic profile changed')
+            return await self.control.call('dialogues.topic-suggestion',
+                {'uid': profile['uid'], 'profileId': profile['profileId'], 'input': params['input']}, timeout=1800)
         if method == 'identity.link-redeem' and ingress:
             allowed = {'telegramId', 'code'}
             if set(params) != allowed:
@@ -747,7 +753,7 @@ class Broker:
                 catalog = await self.control.call('tools.list', {'uid': peer_uid})
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if state['role'] == 'guest' else short in (
-                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_accounts','brai_telegram_link_account','brai_telegram_unlink_account'))
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_accounts','brai_telegram_link_account','brai_telegram_unlink_account','telegram_rename_current_topic'))
             if name == 'mcp__brai__brai_dev_release':
                 allowed = state['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
             current = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
@@ -783,7 +789,7 @@ class Broker:
                 catalog = await self.control.call('tools.list', {'uid': peer_uid})
                 allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
                     short in TOOL_POLICY['guestClient'] if profile['role'] == 'guest' else short in (
-                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_accounts','brai_telegram_link_account','brai_telegram_unlink_account'))
+                    'create_text_file','create_document_file','create_spreadsheet_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_accounts','brai_telegram_link_account','brai_telegram_unlink_account','telegram_rename_current_topic'))
             if name == 'mcp__brai__brai_dev_release':
                 allowed = profile['role'] in ('creator', 'admin') and self.config.get('registryPath') == '/etc/brai-dev/identity/registry.json'
             current = await self.authorize(peer_uid)
@@ -1008,6 +1014,7 @@ PARAMETERS = {
     'dialogues.authorize': (set(), set()),
     'identity.resolve': ({'telegramId'}, set()),
     'ingress.resolve-known': ({'telegramId'}, set()),
+    'ingress.topic-suggestion': ({'telegramId', 'profileId', 'input'}, set()),
     'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'accountAnswer', 'expectedUid', 'accountRefused'}),
@@ -1087,6 +1094,10 @@ def validate_params(method, params):
         raise ValueError('Invalid chat')
     if 'args' in params and not isinstance(params['args'], dict):
         raise ValueError('Invalid args')
+    if method == 'ingress.topic-suggestion':
+        if not isinstance(params['input'], dict):
+            raise ValueError('Invalid topic input')
+        uuid.UUID(params['profileId'])
     if 'threadId' in params and (type(params['threadId']) is not int
             or not 1 <= params['threadId'] <= 9007199254740991):
         raise ValueError('Invalid Telegram thread')

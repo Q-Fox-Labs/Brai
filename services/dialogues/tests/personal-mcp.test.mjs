@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {startMcp} from '../dist/mcp.js';
+import {suggestTopic} from '../dist/topic-socket.js';
 test('MCP: другой адресат и отозванный после commit доступ не раскрывают результат',async()=>{
  let allowed=true,writes=0;
  const secret='private-data-must-not-escape';
@@ -34,4 +35,38 @@ test('MCP: другой адресат и отозванный после commit
   const fault=JSON.parse(response.content[0].text);
   assert.equal(fault.code,'INTERNAL');assert.equal('applied' in fault,false);
  }finally{await client.close().catch(()=>{});await listener.close();}
+});
+
+test('topic endpoint authenticates the profile and never returns a revoked proposal',async()=>{
+ let allowed=true;
+ const requests=[];
+ const cfg={host:'127.0.0.1',port:0,owner:'data-a',hosts:['initial'],origins:['http://initial'],
+  token:'personal-token-012345678901234567890123456789',
+  personal:{userId:'account-a',profileId:'profile-a',operatorToken:'operator-token-012345678901234567890123456789',
+   authorize:async()=>{if(!allowed)throw new Error('Auth denied');},
+   suggestTopic:input=>suggestTopic(input,{structured:async(request,config)=>{
+    requests.push({request:JSON.parse(request),schema:config.schema});
+    if(requests.length===2)allowed=false;
+    return '{"title":"План сада","icon":1}';
+   }})}};
+ const listener=await startMcp({},cfg),url=new URL('/telegram-topic-suggestion',listener.url);
+ cfg.hosts.push(url.host);cfg.origins.push(url.origin);
+ const headers={Authorization:'Bearer '+cfg.token,'x-brai-user-id':'account-a','x-brai-profile-id':'profile-a'};
+ const request={request:'Спланируй сад',icons:['🐾','🌿']};
+ const post=(head,body=request)=>fetch(url,{method:'POST',headers:head,body:JSON.stringify(body)});
+ try{
+  assert.equal((await post({...headers,Authorization:'Bearer '+cfg.personal.operatorToken})).status,401);
+  assert.equal((await post({...headers,'x-brai-profile-id':'profile-b'})).status,403);
+  assert.equal((await post({...headers,Origin:'https://foreign.example'})).status,403);
+  assert.equal(requests.length,0);
+  const response=await post(headers);
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{title:'План сада',icon:1});
+  assert.deepEqual(requests[0].request,request);
+  assert.deepEqual(requests[0].schema.properties.icon.enum,[0,1]);
+  const revoked=await post(headers);
+  assert.equal(revoked.status,500);
+  assert.equal(await revoked.text(),'');
+  assert.equal(requests.length,2);
+ }finally{await listener.close();}
 });

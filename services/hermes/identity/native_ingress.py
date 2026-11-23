@@ -344,7 +344,7 @@ class ReleaseGate:
             self.unlocked.set()
         return {'operationId': operationId, 'state': 'resumed', 'reason': None}
 
-def register(ctx, *, build_resolver=None, admit_update=None):
+def register(ctx, *, build_resolver=None, admit_update=None, topic_names=None, topic_rename=None):
     """Зарегистрировать заводской hook до native Telegram polling.
 
     `build_resolver(adapter, runner)` возвращает async функцию `resolve_bridge(source)`;
@@ -393,6 +393,8 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         if runner is None or not callable(getattr(runner, '_hm_admit_event', None)):
             raise RuntimeError('Native gateway runner unavailable')
         resolver = build_resolver(adapter, runner)
+        if topic_names is not None:
+            resolver.enable_topic_naming(topic_names, topic_rename)
         # Identity restart сохраняет Telegram backlog, включая сообщения во время release gate.
         adapter._drop_pending_on_cold_boot = False
         gate = ReleaseGate(app)
@@ -452,6 +454,8 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         from telegram.ext import ApplicationHandlerStop, TypeHandler
         async def guard(update, context):
             _admitted_message.set(None)
+            if topic_names is not None and mirror is None:
+                resolver.observe_topic_edit(update)
             if getattr(update, 'callback_query', None) is not None or getattr(update, 'inline_query', None) is not None:
                 # AIDEV-NOTE: Сообщение callback отправлено ботом; Root проверяет
                 # нажавшего, owner сообщения и свежий Auth до личной обработки.

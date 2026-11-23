@@ -754,13 +754,25 @@ export async function startControl(config, adapters = {}) {
       })();
     },
   });
-  return { control, authCall, registry, async stop() { await service.stop(); control.closeMemorySnapshots(); await nc.drain(); } };
+  return { control, authCall, registry, suggestTopic:adapters.suggestTopic,
+    async stop() { await service.stop(); control.closeMemorySnapshots(); await nc.drain(); } };
 }
 
 /** Приватный протокол доступен только управляющему процессу через его stdin/stdout. */
 export async function privateCall(runtime, method, params) {
   if (!object(params)) throw new Error('INVALID_ARGUMENT');
   const { control, authCall, registry } = runtime;
+  if(method==='dialogues.topic-suggestion'){
+    if(Object.keys(params).sort().join(',')!=='input,profileId,uid'||!Number.isSafeInteger(params.uid)||params.uid<=0||
+       !text(params.profileId)||!object(params.input))
+      throw new Error('INVALID_ARGUMENT');
+    const user=await privateCall(runtime,'authorize',{uid:params.uid});
+    const data=await registry(),profile=data?.profiles?.[String(params.uid)];
+    if(!profile||profile.userId!==user.userId||profile.profileId!==user.profileId||
+       profile.profileId!==params.profileId||profile.status!=='active'||
+       typeof runtime.suggestTopic!=='function')throw new Error('FORBIDDEN');
+    return runtime.suggestTopic({...profile,workerUid:params.uid},params.input);
+  }
   if (method === 'identity.link-redeem') {
     if (Object.keys(params).some(key=>!['telegramId','code'].includes(key)) ||
         !/^[1-9][0-9]{0,19}$/.test(params.telegramId ?? '') || !/^[A-Za-z0-9_-]{43}$/.test(params.code ?? '')) throw new Error('INVALID_ARGUMENT');

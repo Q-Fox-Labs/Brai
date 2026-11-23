@@ -204,3 +204,11 @@ access только через auth.command; bearer не помещается в
 [Auth](../auth/dialogues-access.asyncapi.yaml), отдельно от модельной подписки.
 Готовность Hermes, worker UID и его applied generation не входят в решение.
 Проверка Auth и RLS выполняется до операции и перед выдачей результата.
+
+На HTTP listener личных Диалогов запрос `POST /telegram-topic-suggestion`
+использует тот же персональный bearer, привязку и список локальных Host, что
+и MCP. Operator bearer для операции отклоняется. Control посылает
+`{request, icons}`, где `icons` содержит отображаемые emoji. Runtime
+создаёт один временный структурированный запрос Luna и возвращает
+`{title, icon}`, где `icon` — индекс с нуля. Текст, Telegram ID и результат
+не записываются в Диалоги. Auth и RLS перепроверяются перед выдачей.

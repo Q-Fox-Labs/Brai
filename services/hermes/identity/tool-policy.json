@@ -23,7 +23,8 @@
     "read_text_file",
     "fetch_file",
     "create_document_file",
-    "create_spreadsheet_file"
+    "create_spreadsheet_file",
+    "telegram_rename_current_topic"
   ],
   "guestNative": [
     "memos_search",

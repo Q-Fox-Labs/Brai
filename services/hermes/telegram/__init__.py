@@ -951,37 +951,17 @@ class TelegramPlugin:
 
     def _topic_update(self, message, chat, user, edited):
         """Поставить проверку темы в фоне до передачи сообщения агенту."""
-        created = getattr(message, 'forum_topic_created', None)
-        thread = getattr(message, 'message_thread_id', None)
-        if thread is None and created is not None:
-            # Telegram identifies a new topic by its creation service message ID.
-            thread = getattr(message, 'message_id', None)
-        if type(thread) is not int or thread <= 1:
+        event = _topic_module('topic_names').topic_update(message, edited)
+        if event is None:
             return
+        thread, operation, text = event
         route = (str(chat.id), str(thread))
-        if getattr(message, 'forum_topic_edited', None) is not None:
+        if operation == 'cancel':
+            if getattr(message, 'forum_topic_edited', None) is None:
+                return
             pending = self.topic_tasks.get(route)
             if pending:
                 pending.cancel()
-            operation, text = 'cancel', ''
-        elif created is not None:
-            implicit = getattr(created, 'is_name_implicit', None)
-            if implicit is None:
-                implicit = (getattr(created, 'api_kwargs', None) or {}).get('is_name_implicit')
-            if implicit is not True:
-                return
-            operation, text = 'create', ''
-        elif edited:
-            return
-        else:
-            text = getattr(message, 'text', None) or getattr(message, 'caption', None)
-            if not text:
-                text = next((label for field, label in (('photo', 'Фотография'), ('voice', 'Голосовое сообщение'),
-                    ('audio', 'Аудиозапись'), ('video', 'Видео'), ('document', 'Документ'), ('sticker', 'Стикер'),
-                    ('location', 'Геопозиция'), ('venue', 'Место')) if getattr(message, field, None)), '')
-            if not isinstance(text, str) or not text.strip():
-                return
-            operation = 'claim'
         task = self.loop.create_task(self._admit_topic_update(route, chat.type, str(getattr(user, 'id', '')), operation, text))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -1062,12 +1042,18 @@ class TelegramPlugin:
         try:
             values = self.topic_rename_api.rename_arguments(args)
             context = self._tool_context({'session_id': session_id})
+            if self.config.identity_worker:
+                from identity.scope import delivery_scope
+                scope = delivery_scope.get()
+                if not isinstance(scope, str) or not scope:
+                    raise BridgeError('TOPIC_RENAME_CONTEXT_REQUIRED')
+                context['delivery_scope'] = scope
             if (not tool_call_id or not re.fullmatch(r'[1-9][0-9]*', context['message_id'] or '')
                     or not re.fullmatch(r'[1-9][0-9]*', context['thread_id'] or '') or context['thread_id'] == '1'):
                 raise BridgeError('TOPIC_RENAME_CONTEXT_REQUIRED')
             if self.closed or self.topic_rename.server is None:
                 raise BridgeError('TOPIC_RENAME_UNAVAILABLE')
-            if 'text' in values and not self.topic_socket:
+            if 'text' in values and not (self.topic_socket or self.config.identity_worker):
                 raise BridgeError('TOPIC_GENERATOR_UNAVAILABLE')
         except self.topic_rename_api.TopicRenameError:
             return {'action': 'block', 'message': 'Передай либо готовый заголовок title, либо описание темы text.'}
@@ -1086,6 +1072,8 @@ class TelegramPlugin:
         route = (context['chat_id'], context['thread_id'])
         if self.closed or bot is None or not connected() or not self._session_matches({**context, 'owner': self.config.owner}):
             raise error('TOPIC_RENAME_CONTEXT_REQUIRED')
+        if self.config.identity_worker:
+            return await bot.rename_current_topic(context['message_id'], args, context['delivery_scope'])
         title = args.get('title')
         if title is None:
             try:
@@ -2077,7 +2065,7 @@ def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
     if os.environ.get('BRAI_IDENTITY_MODE') == 'telegram':
         from identity.native_ingress import register as register_identity
-        register_identity(ctx)
+        register_identity(ctx, topic_names=_topic_module('topic_names'), topic_rename=_topic_module('topic_rename'))
         return
     from types import SimpleNamespace
     from hermes_cli.plugins import get_plugin_manager
@@ -2090,9 +2078,9 @@ def register(ctx):
     if worker:
         sys.modules['_brai_identity_human'].attach = plugin.attach_identity_worker
     else:
-        plugin.enable_topic_rename()
         ctx.register_telegram_handler(plugin.factory)
-        ctx.register_hook('pre_tool_call', plugin.authorize_topic_rename)
+    plugin.enable_topic_rename()
+    ctx.register_hook('pre_tool_call', plugin.authorize_topic_rename)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)
     ctx.register_hook("transform_llm_output", plugin.outgoing)
     ctx.register_hook("transform_tool_result", plugin.tool_result)

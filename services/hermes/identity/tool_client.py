@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import struct
 import sys
@@ -12,6 +13,31 @@ import uuid
 TOOL_POLICY = json.loads(Path(__file__).with_name('tool-policy.json').read_text())
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
+TOPIC_RENAME = 'telegram_rename_current_topic'
+
+
+def rename_topic(arguments):
+    """Передать локальному Telegram-плагину один допуск от native hook."""
+    path = os.environ.get('BRAI_TELEGRAM_RENAME_SOCKET')
+    ticket = arguments.get('_topicTicket')
+    if (not path or not Path(path).is_absolute() or set(arguments) != {'_topicTicket'}
+            or not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', ticket)):
+        return {'ok': False, 'code': 'TOPIC_RENAME_CONTEXT_REQUIRED'}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(1800)
+        conn.connect(path)
+        _, uid, _ = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if uid != os.getuid():
+            raise PermissionError('Unexpected topic port owner')
+        conn.sendall((ticket + '\n').encode('ascii'))
+        with conn.makefile('rb') as reply:
+            line = reply.readline(MAX_FRAME + 1)
+    if len(line) > MAX_FRAME or not line.endswith(b'\n'):
+        raise ConnectionError('Topic rename response incomplete')
+    result = json.loads(line)
+    if not isinstance(result, dict):
+        raise ValueError('Invalid topic rename response')
+    return result
 
 
 def broker_call(method, params, *, path=None, timeout=120):
@@ -68,7 +94,7 @@ def handle(method, params):
         if not isinstance(result, dict) or not isinstance(result.get('tools'), list):
             raise RuntimeError('Broker tools unavailable')
         tools = result['tools']
-        if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'brai_telegram_accounts', 'brai_telegram_link_account', 'brai_telegram_unlink_account', 'publish_file', 'fetch_file', 'brai_dev_release') for item in tools):
+        if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'brai_telegram_accounts', 'brai_telegram_link_account', 'brai_telegram_unlink_account', 'publish_file', 'fetch_file', 'brai_dev_release', TOPIC_RENAME) for item in tools):
             raise RuntimeError('Invalid tool catalog')
         role = result.get('role')
         if role not in TOOL_POLICY['roles']:
@@ -87,6 +113,12 @@ def handle(method, params):
                  'inputSchema': {'type':'object', 'properties':{'path':{'type':'string'}, 'requestId':{'type':'string'}}, 'required':['path'], 'additionalProperties':False}},
                 {'name': 'fetch_file', 'description': 'Получить собственный опубликованный файл.',
                  'inputSchema': {'type':'object', 'properties':{'artifactId':{'type':'string'}}, 'required':['artifactId'], 'additionalProperties':False}}]
+        if os.environ.get('BRAI_TELEGRAM_RENAME_SOCKET'):
+            client_tools.append({'name': TOPIC_RENAME,
+                'description': 'По явной просьбе переименовать текущую тему Telegram. Передай готовое имя в title или описание в text, чтобы Диалоги придумали имя.',
+                'inputSchema': {'type':'object', 'properties':{'title':{'type':'string','minLength':1,'maxLength':128},
+                    'text':{'type':'string','minLength':1}}, 'oneOf':[{'required':['title']},{'required':['text']}],
+                    'additionalProperties':False}})
         client_tools += [
             {'name':'create_text_file','description':'Создать и опубликовать точные UTF-8 байты. Передай безопасное имя без пути, содержимое и стабильный requestId. Код в файле не исполняется.',
              'inputSchema':{'type':'object','properties':{'filename':{'type':'string','maxLength':180},'content':{'type':'string'},'requestId':{'type':'string','maxLength':256}},'required':['filename','content','requestId'],'additionalProperties':False}},
@@ -111,6 +143,11 @@ def handle(method, params):
         name, arguments = params.get('name'), params.get('arguments', {})
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ValueError('Invalid tool call')
+        if name == TOPIC_RENAME:
+            result = rename_topic(arguments)
+            return {'isError': result.get('ok') is not True,
+                    'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}],
+                    'structuredContent': result}
         if name in ('create_text_file', 'read_text_file', 'create_document_file', 'create_spreadsheet_file'):
             operation = {'create_text_file': 'files.create-text', 'read_text_file': 'files.read-text', 'create_document_file': 'files.create-document', 'create_spreadsheet_file': 'files.create-spreadsheet'}[name]
             value = broker_call(operation, arguments)

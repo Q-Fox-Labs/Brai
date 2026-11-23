@@ -59,7 +59,8 @@ class Bridge:
                 await writer.wait_closed()
                 raise PermissionError('Unexpected worker UID')
             peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended,
-                             'telegram_api': self.call_telegram_api, 'chat_states': self.read_chat_states,
+                             'telegram_api': self.call_telegram_api, 'telegram_topic_rename': self.call_telegram_topic_rename,
+                             'chat_states': self.read_chat_states,
                              'recovery.check': self.check_recovery})
             task = asyncio.create_task(peer.run())
             # close() должен отменять и ещё не завершившийся handshake.
@@ -217,6 +218,10 @@ class Bridge:
         if not callable(self.telegram_api):
             raise RpcError(-32601, 'Interactive API unavailable')
         return await self.telegram_api(self.owner, method, payload, scope_id)
+
+    async def call_telegram_topic_rename(self, payload, scope_id):
+        """Переименовать тему только через проверку активного хода в ingress."""
+        return await self.call_telegram_api('rename_current_topic', payload, scope_id)
 
     async def send(self, action, payload, scope_id=UNSCOPED, delivery_id=None, input_delivery_id=None):
         """Доставить только в разрешённый исходный chat/thread и вернуть реальный результат."""

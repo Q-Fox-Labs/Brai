@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет связку Telegram ingress с брокером личного процесса.
 # ABOUTME: Все сетевые вызовы заменены локальными подставными ответами.
 import asyncio
+import importlib.util
 import json
 import sys
 import time
@@ -28,6 +29,84 @@ def event():
               message_id='55', message_type=NS(value='photo'), timestamp=None, reply_expected=True,
               media_urls=['/ingress/a'], media_types=['image/png'], media_text_inlined=[], reply_to_message_id=None,
               _brai_identity_inputs=[{'path':'/ingress/a','itemId':'55:0','caption':'hello','groupId':'album'}])
+
+def topic_module(name):
+    path = Path(__file__).resolve().parents[2] / 'telegram' / (name + '.py')
+    module = importlib.util.module_from_spec(spec := importlib.util.spec_from_file_location(name, path))
+    spec.loader.exec_module(module)
+    return module
+
+
+class TopicNamingTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.owner = {**profile(), 'profileId': 'profile-a', 'role': 'user', 'generation': 8}
+        self.other = {**self.owner, 'uid': 102, 'userId': 'other', 'profileId': 'profile-b', 'telegramId': '124'}
+        self.bot = NS(id=11, edit_forum_topic=AsyncMock(return_value=True),
+                      get_forum_topic_icon_stickers=AsyncMock(return_value=[
+                          NS(custom_emoji_id='90', emoji='🌿'), NS(custom_emoji_id='91', emoji='🐾')]),
+                      get_chat_member=AsyncMock(return_value=NS(status='administrator', can_manage_topics=True)))
+        self.resolver = runtime.Resolver(NS(_bot=self.bot))
+        self.resolver.enable_topic_naming(topic_module('topic_names'), topic_module('topic_rename'))
+        self.addAsyncCleanup(self.resolver.close)
+        self.resolver._account = AsyncMock(return_value=self.owner)
+
+    def update(self, thread, *, chat='123', **fields):
+        message = NS(message_id=thread, message_thread_id=thread, is_topic_message=True, **fields)
+        return NS(message=message, effective_chat=NS(id=int(chat),
+                  type='private' if chat == '123' else 'supergroup', is_forum=True))
+
+    async def test_one_proposal_per_implicit_topic_without_waiting_for_model(self):
+        started, done = asyncio.Event(), asyncio.Event()
+        async def generate(method, params, *, timeout):
+            self.assertEqual(method, 'ingress.topic-suggestion')
+            self.assertEqual(params, {'telegramId': '123', 'profileId': 'profile-a',
+                                      'input': {'request': 'помоги с садом', 'icons': ['🌿', '🐾']}})
+            started.set()
+            await done.wait()
+            return {'title': 'План сада', 'icon': 0}
+
+        self.resolver.observe_topic(self.update(88, forum_topic_created=NS(api_kwargs={'is_name_implicit': True})), self.owner)
+        self.resolver.observe_topic(self.update(89, forum_topic_created=NS(name='Задано вручную')), self.owner)
+        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=generate)) as broker:
+            self.resolver.observe_topic(self.update(89, text='другая тема'), self.owner)
+            self.resolver.observe_topic(self.update(88, text='чужой текст'), self.other)
+            self.resolver.observe_topic(self.update(88, text='помоги с садом'), self.owner)
+            await asyncio.wait_for(started.wait(), 1)
+            self.resolver.observe_topic(self.update(88, text='следующее сообщение'), self.owner)
+            self.bot.edit_forum_topic.assert_not_called()
+            done.set()
+            await asyncio.gather(*self.resolver.topic_tasks)
+            broker.assert_awaited_once()
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=88,
+                                                          name='План сада', icon_custom_emoji_id='90')
+
+    async def test_late_result_cannot_overwrite_observed_manual_edit(self):
+        self.resolver.observe_topic(self.update(88, chat='-124', forum_topic_created=NS(is_name_implicit=True)), self.owner)
+        async def generate(*args, **kwargs):
+            self.resolver.observe_topic_edit(self.update(88, chat='-124', forum_topic_edited=NS(name='Мой заголовок')))
+            return {'title': 'План сада', 'icon': 0}
+        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=generate)):
+            self.resolver.observe_topic(self.update(88, chat='-124', caption='сад'), self.owner)
+            await asyncio.gather(*self.resolver.topic_tasks)
+        self.bot.edit_forum_topic.assert_not_called()
+
+    async def test_explicit_title_is_exact_and_fenced_to_current_group_turn(self):
+        route = ('-124', '88')
+        self.resolver.ledger.admit(self.owner, route, {'thread_id': '88'}, '90')
+        self.resolver.turns[self.owner['uid']] = {'id':'scope', 'messageId':'90', 'route':route, 'actor':'123'}
+        self.resolver.delivery_context = AsyncMock(return_value=(None, None, None, lambda: None, None))
+        with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+            rename = self.resolver.rename_current_topic
+            with self.assertRaises(PermissionError):
+                await rename(self.owner, 'owner', {'messageId':'89', 'args':{'title':'Мой сад'}}, 'scope')
+            self.bot.get_chat_member.return_value = NS(status='member')
+            with self.assertRaises(PermissionError):
+                await rename(self.owner, 'owner', {'messageId':'90', 'args':{'title':'Мой сад'}}, 'scope')
+            self.bot.get_chat_member.return_value = NS(status='creator')
+            self.assertEqual(await rename(self.owner, 'owner', {'messageId':'90', 'args':{'title':'  Мой сад  '}}, 'scope'),
+                             {'ok': True, 'title': '  Мой сад  '})
+            broker.assert_not_awaited()
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=-124, message_thread_id=88, name='  Мой сад  ')
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):

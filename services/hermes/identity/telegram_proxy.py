@@ -85,3 +85,8 @@ class BotProxy:
     async def answer_inline_query(self, **payload):
         """Ответить на проверенный Root inline query личным каталогом команд."""
         return await self._call('answer_inline_query', payload)
+
+    async def rename_current_topic(self, message_id, args, scope_id):
+        """Передать одноразовое действие без адреса темы и без токена бота."""
+        return await self._peer.call('telegram_topic_rename', {
+            'payload': {'messageId': message_id, 'args': args}, 'scope_id': scope_id}, timeout=1800)
