@@ -2,7 +2,11 @@
 # ABOUTME: Passes the stock manifest and bounded test credentials as protected Ansible input.
 name: Stock PROD clean install
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/stock-prod-clean-20261123]
+    paths: [.github/workflows/stock-prod.launch]
 
 permissions:
   contents: read
