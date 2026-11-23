@@ -14,9 +14,9 @@ import uuid
 from unittest.mock import patch
 
 
-async def eventually(check, label, watch=None):
+async def eventually(check, label, watch=None, timeout=180):
     """Дождаться наблюдаемого исхода; срок относится только к исполнению fixture."""
-    async with asyncio.timeout(180):
+    async with asyncio.timeout(timeout):
         while not check():
             if watch is not None and watch.returncode is not None:
                 raise ValueError('WORKER_EXITED')
@@ -35,16 +35,18 @@ async def run(config, fixture, native, receipt):
     from gateway.platforms.event import MessageType
 
     source = Path(config['sourceRoot'])
+    source_sha = config['sourceSha']
     root = fixture.RUN_BASE / str(uuid.uuid4())
     root.parent.mkdir(mode=0o711, parents=True, exist_ok=True)
     root.mkdir(mode=0o711)
     identity = root.stat().st_dev, root.stat().st_ino
     workers, servers, log_tasks = [], [], []
+    broker_runs = []
     deliveries = []
     connection_errors = []
     consumer = supervisor = None
     resolver = None
-    proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': config['sourceSha'],
+    proof = {'kind': 'hermes-durable-delivery-faults', 'sourceSha': source_sha,
              'realNativeWorker': True, 'realTelegram': False, 'realInference': False,
              'backend': 'synthetic', 'scenarios': []}
     stage = 'prepare'
@@ -168,7 +170,8 @@ for _name in ('gateway', 'agent', 'run_agent'):
             if method == 'ingress.input-ready':
                 return {'ready': True}
             if method == 'identity.resolve': return profile
-            if method in ('ingress.admit', 'ingress.close', 'ingress.status'): return {}
+            if method == 'ingress.close': return {'closed': True}
+            if method in ('ingress.admit', 'ingress.status'): return {}
             raise AssertionError('Unexpected fixture Auth operation: ' + method)
 
         ingress = root / 'ingress'; ingress.mkdir(mode=0o700)
@@ -179,7 +182,7 @@ for _name in ('gateway', 'agent', 'run_agent'):
             return value
         def item(ident, thread=11):
             return Update.de_json({'update_id': ident, 'message': {'message_id': ident, 'date': 1,
-                'message_thread_id': thread, 'chat': {'id': 123, 'type': 'private'},
+                'message_thread_id': thread, 'is_topic_message': True, 'chat': {'id': 123, 'type': 'private'},
                 'from': {'id': 123, 'is_bot': False, 'first_name': 'Fixture'},
                 'text': 'Reply with SYNTHETIC_OK.'}}, bot)
         async def consume_batch(event, ident):
@@ -453,7 +456,8 @@ peer.close();channel.close()
             await eventually(lambda: len(deliveries) >= 7, 'provider-failure-notice', watch=process)
             fixture.require(len(provider_failures) >= 1 and 'SYNTHETIC_OK' not in deliveries[6].get('content', ''),
                             'PROVIDER_FAILURE_NOT_OBSERVED')
-            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process)
+            # Native owns the complete provider retry schedule; do not end the test mid-retry.
+            await eventually(lambda: not resolver.turns, 'failed-turn-idle', watch=process, timeout=None)
             requests_before_recovery = len(model.requests)
             provider_unavailable = False
             await eventually(lambda: any('SYNTHETIC_OK' in item.get('content', '') for item in deliveries[7:]),
@@ -521,6 +525,11 @@ peer.close();channel.close()
         if cleanup_errors:
             proof.update(state='failed', cleaned=False, cleanupErrors=cleanup_errors, fixtureRoot=str(root))
         else:
-            fixture.remove_owned_root(root, identity)
-            proof['cleaned'] = True
+            try:
+                fixture.remove_owned_root(root, identity)
+            except Exception as error:
+                proof.update(state='failed', cleaned=False, fixtureRoot=str(root),
+                             cleanupErrors=[{'type': type(error).__name__, 'code': fixture.safe_error_code(error)}])
+            else:
+                proof['cleaned'] = True
     return proof
