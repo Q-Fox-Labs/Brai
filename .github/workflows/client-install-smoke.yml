@@ -32,7 +32,7 @@ jobs:
     env:
       BRAI_CI_SOURCE_SHA: ${{ inputs.source_sha }}
       ADMIN_REPOSITORY: ${{ vars.BRAI_CI_ADMIN_REPOSITORY || 'Q-Fox-Labs/Q-Server' }}
-      ADMIN_SHA: ${{ vars.BRAI_CI_ADMIN_SHA || '8ef49bf67e2aa3870a609bcdae487c291ce241eb' }}
+      ADMIN_SHA: ${{ vars.BRAI_CI_ADMIN_SHA || '8b0e16d38e29541a43caaabca4bf71641abc9317' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -109,6 +109,7 @@ jobs:
           BRAI_CI_INSTALL_BUNDLE: ${{ secrets.BRAI_CI_INSTALL_BUNDLE }}
           BRAI_CI_HF_TOKEN: ${{ secrets.BRAI_CI_HF_TOKEN }}
           BRAI_CI_MEMOS_SDK_URL: ${{ secrets.BRAI_CI_MEMOS_SDK_URL }}
+          BRAI_CI_RELEASE_PACKAGES_URL: ${{ secrets.BRAI_CI_RELEASE_PACKAGES_URL }}
           BRAI_CI_REGISTRY_TOKEN: ${{ secrets.BRAI_CI_REGISTRY_TOKEN }}
           BRAI_CI_REGISTRY_USER: ${{ vars.BRAI_CI_REGISTRY_USER }}
           CI_PACKAGES_TOKEN: ${{ github.token }}

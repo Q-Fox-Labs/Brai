@@ -120,9 +120,11 @@ def check_identity(manifest, inputs):
     managed = deployment['managedMemos']
     provider = managed.get('providerDescriptor', {})
     if (managed.get('freshInstall') is not True or managed.get('technicalProviders') != []
-            or not isinstance(provider, dict) or provider.get('variant') != 'external-http-v1'
+            or not isinstance(provider, dict) or provider.get('variant') not in ('external-http-v1', 'release-local-v1')
             or any(not isinstance(provider.get(key), dict) for key in ('llm', 'embedding'))):
-        raise ValueError('Specify both providers for the external-http-v1 MemOS first installation')
+        raise ValueError('Specify both providers for the selected MemOS first installation')
+    if provider['variant'] == 'release-local-v1' and not isinstance(provider.get('broker'), dict):
+        raise ValueError('Specify the private NATS broker and the test embedding credentials')
     distribution = manifest.get('identity_memos_sdk_distribution', {})
     checksum = distribution.get('sha256', '')
     if (not isinstance(checksum, str) or not re.fullmatch('[a-f0-9]{64}', checksum)
@@ -138,6 +140,9 @@ def check_settings(manifest, inputs):
         raise ValueError('Use the local test origin and an empty public URL list')
     if 'registry' in inputs or 'git' in inputs or 'hf_token' in inputs:
         raise ValueError('Supply registry, Git and Hugging Face access separately through Actions')
+    layout_sha = inputs.get('release_oci_archive_sha256')
+    if layout_sha is not None and (not isinstance(layout_sha, str) or not re.fullmatch('[a-f0-9]{64}', layout_sha)):
+        raise ValueError('Pin the exported RELEASE OCI archive by SHA-256')
     check_identity(manifest, inputs)
     expected_files = set(manifest['config_paths'])
     test_files = set(inputs.get('files', {}))
@@ -232,7 +237,24 @@ def stage_sdk(url, checksum, root):
     return root
 
 
+def stage_release_layout(manifest, checksum, run_directory):
+    """Fetch the test-only OCI archive, then hand it to the Root path verifier."""
+    url = os.environ.get('BRAI_CI_RELEASE_PACKAGES_URL', '')
+    if not url or urlsplit(url).scheme != 'https':
+        raise ValueError('Supply the temporary HTTPS source of the RELEASE OCI packages')
+    path = run_directory / 'release-oci.tar'
+    opener = build_opener(SDKRedirectHandler())
+    with opener.open(url, timeout=180) as source, path.open('xb') as destination:
+        shutil.copyfileobj(source, destination)
+    with path.open('rb') as staged:
+        if hashlib.file_digest(staged, 'sha256').hexdigest() != checksum:
+            raise ValueError('The downloaded RELEASE OCI archive differs from the test bundle')
+    write_private(run_directory / 'release-manifest.json', (json.dumps(manifest) + '\n').encode())
+
+
 def ansible_variables(manifest, inputs, run_directory):
+    if checksum := inputs.pop('release_oci_archive_sha256', None):
+        stage_release_layout(manifest, checksum, run_directory)
     output = {'brai_install_manifest': manifest, 'fresh_install_inputs': inputs}
     if inputs.get('identity_mode') != 'telegram':
         return output

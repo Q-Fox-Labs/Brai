@@ -47,7 +47,13 @@ sampler=$!
 trap report EXIT
 
 python3 -B "$fixture" unpack "$BRAI_CI_SOURCE_SHA" "$run_dir/inputs.yml"
-unset BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN BRAI_CI_MEMOS_SDK_URL BRAI_CI_REGISTRY_TOKEN CI_PACKAGES_TOKEN
+unset BRAI_CI_INSTALL_BUNDLE BRAI_CI_HF_TOKEN BRAI_CI_MEMOS_SDK_URL BRAI_CI_RELEASE_PACKAGES_URL BRAI_CI_REGISTRY_TOKEN CI_PACKAGES_TOKEN
+if [[ -f "$run_dir/release-oci.tar" ]]; then
+  sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT /usr/bin/python3 -B \
+    "$(dirname "$fixture")/stage-release-packages.py" "$run_dir/release-oci.tar" \
+    "$run_dir/release-manifest.json" "$installer/ansible/client/roles/brai_install/files/install_server.py"
+  rm -- "$run_dir/release-oci.tar" "$run_dir/release-manifest.json"
+fi
 printf '[managed]\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3\n' > "$run_dir/hosts.ini"
 
 cd "$installer/ansible"
