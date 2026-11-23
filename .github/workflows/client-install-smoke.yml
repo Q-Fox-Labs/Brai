@@ -67,7 +67,19 @@ jobs:
         run: |
           set -euo pipefail
           probe=$(mktemp -d "$RUNNER_TEMP/stock-chrome.XXXXXXXX")
-          trap 'rm -rf -- "$probe"' EXIT
+          finish_probe() {
+            local result=$?
+            trap - EXIT
+            if ((result)); then
+              chrome=/opt/agent-browser-tools/chrome/154.0.8037.92/chrome-linux64
+              sudo namei -l "$chrome" || true
+              sudo getfacl -p /opt /opt/agent-browser-tools /opt/agent-browser-tools/chrome \
+                "$(dirname "$chrome")" "$chrome" || true
+            fi
+            rm -rf -- "$probe"
+            exit "$result"
+          }
+          trap finish_probe EXIT
           cat >"$probe/probe.yml" <<'YAML'
           - hosts: localhost
             gather_facts: false
