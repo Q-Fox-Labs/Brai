@@ -47,7 +47,7 @@ test('topic endpoint authenticates the profile and never returns a revoked propo
    suggestTopic:input=>suggestTopic(input,{structured:async(request,config)=>{
     requests.push({request:JSON.parse(request),schema:config.schema});
     if(requests.length===3)allowed=false;
-    return JSON.stringify({title:'План сада',icon:requests.at(-1).request.icons.length?1:null});
+    return JSON.stringify({title:'Уход за садом — сезонный план работ',icon:requests.at(-1).request.icons.length?1:null});
    }})}};
  const listener=await startMcp({},cfg),url=new URL('/telegram-topic-suggestion',listener.url);
  cfg.hosts.push(url.host);cfg.origins.push(url.origin);
@@ -61,11 +61,11 @@ test('topic endpoint authenticates the profile and never returns a revoked propo
   assert.equal(requests.length,0);
   const response=await post(headers);
   assert.equal(response.status,200);
-  assert.deepEqual(await response.json(),{title:'План сада',icon:1});
+  assert.deepEqual(await response.json(),{title:'Уход за садом',icon:1});
   assert.deepEqual(requests[0].request,request);
   assert.deepEqual(requests[0].schema.properties.icon.enum,[0,1]);
   const rename=await post(headers,{request:'План сада',icons:[]});
-  assert.deepEqual(await rename.json(),{title:'План сада',icon:null});
+  assert.deepEqual(await rename.json(),{title:'Уход за садом',icon:null});
   assert.equal(requests[1].schema.properties.icon.type,'null');
   const revoked=await post(headers);
   assert.equal(revoked.status,500);

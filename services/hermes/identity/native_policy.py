@@ -144,6 +144,25 @@ def restrict_exclusive_plugins(product):
             module.find_provider_dir = find
 
 
+def pin_telegram_plugin():
+    """Подключить Telegram-плагин из загруженного принятого runtime."""
+    from hermes_cli.plugins import PluginManager, parse_manifest_file
+    from hermes_cli.plugins_manifest import manifest_key
+
+    path = Path('/opt/brai-profile/runtime/services/hermes/telegram')
+    name = 'brai-telegram'
+    manifest = parse_manifest_file(path / 'plugin.yaml', path, 'bundled', '')
+    if manifest is None or manifest.name != name or manifest_key(manifest) != name:
+        raise RuntimeError('Trusted Telegram plugin unavailable')
+    original = PluginManager._collect_directory_manifests
+
+    def collect(self):
+        other_plugins = [item for item in original(self) if item.name != name and manifest_key(item) != name]
+        return [*other_plugins, manifest]
+
+    PluginManager._collect_directory_manifests = collect
+
+
 def execution_grant(name):
     """Одна проверка фактического native/inline имени до любого пользовательского hook."""
     try:
@@ -290,7 +309,8 @@ def install(*, cold_start=False):
     _guest = _role == 'guest'
     _suspended = _guest or state.get('backgroundsSuspended') is True
     install_worker_watchdog()
-    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+    identity_worker = os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
+    if identity_worker:
         _managed_stt = install_managed_stt(Path('/opt/brai-profile/profile-config.json'))
     if _guest or state.get('staged') is True:
         product = Path(__file__).resolve().parents[1]
@@ -329,6 +349,8 @@ def install(*, cold_start=False):
                         'memory','context_engine','model-providers','cron_providers','computer_use'}))
         plugins.PluginManager._collect_directory_manifests = manifests
         plugins.PluginManager._scan_entry_points = lambda self: original_entrypoints(self) if active_configuration() else []
+    if identity_worker:
+        pin_telegram_plugin()
     if _guest:
         # Config/provider discovery уже закреплены до импорта браузера и producer-модулей.
         from .guest_browser import install as install_browser

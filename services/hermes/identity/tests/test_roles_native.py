@@ -158,6 +158,38 @@ class InlineExecutorTests(unittest.TestCase):
 class ExclusiveLoaderTests(unittest.TestCase):
     """HOME/проект/entrypoints не становятся кодом гостевого trusted startup."""
 
+    def test_managed_telegram_uses_running_program_and_keeps_other_plugins(self):
+        from unittest.mock import Mock, patch
+        telegram = types.SimpleNamespace(name='brai-telegram', key='brai-telegram')
+        stale = types.SimpleNamespace(name='brai-telegram', key='brai-telegram')
+        alias = types.SimpleNamespace(name='brai-telegram', key='group/local')
+        other = types.SimpleNamespace(name='local', key='local')
+
+        class Manager:
+            def _collect_directory_manifests(self):
+                return [stale, other, alias]
+
+        package = types.ModuleType('hermes_cli'); package.__path__ = []
+        plugins = types.ModuleType('hermes_cli.plugins')
+        plugins.PluginManager = Manager
+        plugins.parse_manifest_file = Mock(return_value=telegram)
+        manifest = types.ModuleType('hermes_cli.plugins_manifest')
+        manifest.manifest_key = lambda row: row.key
+        identity = types.ModuleType('identity'); identity.__path__ = []
+        client = types.ModuleType('identity.tool_client'); client.broker_call = lambda *a: None
+        with patch.dict(sys.modules, {'identity': identity, 'identity.tool_client': client, 'hermes_cli': package,
+                                      'hermes_cli.plugins': plugins, 'hermes_cli.plugins_manifest': manifest}):
+            spec = importlib.util.spec_from_file_location('identity.native_policy', ROOT / 'services/hermes/identity/native_policy.py')
+            policy = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(policy)
+            policy.pin_telegram_plugin()
+            directory = Path('/opt/brai-profile/runtime/services/hermes/telegram')
+            plugins.parse_manifest_file.assert_called_once_with(directory / 'plugin.yaml', directory, 'bundled', '')
+            found = Manager()._collect_directory_manifests()
+            self.assertEqual(len(found), 2)
+            self.assertIs(found[0], other)
+            self.assertIs(found[1], telegram)
+
     def test_all_exclusive_groups_use_canonical_bundle_until_active(self):
         from unittest.mock import patch
         active, effects = {'value': False}, []
