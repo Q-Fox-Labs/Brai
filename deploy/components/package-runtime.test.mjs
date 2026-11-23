@@ -2,7 +2,8 @@
 // ABOUTME: Использует небольшие временные репозитории без сети и установки пакетов.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { packageComponent, verifyPackage } from './package-runtime.mjs';
@@ -70,6 +71,66 @@ test('deterministic payloads preserve layout and mode; existing payload is verif
   writeFileSync(join(executable.path, 'services/example/main.mjs'), 'export const value = 0;\n');
   await assert.rejects(build(), /IMMUTABLE_OUTPUT_MISMATCH/);
   assert.match(readFileSync(join(executable.path, 'services/example/main.mjs'), 'utf8'), /value = 0/);
+});
+
+test('runtime hooks have a separate, versioned contract without changing launch entrypoints', async t => {
+  const {write, component, build} = fixture(t);
+  const path = 'services/example/health.mjs';
+  write(path, 'export const healthy = true;\n');
+  component.delivery.files.push(path);
+  const legacy = await build();
+  component.delivery.runtimeHooks = [{kind: 'container-health', path}];
+  const next = await build();
+  assert.equal(legacy.format, 'brai-component-runtime-v1');
+  assert.equal(next.format, 'brai-component-runtime-v2');
+  assert.deepEqual(next.runtime.entrypoints, legacy.runtime.entrypoints);
+  assert.deepEqual(next.runtime.hooks, component.delivery.runtimeHooks);
+  assert.notEqual(next.payloadHash, legacy.payloadHash);
+  assert.equal(verifyPackage(next.path, component.id).payloadHash, next.payloadHash);
+  component.delivery.runtimeHooks = [{kind:'unrecognized', path}];
+  await assert.rejects(build(), /INVALID_RUNTIME_HOOKS/);
+  component.delivery.runtimeHooks = [];
+  await assert.rejects(build(), /INVALID_RUNTIME_HOOKS/);
+  component.delivery.runtimeHooks = [{kind:'container-health', path:'services/example/missing.mjs'}];
+  await assert.rejects(build(), /MISSING_RUNTIME_ENTRYPOINT/);
+  component.delivery.runtimeHooks = [{kind:'container-health', path:component.delivery.entrypoints[0]}];
+  await assert.rejects(build(), /INVALID_RUNTIME_HOOKS/);
+});
+
+test('cached packages must match the requested hooks, content address and readable hook mode', async t => {
+  const {root, write, component, build} = fixture(t);
+  const path = 'services/example/health.mjs';
+  write(path, 'export const healthy = true;\n');
+  component.delivery.files.push(path);
+  const legacy = await build();
+  component.delivery.runtimeHooks = [{kind: 'container-health', path}];
+  const artifact = await build();
+  assert.throws(() => verifyPackage(artifact.path, component.id, component.delivery.runtimeHooks, root), /IMMUTABLE_OUTPUT_MISMATCH/);
+  assert.equal(verifyPackage(artifact.path, component.id, component.delivery.runtimeHooks, join(root, 'tmp/output')).payloadHash, artifact.payloadHash);
+  assert.throws(() => verifyPackage(legacy.path, component.id, component.delivery.runtimeHooks), /IMMUTABLE_OUTPUT_MISMATCH/);
+  assert.throws(() => verifyPackage(artifact.path, component.id, undefined), /IMMUTABLE_OUTPUT_MISMATCH/);
+  const manifestPath = join(artifact.path, 'artifact-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const row = manifest.files.find(file => file.path === path);
+  chmodSync(join(artifact.path, path), 0o600);
+  row.mode = 0o600;
+  manifest.payloadHash = createHash('sha256').update(JSON.stringify({files:manifest.files,runtime:manifest.runtime,runtimePackages:manifest.runtimePackages})).digest('hex');
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  assert.throws(() => verifyPackage(artifact.path, component.id, component.delivery.runtimeHooks), /MISSING_RUNTIME_HOOK/);
+  const renamed = join(root, 'tmp/output', `${component.id}-${manifest.payloadHash}`);
+  renameSync(artifact.path, renamed);
+  assert.throws(() => verifyPackage(renamed, component.id, component.delivery.runtimeHooks), /MISSING_RUNTIME_HOOK/);
+  const legacyManifestPath = join(legacy.path, 'artifact-manifest.json');
+  const legacyManifest = JSON.parse(readFileSync(legacyManifestPath, 'utf8'));
+  legacyManifest.runtime.command = ['node', 'different.mjs'];
+  legacyManifest.payloadHash = createHash('sha256').update(JSON.stringify({files:legacyManifest.files,runtime:legacyManifest.runtime,runtimePackages:legacyManifest.runtimePackages})).digest('hex');
+  writeFileSync(legacyManifestPath, `${JSON.stringify(legacyManifest, null, 2)}\n`);
+  assert.throws(() => verifyPackage(legacy.path, component.id), /IMMUTABLE_OUTPUT_MISMATCH/);
+  const externalManifest = join(root, 'external-manifest.json');
+  writeFileSync(externalManifest, readFileSync(legacyManifestPath));
+  rmSync(legacyManifestPath);
+  symlinkSync(externalManifest, legacyManifestPath);
+  assert.throws(() => verifyPackage(legacy.path, component.id), /IMMUTABLE_OUTPUT_MISMATCH/);
 });
 
 test('first-party delivery removes group and other write access without changing source', async t => {

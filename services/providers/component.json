@@ -111,11 +111,13 @@
     ],
     "entrypoints": [
       "services/providers/dist/main.js",
-      "services/providers/dist/health.js",
       "services/providers/dist/migrate.js",
       "services/providers/dist/chat-http.js",
       "services/providers/dist/observation.js",
       "services/providers/dist/catalog.js"
+    ],
+    "runtimeHooks": [
+      { "kind": "container-health", "path": "services/providers/dist/health.js" }
     ],
     "smokeImports": [
       "services/providers/dist/catalog.js",

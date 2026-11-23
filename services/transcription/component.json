@@ -148,11 +148,13 @@
     ],
     "entrypoints": [
       "services/transcription/dist/coordinator/main.js",
-      "services/transcription/dist/coordinator/health.js",
       "services/transcription/dist/helper/main.js",
       "services/transcription/dist/executors/local/main.js",
       "services/transcription/dist/executors/external/main.js",
       "services/transcription/dist/helper/migrate.js"
+    ],
+    "runtimeHooks": [
+      { "kind": "owner-probe-import", "path": "services/transcription/dist/coordinator/health.js" }
     ],
     "smokeImports": [
       "services/transcription/contracts/index.mjs"

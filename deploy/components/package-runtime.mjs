@@ -10,6 +10,7 @@ import { lockInputs } from './lock-inputs.mjs';
 
 const run = promisify(execFile);
 const format = 'brai-component-runtime-v1';
+const hooksFormat = 'brai-component-runtime-v2';
 const manifestName = 'artifact-manifest.json';
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -149,8 +150,22 @@ function payloadHash(files, runtime, runtimePackages) {
   return hash(JSON.stringify({files,runtime,runtimePackages}));
 }
 
+function validateHooks(hooks, entrypoints, files, required = false) {
+  if (!Array.isArray(hooks) || (required && !hooks.length) || !Array.isArray(entrypoints) || hooks.some(hook =>
+      !hook || Object.keys(hook).sort().join(',') !== 'kind,path' ||
+      !['container-health', 'owner-probe-import'].includes(hook.kind) || typeof hook.path !== 'string') ||
+      new Set(hooks.map(hook => hook.path)).size !== hooks.length ||
+      hooks.some(hook => entrypoints.includes(hook.path))) fail('INVALID_RUNTIME_HOOKS');
+  for (const hook of hooks) {
+    repositoryPath(hook.path);
+    if (files && !files.some(file => file.path === hook.path && !('symlink' in file) && (file.mode & 0o444) === 0o444)) fail('MISSING_RUNTIME_HOOK');
+  }
+}
+
 async function validateRuntime(stage, component) {
-  for (const key of [...component.delivery.entrypoints, ...component.delivery.smokeImports]) {
+  const hooks = component.delivery.runtimeHooks ?? [];
+  validateHooks(hooks, component.delivery.entrypoints, undefined, component.delivery.runtimeHooks !== undefined);
+  for (const key of [...component.delivery.entrypoints, ...component.delivery.smokeImports, ...hooks.map(hook => hook.path)]) {
     repositoryPath(key);
     if (!existsSync(join(stage, key)) || !lstatSync(join(stage, key)).isFile()) fail(`MISSING_RUNTIME_ENTRYPOINT: ${key}`);
   }
@@ -160,7 +175,7 @@ async function validateRuntime(stage, component) {
   const options = { env, timeout: 30_000, maxBuffer: 1024 * 1024 };
   const sandbox = ['--die-with-parent', '--ro-bind', '/', '/', '--tmpfs', '/tmp', '--ro-bind', stage, isolated, '--unshare-net', '--chdir', isolated, '--'];
   try {
-    for (const key of component.delivery.entrypoints.filter(key => /\.(?:mjs|cjs|js)$/.test(key))) {
+    for (const key of [...component.delivery.entrypoints, ...hooks.map(hook => hook.path)].filter(key => /\.(?:mjs|cjs|js)$/.test(key))) {
       await run('/usr/bin/bwrap', [...sandbox, process.execPath, '--check', join(isolated, key)], options);
     }
     if (component.delivery.smokeImports.length) {
@@ -231,7 +246,8 @@ export async function packageComponent(root, component, outputRoot) {
     const files = inventory(stage);
     const runtimePackages = [...packages.values()].map(({ key, entry, version, target }) => ({ lockKey: key, version, ...(entry.integrity ? { integrity: entry.integrity } : {}), ...(target ? { link: true, target } : {}) })).sort((a, b) => compare(a.lockKey, b.lockKey));
     const runtime={kind:component.delivery.kind,workingDirectory:component.directory,entrypoints:component.delivery.entrypoints,command:component.delivery.command ?? (component.delivery.entrypoints.length?['node',posix.relative(component.directory,component.delivery.entrypoints[0])]:[]),systemRequirements:component.delivery.systemRequirements ?? []};
-    const manifest = { format, componentId: component.id, payloadHash: payloadHash(files,runtime,runtimePackages), files, bytes: files.reduce((sum, file) => sum + file.size, 0), runtimePackages, runtime, systemRequirements: runtime.systemRequirements };
+    if (component.delivery.runtimeHooks !== undefined) runtime.hooks = component.delivery.runtimeHooks;
+    const manifest = { format: component.delivery.runtimeHooks === undefined ? format : hooksFormat, componentId: component.id, payloadHash: payloadHash(files,runtime,runtimePackages), files, bytes: files.reduce((sum, file) => sum + file.size, 0), runtimePackages, runtime, systemRequirements: runtime.systemRequirements };
     const path = join(output, `${component.id}-${manifest.payloadHash}`);
     const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
     writeFileSync(join(stage, manifestName), encoded);
@@ -249,10 +265,11 @@ export async function packageComponent(root, component, outputRoot) {
 }
 
 // A cached artifact is reused only after checking every delivered byte and mode.
-export function verifyPackage(path, componentId) {
-  if (lstatSync(path).isSymbolicLink()) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
+export function verifyPackage(path, componentId, expectedHooks, outputRoot) {
+  if (lstatSync(path).isSymbolicLink() || !lstatSync(join(path,manifestName), {throwIfNoEntry:false})?.isFile() || (outputRoot && (resolve(path) !== path || resolve(outputRoot) !== outputRoot || dirname(path) !== outputRoot || realpathSync(outputRoot) !== outputRoot))) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
   const manifest=json(join(path,manifestName)),files=inventory(path);
+  if (manifest.format === hooksFormat) validateHooks(manifest.runtime?.hooks, manifest.runtime?.entrypoints, files, true);
   if(componentId==='web' && manifest.runtime?.entrypoints?.[0]==='apps/web/server.js')verifyDirectories(path);
-  if(manifest.format!==format || manifest.componentId!==componentId || manifest.payloadHash!==payloadHash(files,manifest.runtime,manifest.runtimePackages) || JSON.stringify(manifest.files)!==JSON.stringify(files) || manifest.bytes!==files.reduce((sum,file)=>sum+file.size,0) || JSON.stringify(manifest.systemRequirements)!==JSON.stringify(manifest.runtime.systemRequirements)) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
+  if(![format,hooksFormat].includes(manifest.format) || (manifest.format===format && 'hooks' in manifest.runtime) || (manifest.format===hooksFormat && !Array.isArray(manifest.runtime.hooks)) || (arguments.length >= 3 && JSON.stringify(manifest.runtime.hooks) !== JSON.stringify(expectedHooks)) || manifest.componentId!==componentId || basename(path)!==`${componentId}-${manifest.payloadHash}` || manifest.payloadHash!==payloadHash(files,manifest.runtime,manifest.runtimePackages) || JSON.stringify(manifest.files)!==JSON.stringify(files) || manifest.bytes!==files.reduce((sum,file)=>sum+file.size,0) || JSON.stringify(manifest.systemRequirements)!==JSON.stringify(manifest.runtime.systemRequirements)) fail(`IMMUTABLE_OUTPUT_MISMATCH: ${path}`);
   return {...manifest,path};
 }

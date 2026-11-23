@@ -18,8 +18,19 @@ test('the same service connections resubscribe after an isolated broker restart'
   const {registerProvidersV1}=await import('../../../providers/dist/nats-v1.js');
   assert.match(container,/^brai-reconnect-fixture-[0-9a-f]{32}$/);
   assert.match(server,/^nats:\/\/127[.]0[.]0[.]1:[0-9]+$/);
-  const info=JSON.parse(execFileSync('/usr/bin/docker',['inspect',container],{encoding:'utf8'}))[0];
+  const info=JSON.parse(execFileSync('/usr/bin/docker',['inspect','--type','container',container],{encoding:'utf8',timeout:10000}))[0];
   assert.equal(info.Config.Labels['brai.test.fixture'],'nats-reconnect');
+  assert.match(info.Id,/^[0-9a-f]{64}$/);
+  const fixtureId=info.Id;
+  const published=info.NetworkSettings.Ports?.['4222/tcp'];
+  assert.ok(Array.isArray(published)&&published.length===1,'fixture must expose one broker port');
+  assert.equal(published[0].HostIp,'127.0.0.1');
+  assert.equal(server,`nats://127.0.0.1:${published[0].HostPort}`,'broker URL must belong to the fixture');
+  const deadline=Date.now()+10000;
+  while(true){
+    try {const probe=await connect({servers:server,timeout:500,maxReconnectAttempts:0});await probe.close();break;}
+    catch(error){if(Date.now()>=deadline)throw error;await new Promise(resolve=>setTimeout(resolve,100));}
+  }
   const a=await connection({servers:server,inboxPrefix:'_INBOX.reconnect_transcription'},3000);
   const b=await connectBroker({servers:server,inboxPrefix:'_INBOX.reconnect_providers'});
   const c=await connect({servers:server,inboxPrefix:'_INBOX.reconnect_client',maxReconnectAttempts:-1});
@@ -42,7 +53,7 @@ test('the same service connections resubscribe after an isolated broker restart'
     if(event.type==='reconnect'&&disconnected){resolve();return;}
   }reject(Error('status stream ended'));})().catch(reject);});}
   const restored=[a,b,c].map(reconnected);
-  execFileSync('/usr/bin/docker',['restart','--time','1',container],{stdio:'ignore'});
+  execFileSync('/usr/bin/docker',['restart','--time','1',fixtureId],{stdio:'ignore',timeout:10000});
   await Promise.all(restored);
   await Promise.all([a.flush(),b.flush(),c.flush()]);
   await check();
@@ -53,7 +64,7 @@ test('the same service connections resubscribe after an isolated broker restart'
   await c.flush();
   function event(nc,type){return new Promise((resolve,reject)=>{void(async()=>{for await(const item of nc.status())if(item.type===type){resolve();return;}reject(Error('status stream ended'));})().catch(reject);});}
   const down=[a,b,c].map(nc=>event(nc,'disconnect'));
-  execFileSync('/usr/bin/docker',['stop','--time','1',container],{stdio:'ignore'});
+  execFileSync('/usr/bin/docker',['stop','--time','1',fixtureId],{stdio:'ignore',timeout:10000});
   await Promise.all(down);
   const history=historySender(b,()=>providerCanSend(b));
   history.send({id:'synthetic'});
@@ -64,7 +75,7 @@ test('the same service connections resubscribe after an isolated broker restart'
   const fact={id,type_id:1201,occurred_at:'2026-10-05T01:00:00Z',scope_type:'user',scope_id:'owner',data:{requestId:id,phase:'accepted',outcome:null}};
   await assert.rejects(deps.history.append(fact),error=>error.errorCode==='HISTORY_DELIVERY_FAILED'&&error.outcome==='not_started');
   const up=[a,b,c].map(nc=>event(nc,'reconnect'));
-  execFileSync('/usr/bin/docker',['start',container],{stdio:'ignore'});
+  execFileSync('/usr/bin/docker',['start',fixtureId],{stdio:'ignore',timeout:10000});
   await Promise.all(up);
   await Promise.all([a.flush(),b.flush(),c.flush()]);
   await new Promise(resolve=>setTimeout(resolve,200));
@@ -73,7 +84,7 @@ test('the same service connections resubscribe after an isolated broker restart'
 
   const monitor=monitorBroker(b);
   const downAgain=event(b,'disconnect');
-  execFileSync('/usr/bin/docker',['stop','--time','1',container],{stdio:'ignore'});
+  execFileSync('/usr/bin/docker',['stop','--time','1',fixtureId],{stdio:'ignore',timeout:10000});
   await downAgain;
   monitor.beginShutdown();
   await providers.stop();

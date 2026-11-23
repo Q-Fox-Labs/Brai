@@ -53,3 +53,32 @@ jobs:
       - name: Build, check and package active components
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: node deploy/components/cli.mjs run
+
+  nats-reconnect:
+    name: NATS reconnect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build the affected services
+        run: |
+          npm run build --workspace=@brai/providers
+          npm run build --workspace=@brai/transcription
+      - name: Verify recovery after a broker restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="brai-reconnect-fixture-$(openssl rand -hex 16)"
+          trap 'docker rm -f "$fixture" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$fixture" --label brai.test.fixture=nats-reconnect -p 127.0.0.1::4222 nats:2.15.0 >/dev/null
+          port="$(docker port "$fixture" 4222/tcp)"
+          export BRAI_RECONNECT_FIXTURE_CONTAINER="$fixture"
+          export BRAI_RECONNECT_FIXTURE_NATS="nats://${port}"
+          node --test services/transcription/tests/integration/nats-reconnect.test.mjs
