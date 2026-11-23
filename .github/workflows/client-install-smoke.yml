@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: stock-prod-clean-install
     env:
-      STOCK_ADMIN_SHA: 639f8a3a5cdf284ca238347f2d0f434770949c4a
+      STOCK_ADMIN_SHA: bd2703dafae083857a87bd8c6f6b63512d6025a1
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -51,6 +51,7 @@ jobs:
           test "$RUNNER_OS" = Linux
           printf 'CPU cores: %s\n' "$(nproc)"
           df -h /
+          sudo setfacl --remove-default -- /opt
           sudo chmod go-w /opt
           conflicting=()
           for package in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; do
