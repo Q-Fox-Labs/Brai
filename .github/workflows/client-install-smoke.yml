@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: d6f1798c9b235b781939c286437ebbe4f923ec6f7fe48019caecd5967c0db1db
+      STOCK_PATCH_SHA256: 77c4bf2f1029fb9ce2b4ae517084b8181b1a4e1f56b31653b74aa230a082597c
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -188,6 +188,8 @@ jobs:
                 {
                   cat "$work/ansible.log"
                   if [[ -f "$work/verify.log" ]]; then cat "$work/verify.log"; fi
+                  printf '\n--- COMPOSE SERVICE STATE ---\n'
+                  sudo -n docker ps --all --format '{{.Names}} {{.Status}}' || true
                   printf '\n--- HERMES SERVICE DIAGNOSTICS ---\n'
                   for unit in brai-hermes-production-{codex-bridge,embeddings,memos,browser,intake}.service; do
                     sudo -n systemctl show "$unit" --property=Id,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts || true
