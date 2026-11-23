@@ -182,7 +182,7 @@ for _name in ('gateway', 'agent', 'run_agent'):
             return value
         def item(ident, thread=11):
             return Update.de_json({'update_id': ident, 'message': {'message_id': ident, 'date': 1,
-                'message_thread_id': thread, 'chat': {'id': 123, 'type': 'private'},
+                'message_thread_id': thread, 'is_topic_message': True, 'chat': {'id': 123, 'type': 'private'},
                 'from': {'id': 123, 'is_bot': False, 'first_name': 'Fixture'},
                 'text': 'Reply with SYNTHETIC_OK.'}}, bot)
         async def consume_batch(event, ident):
