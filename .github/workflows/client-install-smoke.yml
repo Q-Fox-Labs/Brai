@@ -1,0 +1,77 @@
+# ABOUTME: Runs the unmodified client PROD playbook on a fresh GitHub-hosted Ubuntu.
+# ABOUTME: Passes the stock manifest and bounded test credentials as protected Ansible input.
+name: Stock PROD clean install
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  install:
+    if: github.repository == 'Q-Fox-Labs/Brai' && github.ref == 'refs/heads/feature/stock-prod-clean-20261123'
+    runs-on: ubuntu-24.04
+    environment: stock-prod-clean-install
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Q-Fox-Labs/Q-Server
+          ssh-key: ${{ secrets.STOCK_PROD_ADMIN_READ_KEY }}
+          ref: da1762ee80ac4a42ca2afa8a5369e5b9ca577ee8
+          persist-credentials: false
+      - name: Prepare Ubuntu for the documented client bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(git rev-parse HEAD)" = da1762ee80ac4a42ca2afa8a5369e5b9ca577ee8
+          printf 'CPU cores: %s\n' "$(nproc)"
+          df -h /
+          sudo chmod go-w /opt
+          conflicting=()
+          for package in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; do
+            if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null)" == installed ]]; then
+              conflicting+=("$package")
+            fi
+          done
+          if (("${#conflicting[@]}")); then
+            sudo apt-get purge -y "${conflicting[@]}"
+          fi
+      - name: Run the stock client PROD installer
+        shell: bash
+        env:
+          INPUT_PART_1: ${{ secrets.STOCK_PROD_INPUT_PART_1 }}
+          INPUT_PART_2: ${{ secrets.STOCK_PROD_INPUT_PART_2 }}
+          INPUT_PART_3: ${{ secrets.STOCK_PROD_INPUT_PART_3 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work=$(mktemp -d "$RUNNER_TEMP/stock-prod.XXXXXXXX")
+          report() {
+            local code=$?
+            trap - EXIT
+            if ((code)) && [[ -f "$work/ansible.log" ]]; then
+              awk '/^TASK \[/ { task=$0 } END { if (task) print task }' "$work/ansible.log"
+            fi
+            rm -rf -- "$work"
+            exit "$code"
+          }
+          trap report EXIT
+          test -n "$INPUT_PART_1"
+          printf '%s' "$INPUT_PART_1$INPUT_PART_2$INPUT_PART_3" | base64 --decode | gzip --decompress > "$work/inputs.yml"
+          unset INPUT_PART_1 INPUT_PART_2 INPUT_PART_3
+          printf '[managed]\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3\n' > "$work/hosts.ini"
+          cd ansible
+          sudo -n /bin/bash -c '
+            umask 022
+            export ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true
+            exec "$@"
+          ' bash "$(command -v ansible-playbook)" -i "$work/hosts.ini" client/install.yml \
+            --extra-vars "@$work/inputs.yml" > "$work/ansible.log" 2>&1
+          sudo test -f /var/lib/brai-install/completed.json
+          sudo /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
+            --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
+            > "$work/verify.log" 2>&1
+          echo 'Stock PROD install and independent verify passed.'
