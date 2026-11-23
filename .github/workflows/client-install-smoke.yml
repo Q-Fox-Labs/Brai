@@ -61,7 +61,35 @@ jobs:
           if (("${#conflicting[@]}")); then
             sudo apt-get purge -y "${conflicting[@]}"
           fi
+      - name: Reproduce the stock Chrome role without protected inputs
+        if: github.event.head_commit.message == 'Probe native Chrome prerequisites'
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe=$(mktemp -d "$RUNNER_TEMP/stock-chrome.XXXXXXXX")
+          trap 'rm -rf -- "$probe"' EXIT
+          cat >"$probe/probe.yml" <<'YAML'
+          - hosts: localhost
+            gather_facts: false
+            vars:
+              brai_native_chrome_root: /opt/agent-browser-tools/chrome/154.0.8037.92/chrome-linux64
+            tasks:
+              - ansible.builtin.include_role:
+                  name: brai_install
+                  tasks_from: native_chrome
+          YAML
+          cd ansible
+          stat -c '%u:%g %a %n' / /opt /etc /var /var/cache
+          sudo -n /bin/bash -c '
+            umask 022
+            export ANSIBLE_ROLES_PATH="$1"
+            shift
+            exec "$@"
+          ' bash "$PWD/client/roles" "$RUNNER_TEMP/stock-ansible/bin/ansible-playbook" \
+            -i localhost, -c local "$probe/probe.yml"
       - name: Run the stock client PROD installer
+        if: github.event.head_commit.message != 'Probe native Chrome prerequisites'
+        id: installer
         shell: bash
         env:
           INPUT_PART_1: ${{ secrets.STOCK_PROD_INPUT_PART_1 }}
@@ -71,13 +99,51 @@ jobs:
           set -euo pipefail
           umask 077
           work=$(mktemp -d "$RUNNER_TEMP/stock-prod.XXXXXXXX")
+          cat > "$work/diagnostics-recipient.pem" <<'PEM'
+          -----BEGIN CERTIFICATE-----
+          MIIEMzCCApugAwIBAgIUXzoCziSDzWavaXp0jcDdBzNbfTswDQYJKoZIhvcNAQEL
+          BQAwKTEnMCUGA1UEAwweQnJhaSBjbGVhbiBpbnN0YWxsIGRpYWdub3N0aWNzMB4X
+          DTI2MTEyMzE1NTc0OFoXDTI2MTIyMzE1NTc0OFowKTEnMCUGA1UEAwweQnJhaSBj
+          bGVhbiBpbnN0YWxsIGRpYWdub3N0aWNzMIIBojANBgkqhkiG9w0BAQEFAAOCAY8A
+          MIIBigKCAYEA4aA2i5PW6e1gT2B71G4NAoNoFXW0v2sPDfki67Qm/GdkNkFIXwHB
+          JiG/prEdrgtkUiENmscGzOqtHHatNfO5If827DQbg1glESBHBN3IlUjKicIBKbP6
+          X6o/YJkB8EGCYDjDBj8widW+SFYjPpk7SEQfrKf0n13rQ2E1Qlm5GaVe9KrqGaHb
+          xfeFe9qIAlKQ70hL0vJWOpxU3+BW0WjWVs+dsw62btWyxJdRBc05m31Swuemlp/l
+          k86HzTz2ZjgQkYxYs9wEYs8pFDL2tVtHmy1/INuEgyQcBKAdSJ0ayCMWAo5ESm/6
+          qEkTpQXRcotdOZHQNvWF5xyXTpR7EhW77AJGuYlYsLeOTT6iCjvzgx4GckvIWv+p
+          NwCh8OsBx3oLtrxU44ATgCc5ROr36UfjyZwqkUISNkmNuJyG1DNucwPMrI+sOK0x
+          UAToVJYX/8mHecJ1DdizPVIdXOXeWQG8WwOBy4SDcqcGE9FC18qVCAShnM31WoYI
+          AXsLWq89U4WRAgMBAAGjUzBRMB0GA1UdDgQWBBQc9pJZf8BxIgVWEslZsSLSS0bi
+          9TAfBgNVHSMEGDAWgBQc9pJZf8BxIgVWEslZsSLSS0bi9TAPBgNVHRMBAf8EBTAD
+          AQH/MA0GCSqGSIb3DQEBCwUAA4IBgQDRuiKV3Suqq/EnF4zyuiHA2ndjMKGJa/xM
+          J1N+Gghf+SupvSZjZFE7/f+1zXVrtUGqFwKiIdxEO7/Ggt/0h6hM91daO2tEzO1Y
+          d2wNLfWyPuhmMJs8ybJajWn9Gr5f0chjSpOuJmhBh1Vu2TvoGuwmggG4li1LLnm7
+          ZNi0jLgrniRhKVIW9x86AspMjxmfMYVjcIo3DY7/BkxtyVL+2/rcow1os0keOBNy
+          xWVW5bVHbEOj7W6PmCkCYxTT9RyhGEj1IjExJVHM7MIEKUmYxfJUmbByQ/fZPbwY
+          aCHWQvKyr8r6Jp8u0DGL8MroGqZOgJzYfPaJxdKY2DQk3pccsAgUaFTDsvb/+nzX
+          rAghWONtUt23NsYINyV26QM0Fk4q4nM5/GFISJXzHPA8FEkAXFjMB+K38eyfV3dE
+          Cdn+bl75eosgYdfSxGg04/xAwy6b+emLw8w1enn0y4Jr43ajlAjR41geJucHP8IQ
+          tYKwCEknzJJs1fN/+1PJrzbPMeEoH6k=
+          -----END CERTIFICATE-----
+          PEM
           report() {
             local code=$?
             trap - EXIT
-            if ((code)) && [[ -f "$work/ansible.log" ]]; then
-              awk '/^TASK \[/ { task=$0 } END { if (task) print task }' "$work/ansible.log"
+            if ((code)); then
               if sudo -n test -f /var/lib/brai-install/owner.json; then
                 echo 'Installer accepted the manifest and protected inputs.'
+              fi
+              if [[ -s "$work/ansible.log" ]]; then
+                {
+                  cat "$work/ansible.log"
+                  if [[ -f "$work/verify.log" ]]; then cat "$work/verify.log"; fi
+                } > "$work/failure.log"
+                if ! openssl cms -encrypt -aes-256-gcm -binary -in "$work/failure.log" \
+                  -outform DER -out "$RUNNER_TEMP/stock-install-failure.cms" \
+                  "$work/diagnostics-recipient.pem"; then
+                  rm -f "$RUNNER_TEMP/stock-install-failure.cms"
+                  echo 'Failed to preserve encrypted diagnostics.'
+                fi
               fi
             fi
             rm -rf -- "$work"
@@ -91,15 +157,34 @@ jobs:
           cd ansible
           sudo -n /bin/bash -c '
             umask 022
-            export ANSIBLE_NOCOLOR=1 ANSIBLE_NO_LOG=true
+            export ANSIBLE_NOCOLOR=1 PYTHONUNBUFFERED=1
             export ANSIBLE_COLLECTIONS_PATH="$1"
             shift
             exec "$@"
           ' bash "$RUNNER_TEMP/stock-collections" "$RUNNER_TEMP/stock-ansible/bin/ansible-playbook" \
             -i "$work/hosts.ini" client/install.yml \
-            --extra-vars "@$work/inputs.yml" > "$work/ansible.log" 2>&1
+            --extra-vars "@$work/inputs.yml" 2>&1 | tee "$work/ansible.log" | python3 -u -c '
+          import re, sys
+          from pathlib import Path
+          names = {
+              match.group(1).strip().strip(chr(39) + chr(34))
+              for file in Path(".").rglob("*.yml")
+              for match in re.finditer(r"^\s*-\s+name:\s*([^\n{}]+)$", file.read_text(errors="replace"), re.M)
+          }
+          for line in sys.stdin:
+              match = re.fullmatch(r"TASK \[([^\[\]\n]+)\] \*+\n", line)
+              if match and match.group(1).rsplit(" : ", 1)[-1] in names:
+                  print(line, end="")
+          '
           sudo test -f /var/lib/brai-install/completed.json
           sudo /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
             --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
             > "$work/verify.log" 2>&1
           echo 'Stock PROD install and independent verify passed.'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure() && steps.installer.outcome == 'failure'
+        with:
+          name: stock-install-failure-encrypted
+          path: ${{ runner.temp }}/stock-install-failure.cms
+          if-no-files-found: ignore
+          retention-days: 1
