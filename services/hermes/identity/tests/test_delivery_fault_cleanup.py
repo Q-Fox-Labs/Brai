@@ -7,7 +7,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from identity.tests.delivery_faults import eventually, run
+from identity.tests.delivery_faults import eventually, run, without_worker_deadline
 
 
 class DeliveryFaultCleanupTests(unittest.TestCase):
@@ -54,6 +54,14 @@ class DeliveryFaultCleanupTests(unittest.TestCase):
             self.assertFalse(result['cleaned'])
             self.assertEqual(result['cleanupErrors'], [{'type': 'OSError', 'code': 'CLEANUP_FAILED'}])
             self.assertEqual(list(root.iterdir()), [Path(result['fixtureRoot'])])
+
+    def test_worker_deadline_removal_is_exact_and_preserves_other_options(self):
+        args = ['systemd-run', '--property=RuntimeMaxSec=420', '--property=MemoryMax=4G']
+        self.assertEqual(without_worker_deadline(args), ['systemd-run', '--property=MemoryMax=4G'])
+        self.assertIn('--property=RuntimeMaxSec=420', args)
+        for invalid in ([], args + ['--property=RuntimeMaxSec=420']):
+            with self.assertRaisesRegex(ValueError, 'FIXTURE_RUNTIME_LIMIT_CHANGED'):
+                without_worker_deadline(invalid)
 
     def test_wait_without_deadline_still_detects_a_dead_worker(self):
         with self.assertRaisesRegex(ValueError, 'WORKER_EXITED'):
