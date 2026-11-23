@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createChatHttp} from '../dist/chat-http.js';
+import {readiness} from '../dist/readiness.js';
 
 test('readiness отражает состояние и требует действующий bearer',async t=>{
   let ready=false;
@@ -34,4 +35,37 @@ test('readiness не занимает пользовательские слот�
   await full;
   try{const result=await fetch(`${base}/internal/readiness`,{headers});assert.equal(result.status,200);assert.deepEqual(await result.json(),{ready:true});}
   finally{release();await Promise.all(requests);}
+});
+
+test('readiness reports unavailable if NATS disconnects while proxy readiness is pending',async t=>{
+  let connected=true, release, notify;
+  const pending=new Promise(resolve=>{release=resolve;});
+  const entered=new Promise(resolve=>{notify=resolve;});
+  const check=readiness({connected:()=>connected,servicesReady:()=>true,storage:async()=>{},
+    proxy:async()=>{notify();await pending;return true;}});
+  const token='synthetic-token-with-at-least-32-characters';
+  const server=createChatHttp({},[{token,ownerId:'synthetic-owner',connectionId:'synthetic'}],check);
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const request=fetch(`http://127.0.0.1:${server.address().port}/internal/readiness`,
+    {headers:{authorization:`Bearer ${token}`}});
+  await entered;
+  connected=false;
+  release();
+  const response=await request;
+  assert.equal(response.status,503);
+  assert.deepEqual(await response.json(),{ready:false});
+});
+
+test('readiness reports unavailable if service readiness changes during dependency checks',async()=>{
+  let serviceReady=true, release, notify;
+  const pending=new Promise(resolve=>{release=resolve;});
+  const entered=new Promise(resolve=>{notify=resolve;});
+  const check=readiness({connected:()=>true,servicesReady:()=>serviceReady,storage:async()=>{},
+    proxy:async()=>{notify();await pending;return true;}});
+  const result=check();
+  await entered;
+  serviceReady=false;
+  release();
+  assert.equal(await result,false);
 });

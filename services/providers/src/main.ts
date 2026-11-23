@@ -11,6 +11,7 @@ import { postgresStore } from "./postgres.js";
 import { createOperations } from "./operations.js";
 import { createObservation, historySender, OBSERVATION_LIMITS } from "./observation.js";
 import { postgresObservation } from "./observation-postgres.js";
+import { readiness } from "./readiness.js";
 const { NATS_URL, LITELLM_URL, PROVIDERS_DATABASE_URL, LITELLM_API_KEY }=process.env;
 if(!NATS_URL || !LITELLM_URL)throw new Error("MISSING_RUNTIME_CONFIGURATION");
 const store=PROVIDERS_DATABASE_URL?postgresStore(PROVIDERS_DATABASE_URL):undefined;
@@ -26,14 +27,16 @@ await operations?.resumeOutputs();
 const v0=process.env.PROVIDERS_V0_ENABLED==="0"?undefined:await registerProviders(nc,liteLLMPort(LITELLM_URL,guard,LITELLM_API_KEY));
 await observation?.tick();
 const v1=operations?await registerProvidersV1(nc,operations,{inboxPrefix:process.env.PROVIDERS_INBOX_PREFIX,diagnostics:()=>observation!.status(),connected:broker.ready}):undefined;
-const http=process.env.PROVIDERS_HTTP_PORT?createChatHttp(operations??(()=>{throw new Error('HTTP_REQUIRES_PG');})(),[{token:process.env.PROVIDERS_HTTP_TOKEN??'',ownerId:process.env.PROVIDERS_HTTP_OWNER_ID??'',connectionId:process.env.PROVIDERS_HTTP_CONNECTION_ID??''}],async()=>{
-  if(!broker.ready()||!operations?.status().ready||observation?.status().dependencies.storage!=='ready')return false;
-  try {const [,proxy]=await Promise.all([store!.ready(),fetch(new URL('/health/liveliness',LITELLM_URL),{signal:AbortSignal.timeout(5000)})]);return proxy.ok;} catch {return false;}
-}):undefined;
+let stopping=false;
+const http=process.env.PROVIDERS_HTTP_PORT?createChatHttp(operations??(()=>{throw new Error('HTTP_REQUIRES_PG');})(),[{token:process.env.PROVIDERS_HTTP_TOKEN??'',ownerId:process.env.PROVIDERS_HTTP_OWNER_ID??'',connectionId:process.env.PROVIDERS_HTTP_CONNECTION_ID??''}],readiness({
+  connected:()=>!stopping&&broker.ready(),
+  servicesReady:()=>Boolean(operations?.status().ready&&observation?.status().dependencies.storage==='ready'),
+  storage:()=>store!.ready(),
+  proxy:async()=>(await fetch(new URL('/health/liveliness',LITELLM_URL),{signal:AbortSignal.timeout(5000)})).ok,
+})):undefined;
 if(http){const port=Number(process.env.PROVIDERS_HTTP_PORT);if(!Number.isInteger(port)||port<1||port>65535)throw new Error('INVALID_HTTP_CONFIGURATION');await new Promise<void>((resolve,reject)=>{http.once('error',reject);http.listen(port,process.env.PROVIDERS_HTTP_HOST??'127.0.0.1',resolve);});}
 const observe=observation?setInterval(()=>{void observation.tick();},OBSERVATION_LIMITS.pollMs):undefined;observe?.unref();
 const sweep=store?setInterval(()=>{void store.sweep(Date.now()).catch(()=>{console.error('{"code":"STORAGE_UNAVAILABLE"}');});},60000):undefined;sweep?.unref();
-let stopping=false;
 for(const signal of ["SIGTERM","SIGINT"] as const)process.once(signal,()=>{
   if(stopping)return;stopping=true;broker.beginShutdown();
   const stopHttp=http?new Promise<void>(resolve=>http.close(()=>resolve())):undefined;

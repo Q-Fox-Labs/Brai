@@ -49,6 +49,7 @@
       "services/providers/src/observation.ts",
       "services/providers/src/operations.ts",
       "services/providers/src/postgres.ts",
+      "services/providers/src/readiness.ts",
       "services/providers/src/schema.ts",
       "services/providers/src/v1-schema.ts",
       "services/providers/litellm.yaml",
