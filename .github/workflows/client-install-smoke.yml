@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: stock-prod-clean-install
     env:
-      STOCK_ADMIN_SHA: 4cb42a77193b6eba03e57a3e0f3d97168e529582
+      STOCK_ADMIN_SHA: 764f6aa34b64e52886b5354b248ca6e5247c7aeb
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -195,7 +195,8 @@ jobs:
                   print(line, end="")
           '
           sudo test -f /var/lib/brai-install/completed.json
-          sudo /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
+          sudo -n /usr/bin/env BRAI_INSTALL_CAPTURE_FAILURE=1 \
+            /usr/bin/python3 -B /var/lib/brai-install/install_server.py verify \
             --manifest /var/lib/brai-install/baseline.json --inputs /var/lib/brai-install/inputs.json \
             > "$work/verify.log" 2>&1
           echo 'Stock PROD install and independent verify passed.'
