@@ -21,6 +21,7 @@ sample_disk() {
 
 report() {
   local code=$?
+  local last_task chrome_root chrome_archive sha
   trap - EXIT
   kill "$sampler" 2>/dev/null || true
   wait "$sampler" 2>/dev/null || true
@@ -33,7 +34,22 @@ report() {
     }'
   if ((code)); then
     if [[ -f "$run_dir/ansible.log" ]]; then
-      awk '/^TASK \[/ { last = $0 } END { if (last) print "Last Ansible task: " last }' "$run_dir/ansible.log"
+      last_task=$(awk '/^TASK \[/ { last = $0 } END { print last }' "$run_dir/ansible.log")
+      if [[ -n "$last_task" ]]; then
+        printf 'Last Ansible task: %s\n' "$last_task"
+      fi
+      if [[ "$last_task" == *'Verify archive and all installed Chrome bytes'* ]]; then
+        for chrome_root in /opt/brai-hermes-browser/chrome-linux64 /opt/agent-browser-tools/chrome/154.0.8037.92/chrome-linux64; do
+          if [[ -d "$chrome_root" ]]; then
+            chrome_archive=/var/cache/brai-hermes-chrome-154.0.8037.92.zip
+            sha=$(printf '%s' "$chrome_root" | sha256sum | cut -d' ' -f1)
+            sudo namei -l "$chrome_root" "$chrome_archive" /etc/brai-hermes/chrome-catalog || true
+            sudo /usr/bin/python3 -B /usr/local/lib/brai-hermes/native_chrome.py \
+              --root "$chrome_root" --archive "$chrome_archive" \
+              --receipt "/etc/brai-hermes/chrome-catalog/$sha.json" || true
+          fi
+        done
+      fi
     fi
     sudo docker ps -a --format '{{.Names}}  {{.Status}}' 2>/dev/null || true
   fi
