@@ -117,7 +117,7 @@ def handle(method, params):
                 {'name': 'fetch_file', 'description': 'Получить собственный опубликованный файл.',
                  'inputSchema': {'type':'object', 'properties':{'artifactId':{'type':'string'}}, 'required':['artifactId'], 'additionalProperties':False}}]
         client_tools.append({'name': TOPIC_RENAME,
-                'description': 'По явной просьбе переименовать текущую тему Telegram. Передай готовое имя в title или описание в text, чтобы Диалоги придумали имя.',
+                'description': 'По явной просьбе переименовать текущую тему Telegram. Если пользователь указал точное имя, передай его в title. Если он просит придумать имя, передай предмет беседы в text для генерации в Диалогах.',
                 'inputSchema': {'type':'object', 'properties':{'title':{'type':'string','minLength':1,'maxLength':128},
                     'text':{'type':'string','minLength':1}}, 'oneOf':[{'required':['title']},{'required':['text']}],
                     'additionalProperties':False}})
