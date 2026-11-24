@@ -211,6 +211,8 @@ class Worker:
             from .native_policy import revalidate_startup
             revalidate_startup()
         if managed_stt:
+            from .native_policy import install_telegram_audio_input
+            install_telegram_audio_input(self.runner, Platform.TELEGRAM)
             self.runner.config.stt_enabled = True
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
@@ -1005,7 +1007,7 @@ class Worker:
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise RpcError(-32602, 'Invalid source')
         allowed = {'text', 'user_id', 'user_name', 'message_id', 'media_urls', 'media_types', 'media_text_inlined', 'reply_to_message_id', 'reply_to_text', 'timestamp', 'reply_expected'}
-        if set(event) - allowed - {'source', 'message_type', 'identity_inputs', 'delivery_scope', 'chat_generation'}:
+        if set(event) - allowed - {'source', 'message_type', 'identity_inputs', 'delivery_scope', 'chat_generation', 'voice_retry'}:
             raise RpcError(-32602, 'Unsupported event fields')
         fields = {key: event[key] for key in allowed if key in event}
         if 'timestamp' in fields:
@@ -1038,6 +1040,10 @@ class Worker:
                     or any(key in item and item[key] is not None and not isinstance(item[key], str) for key in ('caption', 'groupId'))):
                 raise RpcError(-32602, 'Invalid input file')
         message._brai_identity_inputs = inputs
+        if 'voice_retry' in event:
+            if event['voice_retry'] is not True or message.message_type != MessageType.VOICE or len(inputs) != 1:
+                raise RpcError(-32602, 'Invalid voice retry')
+            message._brai_voice_retry = True
         if not isinstance(message.message_id, str) or not message.message_id:
             raise RpcError(-32602, 'Message ID required')
         scope_id = event.get('delivery_scope')

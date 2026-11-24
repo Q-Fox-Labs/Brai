@@ -19,6 +19,27 @@ class TransportTest(unittest.TestCase):
         self.a={'state':'known','profile':{'uid':1001,'profileId':'11111111-1111-4111-8111-111111111111',
             'userId':'a','telegramId':'42','authorTelegramId':'42','role':'user','generation':1}}
 
+    def test_voice_retry_preserves_original_and_is_idempotent(self):
+        raw = self.update.to_dict()
+        raw['message'].pop('text')
+        raw['message']['voice'] = {'duration': 516, 'file_id': 'original-file', 'file_unique_id': 'original-media'}
+        voice = Update.de_json(raw, self.update.get_bot())
+        self.assertEqual(self.inbox.capture_batch([(voice, self.a)], 123), ['captured'])
+        with self.assertRaisesRegex(ValueError, 'VOICE_RETRY_SOURCE_UNAVAILABLE'):
+            self.inbox.retry_voice(123, 7, 'invalid')
+        self.inbox.transition(123, 7, 'captured', 'handing_off')
+        self.inbox.transition(123, 7, 'handing_off', 'accepted')
+        old = self.inbox.observe(123, 7)
+        with self.assertRaisesRegex(ValueError, 'VOICE_RETRY_SOURCE_CHANGED'):
+            self.inbox.retry_voice(123, 7, 'invalid')
+        first = self.inbox.retry_voice(123, 7, old['digest'])
+        self.assertEqual(first, self.inbox.retry_voice(123, 7, old['digest']))
+        self.assertEqual(first['state'], 'captured')
+        self.assertEqual(self.inbox.observe(123, 7), old)
+        self.assertTrue(self.inbox.is_voice_retry(123, first['attempt']))
+        self.assertFalse(self.inbox.is_voice_retry(123, 7))
+        self.assertEqual(len(self.inbox.pending()), 1)
+
     def test_owner_rebinding_after_commit_blocks_original(self):
         self.assertEqual(self.inbox.capture_batch([(self.update,self.a)],123),['captured'])
         other={'state':'known','profile':{**self.a['profile'],'uid':1002,

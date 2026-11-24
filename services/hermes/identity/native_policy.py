@@ -89,9 +89,42 @@ def install_managed_stt(path):
     if (stt.get('enabled') is True and stt.get('provider') == 'brai_local_ai'
             and provider.get('type') == 'command'):
         from tools import transcription_tools
-        transcription_tools._load_stt_config = lambda: deepcopy(stt)
+        from .audio_parts import PREPARE_TIMEOUT
+        managed = deepcopy(stt)
+        # AIDEV-NOTE: Внешний idle timeout должен покрывать декодирование
+        # Дневника. Каждая часть по-прежнему имеет собственный срок invoke.
+        managed['providers']['brai_local_ai']['timeout'] = PREPARE_TIMEOUT + 20
+        transcription_tools._load_stt_config = lambda: deepcopy(managed)
         return True
     return False
+
+
+def install_telegram_audio_input(runner, telegram_platform):
+    """Направить Telegram audio и аудиодокументы в штатный STT личного worker."""
+    classify = runner._classify_inbound_media
+    pending_paths = runner._pending_event_audio_paths
+
+    def from_telegram(event):
+        return getattr(getattr(event, 'source', None), 'platform', None) == telegram_platform
+
+    def classify_media(event, prepared):
+        images, voice, audio, videos = classify(event, prepared)
+        if not from_telegram(event):
+            return images, voice, audio, videos
+        original_audio = getattr(event, '_brai_audio_paths', set())
+        candidates = set(voice) | set(audio) | original_audio
+        selected = [path for path in (event.media_urls or []) if path in candidates] if not prepared else []
+        return images, selected, [], [path for path in videos if path not in original_audio]
+
+    def pending_media(event):
+        if from_telegram(event):
+            return classify_media(event, False)[1]
+        return pending_paths(event)
+
+    # AIDEV-NOTE: Native foreground классифицирует AUDIO/DOCUMENT как файлы,
+    # а очередь использует другой helper. Оба пути должны выбрать один STT.
+    runner._classify_inbound_media = classify_media
+    runner._pending_event_audio_paths = pending_media
 
 
 def protect_config_readers(config, accepted):
