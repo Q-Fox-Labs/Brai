@@ -69,6 +69,10 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self.adapters = {}
                 self._running = False
                 self.exit_code = None
+            def _classify_inbound_media(self, event, prepared):
+                return [], [], [], []
+            def _pending_event_audio_paths(self, event):
+                return []
             async def stop(self):
                 outer.calls.append('stop')
                 self._running = False
