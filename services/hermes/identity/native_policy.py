@@ -99,6 +99,31 @@ def install_managed_stt(path):
     return False
 
 
+def install_telegram_audio_input(runner, telegram_platform):
+    """Направить Telegram audio и аудиодокументы в штатный STT личного worker."""
+    classify = runner._classify_inbound_media
+    pending_paths = runner._pending_event_audio_paths
+
+    def from_telegram(event):
+        return getattr(getattr(event, 'source', None), 'platform', None) == telegram_platform
+
+    def classify_media(event, prepared):
+        images, voice, audio, videos = classify(event, prepared)
+        if not from_telegram(event):
+            return images, voice, audio, videos
+        return images, (voice + audio if not prepared else voice), [], videos
+
+    def pending_media(event):
+        if from_telegram(event):
+            return classify_media(event, False)[1]
+        return pending_paths(event)
+
+    # AIDEV-NOTE: Native foreground классифицирует AUDIO/DOCUMENT как файлы,
+    # а очередь использует другой helper. Оба пути должны выбрать один STT.
+    runner._classify_inbound_media = classify_media
+    runner._pending_event_audio_paths = pending_media
+
+
 def protect_config_readers(config, accepted):
     """Закрепить обычные и raw readers SDK за одним доверенным guest/staged config."""
     for name in ('load_config', 'load_config_readonly', 'read_raw_config',

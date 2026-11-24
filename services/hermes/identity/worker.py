@@ -208,6 +208,8 @@ class Worker:
             from .native_policy import revalidate_startup
             revalidate_startup()
         if managed_stt:
+            from .native_policy import install_telegram_audio_input
+            install_telegram_audio_input(self.runner, Platform.TELEGRAM)
             self.runner.config.stt_enabled = True
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')

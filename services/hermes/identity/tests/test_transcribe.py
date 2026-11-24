@@ -232,6 +232,23 @@ class ManagedVoiceSettingsTests(unittest.TestCase):
             loaded['enabled'] = False
             self.assertTrue(tools.transcription_tools._load_stt_config()['enabled'])
 
+    def test_native_foreground_and_pending_paths_accept_audio_documents(self):
+        from types import SimpleNamespace
+        from identity.native_policy import install_telegram_audio_input
+
+        def classify(event, prepared):
+            return ['photo'], [], ['track'], ['video']
+
+        runner = SimpleNamespace(_classify_inbound_media=classify, _pending_event_audio_paths=lambda event: [])
+        install_telegram_audio_input(runner, 'telegram')
+        telegram = SimpleNamespace(source=SimpleNamespace(platform='telegram'))
+        other = SimpleNamespace(source=SimpleNamespace(platform='other'))
+        self.assertEqual(runner._classify_inbound_media(telegram, False), (['photo'], ['track'], [], ['video']))
+        self.assertEqual(runner._classify_inbound_media(telegram, True), (['photo'], [], [], ['video']))
+        self.assertEqual(runner._pending_event_audio_paths(telegram), ['track'])
+        self.assertEqual(runner._classify_inbound_media(other, False), classify(other, False))
+        self.assertEqual(runner._pending_event_audio_paths(other), [])
+
     def test_unconfigured_profile_does_not_enable_managed_stt(self):
         from unittest.mock import patch
         from identity import native_policy
