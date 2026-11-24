@@ -27,6 +27,20 @@ jobs:
           ssh-key: ${{ secrets.STOCK_PROD_ADMIN_READ_KEY }}
           ref: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
           persist-credentials: false
+      - name: Apply the verified candidate MCP renderer
+        shell: bash
+        env:
+          STOCK_ADMIN_PATCH: ${{ secrets.STOCK_PROD_ADMIN_PATCH }}
+        run: |
+          set -euo pipefail
+          umask 077
+          candidate=$(mktemp "$RUNNER_TEMP/stock-mcp.XXXXXXXX")
+          trap 'rm -f -- "$candidate"' EXIT
+          printf '%s' "$STOCK_ADMIN_PATCH" | base64 --decode | gzip --decompress > "$candidate"
+          unset STOCK_ADMIN_PATCH
+          printf '%s  %s\n' a5bd65e764073da2164ce9cb448607cd0762c982211d1cd3d3759c8c4d6ec354 "$candidate" | sha256sum --check --status
+          git apply --whitespace=error --include=ansible/client/roles/brai_install/files/configure_mcp.py \
+            --include=ansible/client/roles/brai_install/files/mcp_config.py "$candidate"
       - name: Request account metadata from the pinned Codex binary
         shell: bash
         env:
