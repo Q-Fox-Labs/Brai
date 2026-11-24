@@ -31,7 +31,9 @@ def audio_info(source):
         metadata = json.loads(proof.stdout)
         names = set(metadata['format']['format_name'].split(','))
         raw_duration = metadata['format'].get('duration')
-        duration = float(raw_duration) if raw_duration is not None and not names & ESTIMATED_CONTAINERS else None
+        duration = None
+        if raw_duration not in (None, 'N/A') and not names & ESTIMATED_CONTAINERS:
+            duration = float(raw_duration)
         streams = metadata['streams']
         audio_count = sum(stream['codec_type'] == 'audio' for stream in streams)
         if not names or not names <= set(AUDIO_CONTAINERS.split(',')) or audio_count != 1:

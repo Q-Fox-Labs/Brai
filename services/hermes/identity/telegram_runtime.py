@@ -767,13 +767,7 @@ class Resolver:
             raise PermissionError('Only private Telegram chats are supported')
         uid = profile['uid']
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
-        turn = self.turns.get(uid)
-        if turn and turn['route'] != route:
-            raise PermissionError('Another conversation is active')
-        if not turn:
-            turn = {'id': uuid.uuid4().hex, 'route': route}
-            self.turns[uid] = turn
-        turn['chatGeneration'] = self._chat_generation(profile, route)
+        generation = self._chat_generation(profile, route)
         voice_retry = False
         update_ids = getattr(event, '_brai_release_updates', [])
         if getattr(self, 'mirror', None) is not None and len(update_ids) == 1:
@@ -784,9 +778,17 @@ class Resolver:
                 if not await asyncio.to_thread(self.mirror.transport.is_voice_retry, bot_id, attempt):
                     raise PermissionError('VOICE_RETRY_SOURCE_CHANGED')
                 prior = await asyncio.to_thread(self.mirror.inbox.observe, profile, bot_id, attempt - VOICE_RETRY_BASE)
-                if prior['state'] != 'accepted' or prior['chat_generation'] != turn['chatGeneration']:
+                if prior['state'] != 'accepted' or prior['chat_generation'] != generation:
                     raise PermissionError('VOICE_RETRY_CONSENT_CHANGED')
+                self._chat_generation(profile, route, generation)
                 voice_retry = True
+        turn = self.turns.get(uid)
+        if turn and turn['route'] != route:
+            raise PermissionError('Another conversation is active')
+        if not turn:
+            turn = {'id': uuid.uuid4().hex, 'route': route}
+            self.turns[uid] = turn
+        turn['chatGeneration'] = generation
         route_metadata = getattr(self.runner, '_thread_metadata_for_source', None)
         turn['metadata'] = (dict(route_metadata(event.source, event.message_id) or {}) if callable(route_metadata)
                             else ({'thread_id': route[1]} if route[1] else {}))
