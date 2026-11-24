@@ -49,7 +49,7 @@ jobs:
           CODEX_HOME="$probe/home" CODEX_INSTALL_DAEMON_ONLY=1 CODEX_NON_INTERACTIVE=1 \
             /bin/bash "$probe/install.sh" --release 0.171.0 >/dev/null
           "$probe/python/bin/python" -B - "$probe" "$unit" <<'PY'
-          import base64, json, os, pwd, subprocess, sys, time
+          import base64, json, os, pwd, re, subprocess, sys, time
           from pathlib import Path
           from websockets.sync.client import unix_connect
           sys.path.insert(0, 'ansible/roles/fresh_install/files')
@@ -113,6 +113,17 @@ jobs:
           reason = next((code for pattern, code in reasons.items() if pattern in message.lower()),
                         'CODEX_ACCOUNT_EMPTY' if 'result' in result else 'CODEX_ACCOUNT_UNKNOWN_ERROR')
           status = error.get('code')
-          print(json.dumps({'reason': reason, 'rpcCode': status if type(status) is int else None}))
+          detail = {}
+          if reason == 'WORKSPACE_REQUIREMENTS_INVALID':
+              if match := re.search(r'invalid (?:non-file )?configuration (?:at .*:|at line )(\d+)(?:, column |:)(\d+)$', message):
+                  detail = {'kind': 'CONFIG_PARSE', 'line': int(match[1]), 'column': int(match[2]),
+                            'mainConfig': '/home/config.toml:' in message}
+              elif match := re.search(r'cloud config: (request timed out|authentication failed|request failed|invalid bundle|internal error)(?: \(HTTP (\d{3})\))?$', message):
+                  detail = {'kind': match[1], 'http': int(match[2]) if match[2] else None}
+              elif match := re.search(r'\(os error (\d+)\)$', message):
+                  detail = {'kind': 'OS_ERROR', 'errno': int(match[1])}
+              elif 'network policy' in message.lower():
+                  detail = {'kind': 'NET_POLICY'}
+          print(json.dumps({'reason': reason, 'rpcCode': status if type(status) is int else None, **detail}))
           sys.exit(1)
           PY
