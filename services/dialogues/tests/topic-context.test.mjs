@@ -20,6 +20,13 @@ test('свёртка перерабатывает превышение 50 ток
  }},[{dialogue_id:'dialogue',message_id:'message',text:'Исходная переписка.'}]),{code:'TOPIC_SOURCE_INVALID'});
 });
 
+test('граница свёртки беседы не становится ссылкой на исходное сообщение',async()=>{
+ const card=await summarizeTopic({async structured(){
+  return JSON.stringify({extended:'Описание',compact:'Кратко',source_indexes:[0]});
+ }},[{dialogue_id:'dialogue',message_id:'last-message',text:'Вся беседа',source_kind:'dialogue_summary'}]);
+ assert.deepEqual(card.source_refs,[]);
+});
+
 test('смена уровня карточки и вытеснение темы видны после ACK',()=>{
  const topics=Array.from({length:220},(_,i)=>({
   topic_id:'topic-'+i,title:'Тема '+i,version:'1',last_activity:new Date(i),

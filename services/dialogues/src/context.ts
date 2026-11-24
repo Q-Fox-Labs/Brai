@@ -29,12 +29,12 @@ export function contextPages(metadata:Record<string,any>,items:any[],makeCursor:
  const expanded:any[]=[];
  for(const item of items){
   if(Buffer.byteLength(JSON.stringify(envelope(item)))<=budget){expanded.push(item);continue;}
-  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='message_representation'||item.type==='turn_work'))fail('RESPONSE_ITEM_TOO_LARGE');
+  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='topic_summary'||item.type==='message_representation'||item.type==='turn_work'))fail('RESPONSE_ITEM_TOO_LARGE');
   const {text,truncated,next_offset,read_tool,...identity}=item;
   let total=0;for(const ch of text)total++;
   const info={total_chars:total,total_bytes:Buffer.byteLength(text),text_sha256:createHash('sha256').update(text,'utf8').digest('hex'),offset_unit:'unicode_codepoints',
    coverage:item.type==='dialogue_summary'?{through_message_id:item.through_message_id,through_order:item.through_order}:{message_id:item.message_id}};
-  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':item.type==='turn_work'?'turn_work_fragment':item.summary_version?'message_summary_fragment':'original_fragment';
+  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':item.type==='topic_summary'?'topic_summary_fragment':item.type==='turn_work'?'turn_work_fragment':item.summary_version?'message_summary_fragment':'original_fragment';
   const fragment=(part:string,offset:number,next:number|null)=>({...identity,...info,type:kind,representation:kind==='original_fragment'?'original_fragment':'summary_fragment',text:part,offset,next_offset:next,is_last_fragment:next===null,text_complete:offset===0&&next===null});
   const available=budget-Buffer.byteLength(JSON.stringify(envelope(fragment('',Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER))));
   if(available<6)fail('RESPONSE_ITEM_TOO_LARGE');

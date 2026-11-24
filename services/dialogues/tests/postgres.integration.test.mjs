@@ -64,6 +64,12 @@ test('PostgreSQL: обмен, контекст, история и перенос
    await operation('topic_move',{dialogue_id:'next',topic_id:topic.topic_id});
    assert.equal((await operation('topic_get',{topic_id:nextTopic})).topic_id,topic.topic_id);
    assert.equal((await operation('topic_get',{topic_id:topic.topic_id})).dialogues.length,2);
+   const third=await operation('input',{dialogue:{id:'third',channel:'synthetic'},messages:[{id:'third-in',text:'Третий тред'}]},stable);
+   const thirdTopic=third.context.items.find(item=>item.type==='topic_summary'&&item.topic_id!==topic.topic_id&&item.topic_id!==nextTopic).topic_id;
+   await operation('topic_move',{dialogue_id:'next',topic_id:thirdTopic});
+   await operation('topic_move',{dialogue_id:'initial',topic_id:thirdTopic});
+   await operation('topic_move',{dialogue_id:'initial',topic_id:null});
+   assert.equal((await operation('topic_get',{topic_id:nextTopic})).topic_id,thirdTopic);
    await operation('topic_move',{dialogue_id:'next',topic_id:null});
    assert.equal((await operation('topic_get',{topic_id:nextTopic})).topic_id,nextTopic);
    const restart=await operation('poll',{dialogue_id:'next'},{...stable,reset:true});
@@ -84,6 +90,14 @@ test('PostgreSQL: обмен, контекст, история и перенос
     return JSON.stringify({text:'Короткая проверка.'});
    }};
    const jobs=createTopicJobs(app,profile,generator);
+   const lease=await app.connect();
+   try{
+    await lease.query('SELECT pg_advisory_lock(hashtextextended($1,0))',['dialogues-topic-worker:'+profile]);
+    await assert.rejects(jobs.tick({requireIdleWorker:true}),{code:'TOPIC_WORKER_BUSY'});
+   }finally{
+    await lease.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',['dialogues-topic-worker:'+profile]);
+    lease.release();
+   }
    assert.equal(await jobs.tick(),true);
    assert.equal(await jobs.tick(),true);
    const same=await api.message(profile,{dialogue_id:dialogue.id,message_id:'big',target:'message_summary'});
@@ -91,6 +105,35 @@ test('PostgreSQL: обмен, контекст, история и перенос
    const context=await api.pull(profile,{request_id:req(),consumer_id:'worker-reader',context_instance_id:'default',format:'compact'});
    assert.equal(context.items.find(item=>item.message_id==='big').text,'Короткая проверка.');
    assert.equal(context.items.find(item=>item.type==='topic_summary').text,'Запланирована проверка.');
+  });
+
+  await t.test('группировка сначала сохраняет предложение и защищает ручной перенос',async()=>{
+   const profile='topic-grouping-fixture';
+   for(const [id,message] of [['first','Проверка выпуска PR 123'],['second','Продолжение проверки выпуска PR 123']]){
+    await api.append(profile,{request_id:req(),dialogue:{id,channel:'synthetic',title:'Проверка выпуска'},
+     messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:message}]});
+   }
+   const generator={async structured(input){
+    const data=JSON.parse(input);
+    return data.candidates?JSON.stringify({topic_id:data.candidates[0].topic_id}):
+     JSON.stringify({extended:'Проверка выпуска PR 123.',compact:'Проверка PR 123.',source_indexes:[0]});
+   }};
+   const proposed=createTopicJobs(app,profile,generator);
+   assert.equal(await proposed.tick(),true);
+   assert.equal(await proposed.tick(),true);
+   assert.equal(await proposed.tick(),true);
+   const rows=(await app.query(`SELECT dialogue_id,topic_id,proposed_topic_id FROM dialogues_live.topic_members
+    WHERE owner_id=$1 ORDER BY dialogue_id`,[profile])).rows;
+   const proposal=rows.find(row=>row.proposed_topic_id);
+   assert.ok(proposal);
+   assert.equal(new Set(rows.map(row=>row.topic_id)).size,2);
+   await api.topics.move(profile,req(),proposal.dialogue_id,proposal.proposed_topic_id);
+   await api.topics.move(profile,req(),proposal.dialogue_id,null);
+   const applied=createTopicJobs(app,profile,generator,undefined,true);
+   assert.equal(await applied.tick(),true);
+   assert.equal(await applied.tick(),true);
+   assert.equal((await app.query(`SELECT topic_id,manually_assigned FROM dialogues_live.topic_members
+    WHERE owner_id=$1 AND dialogue_id=$2`,[profile,proposal.dialogue_id])).rows[0].manually_assigned,true);
   });
 
   await t.test('архив из 1000 тем сохраняет лимит bootstrap и исторический импорт в дельте',async()=>{
@@ -124,14 +167,6 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal(items.filter(item=>item.type==='message_representation').length,20);
    assert.ok(items.reduce((sum,item)=>sum+(item.tokens??0),0)<=22000);
    assert.equal((await api.ack(profile,{request_id:req(),delivery_id:delivery,consumer_id:context.consumer_id,context_instance_id:context.context_instance_id})).acknowledged,true);
-   const changes=Array.from({length:21},(_,i)=>({
-    turn_id:'older',id:'old-'+i,role:'user',kind:'input',text:'Исторический импорт '+i,occurred_at:'1999-01-01T00:00:00Z'
-   }));
-   await api.append(profile,{request_id:req(),dialogue:{id:'dialogue-1',channel:'synthetic'},messages:changes});
-   const update=await api.pull(profile,{request_id:req(),...context});
-   assert.equal(update.summaries_mode,'updates');
-   assert.equal(update.items.filter(item=>item.message_id?.startsWith('old-')).length,21);
-   assert.equal((await api.topics.search(profile,'Запись dialogue-1')).messages[0].dialogue_id,'dialogue-1');
    const legacyReq=req(),legacy={consumer_id:'legacy-reader',context_instance_id:'default'};
    let legacyPage=await api.pull(profile,{request_id:legacyReq,...legacy});
    const legacyPages=[legacyPage];
@@ -144,6 +179,14 @@ test('PostgreSQL: обмен, контекст, история и перенос
    const sizes={legacy:measure(legacyPages),compact:measure(pages)};
    assert.ok(sizes.compact.tokens<sizes.legacy.tokens);
    console.log(JSON.stringify({fixture:'1000-topics',...sizes}));
+   const changes=Array.from({length:21},(_,i)=>({
+    turn_id:'older',id:'old-'+i,role:'user',kind:'input',text:'Исторический импорт '+i,occurred_at:'1999-01-01T00:00:00Z'
+   }));
+   await api.append(profile,{request_id:req(),dialogue:{id:'dialogue-1',channel:'synthetic'},messages:changes});
+   const update=await api.pull(profile,{request_id:req(),...context});
+   assert.equal(update.summaries_mode,'updates');
+   assert.equal(update.items.filter(item=>item.message_id?.startsWith('old-')).length,21);
+   assert.equal((await api.topics.search(profile,'Запись dialogue-1')).messages[0].dialogue_id,'dialogue-1');
   });
 
   await t.test('правило 100 символов и атомарный пакет',async()=>{

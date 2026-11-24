@@ -41,6 +41,20 @@ test('RLS: независимые логины, старая история, з�
   }
   await assert.rejects(read(legacy),{code:'42501'});
   for(const table of ownerTables)assert.equal((await a.query('SELECT count(*)::int n FROM dialogues_live.'+table+" WHERE owner_id='account-b'")).rows[0].n,0);
+  // Fixture имитирует уже настроенные профили с версией 006 до установки тем.
+  const beforeTopics=`DROP TABLE dialogues_live.message_compact_summaries,dialogues_live.topic_summaries,
+    dialogues_live.topic_members,dialogues_live.topics;
+   ALTER TABLE dialogues_live.context_consumers DROP COLUMN topic_view;
+   ALTER TABLE dialogues_live.context_deliveries DROP COLUMN topic_view;
+   DELETE FROM dialogues_live.migrations WHERE version=7`;
+  for(const upgrade of [()=>migrate(owner,who,'dialogues_fixture_a'),()=>migrateIsolation(owner,who)]){
+   await owner.query(beforeTopics);
+   await upgrade();
+   await verifyOwnerConnection(a,bindingA);await verifyOwnerConnection(b,bindingB);
+   await b.query("INSERT INTO dialogues_live.topics(owner_id,id,title) VALUES('account-b','same','private topic')");
+   assert.deepEqual((await a.query('SELECT id FROM dialogues_live.topics')).rows,[]);
+   assert.deepEqual((await b.query('SELECT id FROM dialogues_live.topics')).rows,[{id:'same'}]);
+  }
   const checks=await Promise.all(Array.from({length:60},async(_,i)=>({i,rows:await read(i%2?a:b)})));
   for(const {i,rows}of checks)assert.equal(rows[0].owner_id,i%2?'legacy-owner':'account-b');
   await owner.query("UPDATE dialogues_access.sys_owner_bindings SET enabled=false WHERE login_role='dialogues_fixture_a'");

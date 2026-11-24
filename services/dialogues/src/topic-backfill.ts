@@ -25,7 +25,7 @@ try{
  const jobs=createTopicJobs(pool,binding.ownerId,luna,access.authorize);
  const seeded=await jobs.seed();
  let operations=0;
- while(await jobs.tick())operations++;
+ while(await jobs.tick({requireIdleWorker:true}))operations++;
  console.log(JSON.stringify({service:'dialogues',event:'topic_backfill_finished',seeded,operations}));
 }catch(error){
  console.error(JSON.stringify({service:'dialogues',event:'topic_backfill_failed',code:error instanceof DialoguesFault?error.code:'INTERNAL'}));
