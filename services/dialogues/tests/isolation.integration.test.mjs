@@ -42,7 +42,13 @@ test('RLS: независимые логины, старая история, з�
   await assert.rejects(read(legacy),{code:'42501'});
   for(const table of ownerTables)assert.equal((await a.query('SELECT count(*)::int n FROM dialogues_live.'+table+" WHERE owner_id='account-b'")).rows[0].n,0);
   // Fixture имитирует уже настроенные профили с версией 006 до установки тем.
-  const beforeTopics=`DROP TABLE dialogues_live.message_compact_summaries,dialogues_live.topic_summaries,
+  const withoutWorker=`DROP TRIGGER topics_message_changed ON dialogues_live.messages;
+   DROP TRIGGER topics_message_summary_changed ON dialogues_live.message_summaries;
+   DROP TRIGGER topics_dialogue_summary_changed ON dialogues_live.dialogue_summaries;
+   DROP TRIGGER topics_final_changed ON dialogues_live.turns;
+   DROP FUNCTION dialogues_live.mark_topic_dirty();
+   DELETE FROM dialogues_live.migrations WHERE version=8;`;
+  const beforeTopics=withoutWorker+`DROP TABLE dialogues_live.message_compact_summaries,dialogues_live.topic_summaries,
     dialogues_live.topic_members,dialogues_live.topic_separations,dialogues_live.topics;
    ALTER TABLE dialogues_live.context_consumers DROP COLUMN topic_view;
    ALTER TABLE dialogues_live.context_deliveries DROP COLUMN topic_view;
@@ -55,6 +61,21 @@ test('RLS: независимые логины, старая история, з�
    assert.deepEqual((await a.query('SELECT id FROM dialogues_live.topics')).rows,[]);
    assert.deepEqual((await b.query('SELECT id FROM dialogues_live.topics')).rows,[{id:'same'}]);
   }
+  // Обновление 007 сохраняет готовые темы и привязки, а откат runtime может писать историю.
+  await owner.query(withoutWorker+`ALTER TABLE dialogues_live.topics DROP COLUMN dirty_seq;
+   ALTER TABLE dialogues_live.topic_members DROP COLUMN checked_evidence,DROP COLUMN evidence_seq;`);
+  await b.query("INSERT INTO dialogues_live.topic_members(owner_id,dialogue_id,topic_id) VALUES('account-b','same','same')");
+  await migrateIsolation(owner,who);
+  assert.equal((await b.query("SELECT evidence_seq FROM dialogues_live.topic_members WHERE dialogue_id='same'")).rows[0].evidence_seq,'-1');
+  await owner.query('REVOKE ALL ON dialogues_live.topics,dialogues_live.topic_members FROM dialogues_fixture_b');
+  await b.query(`INSERT INTO dialogues_live.turns(owner_id,dialogue_id,id,turn_order,status,change_seq)
+   VALUES('account-b','same','legacy-turn',1,'completed',1)`);
+  await b.query(`INSERT INTO dialogues_live.messages(owner_id,dialogue_id,turn_id,id,role,kind,message_order,item_order,text,payload,content_hash,source,change_seq)
+   VALUES('account-b','same','legacy-turn','legacy-input','user','input',1,1,'Старая версия пишет историю','{}','synthetic','{}',3)`);
+  await bindOwner(owner,who,'dialogues_fixture_b',bindingB);
+  assert.deepEqual((await b.query(`SELECT evidence_seq,dirty_seq FROM dialogues_live.topic_members
+   JOIN dialogues_live.topics ON topics.owner_id=topic_members.owner_id AND topics.id=topic_members.topic_id WHERE dialogue_id='same'`)).rows,
+  [{evidence_seq:'3',dirty_seq:'3'}]);
   const checks=await Promise.all(Array.from({length:60},async(_,i)=>({i,rows:await read(i%2?a:b)})));
   for(const {i,rows}of checks)assert.equal(rows[0].owner_id,i%2?'legacy-owner':'account-b');
   await owner.query("UPDATE dialogues_access.sys_owner_bindings SET enabled=false WHERE login_role='dialogues_fixture_a'");

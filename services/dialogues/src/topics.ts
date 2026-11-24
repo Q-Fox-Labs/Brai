@@ -137,7 +137,7 @@ export async function moveTopicMember(db:PoolClient,owner:string,dialogue:string
   await db.query('UPDATE dialogues_live.topics SET merged_into=NULL WHERE owner_id=$1 AND id=$2',[owner,own]);
  }
  await db.query('UPDATE dialogues_live.topic_members SET topic_id=$3 WHERE owner_id=$1 AND dialogue_id=$2',[owner,dialogue,target]);
- await db.query('UPDATE dialogues_live.topics SET membership_version=membership_version+1 WHERE owner_id=$1 AND id=ANY($2::text[])',[owner,[previous,target]]);
+ await db.query("UPDATE dialogues_live.topics SET membership_version=membership_version+1,dirty_seq=nextval('dialogues_live.change_seq') WHERE owner_id=$1 AND id=ANY($2::text[])",[owner,[previous,target]]);
  await db.query(`UPDATE dialogues_live.topics SET merged_into=$3 WHERE owner_id=$1 AND id=$2 AND NOT EXISTS
   (SELECT 1 FROM dialogues_live.topic_members WHERE owner_id=$1 AND topic_id=$2)`,[owner,previous,target]);
  return target;

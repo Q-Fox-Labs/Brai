@@ -3,7 +3,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {countContextTokens,topicCardChanges} from '../dist/compact-context.js';
-import {summarizeTopic} from '../dist/topic-jobs.js';
+import {chooseGrouping,summarizeTopic} from '../dist/topic-jobs.js';
+import {matchesTopicReference} from '../dist/topic-references.js';
 import {invoke} from '../dist/api.js';
 
 test('свёртка перерабатывает превышение 50 токенов и оставляет исходный ID',async()=>{
@@ -53,4 +54,28 @@ test('поиск, тема и чтение архива не создают вы
  assert.equal((await call('search',{query:'номер PR'})).query,'номер PR');
  assert.equal((await call('topic_get',{topic_id:'topic'})).id,'topic');
  assert.equal((await call('read',{archive_only:true,dialogue_id:'dialogue',message_id:'message'})).message_id,'message');
+});
+
+test('PR сравнивается целиком вместе с репозиторием, имя файла тоже целиком',()=>{
+ const query='Дальше https://github.com/Foo/Bar/pull/12';
+ assert.equal(matchesTopicReference(query,'Тема запроса','PR foo/bar#012'),true);
+ assert.equal(matchesTopicReference(query,'Тема запроса','https://github.com/Foo/Bar/pull/123'),false);
+ assert.equal(matchesTopicReference(query,'Тема запроса','PR foo/other#12'),false);
+ assert.equal(matchesTopicReference('Напомни PR #12','Тема запроса','PR foo/bar#12'),false);
+ assert.equal(matchesTopicReference('Проверь src/main.ts','Код сервиса','Файл src/main.ts'),true);
+ assert.equal(matchesTopicReference('Проверь src/main.ts','Код сервиса','Файл src/main.ts.bak'),false);
+ assert.equal(matchesTopicReference('Проверь src/main.ts','Код сервиса','Файл other/src/main.ts'),false);
+ assert.equal(matchesTopicReference('Проверь src/main.ts.','Код сервиса','Файл src/main.ts'),true);
+ assert.equal(matchesTopicReference('Открой component.json','Конфигурация','Файлы component.json, settings.toml, Dockerfile'),true);
+ assert.equal(matchesTopicReference('Проверь Dockerfile','Конфигурация','Файл Dockerfile.dev'),false);
+});
+
+test('модель не вызывается, если все найденные кандидаты ссылаются на другой PR',async()=>{
+ const luna={async structured(){assert.fail('сравниваемые PR уже отличаются');}};
+ const input={title:'Выпуск',text:'https://github.com/team/app/pull/12'};
+ const candidates=[
+  {topic_id:'prefix',title:'Выпуск',extended:'https://github.com/team/app/pull/123'},
+  {topic_id:'other-repo',title:'Выпуск',extended:'Проверка выпуска.',evidence:'https://github.com/team/docs/pull/12'},
+ ];
+ assert.equal(await chooseGrouping(luna,input,candidates),null);
 });

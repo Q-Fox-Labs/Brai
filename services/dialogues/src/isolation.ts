@@ -30,6 +30,7 @@ export async function migrateIsolation(pool:Pool,owner:string){
   if(foreign)throw new Error('TABLE_OWNER_CONFLICT');
   await db.query(readFileSync(new URL('../migrations/006_owner_isolation.sql',import.meta.url),'utf8'));
   await db.query(readFileSync(new URL('../migrations/007_topics.sql',import.meta.url),'utf8'));
+  await db.query(readFileSync(new URL('../migrations/008_topic_work.sql',import.meta.url),'utf8'));
   await db.query('COMMIT');
  }catch(error){await db.query('ROLLBACK');throw error;}finally{db.release();}
 }

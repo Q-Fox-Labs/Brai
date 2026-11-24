@@ -24,7 +24,7 @@ let authAccess:Awaited<ReturnType<typeof connectAuthAccess>>|undefined;
 let mcp:Awaited<ReturnType<typeof startMcp>>;
 let closeTopics:Awaited<ReturnType<typeof startTopicSocket>>|undefined;
 try {
-  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=7")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
+  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=8")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
   const owner=required("DIALOGUES_MCP_OWNER_ID");
   const isolated=Boolean((await pool.query('SELECT 1 FROM dialogues_live.migrations WHERE version=6')).rowCount);
   let personal:Parameters<typeof startMcp>[1]['personal'];

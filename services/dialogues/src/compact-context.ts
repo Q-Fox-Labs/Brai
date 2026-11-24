@@ -4,6 +4,7 @@ import type {PoolClient} from 'pg';
 import {Tiktoken} from 'js-tiktoken/lite';
 import o200k from 'js-tiktoken/ranks/o200k_base';
 import {recentTopics,visibleMessage} from './topics.js';
+import {linkedDialogueIds,matchesTopicReference} from './topic-references.js';
 
 export const topicLimits={extended:400,compact:50,message:200} as const;
 let encoding:Tiktoken|undefined;
@@ -41,15 +42,18 @@ async function referencedTopic(db:PoolClient,owner:string,dialogue:string|undefi
  const message=(await db.query(`SELECT m.text FROM dialogues_live.messages m
  WHERE m.owner_id=$1 AND m.dialogue_id=$2 AND m.kind='input' ORDER BY m.message_order LIMIT 1`,[owner,dialogue])).rows[0];
  if(!message)return undefined;
- const candidates=(await db.query(`SELECT t.id FROM dialogues_live.topics t
- LEFT JOIN LATERAL (SELECT extended FROM dialogues_live.topic_summaries
+ const candidates=(await db.query(`SELECT t.id,COALESCE(t.title,'') AS title,s.extended,
+  EXISTS(SELECT 1 FROM dialogues_live.topic_members linked
+   WHERE linked.owner_id=t.owner_id AND linked.topic_id=t.id AND linked.dialogue_id=ANY($3::text[])) AS linked
+ FROM dialogues_live.topics t
+ JOIN LATERAL (SELECT extended FROM dialogues_live.topic_summaries
   WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
- WHERE t.owner_id=$1 AND t.merged_into IS NULL AND s.extended IS NOT NULL
- AND NOT EXISTS(SELECT 1 FROM dialogues_live.topic_members tm WHERE tm.owner_id=t.owner_id AND tm.topic_id=t.id AND tm.dialogue_id=$2)
- AND ((t.title IS NOT NULL AND lower(t.title)<>lower($2) AND strpos(lower($3),lower(t.title))>0 AND cardinality(string_to_array(t.title,' '))>=2)
-  OR EXISTS (SELECT 1 FROM regexp_matches($3,'(PR[[:space:]#]*[0-9]+|[[:alnum:]_-]+[.](ts|js|py|yml|md))','gi') r
-    WHERE strpos(lower(s.extended),lower(r[1]))>0)) LIMIT 2`,[owner,dialogue,message.text])).rows;
- return candidates.length===1?candidates[0].id:undefined;
+ WHERE t.owner_id=$1 AND t.merged_into IS NULL
+ AND NOT EXISTS(SELECT 1 FROM dialogues_live.topic_members tm WHERE tm.owner_id=t.owner_id AND tm.topic_id=t.id AND tm.dialogue_id=$2)`,[owner,dialogue,linkedDialogueIds(message.text)])).rows;
+ const linked=candidates.filter(candidate=>candidate.linked);
+ if(linked.length)return linked.length===1?linked[0].id:undefined;
+ const matches=candidates.filter(candidate=>matchesTopicReference(message.text,candidate.title,candidate.extended));
+ return matches.length===1?matches[0].id:undefined;
 }
 
 /** Считает карточки и новые сообщения внутри той же транзакции, что и выдачу. */

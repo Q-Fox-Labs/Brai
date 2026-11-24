@@ -148,6 +148,75 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.deepEqual(await memberships(),{...initial,followup:initial[moved]});
   });
 
+  await t.test('сначала сопоставляет новое свидетельство, затем обновляет только итоговую тему',async()=>{
+   const profile='grouping-order-fixture';
+   const append=(id,title,message,text)=>api.append(profile,{request_id:req(),dialogue:{id,channel:'synthetic',title},
+    messages:[{id:message,turn_id:'turn',role:'user',kind:'input',text,...(text.length>100?{summary:'Краткий след сообщения'}:{})}]});
+   const target='https://github.com/team/app/pull/12';
+   const calls=[];
+   const generator={async structured(input){
+    const data=JSON.parse(input);
+    if(data.candidates){
+     calls.push('group');
+     return JSON.stringify({topic_id:data.dialogue.text.includes('PR team/app#12')?data.candidates[0].topic_id:null});
+    }
+    calls.push('summary');
+    return JSON.stringify({extended:'Проверка выпуска '+target,compact:'Проверка выпуска.',source_indexes:[0]});
+   }};
+   await append('initial','Проверка выпуска','target','Проверка '+target);
+   const jobs=createTopicJobs(app,profile,generator);
+   while(await jobs.tick()){}
+   assert.deepEqual(calls,['summary']);
+
+   await append('new','Новый разговор','greeting','Продолжим');
+   calls.length=0;
+   while(await jobs.tick()){}
+   assert.deepEqual(calls,['summary']);
+
+   await api.append(profile,{request_id:req(),dialogue:{id:'new',channel:'synthetic',title:'Новый разговор'},
+    messages:Array.from({length:25},(_,i)=>({id:'extra-'+i,turn_id:'turn',role:'user',kind:'input',
+     text:i===21?'А'.repeat(6100)+' Перепроверю '+target:'Б'.repeat(6100),summary:'Краткий след сообщения'}))});
+   await append('initial','Проверка выпуска','latest','Уточнение по уже готовой теме.');
+   calls.length=0;
+   while(await jobs.tick()){}
+   assert.deepEqual(calls,['group','summary']);
+   const rows=(await app.query('SELECT topic_id FROM dialogues_live.topic_members WHERE owner_id=$1',[profile])).rows;
+   assert.equal(rows.length,2);
+   assert.equal(rows[0].topic_id,rows[1].topic_id);
+  });
+
+  await t.test('проверяет вход, который пришёл между сопоставлением и чтением состояния',async()=>{
+   const profile='grouping-watermark-fixture';
+   const append=(message,text)=>api.append(profile,{request_id:req(),dialogue:{id:'race',channel:'synthetic',title:'Работа'},
+    messages:[{id:message,turn_id:'turn',role:'user',kind:'input',text}]});
+   await append('first','Первый вход');
+   let inject=true,cards=0;
+   const pool={async connect(){
+    const client=await app.connect();
+    return {release:()=>client.release(),async query(sql,params){
+     if(inject&&sql.startsWith('WITH member_state AS')){
+      inject=false;
+      await append('during-read','Новый факт для сопоставления');
+     }
+     return await client.query(sql,params);
+    }};
+   }};
+   const jobs=createTopicJobs(pool,profile,{async structured(input){
+    ++cards;
+    return JSON.stringify({extended:'Суть работы.',compact:'Работа.',source_indexes:[0]});
+   }});
+   assert.equal(await jobs.tick(),true);
+   assert.equal(cards,0);
+   assert.equal(await jobs.tick(),true);
+   assert.equal(cards,1);
+   assert.equal(await jobs.tick(),false);
+   const [{checked_at,evidence_seq,dirty_seq}]=(await app.query(`SELECT checked_at,evidence_seq,dirty_seq
+    FROM dialogues_live.topic_members tm JOIN dialogues_live.topics t ON t.owner_id=tm.owner_id AND t.id=tm.topic_id
+    WHERE tm.owner_id=$1`,[profile])).rows;
+   assert.equal(checked_at,evidence_seq);
+   assert.equal(dirty_seq,null);
+  });
+
   await t.test('архив из 1000 тем сохраняет лимит bootstrap и исторический импорт в дельте',async()=>{
    const profile='large-topic-fixture',context={consumer_id:'large-reader',context_instance_id:'default',format:'compact'};
    await app.query(`INSERT INTO dialogues_live.dialogues(owner_id,id,channel,title)
@@ -199,6 +268,13 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal(update.summaries_mode,'updates');
    assert.equal(update.items.filter(item=>item.message_id?.startsWith('old-')).length,21);
    assert.equal((await api.topics.search(profile,'Запись dialogue-1')).messages[0].dialogue_id,'dialogue-1');
+   const {id:oldTopic}=(await app.query(`SELECT id FROM dialogues_live.topics
+    WHERE owner_id=$1 AND home_dialogue_id='dialogue-1' AND dirty_seq IS NOT NULL`,[profile])).rows[0];
+   await api.append(profile,{request_id:req(),dialogue:{id:'explicit-continuation',channel:'synthetic'},
+    messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:'Вернёмся к теме «Проверка архива 1».'}]});
+   const pinned=await api.pull(profile,{request_id:req(),consumer_id:'pinned-reader',context_instance_id:'default',
+    format:'compact',dialogue_id:'explicit-continuation'});
+   assert.equal(pinned.items.find(item=>item.topic_id===oldTopic)?.tier,'extended');
   });
 
   await t.test('правило 100 символов и атомарный пакет',async()=>{
