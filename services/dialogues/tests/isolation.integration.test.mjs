@@ -43,7 +43,7 @@ test('RLS: независимые логины, старая история, з�
   for(const table of ownerTables)assert.equal((await a.query('SELECT count(*)::int n FROM dialogues_live.'+table+" WHERE owner_id='account-b'")).rows[0].n,0);
   // Fixture имитирует уже настроенные профили с версией 006 до установки тем.
   const beforeTopics=`DROP TABLE dialogues_live.message_compact_summaries,dialogues_live.topic_summaries,
-    dialogues_live.topic_members,dialogues_live.topics;
+    dialogues_live.topic_members,dialogues_live.topic_separations,dialogues_live.topics;
    ALTER TABLE dialogues_live.context_consumers DROP COLUMN topic_view;
    ALTER TABLE dialogues_live.context_deliveries DROP COLUMN topic_view;
    DELETE FROM dialogues_live.migrations WHERE version=7`;

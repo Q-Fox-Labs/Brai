@@ -116,10 +116,12 @@ test('PostgreSQL: обмен, контекст, история и перенос
     await api.append(profile,{request_id:req(),dialogue:{id,channel:'synthetic',title:'Проверка выпуска'},
      messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:message}]});
    }
+   let continuationOf='';
    const generator={async structured(input){
     const data=JSON.parse(input);
     if(data.candidates){
-     const candidate=data.dialogue.text.includes('PR 123')&&data.candidates.find(item=>item.extended.includes('PR 123'));
+     const sameTask=data.dialogue.text.includes('Точный следующий шаг')?continuationOf:'PR 123';
+     const candidate=data.dialogue.text.includes('PR 123')&&data.candidates.find(item=>item.extended.includes(sameTask));
      return JSON.stringify({topic_id:candidate?candidate.topic_id:null});
     }
     const text=data.sources.map(source=>source.text).join(' ');
@@ -139,6 +141,11 @@ test('PostgreSQL: обмен, контекст, история и перенос
    await api.topics.move(profile,req(),moved,null);
    while(await jobs.tick()){}
    assert.deepEqual(await memberships(),initial);
+   continuationOf=moved==='first'?'Проверка выпуска PR 123':'Продолжение проверки выпуска PR 123';
+   await api.append(profile,{request_id:req(),dialogue:{id:'followup',channel:'synthetic',title:'Проверка выпуска'},
+    messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:'Точный следующий шаг для PR 123'}]});
+   while(await jobs.tick()){}
+   assert.deepEqual(await memberships(),{...initial,followup:initial[moved]});
   });
 
   await t.test('архив из 1000 тем сохраняет лимит bootstrap и исторический импорт в дельте',async()=>{

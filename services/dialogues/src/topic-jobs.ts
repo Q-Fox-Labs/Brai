@@ -211,12 +211,13 @@ const groupingPrompt={
  schema:{type:'object',additionalProperties:false,required:['topic_id'],properties:{topic_id:{type:['string','null']}}}
 };
 
-// AIDEV-NOTE: Иначе оставшийся тред может отменить ручное разделение встречным переносом.
+// AIDEV-NOTE: Проверяем оба направления, чтобы встречная группировка не отменила ручное разделение.
 const automaticTarget=`NOT EXISTS (
- SELECT 1 FROM dialogues_live.topic_members home WHERE home.owner_id=t.owner_id AND home.topic_id=t.id
-  AND home.dialogue_id=t.home_dialogue_id AND home.manually_assigned
-  AND NOT EXISTS (SELECT 1 FROM dialogues_live.topic_members other WHERE other.owner_id=t.owner_id
-   AND other.topic_id=t.id AND other.dialogue_id<>home.dialogue_id)
+ SELECT 1 FROM dialogues_live.topic_members member
+ JOIN dialogues_live.topic_separations split ON split.owner_id=member.owner_id
+  AND ((split.dialogue_id=$4 AND split.separated_from=member.dialogue_id)
+   OR (split.separated_from=$4 AND split.dialogue_id=member.dialogue_id))
+ WHERE member.owner_id=t.owner_id AND member.topic_id=t.id
 )`;
 
 async function checkGrouping(db:PoolClient,owner:string,luna:Generator,authorize:()=>Promise<void>|undefined){
@@ -238,7 +239,7 @@ async function checkGrouping(db:PoolClient,owner:string,luna:Generator,authorize
    AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
   WHERE t.owner_id=$1 AND t.id<>$2 AND t.merged_into IS NULL AND ${automaticTarget}
   AND to_tsvector('pg_catalog.russian',concat_ws(' ',t.title,s.extended)) @@ q.words
-  ORDER BY rank DESC,t.id LIMIT 10`,[owner,row.topic_id,query])).rows:[];
+  ORDER BY rank DESC,t.id LIMIT 10`,[owner,row.topic_id,query,row.dialogue_id])).rows:[];
  let target:string|null=null;
  if(candidates.length){
   const decision=JSON.parse(await luna.structured(JSON.stringify({dialogue:{title:row.title,text:row.extended},candidates}),groupingPrompt));
@@ -260,7 +261,7 @@ async function checkGrouping(db:PoolClient,owner:string,luna:Generator,authorize
    const version=(await db.query(`SELECT max(s.change_seq)::text AS seq FROM dialogues_live.topics t
       JOIN dialogues_live.topic_summaries s ON s.owner_id=t.owner_id AND s.topic_id=t.id
        AND s.membership_version=t.membership_version
-      WHERE t.owner_id=$1 AND t.id=$2 AND t.membership_version=$3 AND ${automaticTarget}`,[owner,target,expected.membership_version])).rows[0].seq;
+      WHERE t.owner_id=$1 AND t.id=$2 AND t.membership_version=$3 AND ${automaticTarget}`,[owner,target,expected.membership_version,row.dialogue_id])).rows[0].seq;
    if(!destination||destination.membership_version!==expected.membership_version||version!==expected.change_seq
       ||digest(destination.inputs)!==destination.source_digest){
     await db.query('ROLLBACK');return true;

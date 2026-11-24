@@ -15,6 +15,13 @@ CREATE TABLE IF NOT EXISTS dialogues_live.topic_members (
  FOREIGN KEY(owner_id,topic_id) REFERENCES dialogues_live.topics(owner_id,id)
 );
 CREATE INDEX IF NOT EXISTS topic_members_lookup ON dialogues_live.topic_members(owner_id,topic_id,dialogue_id);
+CREATE TABLE IF NOT EXISTS dialogues_live.topic_separations (
+ owner_id text NOT NULL, dialogue_id text NOT NULL, separated_from text NOT NULL,
+ PRIMARY KEY(owner_id,dialogue_id,separated_from),
+ FOREIGN KEY(owner_id,dialogue_id) REFERENCES dialogues_live.dialogues(owner_id,id),
+ FOREIGN KEY(owner_id,separated_from) REFERENCES dialogues_live.dialogues(owner_id,id),
+ CHECK (dialogue_id<>separated_from)
+);
 CREATE TABLE IF NOT EXISTS dialogues_live.topic_summaries (
  owner_id text NOT NULL, topic_id text NOT NULL, version bigint NOT NULL,
  source_digest text NOT NULL, membership_version bigint NOT NULL, extended text NOT NULL, compact text NOT NULL,
@@ -43,7 +50,7 @@ DECLARE relation text;
 DECLARE binding record;
 BEGIN
  IF to_regclass('dialogues_access.sys_owner_bindings') IS NULL THEN RETURN; END IF;
- FOREACH relation IN ARRAY ARRAY['topics','topic_members','topic_summaries','message_compact_summaries'] LOOP
+ FOREACH relation IN ARRAY ARRAY['topics','topic_members','topic_separations','topic_summaries','message_compact_summaries'] LOOP
   EXECUTE format('ALTER TABLE dialogues_live.%I ENABLE ROW LEVEL SECURITY',relation);
   EXECUTE format('ALTER TABLE dialogues_live.%I FORCE ROW LEVEL SECURITY',relation);
   EXECUTE format('DROP POLICY IF EXISTS personal_owner ON dialogues_live.%I',relation);
@@ -56,7 +63,7 @@ BEGIN
  END LOOP;
  FOR binding IN SELECT login_role FROM dialogues_access.sys_owner_bindings WHERE enabled LOOP
   EXECUTE format('GRANT SELECT,INSERT,UPDATE ON dialogues_live.topics,dialogues_live.topic_members TO %I',binding.login_role);
-  EXECUTE format('GRANT SELECT,INSERT ON dialogues_live.topic_summaries,dialogues_live.message_compact_summaries TO %I',binding.login_role);
+  EXECUTE format('GRANT SELECT,INSERT ON dialogues_live.topic_separations,dialogues_live.topic_summaries,dialogues_live.message_compact_summaries TO %I',binding.login_role);
  END LOOP;
 END $topics_access$;
 INSERT INTO dialogues_live.migrations(version) VALUES(7) ON CONFLICT DO NOTHING;
