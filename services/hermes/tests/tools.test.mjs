@@ -87,7 +87,7 @@ test('личный STT доступен в настоящем каталоге �
     assert.ok(timeout > 300_000 && timeout <= 900_000);
     return result;
   } });
-  const runtime = await createBraiTools(config, ports);
+  const runtime = await createBraiTools({ ...config, longRequestTimeoutMs: 300_000 }, ports);
   assert.ok(runtime.tools.some(tool => tool.name === 'local_ai_invoke_transcribe'));
   assert.deepEqual(await runtime.call('local_ai_invoke_transcribe', args), result);
   await assert.rejects(runtime.call('local_ai_invoke_transcribe', { ...args, ownerId: 'foreign' }), /INVALID_ARGUMENT/);
