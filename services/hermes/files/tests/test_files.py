@@ -498,6 +498,30 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         duplicate = self.event('91')
         self.assertFalse(await native.accept_event(duplicate))
 
+    async def test_authorized_voice_retry_reuses_artifact_and_committed_admission(self):
+        def voice():
+            event = self.event('91')
+            event.media_types = ['audio/webm']
+            event._brai_identity_inputs = [{'path': event.media_urls[0], 'itemId':'91:0'}]
+            return event
+
+        original = voice()
+        self.assertTrue(await native.accept_event(original))
+        self.assertEqual(original._brai_audio_paths, set(original.media_urls))
+        artifact = original.metadata['_brai_artifacts'][0]['file']['artifactId']
+        self.assertTrue(native.commit_inbound(original.source, original.message_id))
+        native.release_event(original)
+
+        repeat = voice()
+        repeat._brai_voice_retry = True
+        self.assertTrue(await native.accept_event(repeat))
+        self.assertEqual(repeat.metadata['_brai_artifacts'][0]['file']['artifactId'], artifact)
+        with native.inbound_handoff(repeat.source, repeat.message_id):
+            self.assertFalse(native.commit_inbound(*native._inbound.get()))
+        native.release_event(repeat)
+        self.assertFalse(await native.accept_event(voice()))
+        self.assertEqual(sum(method == 'files.publish' for method, _ in self.backend.calls), 1)
+
     async def test_pending_album_with_late_element_after_restart(self):
         first = self.event('10')
         self.assertTrue(await native.accept_event(first))

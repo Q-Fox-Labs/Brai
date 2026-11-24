@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import stat
 
-from .audio_parts import PREPARE_TIMEOUT
 from .tool_client import broker_call
 
 _installed = False
@@ -90,6 +89,7 @@ def install_managed_stt(path):
     if (stt.get('enabled') is True and stt.get('provider') == 'brai_local_ai'
             and provider.get('type') == 'command'):
         from tools import transcription_tools
+        from .audio_parts import PREPARE_TIMEOUT
         managed = deepcopy(stt)
         # AIDEV-NOTE: Внешний idle timeout должен покрывать декодирование
         # Дневника. Каждая часть по-прежнему имеет собственный срок invoke.
@@ -111,7 +111,10 @@ def install_telegram_audio_input(runner, telegram_platform):
         images, voice, audio, videos = classify(event, prepared)
         if not from_telegram(event):
             return images, voice, audio, videos
-        return images, (voice + audio if not prepared else voice), [], videos
+        original_audio = getattr(event, '_brai_audio_paths', set())
+        candidates = set(voice) | set(audio) | original_audio
+        selected = [path for path in (event.media_urls or []) if path in candidates] if not prepared else []
+        return images, selected, [], [path for path in videos if path not in original_audio]
 
     def pending_media(event):
         if from_telegram(event):

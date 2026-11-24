@@ -28,6 +28,7 @@ _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _conversation_source = ContextVar('brai_file_conversation_source', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
+_VOICE_RETRY_ADMISSION = object()
 _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
@@ -236,16 +237,33 @@ async def accept_event(event, admit=True):
         return True
     groups = list(dict.fromkeys(item['groupId'] for item in refs))
     accepted = [await asyncio.to_thread(files.admit, group, defer=True) for group in groups]
-    if all(value['duplicate'] for value in accepted):
-        event.media_urls = []
-        return False
-    items = [item for value in accepted for item in value['items']]
+    repeat_admission = all(value['duplicate'] for value in accepted)
+    if repeat_admission:
+        if not getattr(event, '_brai_voice_retry', False):
+            event.media_urls = []
+            return False
+        if not inputs or len(refs) != 1 or len(groups) != 1:
+            raise FileError('INVALID_VOICE_RETRY')
+        # AIDEV-NOTE: Только доверенный ingress разрешает новую обработку
+        # уже принятого voice. Публикация и запись прежнего набора сохраняются.
+        items = [{'file': refs[0]['file'], 'caption': inputs[0].get('caption') or ''}]
+        event._brai_voice_retry = False
+    else:
+        items = [item for value in accepted for item in value['items']]
     lease = files.materialize([item['file'] for item in items], ['inbound', groups, str(uuid.uuid4())])
     copies = await asyncio.to_thread(lease.__enter__)
     event._brai_file_lease = lease
+    if inputs:
+        # AIDEV-NOTE: Artifacts определяет MIME для выдачи файла. Для STT
+        # сохраняем входную аудиометку для того же проверенного вложения.
+        audio_items = {ref['file']['artifactId'] for ref, mime in zip(refs, getattr(event, 'media_types', []) or [])
+                       if mime.startswith('audio/')}
+        event._brai_audio_paths = {value['localPath'] for value in copies
+                                   if value['artifactId'] in audio_items}
     event.media_urls = [value['localPath'] for value in copies]
     event.media_types = [value['mimeType'] for value in copies]
-    ticket = files.prepare_admission(source_of(event), str(event.message_id), accepted)
+    ticket = (_VOICE_RETRY_ADMISSION if repeat_admission
+              else files.prepare_admission(source_of(event), str(event.message_id), accepted))
     _prepared_inbound.set((source_of(event), str(event.message_id), ticket))
     event.metadata['fileSets'] = [{key: value for key, value in item.items() if not key.startswith('_')} for item in accepted]
     if any(value.get('supplement') for value in accepted):
@@ -593,6 +611,8 @@ def track_inbound(event):
 
 def commit_inbound(source, message_id, ticket=None):
     """Зафиксировать набор только непосредственно перед запуском агента."""
+    if ticket is _VOICE_RETRY_ADMISSION:
+        return False
     holder = type('AdmissionEvent', (), {'source': source})()
     route = source_of(holder)
     try:

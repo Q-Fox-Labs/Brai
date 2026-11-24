@@ -237,15 +237,17 @@ class ManagedVoiceSettingsTests(unittest.TestCase):
         from identity.native_policy import install_telegram_audio_input
 
         def classify(event, prepared):
-            return ['photo'], [], ['track'], ['video']
+            return ['photo'], [], ['track'], ['webm', 'video']
 
         runner = SimpleNamespace(_classify_inbound_media=classify, _pending_event_audio_paths=lambda event: [])
         install_telegram_audio_input(runner, 'telegram')
-        telegram = SimpleNamespace(source=SimpleNamespace(platform='telegram'))
+        telegram = SimpleNamespace(source=SimpleNamespace(platform='telegram'),
+                                   media_urls=['track', 'webm', 'video'],
+                                   _brai_audio_paths={'webm'})
         other = SimpleNamespace(source=SimpleNamespace(platform='other'))
-        self.assertEqual(runner._classify_inbound_media(telegram, False), (['photo'], ['track'], [], ['video']))
+        self.assertEqual(runner._classify_inbound_media(telegram, False), (['photo'], ['track', 'webm'], [], ['video']))
         self.assertEqual(runner._classify_inbound_media(telegram, True), (['photo'], [], [], ['video']))
-        self.assertEqual(runner._pending_event_audio_paths(telegram), ['track'])
+        self.assertEqual(runner._pending_event_audio_paths(telegram), ['track', 'webm'])
         self.assertEqual(runner._classify_inbound_media(other, False), classify(other, False))
         self.assertEqual(runner._pending_event_audio_paths(other), [])
 

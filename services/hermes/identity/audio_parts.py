@@ -12,9 +12,10 @@ SAMPLE_BYTES = 2
 MAX_AUDIO_SECONDS = 18_000
 PART_SECONDS = 170
 PREPARE_TIMEOUT = 900
-GIGAAM_CONTAINERS = frozenset({'wav', 'flac', 'mp3', 'ogg'})
-AUDIO_CONTAINERS = ','.join(sorted(GIGAAM_CONTAINERS | {
-    'mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2', 'aac', 'matroska', 'webm', 'caf',
+GIGAAM_CONTAINERS = frozenset({'wav', 'flac', 'ogg'})
+ESTIMATED_CONTAINERS = frozenset({'mp3', 'aac'})
+AUDIO_CONTAINERS = ','.join(sorted(GIGAAM_CONTAINERS | ESTIMATED_CONTAINERS | {
+    'mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2', 'matroska', 'webm', 'caf',
 }))
 MEDIA_ARGS = ['-protocol_whitelist', 'file', '-format_whitelist', AUDIO_CONTAINERS]
 
@@ -29,18 +30,19 @@ def audio_info(source):
             stderr=subprocess.DEVNULL, timeout=15)
         metadata = json.loads(proof.stdout)
         names = set(metadata['format']['format_name'].split(','))
-        duration = float(metadata['format']['duration'])
+        raw_duration = metadata['format'].get('duration')
+        duration = float(raw_duration) if raw_duration is not None and not names & ESTIMATED_CONTAINERS else None
         streams = metadata['streams']
         audio_count = sum(stream['codec_type'] == 'audio' for stream in streams)
         if not names or not names <= set(AUDIO_CONTAINERS.split(',')) or audio_count != 1:
             raise ValueError('AUDIO_INVALID')
     except (OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError) as error:
         raise ValueError('AUDIO_INVALID') from error
-    if not math.isfinite(duration) or duration <= 0:
+    if duration is not None and (not math.isfinite(duration) or duration <= 0):
         raise ValueError('AUDIO_INVALID')
-    if duration > MAX_AUDIO_SECONDS:
+    if duration is not None and duration > MAX_AUDIO_SECONDS:
         raise ValueError('AUDIO_TOO_LONG')
-    return duration, len(streams) == 1 and names <= GIGAAM_CONTAINERS
+    return duration, duration is not None and len(streams) == 1 and names <= GIGAAM_CONTAINERS
 
 
 def _cut_frames(raw, final):
@@ -76,7 +78,9 @@ def audio_parts(source, directory, duration):
             total = pcm.getnframes()
             if (pcm.getnchannels(), pcm.getsampwidth(), pcm.getframerate()) != (1, SAMPLE_BYTES, RATE):
                 raise ValueError('AUDIO_INVALID')
-            if not 0 < total <= MAX_AUDIO_SECONDS * RATE or abs(total / RATE - duration) > 1:
+            if total > MAX_AUDIO_SECONDS * RATE:
+                raise ValueError('AUDIO_TOO_LONG')
+            if total < 1 or (duration is not None and abs(total / RATE - duration) > 1):
                 raise ValueError('AUDIO_INCOMPLETE')
             offset = 0
             index = 0

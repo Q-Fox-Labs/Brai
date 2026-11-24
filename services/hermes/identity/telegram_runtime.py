@@ -774,6 +774,19 @@ class Resolver:
             turn = {'id': uuid.uuid4().hex, 'route': route}
             self.turns[uid] = turn
         turn['chatGeneration'] = self._chat_generation(profile, route)
+        voice_retry = False
+        update_ids = getattr(event, '_brai_release_updates', [])
+        if getattr(self, 'mirror', None) is not None and len(update_ids) == 1:
+            from .transport_inbox import VOICE_RETRY_BASE
+            attempt = update_ids[0]
+            if attempt >= VOICE_RETRY_BASE:
+                bot_id = self.adapter._bot.id
+                if not await asyncio.to_thread(self.mirror.transport.is_voice_retry, bot_id, attempt):
+                    raise PermissionError('VOICE_RETRY_SOURCE_CHANGED')
+                prior = await asyncio.to_thread(self.mirror.inbox.observe, profile, bot_id, attempt - VOICE_RETRY_BASE)
+                if prior['state'] != 'accepted' or prior['chat_generation'] != turn['chatGeneration']:
+                    raise PermissionError('VOICE_RETRY_CONSENT_CHANGED')
+                voice_retry = True
         route_metadata = getattr(self.runner, '_thread_metadata_for_source', None)
         turn['metadata'] = (dict(route_metadata(event.source, event.message_id) or {}) if callable(route_metadata)
                             else ({'thread_id': route[1]} if route[1] else {}))
@@ -800,7 +813,17 @@ class Resolver:
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
         data = {key: getattr(event, key) for key in fields if getattr(event, key, None) is not None}
         data['delivery_scope'] = turn['id']
+        if voice_retry:
+            data['voice_retry'] = True
         data['message_type'] = getattr(event.message_type, 'value', event.message_type)
+        document = getattr(getattr(event, 'raw_message', None), 'document', None)
+        declared = getattr(document, 'mime_type', None)
+        if (data['message_type'] == 'video' and isinstance(declared, str) and declared.startswith('audio/')
+                and len(data.get('media_urls') or []) == 1):
+            # AIDEV-NOTE: Native Telegram routes .webm through video even for an audio document.
+            # STT still independently validates the actual container and audio stream.
+            data['message_type'] = 'audio'
+            data['media_types'] = [declared]
         timestamp = getattr(event, 'timestamp', None)
         if timestamp is not None:
             data['timestamp'] = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)

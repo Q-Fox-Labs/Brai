@@ -2,8 +2,13 @@
 # ABOUTME: Хранится в существующем каталоге IdentityJournal; не запускает обработчики.
 import hashlib
 import json
+from types import SimpleNamespace
 
 from .update_inbox import canonical, number
+
+# AIDEV-NOTE: Локальная попытка имеет отдельный durable ID и не меняет offset
+# Telegram. Пространство намеренно выше 64-битного Telegram update_id.
+VOICE_RETRY_BASE = 1 << 63
 
 TRANSPORT_PROFILE = {'profileId':'00000000-0000-0000-0000-000000000000'}
 TRANSPORT_SCHEMA = '''CREATE TABLE IF NOT EXISTS release_transport (
@@ -117,6 +122,48 @@ class TransportInbox:
             db.close()
         self._sync()
         return results
+
+    def _voice_retry_input(self, bot_id, update_id):
+        original = self.observe(bot_id, update_id)
+        raw = json.loads(original['payload'])
+        snapshot = json.loads(original['binding'])
+        message = raw.get('message', {})
+        voice = message.get('voice')
+        if (original['state'] != 'accepted' or snapshot.get('state') != 'known'
+                or set(raw) != {'update_id', 'message'} or not isinstance(voice, dict)
+                or not voice.get('file_unique_id') or message.get('chat', {}).get('type') != 'private'
+                or original['digest'] != hashlib.sha256(canonical(raw).encode()).hexdigest()
+                or str(message.get('from', {}).get('id')) != original['actor_id']):
+            raise ValueError('VOICE_RETRY_SOURCE_UNAVAILABLE')
+        return original, raw, snapshot
+
+    def retry_voice(self, bot_id, update_id, digest):
+        """Поставить одну операторскую попытку для принятого voice; исходная запись не меняется."""
+        update_id = int(number(update_id, 'UPDATE'))
+        if update_id >= VOICE_RETRY_BASE:
+            raise ValueError('VOICE_RETRY_SOURCE_UNAVAILABLE')
+        original, raw, snapshot = self._voice_retry_input(bot_id, update_id)
+        if original['digest'] != digest:
+            raise ValueError('VOICE_RETRY_SOURCE_CHANGED')
+        retry_id = VOICE_RETRY_BASE + update_id
+        raw['update_id'] = retry_id
+        update = SimpleNamespace(update_id=retry_id, effective_user=SimpleNamespace(id=original['actor_id']),
+                                 to_dict=lambda: raw)
+        state, = self.capture_batch([(update, snapshot)], bot_id)
+        return {'attempt': str(retry_id), 'state': state}
+
+    def is_voice_retry(self, bot_id, attempt_id):
+        """Сверить локальную попытку с исходным владельцем и Telegram payload."""
+        attempt = int(number(attempt_id, 'UPDATE'))
+        if attempt < VOICE_RETRY_BASE:
+            return False
+        original, raw, _ = self._voice_retry_input(bot_id, attempt - VOICE_RETRY_BASE)
+        retry = self.observe(bot_id, attempt)
+        raw['update_id'] = attempt
+        if (retry['binding'] != original['binding'] or retry['actor_id'] != original['actor_id']
+                or retry['payload'] != canonical(raw)):
+            raise ValueError('VOICE_RETRY_SOURCE_CHANGED')
+        return True
 
     def transition(self, bot_id, update_id, expected, state):
         allowed = {'captured':{'handing_off','blocked'}, 'handing_off':{'accepted','handled','unknown','blocked'}}
