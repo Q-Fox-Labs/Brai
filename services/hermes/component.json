@@ -1015,7 +1015,6 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/tool_client.py",
       "services/hermes/identity/transcribe.py",
-      "services/hermes/identity/audio_parts.py",
       "services/hermes/identity/synthesize.py",
       "services/hermes/identity/media.py",
       "services/hermes/identity/network.py",
