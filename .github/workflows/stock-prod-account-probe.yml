@@ -1,0 +1,102 @@
+# ABOUTME: Classifies the Codex account readiness failure with the same protected test access.
+# ABOUTME: Prints fixed reasons only and removes the one-shot credential copy.
+name: Stock PROD Codex account probe
+
+on:
+  push:
+    branches: [feature/stock-prod-clean-20261123]
+    paths: [.github/workflows/stock-prod-account-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stock-prod-clean-install
+  cancel-in-progress: false
+
+jobs:
+  account:
+    if: github.repository == 'Q-Fox-Labs/Brai' && github.ref == 'refs/heads/feature/stock-prod-clean-20261123'
+    runs-on: ubuntu-24.04
+    environment: stock-prod-clean-install
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Q-Fox-Labs/Q-Server
+          ssh-key: ${{ secrets.STOCK_PROD_ADMIN_READ_KEY }}
+          ref: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
+          persist-credentials: false
+      - name: Request account metadata from the pinned Codex binary
+        shell: bash
+        env:
+          INPUT_PART_1: ${{ secrets.STOCK_PROD_INPUT_PART_1 }}
+          INPUT_PART_2: ${{ secrets.STOCK_PROD_INPUT_PART_2 }}
+          INPUT_PART_3: ${{ secrets.STOCK_PROD_INPUT_PART_3 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          probe=$(mktemp -d "$RUNNER_TEMP/stock-codex.XXXXXXXX")
+          trap 'rm -rf -- "$probe"' EXIT
+          mkdir "$probe/home"
+          printf '%s' "$INPUT_PART_1$INPUT_PART_2$INPUT_PART_3" | base64 --decode | gzip --decompress > "$probe/inputs.yml"
+          unset INPUT_PART_1 INPUT_PART_2 INPUT_PART_3
+          python3 -m venv "$probe/python"
+          "$probe/python/bin/pip" --disable-pip-version-check install 'PyYAML==6.0.3' >/dev/null
+          npm install --prefix "$probe" --ignore-scripts --no-audit --no-fund '@openai/codex@0.171.0' >/dev/null
+          "$probe/python/bin/python" -B - "$probe" <<'PY'
+          import base64, json, os, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'ansible/roles/fresh_install/files')
+          from protected_bundle import loads
+          root = Path(sys.argv[1])
+          values = loads((root / 'inputs.yml').read_text())['fresh_install_inputs']
+          source = values['files']['/home/agent/.codex/auth.json']['content']
+          auth = root / 'home/auth.json'
+          auth.write_bytes(base64.b64decode(source, validate=True))
+          (root / 'inputs.yml').unlink()
+          commands = [
+              {'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'brai_agent', 'version': '3.0.0'}, 'capabilities': {'experimentalApi': True}}},
+              {'method': 'initialized', 'params': {}},
+              {'id': 2, 'method': 'account/read', 'params': {'refreshToken': False}},
+          ]
+          binary = root / 'node_modules/.bin/codex'
+          with subprocess.Popen([binary, 'app-server', '--listen', 'stdio://'], cwd=root,
+                                env=dict(os.environ, CODEX_HOME=str(root / 'home')), text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+              records = {}
+              try:
+                  for request in commands:
+                      process.stdin.write(json.dumps(request) + '\n')
+                      process.stdin.flush()
+                      if request.get('id'):
+                          for line in process.stdout:
+                              reply = json.loads(line)
+                              if reply.get('id') == request['id']:
+                                  records[request['id']] = reply
+                                  break
+              finally:
+                  process.terminate()
+          result = records.get(2, {})
+          if result.get('result', {}).get('account'):
+              print('CODEX_ACCOUNT_READY')
+              sys.exit(0)
+          error = result.get('error', {})
+          message = error.get('message', '')
+          reasons = {
+              'workspace routing discovery unauthorized (401)': 'WORKSPACE_UNAUTHORIZED',
+              'workspace routing discovery failed': 'WORKSPACE_DISCOVERY_FAILED',
+              'workspace routing discovery timed out': 'WORKSPACE_DISCOVERY_TIMEOUT',
+              'workspace routing discovery missing backend origin': 'WORKSPACE_ORIGIN_MISSING',
+              'workspace routing discovery has invalid account routing override': 'WORKSPACE_OVERRIDE_INVALID',
+              'selected workspace missing from routing discovery': 'WORKSPACE_NOT_FOUND',
+              'workspace routing requires a ChatGPT account id': 'ACCOUNT_ID_MISSING',
+              'failed to load workspace requirements': 'WORKSPACE_REQUIREMENTS_INVALID',
+              'refresh token': 'OAUTH_REFRESH_REJECTED',
+          }
+          reason = next((code for pattern, code in reasons.items() if pattern in message.lower()),
+                        'CODEX_ACCOUNT_EMPTY' if 'result' in result else 'CODEX_ACCOUNT_UNKNOWN_ERROR')
+          status = error.get('code')
+          print(json.dumps({'reason': reason, 'rpcCode': status if type(status) is int else None}))
+          sys.exit(1)
+          PY
