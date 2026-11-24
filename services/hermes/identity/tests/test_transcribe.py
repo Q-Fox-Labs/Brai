@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.profiles import stt_config
 from identity.audio_parts import PREPARE_TIMEOUT, RATE, audio_info, audio_parts
-from identity.transcribe import transcribe_audio, transcribe_file
+from identity.transcribe import PART_TIMEOUT, transcribe_audio, transcribe_file
 
 MODEL = {'modelId': 'selected-model', 'revision': 'selected-revision', 'profileId': 'selected-profile'}
 AID = '11111111-1111-4111-8111-111111111111'
@@ -175,6 +175,7 @@ class AudioPartTests(unittest.TestCase):
                     self.assertTrue(path.is_relative_to(self.home / 'workspace'))
                     return {'artifactId': AID, 'mimeType': 'audio/wav'}
                 args = params['args']
+                self.assertGreater(kwargs['timeout'], PART_TIMEOUT - 10)
                 attempts.append(args['operationId'])
                 if failed and len(attempts) == 2:
                     raise TimeoutError('unknown')

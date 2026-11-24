@@ -1019,7 +1019,7 @@ class Resolver:
                 bot_id = self.adapter._bot.id
                 if not await asyncio.to_thread(self.mirror.transport.is_voice_retry, bot_id, attempt):
                     raise PermissionError('VOICE_RETRY_SOURCE_CHANGED')
-                prior = await asyncio.to_thread(self.mirror.inbox.observe, profile, bot_id, attempt - VOICE_RETRY_BASE)
+                prior = await asyncio.to_thread(self.mirror.inbox.observe, profile, bot_id, attempt % VOICE_RETRY_BASE)
                 if prior['state'] != 'accepted' or prior['chat_generation'] != generation:
                     raise PermissionError('VOICE_RETRY_CONSENT_CHANGED')
                 self._chat_generation(profile, route, generation)

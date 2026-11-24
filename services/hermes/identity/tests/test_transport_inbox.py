@@ -39,6 +39,15 @@ class TransportTest(unittest.TestCase):
         self.assertTrue(self.inbox.is_voice_retry(123, first['attempt']))
         self.assertFalse(self.inbox.is_voice_retry(123, 7))
         self.assertEqual(len(self.inbox.pending()), 1)
+        with self.assertRaisesRegex(ValueError, 'VOICE_RETRY_PREVIOUS_UNCONFIRMED'):
+            self.inbox.retry_voice(123, 7, old['digest'], 2)
+        self.inbox.transition(123, first['attempt'], 'captured', 'handing_off')
+        self.inbox.transition(123, first['attempt'], 'handing_off', 'accepted')
+        second = self.inbox.retry_voice(123, 7, old['digest'], 2)
+        self.assertEqual(second, self.inbox.retry_voice(123, 7, old['digest'], 2))
+        self.assertNotEqual(first['attempt'], second['attempt'])
+        self.assertTrue(self.inbox.is_voice_retry(123, second['attempt']))
+        self.assertEqual(self.inbox.observe(123, 7), old)
 
     def test_owner_rebinding_after_commit_blocks_original(self):
         self.assertEqual(self.inbox.capture_batch([(self.update,self.a)],123),['captured'])

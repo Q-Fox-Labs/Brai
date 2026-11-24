@@ -76,7 +76,7 @@ test('потеря PubAck или LocalAI ответа даёт неизвест�
 
 test('личный STT доступен в настоящем каталоге и передаёт Local AI только доверенного owner', async () => {
   const args = { requestId: ids[0], operationId: ids[1], model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'pinned', profileId: 'gigaam_pytorch' },
-    audioArtifactId: ids[4], deadlineAt: '2026-11-07T12:00:00.000Z' };
+    audioArtifactId: ids[4], deadlineAt: new Date(Date.now() + 900_000).toISOString() };
   const result = { requestId: args.requestId, operationId: args.operationId, model: args.model,
     text: 'Контрольное голосовое.', segments: null, durationMs: 12 };
   let requested = 0;
@@ -85,7 +85,7 @@ test('личный STT доступен в настоящем каталоге �
     assert.equal(subject, 'brai.local_ai.v1.invoke.transcribe');
     assert.deepEqual(payload, { ...args, ownerId: owner });
     assert.equal(payload.deadlineAt, args.deadlineAt);
-    assert.ok(timeout > 0 && timeout <= 300_000);
+    assert.ok(timeout > 300_000 && timeout <= 900_000);
     return result;
   } });
   const runtime = await createBraiTools(config, ports);
