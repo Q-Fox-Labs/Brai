@@ -37,46 +37,62 @@ jobs:
           set -euo pipefail
           umask 077
           probe=$(mktemp -d "$RUNNER_TEMP/stock-codex.XXXXXXXX")
-          trap 'rm -rf -- "$probe"' EXIT
+          unit="stock-codex-account-$GITHUB_RUN_ID.service"
+          trap 'sudo -n systemctl stop "$unit" 2>/dev/null || true; rm -rf -- "$probe"' EXIT
           mkdir "$probe/home"
           printf '%s' "$INPUT_PART_1$INPUT_PART_2$INPUT_PART_3" | base64 --decode | gzip --decompress > "$probe/inputs.yml"
           unset INPUT_PART_1 INPUT_PART_2 INPUT_PART_3
           python3 -m venv "$probe/python"
-          "$probe/python/bin/pip" --disable-pip-version-check install 'PyYAML==6.0.3' >/dev/null
-          npm install --prefix "$probe" --ignore-scripts --no-audit --no-fund '@openai/codex@0.171.0' >/dev/null
-          "$probe/python/bin/python" -B - "$probe" <<'PY'
-          import base64, json, os, subprocess, sys
+          "$probe/python/bin/pip" --disable-pip-version-check install 'PyYAML==6.0.3' 'websockets==16.0' >/dev/null
+          curl --fail --location --silent --show-error https://github.com/openai/codex/releases/download/rust-v0.171.0/install.sh -o "$probe/install.sh"
+          printf '%s  %s\n' b698d8eb50c0fbe0214ea57b5bf2af439054108404c6d2b872989db02f4bd574 "$probe/install.sh" | sha256sum --check --status
+          CODEX_HOME="$probe/home" CODEX_INSTALL_DAEMON_ONLY=1 CODEX_NON_INTERACTIVE=1 \
+            /bin/bash "$probe/install.sh" --release 0.171.0 >/dev/null
+          "$probe/python/bin/python" -B - "$probe" "$unit" <<'PY'
+          import base64, json, os, pwd, subprocess, sys, time
           from pathlib import Path
+          from websockets.sync.client import unix_connect
           sys.path.insert(0, 'ansible/roles/fresh_install/files')
+          sys.path.insert(0, 'ansible/client/roles/brai_install/files')
           from protected_bundle import loads
+          from configure_mcp import configure
           root = Path(sys.argv[1])
+          unit = sys.argv[2]
           values = loads((root / 'inputs.yml').read_text())['fresh_install_inputs']
           source = values['files']['/home/agent/.codex/auth.json']['content']
           auth = root / 'home/auth.json'
           auth.write_bytes(base64.b64decode(source, validate=True))
           (root / 'inputs.yml').unlink()
+          mcp_input = root / 'mcp.json'
+          mcp_input.write_text(json.dumps({'mcp_servers': values.get('mcp_servers', {})}))
+          configure(mcp_input, root / 'home/config.toml', pwd.getpwuid(os.getuid()))
           commands = [
               {'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'brai_agent', 'version': '3.0.0'}, 'capabilities': {'experimentalApi': True}}},
               {'method': 'initialized', 'params': {}},
               {'id': 2, 'method': 'account/read', 'params': {'refreshToken': False}},
           ]
-          binary = root / 'node_modules/.bin/codex'
-          with subprocess.Popen([binary, 'app-server', '--listen', 'stdio://'], cwd=root,
-                                env=dict(os.environ, CODEX_HOME=str(root / 'home')), text=True,
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
-              records = {}
-              try:
-                  for request in commands:
-                      process.stdin.write(json.dumps(request) + '\n')
-                      process.stdin.flush()
-                      if request.get('id'):
-                          for line in process.stdout:
-                              reply = json.loads(line)
-                              if reply.get('id') == request['id']:
-                                  records[request['id']] = reply
-                                  break
-              finally:
-                  process.terminate()
+          binary = root / 'home/packages/app-server-daemon/current/bin/codex'
+          socket = root / 'home/control.sock'
+          subprocess.run(['sudo', '-n', 'systemd-run', '--quiet', '--collect', '--unit', unit,
+                          '--property', f'User={pwd.getpwuid(os.getuid()).pw_name}',
+                          '--property', f'WorkingDirectory={root}', '--setenv', f'CODEX_HOME={root / "home"}',
+                          '--setenv', f'HOME={root}', '--setenv', 'PATH=/usr/local/bin:/usr/bin:/bin',
+                          binary, 'app-server', '--listen', 'unix://' + str(socket)], check=True)
+          while not socket.is_socket():
+              active = subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode
+              if active:
+                  raise SystemExit('CODEX_SYSTEMD_UNIT_UNAVAILABLE')
+              time.sleep(.2)
+          records = {}
+          with unix_connect(str(socket)) as connection:
+              for request in commands:
+                  connection.send(json.dumps(request))
+                  if request.get('id'):
+                      while True:
+                          reply = json.loads(connection.recv(timeout=20))
+                          if reply.get('id') == request['id']:
+                              records[request['id']] = reply
+                              break
           result = records.get(2, {})
           if result.get('result', {}).get('account'):
               print('CODEX_ACCOUNT_READY')
