@@ -185,7 +185,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         config['agent']['system_prompt'] += (
             ' Диалоги обязательны на каждом публичном ходе. До разбора поручения вызови '
             'mcp__brai__dialogues_exchange с action input: сохрани точное сообщение, '
-            'стабильные ID беседы и сообщения, consumer_id и context_instance_id. '
+            'стабильные ID беседы и сообщения и один consumer_id на тред. На уточнениях используй ту же сессию контекста. В page и ACK подставляй context_instance_id из выдачи. '
             'Для текста длиннее 100 символов добавь отдельное непустое summary. '
             'Полностью дочитай context через page с исходным context_request_id, '
             'проверь размер и SHA-256, затем отдельно вызови mcp__brai__dialogues_context_ack. '

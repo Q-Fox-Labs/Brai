@@ -80,3 +80,19 @@ test('MCP: агент исправляет поля из отказа, повт�
   assert.equal(toolDefinitions.length,2);
  }finally{await client.close();await listener.close();}
 });
+
+test('обычный обмен сохраняет экземпляр контекста между запросами',async()=>{
+ const pulls=[];
+ const store={
+  async turnInput(owner,args){return {dialogue_id:args.dialogue.id};},
+  async pull(owner,args){pulls.push(args);return {context_instance_id:args.context_instance_id};}
+ };
+ const {invoke}=await import('../dist/api.js');
+ for(const [index,context] of [inputExample.context,inputExample.context,{...inputExample.context,reset:true},{...inputExample.context,context_instance_id:'other'}].entries()){
+  const result=await invoke(store,'synthetic','dialogues_exchange',{...inputExample,context,arguments:{...inputExample.arguments,request_id:'input-'+index}});
+  assert.equal(result.context.context_instance_id,index===3?'other':'default');
+ }
+ assert.deepEqual(pulls.map(({consumer_id,context_instance_id,reset})=>[consumer_id,context_instance_id,reset===true]),[
+  ['codex:chat-1','default',false],['codex:chat-1','default',false],['codex:chat-1','default',true],['codex:chat-1','other',false]
+ ]);
+});

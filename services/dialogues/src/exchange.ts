@@ -12,10 +12,11 @@ export async function exchange(store:Store,owner:string,raw:unknown) {
  const a=object(raw,['action','arguments','context']);
  const args=object(a.arguments??{},['request_id','dialogue','dialogue_id','turn_id','expected_version','messages','reconciled_no_final','changes','final','cursor','continuation_cursor','consumer_id','context_instance_id','reset','message_id','offset','limit','target','summary_version','through_message_id','text','final_message_id','evidence']);
  if(typeof a.action!=='string')fail('INVALID_ARGUMENT');
- const context=a.context===undefined?undefined:object(a.context,['consumer_id','context_instance_id','reset']);
+ const supplied=a.context===undefined?undefined:object(a.context,['consumer_id','context_instance_id','reset']);
+ const context=supplied&&{consumer_id:supplied.consumer_id,context_instance_id:supplied.context_instance_id??'default',reset:supplied.reset};
  if(context){id(context.consumer_id);id(context.context_instance_id);if(context.reset!==undefined&&typeof context.reset!=='boolean')fail('INVALID_ARGUMENT');}
  if(a.action==='page')return store.pull(owner,args);
- if(!context)throw new DialoguesFault('INVALID_ARGUMENT',{field:'context',expected:'идентификаторы потребителя и экземпляра контекста'});
+ if(!context)throw new DialoguesFault('INVALID_ARGUMENT',{field:'context',expected:'стабильный идентификатор потребителя'});
  if(!['input','update','finish','import','summary','repair','read','snapshot','history','poll'].includes(a.action))return fail('UNKNOWN_OPERATION');
  id(args.request_id);
  id(args.dialogue_id??args.dialogue?.id);
