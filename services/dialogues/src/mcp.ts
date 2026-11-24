@@ -21,7 +21,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   const sessions=new Map<string,Session>(),pending=new Set<Session>();
   const safeId=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9_.:/-]{1,256}$/.test(v)?v:undefined;
   function rejected(name:string,raw:any,diagnostic:Record<string,any>,started:number){
-    const action=['input','update','finish','poll','page','read','history','snapshot','import','summary','repair'].includes(raw?.action)?raw.action:undefined;
+    const action=['input','update','finish','poll','page','read','history','snapshot','import','summary','repair','topic_get','search','topic_move'].includes(raw?.action)?raw.action:undefined;
     try{log({service:'dialogues',event:'request_rejected',tool:['dialogues_exchange','dialogues_context_ack'].includes(name)?name:'unknown',
       action,request_id:safeId(raw?.arguments?.request_id??raw?.request_id),code:diagnostic.code,
       field:diagnostic.unknown_property?(diagnostic.parent_field?diagnostic.parent_field+'.':'')+'<unknown>':diagnostic.field,applied:diagnostic.applied,duration_ms:Date.now()-started});}catch{/* Журнал не меняет исход операции. */}

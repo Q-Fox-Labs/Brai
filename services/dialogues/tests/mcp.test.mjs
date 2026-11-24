@@ -34,7 +34,7 @@ test("MCP предоставляет только обмен и ACK; stdio во�
   const listed=(await client.listTools()).tools;
   assert.deepEqual(listed.map(t=>t.name).sort(),['dialogues_context_ack','dialogues_exchange']);
   const exchange=listed.find(t=>t.name==='dialogues_exchange');
-  assert.deepEqual(exchange.inputSchema.properties.context.required,['consumer_id','context_instance_id']);
+  assert.deepEqual(exchange.inputSchema.properties.context.required,['consumer_id']);
   assert.equal(exchange.inputSchema.oneOf,undefined);
   const input=exchange.inputSchema.properties.arguments.anyOf.find(v=>v.properties.dialogue&&v.properties.messages?.items?.required?.includes('text')&&!v.properties.messages.items.required.includes('turn_id'));
   assert.deepEqual(input.properties.dialogue.required,['id','channel']);

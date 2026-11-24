@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import {createTurns} from "./turns.js";
 import {createContext,contextPages,ownerTransaction} from "./context.js";
 import {enqueueDialogue} from "./jobs.js";
+import {createTopics,ensureTopic} from "./topics.js";
 import { createHash } from "node:crypto";
 import { appendInput, summaryInput, canonical, digest, decodeCursor, encodeCursor, fail, id, integer, object, limits, type Cursor, DialoguesFault } from "./domain.js";
 
@@ -42,6 +43,7 @@ export function createStore(pool:DB,key:string) {
       const existing=(await db.query("SELECT channel FROM dialogues_live.dialogues WHERE owner_id=$1 AND id=$2",[owner,d.id])).rows[0];
       if(existing&&existing.channel!==d.channel)fail("DIALOGUE_CONFLICT");
       await db.query("INSERT INTO dialogues_live.dialogues(owner_id,id,channel,title) VALUES($1,$2,$3,$4) ON CONFLICT(owner_id,id) DO NOTHING",[owner,d.id,d.channel,d.title??d.id]);
+      await ensureTopic(db,owner,d.id);
       if(d.title!==undefined)await db.query("UPDATE dialogues_live.dialogues SET title=$3 WHERE owner_id=$1 AND id=$2",[owner,d.id,d.title]);
       const saved=[];let enqueue=false;
       for(const m of arg.messages) {
@@ -259,5 +261,5 @@ export function createStore(pool:DB,key:string) {
     await ownerTransaction(pool,owner,async db=>{await db.query('INSERT INTO dialogues_live.exchange_events(owner_id,event_id,event_type,dialogue_id,turn_id,result_ids) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',[owner,eventId,action,dialogue,turn,JSON.stringify(resultIds)]);});
   }
   const contextApi=createContext(pool,key);
-  return {append,summary,context,message,history,logExchange,...contextApi,...createTurns(pool,key,mutation,contextApi)};
+  return {append,summary,context,message,history,logExchange,topics:createTopics(pool),...contextApi,...createTurns(pool,key,mutation,contextApi)};
 }

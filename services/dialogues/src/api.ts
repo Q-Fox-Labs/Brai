@@ -15,10 +15,11 @@ const callExamples=' Пример input: '+JSON.stringify(inputExample)+'. Пр�
 export const agentInstructions=baseInstructions+callExamples;
 const str={type:'string'};
 const identifier={type:'string',pattern:'^[A-Za-z0-9_.:/-]{1,256}$'};
+const format={enum:['legacy','compact']};
 const count={type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER};
 const expected={type:'string',pattern:'^[1-9][0-9]*$'};
 const obj=(properties:Record<string,any>,required:string[]=[])=>({type:'object',additionalProperties:false,properties,required});
-const context=obj({consumer_id:identifier,context_instance_id:identifier,reset:{type:'boolean'}},['consumer_id']);
+const context=obj({consumer_id:identifier,context_instance_id:identifier,reset:{type:'boolean'},format},['consumer_id']);
 const ack=obj({request_id:identifier,consumer_id:identifier,context_instance_id:identifier,delivery_id:identifier},['request_id','consumer_id','context_instance_id','delivery_id']);
 const dialogue=obj({id:identifier,channel:identifier,title:str},['id','channel']);
 const publicMessage=obj({id:identifier,text:str,occurred_at:{type:['string','null'],format:'date-time'},source:{type:'object'},summary:{type:'string',description:'Обязательно для оригинала длиннее 100 Unicode-символов.'}},['id','text']);
@@ -27,21 +28,26 @@ const result=obj({id:identifier,formulation:str,source_refs:{type:'array',items:
 const changes=obj({purpose:{type:['string','null']},constraints:{type:['string','null']},add:{type:'array',items:result},update:{type:'array',items:result}});
 const common={request_id:identifier,dialogue_id:identifier};
 const turn={...common,turn_id:identifier,expected_version:expected};
+const archiveOnly={type:'boolean'};
+const independentActions=new Set(['topic_get','search','topic_move']);
 const variants:Record<string,any>={
  input:obj({request_id:identifier,dialogue,messages:{type:'array',minItems:1,maxItems:100,items:publicMessage},reconciled_no_final:{type:'boolean'}},['request_id','dialogue','messages']),
  update:obj({...turn,changes},['request_id','dialogue_id','turn_id','expected_version','changes']),
  finish:obj({...turn,final:publicMessage,changes},['request_id','dialogue_id','turn_id','expected_version','final']),
  poll:obj(common,['request_id','dialogue_id']),
- page:obj({...common,consumer_id:identifier,context_instance_id:identifier,reset:{type:'boolean'},continuation_cursor:str},['request_id','consumer_id','context_instance_id']),
- read:obj({...common,message_id:identifier,target:{enum:['original','message_summary','dialogue_summary']},summary_version:expected,offset:count,limit:{...count,minimum:1,maximum:8192}},['request_id','dialogue_id']),
- history:obj({...common,cursor:str},['request_id','dialogue_id']),
- snapshot:obj({...common,turn_id:identifier,cursor:str},['request_id','dialogue_id']),
+ page:obj({...common,consumer_id:identifier,context_instance_id:identifier,reset:{type:'boolean'},format,input_ids:{type:'array',maxItems:100,items:identifier},continuation_cursor:str},['request_id','consumer_id','context_instance_id']),
+ read:obj({...common,message_id:identifier,target:{enum:['original','message_summary','dialogue_summary']},summary_version:expected,archive_only:archiveOnly,offset:count,limit:{...count,minimum:1,maximum:8192}},['request_id','dialogue_id']),
+ topic_get:obj({request_id:identifier,topic_id:identifier,after:identifier},['request_id','topic_id']),
+ topic_move:obj({...common,topic_id:{type:['string','null'],pattern:identifier.pattern}},['request_id','dialogue_id','topic_id']),
+ search:obj({request_id:identifier,query:{...str,minLength:1,maxLength:8192},topic_id:identifier},['request_id','query']),
+ history:obj({...common,cursor:str,archive_only:archiveOnly},['request_id','dialogue_id']),
+ snapshot:obj({...common,turn_id:identifier,cursor:str,archive_only:archiveOnly},['request_id','dialogue_id']),
  import:obj({request_id:identifier,dialogue,messages:{type:'array',minItems:1,maxItems:100,items:imported}},['request_id','dialogue','messages']),
  summary:obj({...common,target:{enum:['message','dialogue']},message_id:identifier,through_message_id:identifier,expected_version:{type:['string','null'],pattern:'^[1-9][0-9]*$'},text:str},['request_id','dialogue_id','target','expected_version','text']),
  repair:obj({...turn,final_message_id:identifier,evidence:obj({kind:{enum:['native_client']},native_thread_id:identifier,native_turn_id:identifier,phase:{enum:['final_answer']},status:{enum:['completed']}},['kind','native_thread_id','native_turn_id','phase','status']),changes},['request_id','dialogue_id','turn_id','expected_version','final_message_id','evidence'])
 };
 export const toolDefinitions=[
- {name:operations[0],description:'Единый обмен: input начинает или дополняет ход, update меняет результаты, finish согласует финал, poll получает изменения, page дочитывает контекст, read получает один оригинал или саммари, history — саммари сообщений беседы, snapshot — состояние хода. import, summary и repair предназначены для переноса и восстановления. Передавай context рядом с action и arguments; он обязателен для всех действий, кроме page.'+callExamples,inputSchema:{type:'object',additionalProperties:false,properties:{action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object',anyOf:Object.values(variants)},context},required:['action','arguments']}},
+ {name:operations[0],description:'Единый обмен: input начинает или дополняет ход, update меняет результаты, finish согласует финал, poll получает изменения, page дочитывает контекст, read получает один оригинал или саммари, history — саммари сообщений беседы, snapshot — состояние хода. import, summary и repair предназначены для переноса и восстановления. Передавай context рядом с action и arguments; для page, topic_get, search, topic_move и вызовов read, history или snapshot с archive_only:true отдельный context не нужен. topic_get открывает тему по topic_id; topic_move меняет тему треда только по явному поручению, null возвращает его в собственную тему. search ищет в архиве и возвращает ID и смещения совпадений. context.format:compact включает компактную выдачу в подготовленном профиле.'+callExamples,inputSchema:{type:'object',additionalProperties:false,properties:{action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object',anyOf:Object.values(variants)},context},required:['action','arguments']}},
  {name:operations[1],description:'Подтвердить все страницы конкретной выдачи и получить квитанцию.',inputSchema:ack}
 ];
 /** Вызывает только действующий MCP-интерфейс с операторской идентичностью. */
@@ -50,7 +56,7 @@ export function invoke(store:ReturnType<typeof createStore>,owner:string,name:st
  if(name===operations[0]){
   validate(args,obj({action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object'},context},['action','arguments']),'');
   const a=args as Record<string,any>;
-  if(a.action!=='page')validate(a.context,context,'context');
+  if(a.action!=='page'&&!independentActions.has(a.action)&&a.arguments.archive_only!==true)validate(a.context,context,'context');
   validate(a.arguments,variants[a.action],'arguments');
   if(a.action==='input'||a.action==='import')a.arguments.messages.forEach((m:Record<string,any>,i:number)=>validateMessage(m,'arguments.messages['+i+']'));
   if(a.action==='finish')validateMessage(a.arguments.final,'arguments.final');

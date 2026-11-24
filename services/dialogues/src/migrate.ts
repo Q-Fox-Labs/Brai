@@ -20,15 +20,18 @@ export async function migrate(pool:Pool,owner:string,app:string) {
     await db.query(readFileSync(new URL("../migrations/003_context_jobs.sql",import.meta.url),"utf8"));
     await db.query(readFileSync(new URL("../migrations/004_managed_turns.sql",import.meta.url),"utf8"));
     await db.query(readFileSync(new URL("../migrations/005_context_exchange.sql",import.meta.url),"utf8"));
-    await db.query("REVOKE ALL ON SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
-    await db.query("REVOKE ALL ON ALL TABLES IN SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
-    await db.query("REVOKE ALL ON ALL SEQUENCES IN SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
+    await db.query(readFileSync(new URL("../migrations/007_topics.sql",import.meta.url),"utf8"));
     const isolated=Boolean((await db.query("SELECT 1 FROM dialogues_live.migrations WHERE version=6")).rowCount);
+    const bound=isolated&&Boolean((await db.query('SELECT 1 FROM dialogues_access.sys_owner_bindings WHERE login_role=$1 AND enabled',[app])).rowCount);
+    const revoke=bound?'PUBLIC':'PUBLIC,'+quote(app);
+    await db.query("REVOKE ALL ON SCHEMA dialogues_live FROM "+revoke);
+    await db.query("REVOKE ALL ON ALL TABLES IN SCHEMA dialogues_live FROM "+revoke);
+    await db.query("REVOKE ALL ON ALL SEQUENCES IN SCHEMA dialogues_live FROM "+revoke);
     if(!isolated){
     await db.query("GRANT USAGE ON SCHEMA dialogues_live TO "+quote(app));
     await db.query("GRANT SELECT ON dialogues_live.migrations TO "+quote(app));
-    await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.dialogues,dialogues_live.turns TO "+quote(app));
-    await db.query("GRANT SELECT,INSERT ON dialogues_live.messages,dialogues_live.message_summaries,dialogues_live.dialogue_summaries,dialogues_live.requests,dialogues_live.exchange_events TO "+quote(app));
+    await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.dialogues,dialogues_live.turns,dialogues_live.topics,dialogues_live.topic_members TO "+quote(app));
+    await db.query("GRANT SELECT,INSERT ON dialogues_live.messages,dialogues_live.message_summaries,dialogues_live.dialogue_summaries,dialogues_live.requests,dialogues_live.exchange_events,dialogues_live.topic_summaries,dialogues_live.message_compact_summaries TO "+quote(app));
     await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.context_consumers,dialogues_live.context_deliveries,dialogues_live.summary_jobs,dialogues_live.turn_results,dialogues_live.message_backfill TO "+quote(app));
     await db.query("GRANT USAGE,SELECT ON SEQUENCE dialogues_live.change_seq TO "+quote(app));
     }
