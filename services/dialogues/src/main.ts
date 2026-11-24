@@ -72,8 +72,7 @@ try {
   if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"){
     const generator=luna!;
     // AIDEV-NOTE: Подписочный исполнитель DEV предоставляет структурированные ответы.
-    const topicJobs='structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize,
-      process.env.DIALOGUES_TOPIC_GROUPING==='apply'):undefined;
+    const topicJobs='structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
     jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
       try{return await topicJobs.tick();}
       catch(error){

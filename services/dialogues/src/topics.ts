@@ -93,7 +93,7 @@ export function createTopics(pool:DB){
     FROM dialogues_live.topics t LEFT JOIN LATERAL (SELECT version,extended,source_refs FROM dialogues_live.topic_summaries
     WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
     WHERE t.owner_id=$1 AND t.id=$2`,[owner,topic])).rows[0];
-   const dialogues=(await db.query(`SELECT d.id AS dialogue_id,left(d.title,128) AS title,d.channel,tm.proposed_topic_id FROM dialogues_live.topic_members tm
+   const dialogues=(await db.query(`SELECT d.id AS dialogue_id,left(d.title,128) AS title,d.channel FROM dialogues_live.topic_members tm
     JOIN dialogues_live.dialogues d ON d.owner_id=tm.owner_id AND d.id=tm.dialogue_id
     WHERE tm.owner_id=$1 AND tm.topic_id=$2 AND ($3::text IS NULL OR d.id>$3) ORDER BY d.id LIMIT 51`,[owner,topic,after??null])).rows;
    await db.query('COMMIT');
@@ -114,7 +114,7 @@ export function createTopics(pool:DB){
    const previous=(await db.query('SELECT operation,hash,result FROM dialogues_live.requests WHERE owner_id=$1 AND id=$2',[owner,requestId])).rows[0];
    if(previous){if(previous.operation!==operation||previous.hash!==hash)fail('REQUEST_CONFLICT');return previous.result;}
    const topic=await moveTopicMember(db,owner,dialogue,destination);
-   await db.query('UPDATE dialogues_live.topic_members SET manually_assigned=true,proposed_topic_id=NULL WHERE owner_id=$1 AND dialogue_id=$2',[owner,dialogue]);
+   await db.query('UPDATE dialogues_live.topic_members SET manually_assigned=true WHERE owner_id=$1 AND dialogue_id=$2',[owner,dialogue]);
    const receipt={dialogue_id:dialogue,topic_id:topic};
    await db.query("INSERT INTO dialogues_live.requests(owner_id,id,operation,hash,result,change_seq) VALUES($1,$2,$3,$4,$5,nextval('dialogues_live.change_seq'))",[owner,requestId,operation,hash,receipt]);
    return receipt;
@@ -131,7 +131,7 @@ export async function moveTopicMember(db:PoolClient,owner:string,dialogue:string
  const target=destination===null?own:await resolveTopic(db,owner,destination);
  if(previous===target)return target;
  if(destination===null)await db.query('UPDATE dialogues_live.topics SET merged_into=NULL WHERE owner_id=$1 AND id=$2',[owner,own]);
- await db.query('UPDATE dialogues_live.topic_members SET topic_id=$3,proposed_topic_id=NULL WHERE owner_id=$1 AND dialogue_id=$2',[owner,dialogue,target]);
+ await db.query('UPDATE dialogues_live.topic_members SET topic_id=$3 WHERE owner_id=$1 AND dialogue_id=$2',[owner,dialogue,target]);
  await db.query('UPDATE dialogues_live.topics SET membership_version=membership_version+1 WHERE owner_id=$1 AND id=ANY($2::text[])',[owner,[previous,target]]);
  await db.query(`UPDATE dialogues_live.topics SET merged_into=$3 WHERE owner_id=$1 AND id=$2 AND NOT EXISTS
   (SELECT 1 FROM dialogues_live.topic_members WHERE owner_id=$1 AND topic_id=$2)`,[owner,previous,target]);

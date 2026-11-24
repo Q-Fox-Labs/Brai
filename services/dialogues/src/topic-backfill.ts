@@ -1,5 +1,5 @@
 // ABOUTME: Догоняет пересчёт тем в подготовленном персональном профиле.
-// ABOUTME: Сохраняет только производные данные; предложения группировки не применяет.
+// ABOUTME: Пересчитывает производные данные и автоматически связывает продолжения одной задачи.
 import {readFileSync} from 'node:fs';
 import {Pool} from 'pg';
 import {createSubscriptionLuna} from './subscription-luna.js';

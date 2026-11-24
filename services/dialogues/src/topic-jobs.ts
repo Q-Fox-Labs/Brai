@@ -125,7 +125,7 @@ async function recordChange(db:PoolClient,owner:string,operation:string,seq:stri
 }
 
 /** Обрабатывает одну порцию фоновой работы с сохранением уже готовых версий после перезапуска. */
-export function createTopicJobs(pool:Pool,owner:string,luna:Generator,authorize?:()=>Promise<void>,applyGrouping=false){
+export function createTopicJobs(pool:Pool,owner:string,luna:Generator,authorize?:()=>Promise<void>){
  const retryAfter=new Map<string,number>();
  async function seed(){
   return ownerTransaction(pool,owner,async db=>{
@@ -183,7 +183,7 @@ export function createTopicJobs(pool:Pool,owner:string,luna:Generator,authorize?
      SELECT 1 FROM dialogues_live.message_compact_summaries c WHERE c.owner_id=$1 AND c.dialogue_id=m.dialogue_id
       AND c.message_id=m.id AND c.source_version=m.version)`,[owner])).rows;
    const work=messages.find(m=>m.text&&countContextTokens(m.text)>topicLimits.message&&(retryAfter.get(m.dialogue_id+'/'+m.id)??0)<=Date.now());
-   if(!work)return await checkGrouping(client,owner,luna,applyGrouping,()=>authorize?.());
+   if(!work)return await checkGrouping(client,owner,luna,()=>authorize?.());
    key=work.dialogue_id+'/'+work.id;
    const text=await shortenMessage(luna,work.text);
    await authorize?.();
@@ -211,7 +211,15 @@ const groupingPrompt={
  schema:{type:'object',additionalProperties:false,required:['topic_id'],properties:{topic_id:{type:['string','null']}}}
 };
 
-async function checkGrouping(db:PoolClient,owner:string,luna:Generator,apply:boolean,authorize:()=>Promise<void>|undefined){
+// AIDEV-NOTE: Иначе оставшийся тред может отменить ручное разделение встречным переносом.
+const automaticTarget=`NOT EXISTS (
+ SELECT 1 FROM dialogues_live.topic_members home WHERE home.owner_id=t.owner_id AND home.topic_id=t.id
+  AND home.dialogue_id=t.home_dialogue_id AND home.manually_assigned
+  AND NOT EXISTS (SELECT 1 FROM dialogues_live.topic_members other WHERE other.owner_id=t.owner_id
+   AND other.topic_id=t.id AND other.dialogue_id<>home.dialogue_id)
+)`;
+
+async function checkGrouping(db:PoolClient,owner:string,luna:Generator,authorize:()=>Promise<void>|undefined){
  const row=(await db.query(`SELECT tm.dialogue_id,tm.topic_id,t.title,t.membership_version,s.extended,s.change_seq
   FROM dialogues_live.topic_members tm JOIN dialogues_live.topics t ON t.owner_id=tm.owner_id AND t.id=tm.topic_id
   JOIN LATERAL (SELECT extended,change_seq FROM dialogues_live.topic_summaries WHERE owner_id=t.owner_id
@@ -228,14 +236,14 @@ async function checkGrouping(db:PoolClient,owner:string,luna:Generator,apply:boo
   FROM dialogues_live.topics t CROSS JOIN q
   JOIN LATERAL (SELECT extended,change_seq FROM dialogues_live.topic_summaries WHERE owner_id=t.owner_id
    AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
-  WHERE t.owner_id=$1 AND t.id<>$2 AND t.merged_into IS NULL
+  WHERE t.owner_id=$1 AND t.id<>$2 AND t.merged_into IS NULL AND ${automaticTarget}
   AND to_tsvector('pg_catalog.russian',concat_ws(' ',t.title,s.extended)) @@ q.words
   ORDER BY rank DESC,t.id LIMIT 10`,[owner,row.topic_id,query])).rows:[];
  let target:string|null=null;
  if(candidates.length){
-  const proposal=JSON.parse(await luna.structured(JSON.stringify({dialogue:{title:row.title,text:row.extended},candidates}),groupingPrompt));
-  if(proposal.topic_id!==null&&!candidates.some(x=>x.topic_id===proposal.topic_id))throw new DialoguesFault('TOPIC_CANDIDATE_INVALID');
-  target=proposal.topic_id;
+  const decision=JSON.parse(await luna.structured(JSON.stringify({dialogue:{title:row.title,text:row.extended},candidates}),groupingPrompt));
+  if(decision.topic_id!==null&&!candidates.some(x=>x.topic_id===decision.topic_id))throw new DialoguesFault('TOPIC_CANDIDATE_INVALID');
+  target=decision.topic_id;
  }
  await authorize();
  await db.query('BEGIN');
@@ -249,18 +257,20 @@ async function checkGrouping(db:PoolClient,owner:string,luna:Generator,apply:boo
   if(target){
    const expected=candidates.find(candidate=>candidate.topic_id===target)!;
    const [destination]=await topicState(db,owner,target);
-   const version=(await db.query(`SELECT max(change_seq)::text AS seq FROM dialogues_live.topic_summaries
-      WHERE owner_id=$1 AND topic_id=$2 AND membership_version=$3`,[owner,target,expected.membership_version])).rows[0].seq;
+   const version=(await db.query(`SELECT max(s.change_seq)::text AS seq FROM dialogues_live.topics t
+      JOIN dialogues_live.topic_summaries s ON s.owner_id=t.owner_id AND s.topic_id=t.id
+       AND s.membership_version=t.membership_version
+      WHERE t.owner_id=$1 AND t.id=$2 AND t.membership_version=$3 AND ${automaticTarget}`,[owner,target,expected.membership_version])).rows[0].seq;
    if(!destination||destination.membership_version!==expected.membership_version||version!==expected.change_seq
       ||digest(destination.inputs)!==destination.source_digest){
     await db.query('ROLLBACK');return true;
    }
   }
-  const updated=await db.query(`UPDATE dialogues_live.topic_members tm SET checked_at=$4,proposed_topic_id=$5
+  const updated=await db.query(`UPDATE dialogues_live.topic_members tm SET checked_at=$4
    WHERE tm.owner_id=$1 AND tm.dialogue_id=$2 AND tm.topic_id=$3 AND NOT tm.manually_assigned AND (tm.checked_at IS NULL OR tm.checked_at<$4)
    AND (SELECT max(change_seq) FROM dialogues_live.topic_summaries WHERE owner_id=$1 AND topic_id=$3)=$4`,
-  [owner,row.dialogue_id,row.topic_id,row.change_seq,target]);
-  if(updated.rowCount&&apply&&target){
+  [owner,row.dialogue_id,row.topic_id,row.change_seq]);
+  if(updated.rowCount&&target){
    await moveTopicMember(db,owner,row.dialogue_id,target);
    const {seq}=(await db.query("SELECT nextval('dialogues_live.change_seq')::text AS seq")).rows[0];
    await recordChange(db,owner,'internal_topic_group',seq,{dialogue_id:row.dialogue_id,topic_id:target});

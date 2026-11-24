@@ -13,8 +13,6 @@ try{
  let raw='';for await(const chunk of process.stdin)raw+=chunk;
  const {operatorFile,account,directory,stateDirectory,provider,payload,providerPayload=payload,uid}=JSON.parse(raw);
  const op=JSON.parse(readFileSync(operatorFile,'utf8'));
- const topicGrouping=op.dialoguesTopicGrouping??'propose';
- if(!['propose','apply'].includes(topicGrouping))throw new Error('INVALID_TOPIC_GROUPING_MODE');
  const auth=new Pool({connectionString:op.authDatabaseURL,max:1});
  const admin=new Pool({connectionString:op.dialoguesAdminDatabaseURL,max:1});
  const owner=new Pool({connectionString:op.dialoguesOwnerDatabaseURL,max:1});
@@ -57,7 +55,7 @@ try{
   save(directory+'/nats.json',{user:state.login,pass:state.natsPassword});
   writeFileSync(directory+'/token',state.token,{mode:0o600});writeFileSync(directory+'/cursor',state.cursor,{mode:0o600});
   if(state.operatorToken)writeFileSync(directory+'/operator-token',state.operatorToken,{mode:0o600});
-  const env={...(state.operatorToken?{DIALOGUES_OPERATOR_TOKEN_FILE:directory+'/operator-token'}:{}),DIALOGUES_DATABASE_URL:databaseURL.href,DIALOGUES_MCP_TOKEN_FILE:directory+'/token',DIALOGUES_CURSOR_KEY_FILE:directory+'/cursor',DIALOGUES_MCP_PORT:String(account.port),DIALOGUES_MCP_HOST:'127.0.0.1',DIALOGUES_MCP_ALLOWED_HOSTS:'127.0.0.1:'+account.port+',localhost:'+account.port,DIALOGUES_MCP_ALLOWED_ORIGINS:'http://127.0.0.1',DIALOGUES_MCP_USER_ID:state.userId,DIALOGUES_MCP_PROFILE_ID:state.profileId,DIALOGUES_MCP_OWNER_ID:state.ownerId,DIALOGUES_AUTH_SUBJECT:subject,DIALOGUES_NATS_CREDS_FILE:directory+'/nats.json',DIALOGUES_NATS_SERVERS:op.natsServers.join(','),DIALOGUES_NATS_INBOX_PREFIX:inbox,DIALOGUES_SUBSCRIPTION_CONFIG_FILE:directory+'/subscription.json',DIALOGUES_SUMMARY_ENABLED:'true',DIALOGUES_TOPIC_GROUPING:topicGrouping,...(op.natsCAFile?{DIALOGUES_NATS_CA_FILE:op.natsCAFile}:{})};
+  const env={...(state.operatorToken?{DIALOGUES_OPERATOR_TOKEN_FILE:directory+'/operator-token'}:{}),DIALOGUES_DATABASE_URL:databaseURL.href,DIALOGUES_MCP_TOKEN_FILE:directory+'/token',DIALOGUES_CURSOR_KEY_FILE:directory+'/cursor',DIALOGUES_MCP_PORT:String(account.port),DIALOGUES_MCP_HOST:'127.0.0.1',DIALOGUES_MCP_ALLOWED_HOSTS:'127.0.0.1:'+account.port+',localhost:'+account.port,DIALOGUES_MCP_ALLOWED_ORIGINS:'http://127.0.0.1',DIALOGUES_MCP_USER_ID:state.userId,DIALOGUES_MCP_PROFILE_ID:state.profileId,DIALOGUES_MCP_OWNER_ID:state.ownerId,DIALOGUES_AUTH_SUBJECT:subject,DIALOGUES_NATS_CREDS_FILE:directory+'/nats.json',DIALOGUES_NATS_SERVERS:op.natsServers.join(','),DIALOGUES_NATS_INBOX_PREFIX:inbox,DIALOGUES_SUBSCRIPTION_CONFIG_FILE:directory+'/subscription.json',DIALOGUES_SUMMARY_ENABLED:'true',...(op.natsCAFile?{DIALOGUES_NATS_CA_FILE:op.natsCAFile}:{})};
   writeFileSync(directory+'/runtime.env',Object.entries(env).map(([k,v])=>k+'='+JSON.stringify(v)).join('\n')+'\n',{mode:0o600});
   save(directory+'/endpoint.json',{enabled:true,url:'http://127.0.0.1:'+account.port+'/mcp',userId:state.userId,profileId:state.profileId,token:state.token});
   save(directory+'/admission.json',{binding:{subject,userId:state.userId,profileId:state.profileId},nats:{user:state.login,password:state.natsPassword,permissions:{publish:{allow:[subject]},subscribe:{allow:[inbox+'.>']}}}});

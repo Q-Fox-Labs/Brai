@@ -9,11 +9,10 @@ CREATE TABLE IF NOT EXISTS dialogues_live.topics (
 );
 CREATE TABLE IF NOT EXISTS dialogues_live.topic_members (
  owner_id text NOT NULL, dialogue_id text NOT NULL, topic_id text NOT NULL,
- checked_at bigint, proposed_topic_id text, manually_assigned boolean NOT NULL DEFAULT false,
+ checked_at bigint, manually_assigned boolean NOT NULL DEFAULT false,
  PRIMARY KEY(owner_id,dialogue_id),
  FOREIGN KEY(owner_id,dialogue_id) REFERENCES dialogues_live.dialogues(owner_id,id),
- FOREIGN KEY(owner_id,topic_id) REFERENCES dialogues_live.topics(owner_id,id),
- FOREIGN KEY(owner_id,proposed_topic_id) REFERENCES dialogues_live.topics(owner_id,id)
+ FOREIGN KEY(owner_id,topic_id) REFERENCES dialogues_live.topics(owner_id,id)
 );
 CREATE INDEX IF NOT EXISTS topic_members_lookup ON dialogues_live.topic_members(owner_id,topic_id,dialogue_id);
 CREATE TABLE IF NOT EXISTS dialogues_live.topic_summaries (

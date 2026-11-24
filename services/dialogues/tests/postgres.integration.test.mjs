@@ -107,33 +107,38 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal(context.items.find(item=>item.type==='topic_summary').text,'Запланирована проверка.');
   });
 
-  await t.test('группировка сначала сохраняет предложение и защищает ручной перенос',async()=>{
+  await t.test('фон автоматически группирует одну задачу и сохраняет ручное разделение',async()=>{
    const profile='topic-grouping-fixture';
-   for(const [id,message] of [['first','Проверка выпуска PR 123'],['second','Продолжение проверки выпуска PR 123']]){
+   for(const [id,message] of [
+    ['first','Проверка выпуска PR 123'],['second','Продолжение проверки выпуска PR 123'],
+    ['other','Отдельная проверка выпуска PR 124']
+   ]){
     await api.append(profile,{request_id:req(),dialogue:{id,channel:'synthetic',title:'Проверка выпуска'},
      messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:message}]});
    }
    const generator={async structured(input){
     const data=JSON.parse(input);
-    return data.candidates?JSON.stringify({topic_id:data.candidates[0].topic_id}):
-     JSON.stringify({extended:'Проверка выпуска PR 123.',compact:'Проверка PR 123.',source_indexes:[0]});
+    if(data.candidates){
+     const candidate=data.dialogue.text.includes('PR 123')&&data.candidates.find(item=>item.extended.includes('PR 123'));
+     return JSON.stringify({topic_id:candidate?candidate.topic_id:null});
+    }
+    const text=data.sources.map(source=>source.text).join(' ');
+    return JSON.stringify({extended:text,compact:text,source_indexes:[0]});
    }};
-   const proposed=createTopicJobs(app,profile,generator);
-   assert.equal(await proposed.tick(),true);
-   assert.equal(await proposed.tick(),true);
-   assert.equal(await proposed.tick(),true);
-   const rows=(await app.query(`SELECT dialogue_id,topic_id,proposed_topic_id FROM dialogues_live.topic_members
-    WHERE owner_id=$1 ORDER BY dialogue_id`,[profile])).rows;
-   const proposal=rows.find(row=>row.proposed_topic_id);
-   assert.ok(proposal);
-   assert.equal(new Set(rows.map(row=>row.topic_id)).size,2);
-   await api.topics.move(profile,req(),proposal.dialogue_id,proposal.proposed_topic_id);
-   await api.topics.move(profile,req(),proposal.dialogue_id,null);
-   const applied=createTopicJobs(app,profile,generator,undefined,true);
-   assert.equal(await applied.tick(),true);
-   assert.equal(await applied.tick(),true);
-   assert.equal((await app.query(`SELECT topic_id,manually_assigned FROM dialogues_live.topic_members
-    WHERE owner_id=$1 AND dialogue_id=$2`,[profile,proposal.dialogue_id])).rows[0].manually_assigned,true);
+   const memberships=async()=>Object.fromEntries((await app.query(`SELECT dialogue_id,topic_id
+    FROM dialogues_live.topic_members WHERE owner_id=$1`,[profile])).rows.map(row=>[row.dialogue_id,row.topic_id]));
+   const initial=await memberships();
+   assert.equal(new Set(Object.values(initial)).size,3);
+   const jobs=createTopicJobs(app,profile,generator);
+   while(await jobs.tick()){}
+   const grouped=await memberships();
+   assert.equal(grouped.first,grouped.second);
+   assert.equal(grouped.other,initial.other);
+   assert.notEqual(grouped.other,grouped.first);
+   const moved=grouped.first===initial.first?'second':'first';
+   await api.topics.move(profile,req(),moved,null);
+   while(await jobs.tick()){}
+   assert.deepEqual(await memberships(),initial);
   });
 
   await t.test('архив из 1000 тем сохраняет лимит bootstrap и исторический импорт в дельте',async()=>{
