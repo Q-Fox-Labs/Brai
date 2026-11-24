@@ -5,13 +5,16 @@ import os
 from pathlib import Path
 import shlex
 import sys
+import subprocess
 import tempfile
 import unittest
+import wave
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.profiles import stt_config
-from identity.transcribe import transcribe_file
+from identity.audio_parts import PREPARE_TIMEOUT, RATE, audio_info, audio_parts
+from identity.transcribe import transcribe_audio, transcribe_file
 
 MODEL = {'modelId': 'selected-model', 'revision': 'selected-revision', 'profileId': 'selected-profile'}
 AID = '11111111-1111-4111-8111-111111111111'
@@ -126,6 +129,86 @@ class TranscriptionTests(unittest.TestCase):
             stt_config({'modelId': 'incomplete'})
 
 
+class AudioPartTests(unittest.TestCase):
+    """Проверить реальные декодеры, порядок и отсутствие частичного output."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        (self.home / 'workspace').mkdir()
+        self.output = self.home / 'transcript.txt'
+
+    def make_audio(self, filename, seconds):
+        source = self.home / filename
+        subprocess.run(['/usr/bin/ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                        '-i', 'anullsrc=r=16000:cl=mono', '-t', str(seconds), str(source)],
+                       check=True)
+        return source
+
+    def test_ogg_telegram_duration_is_cut_without_losing_frames(self):
+        source = self.make_audio('long.ogg', 516)
+        duration, _ = audio_info(source)
+        original = source.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            lengths = []
+            for part in audio_parts(source, Path(directory), duration):
+                with wave.open(str(part), 'rb') as stream:
+                    self.assertEqual(stream.getframerate(), RATE)
+                    lengths.append(stream.getnframes())
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        self.assertEqual(sum(lengths), 516 * RATE)
+        self.assertEqual(len(lengths), 4)
+        self.assertTrue(all(length <= 170 * RATE for length in lengths))
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_long_audio_combines_results_and_stops_on_failed_part(self):
+        source = self.make_audio('long.ogg', 181)
+        for failed in (False, True):
+            attempts = []
+            paths = []
+            def call(method, params, **kwargs):
+                if method == 'files.publish':
+                    path = Path(params['path'])
+                    paths.append(path)
+                    self.assertTrue(path.is_file())
+                    self.assertTrue(path.is_relative_to(self.home / 'workspace'))
+                    return {'artifactId': AID, 'mimeType': 'audio/wav'}
+                args = params['args']
+                attempts.append(args['operationId'])
+                if failed and len(attempts) == 2:
+                    raise TimeoutError('unknown')
+                return {**args, 'text': f'Часть {len(attempts)}'}
+            with patch.dict(os.environ, {'HERMES_HOME': str(self.home)}):
+                if failed:
+                    with self.assertRaises(TimeoutError):
+                        transcribe_audio(source, self.output, MODEL, call=call)
+                    self.assertFalse(self.output.exists())
+                else:
+                    transcribe_audio(source, self.output, MODEL, call=call)
+                    self.assertEqual(self.output.read_text(), 'Часть 1\nЧасть 2')
+                    self.output.unlink()
+            self.assertEqual(len(set(attempts)), 2)
+            self.assertEqual(len(paths), 2)
+            self.assertEqual(list((self.home / 'workspace').iterdir()), [])
+
+    def test_aac_document_uses_normalized_wav_and_short_ogg_reuses_original(self):
+        for name in ('voice.ogg', 'document.aac', 'album.m4a', 'recording.webm'):
+            source = self.make_audio(name, 2)
+            paths = []
+            def call(method, params, **kwargs):
+                if method == 'files.publish':
+                    path = Path(params['path'])
+                    paths.append(path)
+                    return {'artifactId': AID, 'mimeType': 'audio/ogg' if path == source else 'audio/wav'}
+                return {**params['args'], 'text': 'Готово'}
+            with self.subTest(name=name), patch.dict(os.environ, {'HERMES_HOME': str(self.home)}):
+                transcribe_audio(source, self.output, MODEL, call=call)
+                self.assertEqual(self.output.read_text(), 'Готово')
+                self.assertEqual(paths[0] == source, name == 'voice.ogg')
+                self.output.unlink()
+
+
 class ManagedVoiceSettingsTests(unittest.TestCase):
     def test_accepted_command_reports_managed_stt_and_overrides_tool_config(self):
         from pathlib import Path
@@ -144,6 +227,7 @@ class ManagedVoiceSettingsTests(unittest.TestCase):
                 sys.modules, {'tools': tools}):
             self.assertTrue(native_policy.install_managed_stt(Path('/operator/profile-config.json')))
             loaded = tools.transcription_tools._load_stt_config()
+            self.assertGreater(loaded['providers']['brai_local_ai'].pop('timeout'), PREPARE_TIMEOUT)
             self.assertEqual(loaded, expected)
             loaded['enabled'] = False
             self.assertTrue(tools.transcription_tools._load_stt_config()['enabled'])
