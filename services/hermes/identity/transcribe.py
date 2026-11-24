@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 AUDIO_TYPES = {'audio/ogg', 'audio/wav', 'audio/flac', 'audio/mpeg'}
 MAX_TRANSCRIPT_BYTES = 1_048_576
-PART_TIMEOUT = 180
+SINGLE_TIMEOUT = 180
+PART_TIMEOUT = 900
 
 
 def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
@@ -104,7 +105,7 @@ def _checked_output(output_path):
     return output
 
 
-def transcribe_file(input_path, output_path, model, *, call=broker_call, timeout=PART_TIMEOUT):
+def transcribe_file(input_path, output_path, model, *, call=broker_call, timeout=SINGLE_TIMEOUT):
     """Создать новый UTF-8 output после одной попытки распознавания."""
     output = _checked_output(output_path)
     _write_output(output, _transcribe_part(Path(input_path), model, call, timeout))
@@ -131,7 +132,7 @@ def transcribe_audio(input_path, output_path, model, *, call=broker_call):
         with closing(audio_parts(source, Path(folder), duration)) as parts:
             for index, part in enumerate(parts, start=1):
                 # Native command provider ждёт прогресс; речь и пути не пишутся.
-                print(f'HERMES_IDENTITY_STT_PART {index}', file=sys.stderr, flush=True)
+                print(f'HERMES_IDENTITY_STT_PART {index}', flush=True)
                 text = _transcribe_part(part, model, call, PART_TIMEOUT, allow_silence=True).strip()
                 if not text:
                     continue

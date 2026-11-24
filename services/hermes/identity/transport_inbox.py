@@ -137,7 +137,7 @@ class TransportInbox:
             raise ValueError('VOICE_RETRY_SOURCE_UNAVAILABLE')
         return original, raw, snapshot
 
-    def retry_voice(self, bot_id, update_id, digest):
+    def retry_voice(self, bot_id, update_id, digest, attempt_number=1):
         """Поставить одну операторскую попытку для принятого voice; исходная запись не меняется."""
         update_id = int(number(update_id, 'UPDATE'))
         if update_id >= VOICE_RETRY_BASE:
@@ -145,7 +145,12 @@ class TransportInbox:
         original, raw, snapshot = self._voice_retry_input(bot_id, update_id)
         if original['digest'] != digest:
             raise ValueError('VOICE_RETRY_SOURCE_CHANGED')
-        retry_id = VOICE_RETRY_BASE + update_id
+        attempt_number = int(number(attempt_number, 'ATTEMPT'))
+        retry_id = VOICE_RETRY_BASE * attempt_number + update_id
+        if attempt_number > 1:
+            previous = self.observe(bot_id, retry_id - VOICE_RETRY_BASE)
+            if previous['state'] != 'accepted':
+                raise ValueError('VOICE_RETRY_PREVIOUS_UNCONFIRMED')
         raw['update_id'] = retry_id
         update = SimpleNamespace(update_id=retry_id, effective_user=SimpleNamespace(id=original['actor_id']),
                                  to_dict=lambda: raw)
@@ -157,7 +162,7 @@ class TransportInbox:
         attempt = int(number(attempt_id, 'UPDATE'))
         if attempt < VOICE_RETRY_BASE:
             return False
-        original, raw, _ = self._voice_retry_input(bot_id, attempt - VOICE_RETRY_BASE)
+        original, raw, _ = self._voice_retry_input(bot_id, attempt % VOICE_RETRY_BASE)
         retry = self.observe(bot_id, attempt)
         raw['update_id'] = attempt
         if (retry['binding'] != original['binding'] or retry['actor_id'] != original['actor_id']

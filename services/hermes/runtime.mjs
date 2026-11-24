@@ -347,7 +347,9 @@ export async function createBraiTools(config, ports) {
           await ports.publish(definition.subject, payload, signal);
           return { commandId: args.commandId, status: 'stored', outcome: 'unknown', nextTool: 'timer_command_get' };
         }
-        const timeout = args.deadlineAt ? Math.min(config.longRequestTimeoutMs ?? 300_000, Math.max(1, Date.parse(args.deadlineAt) - Date.now())) : undefined;
+        // AIDEV-NOTE: Одна часть Telegram использует тот же бюджет, что и часть Дневника.
+        const requestCap = config.longRequestTimeoutMs ?? (name === 'local_ai_invoke_transcribe' ? 900_000 : 300_000);
+        const timeout = args.deadlineAt ? Math.min(requestCap, Math.max(1, Date.parse(args.deadlineAt) - Date.now())) : undefined;
         const value = await ports.request(definition.subject, payload, signal, timeout);
         if (!definition.validateResponse(value)) throw fault('INVALID_UPSTREAM_RESPONSE');
         if (value.userId !== undefined && value.userId !== owner) throw fault('OWNER_MISMATCH');
