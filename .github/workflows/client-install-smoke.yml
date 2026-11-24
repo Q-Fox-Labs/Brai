@@ -23,7 +23,7 @@ jobs:
     environment: stock-prod-clean-install
     env:
       STOCK_ADMIN_SHA: 06f5ea4c6f970faff7e8c35e655a810a65e05ae5
-      STOCK_PATCH_SHA256: ec0f7561205d09fff98a23e1deafd9ff6b15cc9af5ae27815302a53533c9e14c
+      STOCK_PATCH_SHA256: 3832a213f03a83c536386e7d0b2f16937ad8f7d4ee3acd163e15de1f0a928389
       STOCK_ANSIBLE_CORE: '2.21.6'
       STOCK_ANSIBLE_POSIX: '2.2.2'
     steps:
@@ -227,6 +227,48 @@ jobs:
                   print(code)
           ' || true
                   done
+                  printf '\n--- BRAI AGENT DEPENDENCIES ---\n'
+                  sudo -n systemctl show codex-native-agent.service --property=ActiveState,SubState,Result,ExecMainStatus || true
+                  sudo -n -u agent timeout 30 /usr/local/bin/node --input-type=module 2>/dev/null <<'AGENT_DIAG' || true
+          import { readFileSync, realpathSync } from 'node:fs';
+          import { createRequire } from 'node:module';
+          import { dirname, resolve } from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const report = (check, data) => console.log(JSON.stringify({ check, ...data }));
+          const checks = async (check, run) => {
+            try { report(check, await run()); }
+            catch (error) {
+              const code = /^[A-Z_]{2,48}$/.test(error.code ?? '') ? error.code : 'FAILED';
+              report(check, { code, upstreamCode: Number.isSafeInteger(error.upstreamCode) ? error.upstreamCode : null });
+            }
+          };
+          await checks('auth-file', async () => {
+            const value = JSON.parse(readFileSync('/home/agent/.codex/auth.json', 'utf8'));
+            return { present: Boolean(value.tokens?.access_token) };
+          });
+          const config = JSON.parse(readFileSync('/etc/brai-agent/config.json', 'utf8'));
+          const health = realpathSync('/opt/brai-codeworks/prod-agent/services/agent/dist/health.js');
+          const { subjects } = await import(pathToFileURL(resolve(dirname(health), '../contracts/index.mjs')));
+          const status = value => ({
+            connection: ['connected', 'connecting', 'disconnected'].includes(value.connection) ? value.connection : 'unknown',
+            authorization: ['ready', 'required'].includes(value.authorization) ? value.authorization : 'unknown',
+          });
+          await checks('nats-status', async () => {
+            const { connect } = createRequire(health)('nats');
+            const nc = await connect({ ...config.nats, pass: config.nats.password, timeout: 2000 });
+            try {
+              const reply = await nc.request(subjects.rpc, Buffer.from('{"action":"status"}'), { timeout: 3000 });
+              return status(JSON.parse(Buffer.from(reply.data).toString()));
+            } finally { await nc.close(); }
+          });
+          await checks('codex-connect', async () => {
+            if (!/^ws\+unix:\/.+:\/$/.test(config.codex.socketUrl)) return { code: 'NONLOCAL_SOCKET' };
+            const { createCodex } = await import(pathToFileURL(resolve(dirname(health), 'codex.js')));
+            const port = createCodex(config.codex);
+            try { await port.connect(); return status(port.status()); }
+            finally { await port.close(); }
+          });
+          AGENT_DIAG
                   if sudo -n test -f /var/lib/brai-install/command-failure.json; then
                     printf '\n--- ROOT COMMAND FAILURE ---\n'
                     sudo -n cat /var/lib/brai-install/command-failure.json
