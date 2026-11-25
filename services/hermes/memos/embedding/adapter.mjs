@@ -218,8 +218,8 @@ export function createEmbeddingServer(config, invokeEmbedding, isReady = () => t
 
 /** Запустить HTTP-адаптер; dial и уведомление об отказе можно подменить в тесте. */
 export async function startEmbeddingAdapter(config, connectNats = connect, onTerminal = () => { process.exitCode = 1; }) {
-  const privateRelease = config.ownerId === 'release-memos'
-    && config.nats.servers.length === 1 && config.nats.servers[0] === 'nats://brai-release-nats:4222';
+  const privateRelease = config.ownerId === 'release-memos' && config.nats.servers.length === 1
+    && ['nats://127.0.0.1:4222', 'nats://brai-release-nats:4222'].includes(config.nats.servers[0]);
   const nc = await connectNats({
     servers: config.nats.servers,
     user: config.nats.user,

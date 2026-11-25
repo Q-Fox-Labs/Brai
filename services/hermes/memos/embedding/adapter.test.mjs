@@ -100,6 +100,31 @@ test('private RELEASE adapter stops listening after a terminal NATS disconnect',
   assert.equal(process.listenerCount('SIGTERM'), beforeTerm);
 });
 
+test('existing RELEASE loopback configuration also exits on a lost NATS connection', async () => {
+  let notifyClosed;
+  let closed = false;
+  const closedPromise = new Promise((resolve) => { notifyClosed = resolve; });
+  const nc = {
+    isClosed: () => closed, isDraining: () => false, closed: () => closedPromise,
+    drain: async () => { closed = true; notifyClosed(); },
+  };
+  const release = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://127.0.0.1:4222'], user: 'release_embeddings', password: 'synthetic',
+  }, embedding: { ...config.embedding, port: 0 } };
+  let options;
+  let terminal = 0;
+  const { server } = await startEmbeddingAdapter(release, async (value) => { options = value; return nc; },
+    () => { terminal++; });
+  assert.equal(options.reconnect, false);
+  assert.equal(options.ignoreClusterUpdates, true);
+  const stopped = once(server, 'close');
+  closed = true;
+  notifyClosed();
+  await stopped;
+  assert.equal(server.listening, false);
+  assert.equal(terminal, 1);
+});
+
 test('private RELEASE adapter rejects a connection already closed during startup', async () => {
   const nc = { isClosed: () => true, isDraining: () => false, closed: () => Promise.resolve() };
   const release = { ...config, ownerId: 'release-memos', nats: {
