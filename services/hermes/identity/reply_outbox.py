@@ -84,10 +84,14 @@ class ReplyOutbox:
                 if previous == 'sending' and not retry_unknown:
                     result = self._unknown_delivery()
                 else:
+                    attempted = False
+
                     def begin_attempt():
+                        nonlocal attempted
                         if not self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=? AND state='pending'",
                                                (ident,)).rowcount:
                             raise PermissionError('Delivery reservation changed')
+                        attempted = True
                     try:
                         if operator_assignment:
                             result = await self.deliver(body, begin_attempt=begin_attempt)
@@ -100,9 +104,14 @@ class ReplyOutbox:
                         result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
-                        result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
-                                  if retry_unknown else self._unknown_delivery())
+                    except Exception as error:
+                        if operator_assignment and not attempted:
+                            if isinstance(error, (ConnectionError, TimeoutError)):
+                                continue
+                            result = {'success': False, 'retryable': False, 'error_kind': 'preparation_failed'}
+                        else:
+                            result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
+                                      if retry_unknown else self._unknown_delivery())
                 sent = result.get('success') is True and bool(result.get('message_id'))
                 if operator_assignment and not sent and result.get('retryable') is not False:
                     result = self._unknown_delivery()

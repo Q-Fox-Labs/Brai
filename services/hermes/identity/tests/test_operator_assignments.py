@@ -176,6 +176,15 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
         await self.outbox.flush()
         self.assertEqual(self.sent, [])
 
+    async def test_preparation_connection_failure_leaves_approval_pending(self):
+        ready = await self.start()
+        self.outbox.deliver = AsyncMock(side_effect=ConnectionError('Preparation unavailable'))
+        result = await self.control('approve', **self.selector, resultDigest=ready['resultDigest'])
+        self.assertEqual(result['state'], 'approved')
+        self.outbox.deliver = self.deliver
+        await self.outbox.flush()
+        self.assertEqual(len(self.sent), 1)
+
     async def test_approved_attempt_interrupted_before_network_can_resume(self):
         ready = await self.start()
         self.worker.side_effect = self.worker_method
