@@ -1,0 +1,38 @@
+# ABOUTME: Проверяет восстановление адаптера памяти после перезапуска NATS.
+# ABOUTME: Работает только с временными Docker-контейнерами и синтетическими данными.
+name: Memory NATS recovery
+on:
+  push:
+    branches: [dev, 'feature/**', 'release-fix/**']
+    paths:
+      - 'services/hermes/memos/embedding/**'
+      - '.github/workflows/memory-nats.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  pull_request:
+    paths:
+      - 'services/hermes/memos/embedding/**'
+      - '.github/workflows/memory-nats.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Exercise NATS restart and replacement
+        env:
+          MEMOS_DOCKER_TEST: '1'
+        run: node --test services/hermes/memos/embedding/adapter.docker.test.mjs

@@ -108,6 +108,31 @@ test('private RELEASE adapter rejects a connection already closed during startup
   await assert.rejects(startEmbeddingAdapter(release, async () => nc, () => {}), /closed during adapter startup/);
 });
 
+test('NATS disconnect interrupts a graceful stop waiting for a slow HTTP client', async () => {
+  let notifyClosed;
+  let closed = false;
+  const closedPromise = new Promise((resolve) => { notifyClosed = resolve; });
+  const nc = {
+    isClosed: () => closed, isDraining: () => false, closed: () => closedPromise,
+    drain: async () => { closed = true; notifyClosed(); },
+  };
+  const release = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+  }, embedding: { ...config.embedding, port: 0 } };
+  let terminal = 0;
+  const { server, close } = await startEmbeddingAdapter(release, async () => nc, () => { terminal++; });
+  const accepted = once(server, 'connection');
+  const slow = httpRequest(`http://127.0.0.1:${server.address().port}/v1/embeddings`, { method: 'POST' });
+  slow.on('error', () => {});
+  slow.write('{');
+  await accepted;
+  const stopping = close();
+  closed = true;
+  notifyClosed();
+  await stopping;
+  assert.equal(terminal, 1);
+});
+
 test('closes NATS if the HTTP listener cannot bind its port', async (t) => {
   const occupied = createServer();
   occupied.listen(0, '127.0.0.1');
