@@ -21,7 +21,7 @@ export async function loadConfig(configPath = process.env.BRAI_HERMES_CONFIG) {
   return validateConfig(value);
 }
 
-/** Validate owner, local NATS endpoint, pinned model, and listener settings. */
+/** Validate owner, permitted NATS endpoint, pinned model, and listener settings. */
 export function validateConfig(value) {
   const nats = value?.nats;
   const embedding = value?.embedding;
@@ -29,10 +29,16 @@ export function validateConfig(value) {
   if (!value?.ownerId || (process.env.BRAI_HERMES_OWNER_ID && process.env.BRAI_HERMES_OWNER_ID !== value.ownerId)) {
     throw new Error('Invalid Hermes owner configuration');
   }
+  // AIDEV-NOTE: RELEASE использует только выделенный DNS в закрытой сети и обязательные credentials.
+  const releaseNats = value.ownerId === 'release-memos'
+    && Array.isArray(nats?.servers) && nats.servers.length === 1
+    && nats.servers[0] === 'nats://brai-release-nats:4222'
+    && typeof nats.user === 'string' && nats.user.length > 0
+    && typeof nats.password === 'string' && nats.password.length > 0;
   if (!Array.isArray(nats?.servers) || nats.servers.length === 0
-    || !nats.servers.every(isLocalNatsServer)
+    || (!releaseNats && !nats.servers.every(isLocalNatsServer))
     || (nats.user && !nats.password) || (!nats.user && nats.password)) {
-    throw new Error('Hermes NATS servers must target a loopback listener on port 4222 or 4223');
+    throw new Error('Hermes NATS servers must target an allowed loopback or private RELEASE listener on port 4222 or 4223');
   }
   if (model?.modelId !== MODEL_ID || model?.revision !== MODEL_REVISION || model?.profileId !== PROFILE_ID) {
     throw new Error('Hermes embedding model must match the pinned LocalAI profile');
@@ -218,8 +224,25 @@ export async function startEmbeddingAdapter(config) {
     inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.memos_embedding',
     timeout: 5_000,
     name: 'memos_embedding_adapter',
+    // AIDEV-NOTE: Остановка NATS на время резервирования может длиться дольше стандартных попыток.
+    maxReconnectAttempts: -1,
+    ignoreClusterUpdates: true,
   });
+  let connected = true;
+  const statuses = nc.status();
+  void (async () => {
+    try {
+      for await (const event of statuses) {
+        if (event.type === 'disconnect' || event.type === 'reconnecting') connected = false;
+        if (event.type === 'reconnect') connected = true;
+      }
+    } finally {
+      connected = false;
+    }
+  })();
+  void nc.closed().then(() => { connected = false; });
   const server = createEmbeddingServer(config, async (invocation) => {
+    if (!connected || nc.isClosed() || nc.isDraining()) throw new Error('NATS unavailable');
     const message = await nc.request(SUBJECT, Buffer.from(JSON.stringify(invocation)), { timeout: config.embedding.timeoutMs });
     const status = message.headers?.get('Nats-Service-Error-Code');
     if (status) {
@@ -228,7 +251,7 @@ export async function startEmbeddingAdapter(config) {
       throw error;
     }
     return JSON.parse(new TextDecoder().decode(message.data));
-  }, () => !nc.isClosed() && !nc.isDraining());
+  }, () => connected && !nc.isClosed() && !nc.isDraining());
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(config.embedding.port, config.embedding.host, resolve);
