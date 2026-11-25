@@ -1,7 +1,9 @@
 // ABOUTME: Проверяет HTTP-контракт MemOS embedding adapter на изолированном NATS порту.
 // ABOUTME: Подменяет invoke, не вызывает модель и не отправляет реальные данные.
 import assert from 'node:assert/strict';
-import { createEmbeddingServer, handleEmbedding, validateConfig } from './adapter.mjs';
+import { createEmbeddingServer, handleEmbedding, startEmbeddingAdapter, validateConfig } from './adapter.mjs';
+import { once } from 'node:events';
+import { createServer, request as httpRequest } from 'node:http';
 import test from 'node:test';
 
 const config = {
@@ -48,6 +50,93 @@ test('accepts only the authenticated RELEASE broker on its private service addre
     assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, password } }));
   }
   assert.throws(() => validateConfig({ ...value, ownerId: 'another-owner' }));
+});
+
+test('private RELEASE adapter stops listening after a terminal NATS disconnect', async () => {
+  let closeConnection;
+  let closed = false;
+  const closedPromise = new Promise((resolve) => { closeConnection = resolve; });
+  const nc = {
+    isClosed: () => closed,
+    isDraining: () => false,
+    closed: () => closedPromise,
+    drain: async () => { closed = true; closeConnection(); },
+    request: async (_subject, bytes) => {
+      const invocation = JSON.parse(bytes.toString());
+      return { data: Buffer.from(JSON.stringify(localAiResponse(invocation, [Array(768).fill(0.5)]))) };
+    },
+  };
+  let options;
+  const release = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+  }, embedding: { ...config.embedding, port: 0 } };
+  let terminal = 0;
+  const beforeInt = process.listenerCount('SIGINT');
+  const beforeTerm = process.listenerCount('SIGTERM');
+  const { server, close } = await startEmbeddingAdapter(release, async (value) => { options = value; return nc; },
+    () => { terminal++; });
+  assert.equal(options.reconnect, false);
+  assert.equal(options.ignoreClusterUpdates, true);
+  const endpoint = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(`${endpoint}/health`)).status, 200);
+  const response = await fetch(`${endpoint}/v1/embeddings`, { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'embeddinggemma-2-q8', input: 'synthetic' }) });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).data[0].embedding.length, 768);
+  const accepted = once(server, 'connection');
+  const slow = httpRequest(`${endpoint}/v1/embeddings`, { method: 'POST' });
+  slow.on('error', () => {});
+  slow.write('{');
+  await accepted;
+  const stopped = once(server, 'close');
+  closed = true;
+  closeConnection();
+  await stopped;
+  assert.equal(server.listening, false);
+  await Promise.all([close(), close()]);
+  assert.equal(terminal, 1);
+  assert.equal(process.listenerCount('SIGINT'), beforeInt);
+  assert.equal(process.listenerCount('SIGTERM'), beforeTerm);
+});
+
+test('private RELEASE adapter rejects a connection already closed during startup', async () => {
+  const nc = { isClosed: () => true, isDraining: () => false, closed: () => Promise.resolve() };
+  const release = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+  }, embedding: { ...config.embedding, port: 0 } };
+  await assert.rejects(startEmbeddingAdapter(release, async () => nc, () => {}), /closed during adapter startup/);
+});
+
+test('closes NATS if the HTTP listener cannot bind its port', async (t) => {
+  const occupied = createServer();
+  occupied.listen(0, '127.0.0.1');
+  await once(occupied, 'listening');
+  t.after(() => new Promise((resolve) => occupied.close(resolve)));
+  let closed = false;
+  const nc = {
+    isClosed: () => closed, isDraining: () => false,
+    closed: () => new Promise(() => {}),
+    close: async () => { closed = true; },
+  };
+  const local = { ...config, embedding: { ...config.embedding, port: occupied.address().port } };
+  await assert.rejects(startEmbeddingAdapter(local, async () => nc), { code: 'EADDRINUSE' });
+  assert.equal(closed, true);
+});
+
+test('loopback configurations retain existing NATS connection defaults', async () => {
+  let options;
+  let closed;
+  const nc = {
+    isClosed: () => false, isDraining: () => false,
+    closed: () => new Promise((resolve) => { closed = resolve; }),
+    drain: async () => { closed?.(); },
+  };
+  const result = await startEmbeddingAdapter({ ...config, embedding: { ...config.embedding, port: 0 } },
+    async (value) => { options = value; return nc; });
+  assert.equal(options.reconnect, undefined);
+  assert.equal(options.ignoreClusterUpdates, undefined);
+  await result.close();
 });
 
 test('rejects malformed input and a request for another model before invoking NATS', async () => {
