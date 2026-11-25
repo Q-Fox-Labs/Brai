@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -51,9 +51,9 @@ test('private adapter recovers after stopped and replaced broker', { skip: proce
     for await (const message of sub) { const value=JSON.parse(new TextDecoder().decode(message.data));
       message.respond(Buffer.from(JSON.stringify({requestId:value.requestId,operationId:value.operationId,
         model:value.model,vectors:value.texts.map(()=>Array(768).fill(0.5))}))); }`;
-  const probeCode = `const bad=await fetch('http://memory-embeddings:19573/v1/embeddings',{
+  const probeCode = `const bad=await fetch('http://brai-release-memos-embeddings:19573/v1/embeddings',{
     method:'POST',signal:AbortSignal.timeout(3000)});if(bad.status!==401)process.exit(1);
-    const r=await fetch('http://memory-embeddings:19573/v1/embeddings',{
+    const r=await fetch('http://brai-release-memos-embeddings:19573/v1/embeddings',{
     method:'POST',headers:{authorization:'Bearer '+${JSON.stringify('x'.repeat(32))},'content-type':'application/json'},
     body:JSON.stringify({model:'embeddinggemma-2-q8',input:'synthetic test'}),signal:AbortSignal.timeout(3000)});
     const v=await r.json();if(!r.ok||v.data?.[0]?.embedding?.length!==768)process.exit(1);`;
@@ -68,19 +68,32 @@ test('private adapter recovers after stopped and replaced broker', { skip: proce
         revision: 'bfcd298762cc34d0357ece5ebdd31791a3a374d8', profileId: 'embeddinggemma2_llama_cpp' } } };
     const configPath = path.join(directory, 'config.json');
     writeFileSync(configPath, JSON.stringify(config));
-    writeFileSync(path.join(directory, 'nats.json'), JSON.stringify({ port: 4222, authorization: { users: [
+    chmodSync(configPath, 0o444);
+    // Переход RELEASE накладывает один неизменяемый файл поверх компонента;
+    // разрешение зависимостей должно оставаться привязанным к компоненту.
+    const adapterPath = 'services/hermes/memos/embedding/adapter.mjs';
+    const overlayPath = path.join(directory, 'adapter-overlay.mjs');
+    const marker = `synthetic-overlay-${suffix}`;
+    writeFileSync(overlayPath, `${readFileSync(adapterPath, 'utf8')}\n// ${marker}\n`, { mode: 0o444 });
+    chmodSync(overlayPath, 0o444);
+    const natsPath = path.join(directory, 'nats.json');
+    writeFileSync(natsPath, JSON.stringify({ port: 4222, authorization: { users: [
       { user: 'release_embeddings', password: 'fixture', permissions: {
         publish: { allow: ['brai.local_ai.v1.invoke.embed', 'brai.local_ai.v1.status'] },
         subscribe: { allow: ['_INBOX.memos_embedding.>'] } } },
       { user: 'responder', password: 'fixture', permissions: {
         publish: { allow: ['_INBOX.memos_embedding.>'] }, subscribe: { allow: ['brai.local_ai.v1.invoke.embed'] } } },
     ] } }));
+    chmodSync(natsPath, 0o444);
     const sourceMount = `type=bind,src=${process.cwd()},dst=/work,readonly`;
     adapter = start('--name', `memos-adapter-${suffix}`, '--network', network,
-      '--network-alias', 'memory-embeddings', '--restart', 'unless-stopped',
+      '--network-alias', 'brai-release-memos-embeddings', '--restart', 'unless-stopped',
+      '--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+      '--tmpfs', '/tmp:rw,nosuid,nodev,mode=1777', '--init',
       '--mount', sourceMount, '--mount', `type=bind,src=${configPath},dst=/config.json,readonly`,
+      '--mount', `type=bind,src=${overlayPath},dst=/work/${adapterPath},readonly`,
       '--workdir', '/work', '--env', 'BRAI_HERMES_CONFIG=/config.json', image,
-      'node', 'services/hermes/memos/embedding/adapter.mjs');
+      'node', adapterPath);
     await wait(() => { if (Number(status(adapter, '.RestartCount')) < 1) throw Error('startup failure not observed'); });
     assert.match(logs(adapter), /MemOS embedding adapter:.*(ENOTFOUND|EAI_AGAIN|CONNECTION_REFUSED|ECONNREFUSED)/i);
     let broker = start(...brokerArgs);
@@ -89,6 +102,15 @@ test('private adapter recovers after stopped and replaced broker', { skip: proce
       image, 'node', '--input-type=module', '-e', responderCode);
     await wait(() => { if (!logs(responder).includes('READY')) throw Error('responder not ready'); });
     await wait(() => probe(responder));
+    assert.ok(docker('exec', adapter, 'cat', `/work/${adapterPath}`).includes(marker),
+      'nested read-only mount must supply the running adapter');
+    assert.equal(status(adapter, '.Config.User'), '1000:1000');
+    assert.equal(docker('exec', adapter, 'id', '-u'), '1000');
+    assert.equal(status(adapter, '.HostConfig.ReadonlyRootfs'), 'true');
+    const overlays = JSON.parse(status(adapter, 'json .Mounts')).filter((mount) => mount.Destination === `/work/${adapterPath}`);
+    assert.equal(overlays.length, 1);
+    assert.equal(overlays[0].Source, overlayPath);
+    assert.equal(overlays[0].RW, false);
     assert.equal(status(adapter, '.HostConfig.NetworkMode'), network);
     assert.equal(status(adapter, 'range .NetworkSettings.Networks}}{{.NetworkID}}{{end'), networkId);
     assert.equal(status(broker, 'range .NetworkSettings.Networks}}{{.NetworkID}}{{end'), networkId);
