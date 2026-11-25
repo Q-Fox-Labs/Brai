@@ -289,10 +289,12 @@
                                metadata: Optional[dict]) -> Optional[asyncio.Task]:
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
-@@ -372,6 +372,21 @@
-
- # Every char MarkdownV2 requires backslash-escaped outside code spans/fences.
+@@ -374,6 +374,25 @@
  _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
+
+
++class _BraiPrivateTopicRetryFailed(Exception):
++    """A second attempt may have reached Telegram. Stop other send paths."""
 +
 +
 +def _brai_hide_bare_urls(content: str) -> str:
@@ -308,10 +310,12 @@
 +            value = value[:-1]
 +        return '[Ссылка](' + value + ')' + suffix
 +    return pattern.sub(convert, content)
-
-
++
++
  def _escape_mdv2(text: str) -> str:
-@@ -1394,7 +1409,7 @@
+     """Escape Telegram MarkdownV2 special characters with a preceding backslash."""
+     return _MDV2_ESCAPE_RE.sub(r'\\\1', text)
+@@ -1394,7 +1413,7 @@
      def _rich_message_payload(self, content: str, *, skip_entity_detection: bool = False) -> dict[str, Any]:
          """``InputRichMessage`` from RAW markdown — never ``format_message(content)``, whose MarkdownV2
          escaping destroys table pipes."""
@@ -320,7 +324,78 @@
          if skip_entity_detection:
              payload["skip_entity_detection"] = True
          return payload
-@@ -3461,18 +3476,10 @@
+@@ -1478,6 +1497,44 @@
+         except Exception:
+             pass
+
++    def _brai_private_topic_route(self, metadata, thread_kwargs):
++        return (os.environ.get("BRAI_IDENTITY_MODE") == "telegram"
++                and bool(thread_kwargs.get("message_thread_id"))
++                and self._dm_topic_fallback(metadata))
++
++    def _brai_private_topic_rejected(self, error, metadata, thread_kwargs):
++        bad_request = self._telegram_error_types()[1]
++        return (self._brai_private_topic_route(metadata, thread_kwargs)
++                and bad_request is not None and isinstance(error, bad_request)
++                and str(error).strip().casefold() in {"message thread not found", "bad request: message thread not found"})
++
++    async def _brai_send_with_private_topic_retry(self, send, metadata, thread_kwargs, reply_to_id):
++        """Retry one explicit Bot API refusal with the same topic and reply anchor."""
++        if not self._brai_private_topic_route(metadata, thread_kwargs):
++            return await send()
++        try:
++            result = await send()
++        except Exception as error:
++            if (not reply_to_id or (metadata or {}).get("telegram_dm_topic_created_for_send")
++                    or not self._brai_private_topic_rejected(error, metadata, thread_kwargs)):
++                raise
++            try:
++                result = await send()
++            except Exception as second_error:
++                reason = ("topic_unavailable" if self._brai_private_topic_rejected(second_error, metadata, thread_kwargs)
++                          else "delivery_unknown")
++                raise _BraiPrivateTopicRetryFailed(reason) from second_error
++        if isinstance(result, dict):
++            message_id = result.get("message_id")
++            nested = result.get("result")
++            if message_id is None and isinstance(nested, dict):
++                message_id = nested.get("message_id")
++        else:
++            message_id = getattr(result, "message_id", None)
++        if type(message_id) not in (int, str) or not str(message_id).isdecimal() or int(message_id) <= 0:
++            raise _BraiPrivateTopicRetryFailed("delivery_unknown")
++        return result
++
+     async def _try_send_rich(
+         self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]) -> Optional[SendResult]:
+         """Attempt a single ``sendRichMessage``. Returns a SendResult (success, or a transient failure the
+@@ -1494,13 +1551,21 @@
+         if reply_to_id is not None:
+             # sendRichMessage takes reply_parameters, NOT reply_to_message_id (silently ignored → anchor dropped).
+             payload["reply_parameters"] = {"message_id": reply_to_id}
+-        try:
+-            # Raw Bot API result: return_type=Message would make PTB deserialize a 10.1 shape it doesn't
+-            # fully model; a post-delivery parse error ≠ send failure.
+-            msg = await _await_with_thread_deadline(
++        async def send_rich():
++            # Keep the raw Bot API receipt to avoid post-delivery deserialization errors.
++            return await _await_with_thread_deadline(
+                 self._bot.do_api_request("sendRichMessage", api_kwargs=payload),
+                 timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
++
++        try:
++            msg = await self._brai_send_with_private_topic_retry(send_rich, metadata, thread_kwargs, reply_to_id)
++        except _BraiPrivateTopicRetryFailed as error:
++            return SendResult(success=False, error="Telegram private topic delivery failed", retryable=False,
++                              error_kind=error.args[0])
+         except Exception as exc:
++            if self._brai_private_topic_rejected(exc, metadata, thread_kwargs):
++                return SendResult(success=False, error="Message thread not found", retryable=False,
++                                  error_kind="topic_unavailable")
+             if self._rich_rejected(exc, "sendRichMessage", "MarkdownV2"):
+                 return None
+             # Honor Telegram's flood-control retry_after over the base retry schedule.
+@@ -3461,18 +3526,10 @@
          return _NetErr, _BadReq, _TimedOut
 
      async def _send_chunk_markdown_or_plain(self, chunk: str, send_kwargs: dict[str, Any]):
@@ -343,7 +418,27 @@
 
      async def _send_chunk_with_retries(
          self, chat_id: str, chunk: str, index: int, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
-@@ -3811,22 +3818,13 @@
+@@ -3497,10 +3554,18 @@
+                 send_kwargs = {
+                     "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id, **thread_kwargs,
+                     **self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
+-                return await self._send_chunk_markdown_or_plain(chunk, send_kwargs), used_thread_fallback
++                msg = await self._brai_send_with_private_topic_retry(
++                    lambda: self._send_chunk_markdown_or_plain(chunk, send_kwargs), metadata, thread_kwargs, reply_to_id)
++                return msg, used_thread_fallback
++            except _BraiPrivateTopicRetryFailed as error:
++                return SendResult(success=False, error="Telegram private topic delivery failed", retryable=False,
++                                  error_kind=error.args[0])
+             except _NetErr as send_err:
+                 # BadRequest subclasses NetworkError in PTB but is permanent; handle specific cases.
+                 if _BadReq and isinstance(send_err, _BadReq):
++                    if self._brai_private_topic_rejected(send_err, metadata, thread_kwargs):
++                        return SendResult(success=False, error="Message thread not found", retryable=False,
++                                          error_kind="topic_unavailable")
+                     if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
+                         if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
+                             return SendResult(success=False, error=str(send_err), retryable=False)
+@@ -3811,22 +3876,13 @@
              self._bot.edit_message_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
 
      async def _edit_markdown_or_plain(self, chat_id: str, message_id: str, formatted: str, plain: str, warn_fmt: str) -> bool:
@@ -370,7 +465,7 @@
          return False
 
      async def edit_message(
-@@ -3928,7 +3926,7 @@
+@@ -3928,7 +3984,7 @@
                  truncated = self._truncate_stream_overflow_preview(content)
                  if self._last_overflow_preview.get(_preview_key) == truncated:
                      return SendResult(success=True, message_id=message_id)
@@ -379,7 +474,7 @@
                  self._last_overflow_preview[_preview_key] = truncated
                  return SendResult(success=True, message_id=message_id)
              # Flood control: short waits retry inline; long waits fail immediately so streaming falls back
-@@ -3989,42 +3987,28 @@
+@@ -3989,42 +4045,28 @@
      async def _send_overflow_continuation(
          self, chat_id: str, chunk: str, reply_to_id: Optional[int], thread_kwargs: dict[str, Any],
          thread_id: Optional[str], metadata: Optional[dict[str, Any]], finalize: bool):
@@ -443,7 +538,7 @@
 
      async def _edit_overflow_split(
          self, chat_id: str, message_id: str, content: str, *, finalize: bool, metadata: Optional[dict[str, Any]] = None) -> SendResult:
-@@ -4041,7 +4025,7 @@
+@@ -4041,7 +4083,7 @@
                      chat_id, message_id, _separate_chunk_indicator_from_fence(self.format_message(first_chunk)), _strip_mdv2(first_chunk),
                      "[%s] Overflow split: MarkdownV2 first-chunk edit failed, falling back to plain text: %s")
              else:
@@ -452,7 +547,7 @@
          except Exception as e:
              if "not modified" not in str(e).lower():  # identical first chunk still sends continuations
                  logger.error("[%s] Overflow split: first-chunk edit failed: %s", self.name, _redact_telegram_error_text(e), exc_info=True)
-@@ -4114,35 +4098,18 @@
+@@ -4114,35 +4156,18 @@
          # Drafts share the regular-send UTF-16 length contract.
          text = content if len(
              content) <= self.MAX_MESSAGE_LENGTH else self.truncate_message(content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)[0]
@@ -500,7 +595,7 @@
 
      async def _send_message_with_thread_fallback(self, **kwargs):
          """Send a control-style message (approval prompts, pickers), retrying once without
-@@ -4370,13 +4337,12 @@
+@@ -4370,13 +4395,12 @@
              reply_to_mode=self._reply_to_mode)
 
      async def _edit_result_text(self, query, result_text: str) -> None:
@@ -516,7 +611,7 @@
 
      async def _handle_choice_picker_callback(self, query, data: str, chat_id: str) -> None:
          """Handle choice picker button taps (cp:<index>)."""
-@@ -5651,6 +5617,7 @@
+@@ -5651,6 +5675,7 @@
          modified), markdown constructs become MarkdownV2 syntax, everything else is escaped."""
          if not content:
              return content
@@ -524,7 +619,7 @@
          placeholders: dict = {}
          counter = [0]
 
-@@ -6514,8 +6481,15 @@
+@@ -6514,8 +6539,15 @@
              return
          if not self._gate_or_observe(msg, update, MessageType.TEXT):
              return
@@ -542,7 +637,7 @@
 
      async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
          """Handle incoming command messages."""
-@@ -6591,6 +6565,24 @@
+@@ -6591,6 +6623,24 @@
          event = None
          try:
              await asyncio.sleep(delay)
@@ -567,7 +662,7 @@
              # Superseded flush (a newer chunk re-armed the timer while our sleep was already done):
              # CancelledError only lands at the next await, so check synchronously before the pop.
              owner = tasks.get(key)
-@@ -6599,7 +6591,9 @@
+@@ -6599,7 +6649,9 @@
              event = pending.pop(key, None)
              if not event:
                  return
@@ -578,7 +673,7 @@
                  self._hold_inbound_event(event, where=f"{where}-flush")
                  event = None
                  return
-@@ -6657,6 +6651,8 @@
+@@ -6657,6 +6709,8 @@
          if existing is None:
              pending[key] = event
              return
@@ -587,7 +682,7 @@
          existing.media_urls.extend(event.media_urls)
          existing.media_types.extend(event.media_types)
          if event.text:
-@@ -6678,7 +6674,12 @@
+@@ -6678,7 +6732,12 @@
          """Album items debounce on media_group_id; singles go through the photo burst batcher."""
          if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it
              return
@@ -600,7 +695,7 @@
          if media_group_id:
              await self._queue_media_group_event(str(media_group_id), event)
          else:
-@@ -6714,6 +6715,9 @@
+@@ -6714,6 +6773,9 @@
                  cached_path = await cache_audio_from_bytes_async(bytes(data), ext=ext)
              event.media_urls = [cached_path]
              event.media_types = [mime]
@@ -610,7 +705,7 @@
              logger.info("[Telegram] Cached user %s at %s", kind, cached_path)
          except Exception as e:
              logger.warning("[Telegram] Failed to cache %s: %s", kind, _redact_telegram_error_text(e), exc_info=True)
-@@ -6782,7 +6786,7 @@
+@@ -6782,7 +6844,7 @@
                  self._set_cached_media(
                      event, await cache_video_from_bytes_async(bytes(video_bytes), ext=ext), SUPPORTED_VIDEO_TYPES[ext], MessageType.VIDEO,
                      "[Telegram] Cached user video document at %s")
@@ -619,7 +714,7 @@
                  return True
              # Any file type is accepted (authorization is the gate, not the extension); unknown types get
              # application/octet-stream. Image documents already returned above.
-@@ -6794,6 +6798,9 @@
+@@ -6794,6 +6856,9 @@
                  return await self._dispatch_with_text(event, f"Document '{display}' could not be cached.")
              event.media_urls = [cached.path]
              event.media_types = [cached.media_type]
@@ -629,7 +724,7 @@
              event.media_text_inlined = [False]  # flipped below once the text is actually injected
              if cached.kind == "audio":
                  event.message_type = MessageType.AUDIO
-@@ -6833,46 +6840,53 @@
+@@ -6833,46 +6898,53 @@
                  self._observe_unmentioned_group_message(msg, _event.message_type, update_id=update.update_id, event=_event)
              return
          event = self._build_message_event(msg, self._media_message_type(msg), update_id=update.update_id)
@@ -652,6 +747,13 @@
 -                    event, await cache_image_from_bytes_async(bytes(image_bytes), ext=ext), f"image/{ext.lstrip('.')}", event.message_type,
 -                    "[Telegram] Cached user photo at %s")
 -                await self._route_photo_event(msg, event)
+-                return
+-            except Exception as e:
+-                logger.warning("[Telegram] Failed to cache photo: %s", _redact_telegram_error_text(e), exc_info=True)
+-                await self._surface_media_cache_failure(msg, event, "photo", e)
+-        # Voice/audio cached for STT transcription; video for vision.
+-        if msg.voice:
+-            if await self._cache_inbound_av(msg, event, msg.voice, "voice message", "voice", ".ogg", "audio/ogg"):
 +        import brai_files
 +        runner = getattr(self, "gateway_runner", None)
 +        reservation = brai_files.reserve_steer_input(runner, event) if runner is not None else None
@@ -664,12 +766,8 @@
 +                await self._handle_sticker(msg, event)
 +                await self.handle_message(self._apply_telegram_group_observe_attribution(event))
                  return
--            except Exception as e:
--                logger.warning("[Telegram] Failed to cache photo: %s", _redact_telegram_error_text(e), exc_info=True)
--                await self._surface_media_cache_failure(msg, event, "photo", e)
--        # Voice/audio cached for STT transcription; video for vision.
--        if msg.voice:
--            if await self._cache_inbound_av(msg, event, msg.voice, "voice message", "voice", ".ogg", "audio/ogg"):
+-        elif msg.audio:
+-            if await self._cache_inbound_av(msg, event, msg.audio, "audio file", "audio", ".mp3", "audio/mp3"):
 +            event = self._apply_telegram_group_observe_attribution(event)
 +            # Cache photo locally: Telegram's file URLs expire (~1 hour) before vision may run.
 +            if msg.photo:
@@ -697,15 +795,12 @@
 +                    return
 +            elif msg.document and await self._cache_inbound_document(msg, event):
                  return
--        elif msg.audio:
--            if await self._cache_inbound_av(msg, event, msg.audio, "audio file", "audio", ".mp3", "audio/mp3"):
+-        elif msg.video:
+-            if await self._cache_inbound_av(msg, event, msg.video, "video file", "video", ".mp4", "video/mp4"):
 +            media_group_id = getattr(msg, "media_group_id", None)
 +            if media_group_id:
 +                await self._queue_media_group_event(str(media_group_id), event)
                  return
--        elif msg.video:
--            if await self._cache_inbound_av(msg, event, msg.video, "video file", "video", ".mp4", "video/mp4"):
--                return
 -        elif msg.document and await self._cache_inbound_document(msg, event):
 -            return
 -        media_group_id = getattr(msg, "media_group_id", None)
@@ -720,7 +815,7 @@
 
      async def _queue_media_group_event(self, media_group_id: str, event: MessageEvent) -> None:
          """Debounce album items (shared media_group_id) into one MessageEvent so the second image isn't
-@@ -6880,7 +6894,13 @@
+@@ -6880,7 +6952,13 @@
          if self._should_drop_delayed_delivery():
              self._hold_inbound_event(event, where="media-group-enqueue")
              return
@@ -734,7 +829,7 @@
          self._accept_update()
          prior_task = self._media_group_tasks.get(media_group_id)
          if prior_task:
-@@ -6912,6 +6932,11 @@
+@@ -6912,6 +6990,11 @@
              file_obj = await sticker.get_file()
              image_bytes = await file_obj.download_as_bytearray()
              cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=".webp")
