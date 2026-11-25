@@ -30,6 +30,26 @@ test('accepts DEV and PROD loopback NATS listeners and rejects other endpoints',
   assert.throws(() => validateConfig({ ...config, nats: { servers: ['nats://example.com:4222'] } }), /loopback/);
 });
 
+test('accepts only the authenticated RELEASE broker on its private service address', () => {
+  const value = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+  } };
+  assert.deepEqual(validateConfig(value).nats.servers, ['nats://brai-release-nats:4222']);
+  for (const servers of [
+    ['nats://brai-release-nats:4223'], ['tls://brai-release-nats:4222'],
+    ['nats://brai-release-nats:4222/'], ['nats://brai-release-nats:4222?x=1'],
+    ['nats://evil@brai-release-nats:4222'], ['nats://other:4222'],
+    ['nats://brai-release-nats:4222', 'nats://127.0.0.1:4222'],
+  ]) assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, servers } }));
+  for (const user of ['', null, 5]) {
+    assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, user } }));
+  }
+  for (const password of ['', null, 5]) {
+    assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, password } }));
+  }
+  assert.throws(() => validateConfig({ ...value, ownerId: 'another-owner' }));
+});
+
 test('rejects malformed input and a request for another model before invoking NATS', async () => {
   let calls = 0;
   const invoke = async () => { calls++; return { vectors: [] }; };
