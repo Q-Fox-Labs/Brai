@@ -43,3 +43,9 @@ export async function startNatsTransport(nc: NatsConnection, gateway: PublicGate
   await nc.flush();
   return { service, close: () => service.stop(), settled: () => Promise.allSettled([...tasks]).then(() => undefined) };
 }
+
+/** Проверяет синхронное состояние transport закреплённого NATS 2.29.3; неизвестную реализацию закрывает. */
+export function canSend(nc: Pick<NatsConnection, 'isClosed'>): boolean {
+  const transport = nc as typeof nc & {protocol?: {connected?: unknown}};
+  return !nc.isClosed() && transport.protocol?.connected === true;
+}

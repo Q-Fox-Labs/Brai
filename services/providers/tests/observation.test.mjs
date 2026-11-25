@@ -30,3 +30,11 @@ test('observer outage does not publish recursive alerts; failed PubAck leaves sa
  store.collectObservations=async()=>{throw Error('PRIVATE')};await observation.tick();assert.equal(calls,2);assert.equal(observation.status().dependencies.storage,'unavailable');assert.ok(!JSON.stringify(observation.status()).includes('PRIVATE'));
  observation.stop();await observation.tick();assert.equal(calls,2);
 });
+
+test('history не отправляет сообщение, пока соединение недоступно',()=>{
+ let sends=0,connected=false;
+ const nc={isClosed:()=>false,request:()=>{sends++;return Promise.resolve({headers:{get:()=>''}});}};
+ const history=historySender(nc,()=>connected);
+ history.send(safeFact(op()));assert.equal(sends,0);assert.equal(history.status().dropped,1);
+ connected=true;history.send(safeFact(op()));assert.equal(sends,1);
+});

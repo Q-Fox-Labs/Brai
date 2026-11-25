@@ -114,3 +114,10 @@ test('OpenRouter documented accounting frame repeats empty assistant finish; con
  const events=[],done=completion(input(),[...fragments().slice(0,-1),accounting],e=>events.push(e));assert.equal(done.toolCalls.length,2);assert.deepEqual(done.usage,{inputTokens:11,outputTokens:7});assert.equal(events.filter(e=>e.type==='tool_call.ready').length,2);
  for(const invalid of [chunk({content:'late'},'tool_calls',usage),chunk({role:'assistant',content:''},'stop',usage),chunk({role:'assistant',content:''},'tool_calls'),chunk({tool_calls:[{index:0,function:{arguments:'late'}}]},'tool_calls',usage)])assert.throws(()=>completion(input(),[...fragments().slice(0,-1),invalid]),e=>e.code==='UPSTREAM_PROTOCOL');
 });
+
+test('stream не буферизует публикации при отключённом брокере',()=>{
+ let sends=0;
+ const sink=createStreamPublisher({publish:()=>{sends++;},flush:async()=>{},isClosed:()=>false},'_INBOX.fixture.synthetic',()=>false);
+ assert.equal(sink({type:'text.delta',operationId:'11111111-1111-4111-8111-111111111111',sequence:1,text:'test'}),false);
+ assert.equal(sends,0);
+});

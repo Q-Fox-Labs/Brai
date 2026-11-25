@@ -44,3 +44,7 @@ immutable release manifest и готовые container images нужны для
 - [HTTP.md](HTTP.md).
 - [SPEC.md](SPEC.md).
 - [Закрытая авторизация отдельного Codex](codex-auth/README.md).
+
+Проверка `node services/providers/dist/health.js` обращается к закрытой
+готовности работающего процесса с runtime bearer. Она не вызывает модель.
+Потерянное NATS соединение восстанавливается без повторной отправки модели.

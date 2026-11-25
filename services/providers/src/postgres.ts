@@ -53,6 +53,8 @@ export function postgresStore(connectionString:string) {
     async sweep(now){await pool.query("UPDATE providers_operations o SET phase='failed',error_code='OUTPUT_BYTES_EXPIRED',finished_at=$1,result_expires_at=$2 WHERE phase='output_pending' AND EXISTS(SELECT 1 FROM providers_pending_outputs p WHERE p.owner_id=o.owner_id AND p.operation_id=o.operation_id AND p.expires_at<=$1)",[now,now+V1_LIMITS.resultTtlMs]);await pool.query("DELETE FROM providers_pending_outputs p WHERE expires_at<=$1 OR EXISTS(SELECT 1 FROM providers_operations o WHERE o.owner_id=p.owner_id AND o.operation_id=p.operation_id AND o.phase NOT IN ('accepted','dispatching','output_pending'))",[now]);await pool.query("UPDATE providers_operations SET result=NULL WHERE result_expires_at<=$1 AND result IS NOT NULL",[now]);await pool.query("DELETE FROM providers_operations WHERE key_expires_at<=$1",[now]);}
   };
   return {...store,
+    /** Проверяет соединение с собственной БД без изменения данных. */
+    async ready(){await pool.query('SELECT 1');return true;},
     /** Вызывать явно при выпуске от роли-владельца, никогда не через shared DB. */
     async migrate(){for(const name of ["001_operations.sql","002_outputs.sql","003_observation.sql"])await pool.query(readFileSync(new URL("../migrations/"+name,import.meta.url),"utf8"));},
     /** Блокировка живёт на выделенной сессии; её потеря немедленно останавливает runtime. */

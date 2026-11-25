@@ -8,6 +8,7 @@
     "prod"
   ],
   "executableSources": [
+    "services/providers/src/health.ts",
     "services/providers/src/main.ts",
     "services/providers/src/migrate.ts",
     "services/providers/src/catalog.ts",
@@ -35,17 +36,20 @@
       "services/providers/src/core.ts",
       "services/providers/src/egress.ts",
       "services/providers/src/http.ts",
+      "services/providers/src/health.ts",
       "services/providers/src/image.ts",
       "services/providers/src/index.ts",
       "services/providers/src/json.ts",
       "services/providers/src/main.ts",
       "services/providers/src/migrate.ts",
+      "services/providers/src/nats-connection.ts",
       "services/providers/src/nats-v1.ts",
       "services/providers/src/nats.ts",
       "services/providers/src/observation-postgres.ts",
       "services/providers/src/observation.ts",
       "services/providers/src/operations.ts",
       "services/providers/src/postgres.ts",
+      "services/providers/src/readiness.ts",
       "services/providers/src/schema.ts",
       "services/providers/src/v1-schema.ts",
       "services/providers/litellm.yaml",
@@ -67,6 +71,7 @@
       "services/providers/tests/observation.test.mjs",
       "services/providers/tests/operations.test.mjs",
       "services/providers/tests/postgres.test.mjs",
+      "services/providers/tests/readiness.test.mjs",
       "services/providers/tests/v0.test.mjs",
       "services/providers/codex-auth/test_credentials.py"
     ]
@@ -113,7 +118,8 @@
     ],
     "smokeImports": [
       "services/providers/dist/catalog.js",
-      "services/providers/dist/artifacts.js"
+      "services/providers/dist/artifacts.js",
+      "services/providers/dist/nats-connection.js"
     ],
     "systemRequirements": [
       "Node.js 24.22.1",
@@ -128,7 +134,7 @@
     "migrations": [
       "services/providers/migrations"
     ],
-    "health": "No model health endpoint; operation-specific health only"
+    "health": "Authenticated readiness checks NATS, storage and LiteLLM without invoking a model."
   },
   "npm": {
     "workspaces": [

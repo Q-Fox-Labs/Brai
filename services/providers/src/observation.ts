@@ -34,12 +34,12 @@ export function alertFor(fact:SafeFact):Alert|null {
   return {id:fact.id,service_id:'service_providers',type_id:1,scope_type:'user',scope_id:fact.scope_id,title:'Не удалось завершить операцию модели',text:'Операция завершилась с ошибкой или её результат пока не сохранён. Проверьте состояние операции. Повторное вычисление не запускалось.',data:fact.data,occurred_at:fact.occurred_at};
 }
 /** Best-effort request Core NATS: нет очереди и retry, ошибка ответа не раскрывается. */
-export function historySender(nc:Pick<NatsConnection,'request'|'isClosed'>){
+export function historySender(nc:Pick<NatsConnection,'request'|'isClosed'>,ready:()=>boolean=()=>!nc.isClosed()){
   let active=0;
   const metrics={sent:0,dropped:0,failed:0};let dependency:Dependency='unknown';
   return {
     send(fact:SafeFact){
-      if(active>=OBSERVATION_LIMITS.historyActive||nc.isClosed()){metrics.dropped++;dependency='unavailable';return;}
+      if(active>=OBSERVATION_LIMITS.historyActive||!ready()){metrics.dropped++;dependency='unavailable';return;}
       active++;
       void nc.request('brai.history.v1.append.service_providers',JSON.stringify(fact),{timeout:OBSERVATION_LIMITS.timeoutMs}).then(reply=>{if(reply.headers?.get('Nats-Service-Error'))throw Error('HISTORY_REJECTED');metrics.sent++;dependency='ready';},()=>{metrics.failed++;dependency='unavailable';}).catch(()=>{metrics.failed++;dependency='unavailable';}).finally(()=>{active--;});
     },
