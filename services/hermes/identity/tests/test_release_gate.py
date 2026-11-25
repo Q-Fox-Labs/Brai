@@ -314,6 +314,7 @@ class ReleaseWorkersTest(unittest.IsolatedAsyncioTestCase):
         resolver = Resolver.__new__(Resolver)
         resolver.release_workers = {}
         resolver.bridges = {}
+        resolver.operator_assignment = None
         resolver.adapter = SimpleNamespace(**{name: {} for name in ('_pending_text_batches', '_pending_text_batch_tasks', '_pending_photo_batches', '_pending_photo_batch_tasks', '_media_group_events', '_media_group_tasks')}, _held_inbound_events=[], _held_inbound_redispatch_task=None)
         resolver._bridge = lambda profile: bridges[profile['uid']]
         async def broker(method, params):
