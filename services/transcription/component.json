@@ -31,7 +31,6 @@
       "services/transcription/coordinator/config.ts",
       "services/transcription/coordinator/domain/core.ts",
       "services/transcription/coordinator/main.ts",
-      "services/transcription/coordinator/health.ts",
       "services/transcription/coordinator/recovery/alerts.ts",
       "services/transcription/coordinator/recovery/controller.ts",
       "services/transcription/coordinator/transport/alerts.ts",
@@ -169,7 +168,7 @@
     "migrations": [
       "services/transcription/helper/migrations"
     ],
-    "health": "Authenticated readiness checks NATS, storage, recovery and local executor; model catalogue checked separately."
+    "health": "Owner NATS status and JSON-RPC health on helper/local/external; no rollout-specific helper is bundled"
   },
   "npm": {
     "workspaces": [

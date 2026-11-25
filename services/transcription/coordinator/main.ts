@@ -53,18 +53,6 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
   alerts.start();
   let nc: NatsConnection | undefined;
   const local = createLocalConnectionProvider(config.localAi, config.dependencyTimeoutMs);
-  let natsConnected = false;
-  const watch = (connection: NatsConnection, update: (connected: boolean) => void) => {
-    update(true);
-    void (async () => {
-      try {
-        for await (const event of connection.status()) {
-          if (event.type === 'disconnect') update(false);
-          if (event.type === 'reconnect') update(true);
-        }
-      } finally { update(false); }
-    })().catch(() => update(false));
-  };
   let http: Awaited<ReturnType<typeof startHttpTransport>> | undefined;
   let nats: Awaited<ReturnType<typeof startNatsTransport>> | undefined;
   let recovery: ReturnType<typeof createRecoveryController> | undefined;
@@ -81,12 +69,11 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
     core?.clearVolatileResults();
   })();
   try {
-    const health = await helper.call('health', {}) as { available: boolean; storageAvailable: boolean };
+    const health = await helper.call('health', {}) as { available: boolean; storageAvailable: boolean; capacityAvailable?: boolean };
     if (!health.storageAvailable) throw new Error('Storage unavailable');
-    if ('capacityAvailable' in health && health.capacityAvailable) alerts.observe('capacity', true);
+    if (health.capacityAvailable) alerts.observe('capacity', true);
     try { nc = await connection(config.nats, config.dependencyTimeoutMs); }
     catch { throw new Error('NATS unavailable'); }
-    watch(nc, (state) => { natsConnected = state; });
     // Неуспешный первоначальный connect можно повторить при следующем чтении каталога.
     await local.get();
     const dependencies = await createDependencyPorts(nc, local.get, config);
@@ -107,21 +94,21 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
     const localHealth = await children.local.call('health', {}).catch(() => ({ available: false })) as { available: boolean };
     if (localHealth.available) alerts.observe('local_ai', true);
     const gateway = createPublicGateway({ invoke: core.invoke, bindings: config.bindings, maxConcurrent: config.maxPublicConcurrent });
-    const status = async () => {
-      await local.get();
-      const [helperHealth, localExecutor] = await Promise.all([
-        children.helper.call('health', {}).catch(() => ({ available: false, storageAvailable: false })),
-        children.local.call('health', {}).catch(() => ({ configured: Boolean(config.localAi), verified: false, available: false })),
-      ]) as [{ available: boolean; storageAvailable: boolean }, { configured: boolean; verified: boolean; available: boolean }];
-      const lifecycle = recovery!.status();
-      const metadataReady = !closing && natsConnected && canSend(nc!) && lifecycle.ready && helperHealth.available && helperHealth.storageAvailable;
-      return { ...lifecycle, ...alerts.status(), metadataReady, localExecutor,
-        ready: metadataReady && local.ready() && localExecutor.configured && localExecutor.verified && localExecutor.available };
-    };
-    http = await startHttpTransport(config.http, gateway, async () => (await status()).ready);
+    http = await startHttpTransport(config.http, gateway);
     nats = await startNatsTransport(nc, gateway, { requestBytes: config.natsRequestBytes, responseBytes: config.natsResponseBytes });
     recovery.start(core.pumpOnce);
-    return { close, address: http.address, status };
+    return { close, address: http.address,
+      async status() {
+        const [helperHealth, localExecutor] = await Promise.all([
+          children.helper.call('health', {}).catch(() => ({ available: false, storageAvailable: false })),
+          children.local.call('health', {}).catch(() => ({ configured: Boolean(config.localAi), verified: false, available: false })),
+        ]) as [{ available: boolean; storageAvailable: boolean }, { configured: boolean; verified: boolean; available: boolean }];
+        const lifecycle = recovery!.status();
+        const metadataReady = !closing && canSend(nc!) && lifecycle.ready && helperHealth.available && helperHealth.storageAvailable;
+        return { ...lifecycle, ...alerts.status(), metadataReady, localExecutor,
+          ready: metadataReady && local.ready() && localExecutor.configured && localExecutor.verified && localExecutor.available };
+      },
+    };
   } catch {
     await close();
     throw new Error('Transcription coordinator startup failed');
