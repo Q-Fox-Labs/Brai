@@ -129,7 +129,7 @@ test('private adapter recovers after stopped and replaced broker', { skip: proce
     // Долгий отказ без паузы: контейнер адаптера должен повторять запуск, пока NATS остановлен.
     docker('stop', '--time', '1', broker);
     await wait(() => {
-      if (Number(status(adapter, '.RestartCount')) < afterStopStart + 2) {
+      if (Number(status(adapter, '.RestartCount')) < afterStopStart + 3) {
         throw Error('adapter has not retried while broker is stopped');
       }
     });
