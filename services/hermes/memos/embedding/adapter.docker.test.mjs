@@ -82,7 +82,7 @@ test('private adapter recovers after stopped and replaced broker', { skip: proce
       '--workdir', '/work', '--env', 'BRAI_HERMES_CONFIG=/config.json', image,
       'node', 'services/hermes/memos/embedding/adapter.mjs');
     await wait(() => { if (Number(status(adapter, '.RestartCount')) < 1) throw Error('startup failure not observed'); });
-    assert.match(logs(adapter), /MemOS embedding adapter:.*(ENOTFOUND|CONNECTION_REFUSED|ECONNREFUSED)/i);
+    assert.match(logs(adapter), /MemOS embedding adapter:.*(ENOTFOUND|EAI_AGAIN|CONNECTION_REFUSED|ECONNREFUSED)/i);
     let broker = start(...brokerArgs);
     await wait(() => { if (!logs(broker).includes('Server is ready')) throw Error('broker not ready'); });
     let responder = start('--network', network, '--mount', sourceMount, '--workdir', '/work',
