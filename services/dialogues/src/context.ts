@@ -22,19 +22,19 @@ function parseCursor(key:string,raw:unknown,owner:string,consumer:string,instanc
 /** Сохраняет полный состав, разделяя его только границами страниц. */
 export function contextPages(metadata:Record<string,any>,items:any[],makeCursor:(index:number)=>string,maxBytes=limits.responseBytes-256){
  const common={summary_size_policy:'no_per_summary_limit',...metadata,
-  summary_utf8_bytes:items.filter(i=>i.type==='dialogue_summary'||i.type==='topic_summary'||i.type==='message_representation'&&(i.summary_version||i.representation==='summary')).reduce((n,i)=>n+Buffer.byteLength(i.text??''),0),
+  ...(metadata.context_format==='compact'?{}:{summary_utf8_bytes:items.filter(i=>i.type==='dialogue_summary'||i.type==='message_representation'&&(i.summary_version||i.representation==='summary')).reduce((n,i)=>n+Buffer.byteLength(i.text??''),0)}),
   manifest_text_utf8_bytes:items.reduce((n,i)=>n+Buffer.byteLength(i.text??''),0)};
  const envelope=(item:any)=>({...common,page_count:Number.MAX_SAFE_INTEGER,page_index:Number.MAX_SAFE_INTEGER,items:[item],continuation_cursor:makeCursor(Number.MAX_SAFE_INTEGER)});
  const budget=maxBytes;
  const expanded:any[]=[];
  for(const item of items){
   if(Buffer.byteLength(JSON.stringify(envelope(item)))<=budget){expanded.push(item);continue;}
-  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='topic_summary'||item.type==='message_representation'||item.type==='turn_work'))fail('RESPONSE_ITEM_TOO_LARGE');
+  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='context_index'||item.type==='message_representation'||item.type==='turn_work'))fail('RESPONSE_ITEM_TOO_LARGE');
   const {text,truncated,next_offset,read_tool,...identity}=item;
   let total=0;for(const ch of text)total++;
   const info={total_chars:total,total_bytes:Buffer.byteLength(text),text_sha256:createHash('sha256').update(text,'utf8').digest('hex'),offset_unit:'unicode_codepoints',
    coverage:item.type==='dialogue_summary'?{through_message_id:item.through_message_id,through_order:item.through_order}:{message_id:item.message_id}};
-  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':item.type==='topic_summary'?'topic_summary_fragment':item.type==='turn_work'?'turn_work_fragment':item.summary_version?'message_summary_fragment':'original_fragment';
+  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':item.type==='context_index'?'context_index_fragment':item.type==='turn_work'?'turn_work_fragment':item.summary_version?'message_summary_fragment':'original_fragment';
   const fragment=(part:string,offset:number,next:number|null)=>({...identity,...info,type:kind,representation:kind==='original_fragment'?'original_fragment':'summary_fragment',text:part,offset,next_offset:next,is_last_fragment:next===null,text_complete:offset===0&&next===null});
   const available=budget-Buffer.byteLength(JSON.stringify(envelope(fragment('',Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER))));
   if(available<6)fail('RESPONSE_ITEM_TOO_LARGE');
@@ -56,11 +56,12 @@ export function contextPages(metadata:Record<string,any>,items:any[],makeCursor:
 }
 /** Создаёт owner-bound pull/ack отдельно от прежнего context_get. */
 export function createContext(pool:DB,key:string){
- async function pull(owner:string,raw:unknown){
+ async function pull(owner:string,raw:unknown,automatic=false){
  const a=object(raw,['request_id','consumer_id','context_instance_id','reset','continuation_cursor','dialogue_id','format','input_ids']);id(a.request_id);id(a.consumer_id);id(a.context_instance_id);if(a.reset!==undefined&&typeof a.reset!=='boolean')fail('INVALID_ARGUMENT');if(a.dialogue_id!==undefined)id(a.dialogue_id);
+ if(!automatic&&/^thread-[a-f0-9]{64}$/.test(a.consumer_id))fail('INVALID_ARGUMENT');
  if(a.format!==undefined&&!['legacy','compact'].includes(a.format))fail('INVALID_ARGUMENT');
  if(a.input_ids!==undefined){if(!Array.isArray(a.input_ids)||a.input_ids.length>100)fail('INVALID_ARGUMENT');a.input_ids.forEach(id);}
- let normalized:any={...(a.format==='compact'?{format:'compact',input_ids:a.input_ids??[]}:{}),request_id:a.request_id,consumer_id:a.consumer_id,context_instance_id:a.context_instance_id,reset:a.reset??false,...(a.dialogue_id===undefined?{}:{dialogue_id:a.dialogue_id})};
+ let normalized:any={...(automatic?{automatic:true}:{}),...(a.format==='compact'?{format:'compact',input_ids:a.input_ids??[]}:{}),request_id:a.request_id,consumer_id:a.consumer_id,context_instance_id:a.context_instance_id,reset:a.reset??false,...(a.dialogue_id===undefined?{}:{dialogue_id:a.dialogue_id})};
  return ownerTransaction(pool,owner,async db=>{
  let delivery=(await db.query('SELECT * FROM dialogues_live.context_deliveries WHERE owner_id=$1 AND request_id=$2',[owner,a.request_id])).rows[0];let index=0;
  if(a.continuation_cursor!==undefined){
@@ -78,13 +79,13 @@ export function createContext(pool:DB,key:string){
  const consumer=(await db.query('SELECT * FROM dialogues_live.context_consumers WHERE owner_id=$1 AND consumer_id=$2 AND context_instance_id=$3',[owner,a.consumer_id,a.context_instance_id])).rows[0];
  if(consumer.active_delivery_id)await db.query("UPDATE dialogues_live.context_deliveries SET state='superseded' WHERE owner_id=$1 AND id=$2 AND state='active'",[owner,consumer.active_delivery_id]);
  const compact=normalized.format==='compact';
- const protocol=compact?4:3;
+ const protocol=automatic?6:compact?5:3;
  const bootstrap=normalized.reset||!consumer.bootstrapped||consumer.protocol_version!==protocol,checkpoint=bootstrap?'0':consumer.checkpoint;
  const boundary=(await db.query('SELECT COALESCE(MAX(change_seq),0)::text AS seq FROM dialogues_live.requests WHERE owner_id=$1',[owner])).rows[0].seq,deliveryId=randomUUID();
  let items:any[],selectedCount:number,missing:number,partial:number,topicView:Record<string,string>|null=null;
  if(compact){
   const result=await collectCompact(db,owner,{boundary,checkpoint,bootstrap,dialogue:normalized.dialogue_id,
-   inputIds:normalized.input_ids,previous:bootstrap?{}:consumer.topic_view??{}});
+   inputIds:normalized.input_ids,automatic,previous:bootstrap?{}:consumer.topic_view??{}});
   ({items,view:topicView,selected:selectedCount,missing}=result);
   partial=0;
  }else{
@@ -136,19 +137,29 @@ export function createContext(pool:DB,key:string){
  }
  selectedCount=selected.length;missing=all.filter(d=>!d.version).length;partial=all.filter(d=>d.version&&d.uncovered_messages).length;
  }
- if(!items.length){await db.query('UPDATE dialogues_live.context_consumers SET active_delivery_id=NULL WHERE owner_id=$1 AND consumer_id=$2 AND context_instance_id=$3',[owner,a.consumer_id,a.context_instance_id]);return {context_status:'no_updates',items:[],delivery_id:null,continuation_cursor:null};}
+ if(!items.length&&!automatic){await db.query('UPDATE dialogues_live.context_consumers SET active_delivery_id=NULL WHERE owner_id=$1 AND consumer_id=$2 AND context_instance_id=$3',[owner,a.consumer_id,a.context_instance_id]);return {context_status:'no_updates',items:[],delivery_id:null,continuation_cursor:null};}
  const metadata={delivery_id:deliveryId,consumer_id:a.consumer_id,context_instance_id:a.context_instance_id,through_seq:boundary,summaries_mode:bootstrap?'bootstrap':'updates',summaries_from_seq:checkpoint,selected_count:selectedCount,
  ...(compact?{context_format:'compact',summary_size_policy:'o200k_base',missing_topic_summaries:missing}:{}),
  missing_dialogue_summaries:compact?0:missing,partial_dialogue_summaries:partial,context_status:'complete_paginated_manifest',window_fit:'consumer_must_read_all_pages_and_report_model_window_limit',overlap_is_independent_evidence:false};
- const pages=contextPages(metadata,items,n=>cursor(key,owner,a.consumer_id,a.context_instance_id,deliveryId,n));
+ const pages=contextPages(metadata,items,n=>cursor(key,owner,a.consumer_id,a.context_instance_id,deliveryId,n),
+  automatic?limits.requestBytes-limits.responseBytes:undefined);
+ if(automatic&&pages.length!==1)fail('RESPONSE_TOO_LARGE');
  await db.query("INSERT INTO dialogues_live.exchange_events(owner_id,event_id,event_type,dialogue_id,delivery_id,through_seq) VALUES($1,$2,'context_issued',$3,$4,$5)",[owner,'delivery:'+deliveryId,a.dialogue_id??null,deliveryId,boundary]);
  delivery=(await db.query("INSERT INTO dialogues_live.context_deliveries(owner_id,id,consumer_id,context_instance_id,request_id,request_hash,through_seq,pages,state,request_options,topic_view) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10) RETURNING *",[owner,deliveryId,a.consumer_id,a.context_instance_id,a.request_id,digest(normalized),boundary,JSON.stringify(pages),JSON.stringify(normalized),topicView])).rows[0];
  await db.query('UPDATE dialogues_live.context_consumers SET active_delivery_id=$4,checkpoint=$5,bootstrapped=$6,protocol_version=$7 WHERE owner_id=$1 AND consumer_id=$2 AND context_instance_id=$3',[owner,a.consumer_id,a.context_instance_id,deliveryId,checkpoint,bootstrap?false:consumer.bootstrapped,protocol]);}
  if(index>=delivery.pages.length)fail('INVALID_CURSOR');if(index>0&&!delivery.served_pages.includes(index-1))fail('PAGES_INCOMPLETE');
- await db.query('UPDATE dialogues_live.context_deliveries SET served_pages=CASE WHEN $3=ANY(served_pages) THEN served_pages ELSE array_append(served_pages,$3) END WHERE owner_id=$1 AND id=$2',[owner,delivery.id,index]);return delivery.pages[index];});
+ await db.query('UPDATE dialogues_live.context_deliveries SET served_pages=CASE WHEN $3=ANY(served_pages) THEN served_pages ELSE array_append(served_pages,$3) END WHERE owner_id=$1 AND id=$2',[owner,delivery.id,index]);
+ if(automatic&&delivery.state==='active'){
+  // AIDEV-NOTE: Готовый снимок, граница и запись выдачи сохраняются вместе. Повтор читает тот же снимок.
+  await ackInTransaction(db,owner,{request_id:'auto-ack-'+delivery.id,consumer_id:a.consumer_id,
+   context_instance_id:a.context_instance_id,delivery_id:delivery.id},true);
  }
- async function ackInTransaction(db:PoolClient,owner:string,raw:unknown){
+ return delivery.pages[index];});
+
+ }
+ async function ackInTransaction(db:PoolClient,owner:string,raw:unknown,automatic=false){
  const a=object(raw,['request_id','consumer_id','context_instance_id','delivery_id']);for(const k of ['request_id','consumer_id','context_instance_id','delivery_id'])id(a[k]);
+ if(!automatic&&/^thread-[a-f0-9]{64}$/.test(a.consumer_id))fail('INVALID_ARGUMENT');
  const prior=(await db.query('SELECT operation,hash,result FROM dialogues_live.requests WHERE owner_id=$1 AND id=$2',[owner,a.request_id])).rows[0];
  if(prior){if(prior.operation!=='context_ack'||prior.hash!==digest(a))fail('REQUEST_CONFLICT');return prior.result;}
  const d=(await db.query('SELECT * FROM dialogues_live.context_deliveries WHERE owner_id=$1 AND id=$2 AND consumer_id=$3 AND context_instance_id=$4',[owner,a.delivery_id,a.consumer_id,a.context_instance_id])).rows[0];if(!d)fail('NOT_FOUND');if(d.state==='superseded')fail('DELIVERY_SUPERSEDED');
@@ -159,6 +170,11 @@ export function createContext(pool:DB,key:string){
  const seq=(await db.query("SELECT nextval('dialogues_live.change_seq')::text AS seq")).rows[0].seq;
  await db.query("INSERT INTO dialogues_live.requests(owner_id,id,operation,hash,result,change_seq) VALUES($1,$2,'context_ack',$3,$4,$5)",[owner,a.request_id,digest(a),receipt,seq]);return receipt;
  }
+ async function pullThread(owner:string,dialogue:string,request_id:string,input_ids:string[]){
+  const consumer_id='thread-'+createHash('sha256').update(dialogue).digest('hex');
+  const delivered=await pull(owner,{request_id,consumer_id,context_instance_id:'default',dialogue_id:dialogue,format:'compact',input_ids},true);
+  return delivered.items[0]?.text??null;
+ }
  async function ack(owner:string,raw:unknown){return ownerTransaction(pool,owner,db=>ackInTransaction(db,owner,raw));}
- return {pull,ack,ackInTransaction};
+ return {pull,pullThread,ack,ackInTransaction};
 }

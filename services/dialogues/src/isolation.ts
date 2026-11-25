@@ -31,6 +31,7 @@ export async function migrateIsolation(pool:Pool,owner:string){
   await db.query(readFileSync(new URL('../migrations/006_owner_isolation.sql',import.meta.url),'utf8'));
   await db.query(readFileSync(new URL('../migrations/007_topics.sql',import.meta.url),'utf8'));
   await db.query(readFileSync(new URL('../migrations/008_topic_work.sql',import.meta.url),'utf8'));
+  await db.query(readFileSync(new URL('../migrations/009_archive_numbers.sql',import.meta.url),'utf8'));
   await db.query('COMMIT');
  }catch(error){await db.query('ROLLBACK');throw error;}finally{db.release();}
 }

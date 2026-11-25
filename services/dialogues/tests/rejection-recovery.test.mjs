@@ -17,6 +17,8 @@ test('MCP: агент исправляет поля из отказа, повт�
    return {status:'completed',final:args.final};},
   async turnGet(){return {version:'1'};},async logExchange(){},
   async pull(){return {items:[],context_status:'no_updates',delivery_id:null};},
+  async pullThread(){return null;},
+  async inThread(owner,dialogue,operation){return operation();},
   async ack(){return {acknowledged:true};}
  };
  const cfg={host:'127.0.0.1',port:0,owner:'synthetic',hosts:['initial'],origins:['http://initial'],token:'synthetic-token-012345678901234567890123456789'};
@@ -31,6 +33,7 @@ test('MCP: агент исправляет поля из отказа, повт�
   assert.ok(listed.description.includes(JSON.stringify(finishExample)));
   assert.match(agentInstructions,/сразу повтори с новым request_id/);
   const base=structuredClone(inputExample);
+  base.context={consumer_id:'codex:chat-1',format:'legacy'};
   base.arguments.messages[0].text='PRIVATE_TEXT';base.arguments.messages[0].source={token:'PRIVATE_TOKEN',nested:{personal:'PRIVATE_SOURCE'}};
   const cases=[
    ['arguments.dialogue.channel',p=>delete p.arguments.dialogue.channel],
@@ -81,14 +84,15 @@ test('MCP: агент исправляет поля из отказа, повт�
  }finally{await client.close();await listener.close();}
 });
 
-test('обычный обмен сохраняет экземпляр контекста между запросами',async()=>{
+test('прежний обмен сохраняет экземпляр контекста между запросами',async()=>{
  const pulls=[];
  const store={
   async turnInput(owner,args){return {dialogue_id:args.dialogue.id};},
   async pull(owner,args){pulls.push(args);return {context_instance_id:args.context_instance_id};}
  };
  const {invoke}=await import('../dist/api.js');
- for(const [index,context] of [inputExample.context,inputExample.context,{...inputExample.context,reset:true},{...inputExample.context,context_instance_id:'other'}].entries()){
+ const legacy={consumer_id:'codex:chat-1',format:'legacy'};
+ for(const [index,context] of [legacy,legacy,{...legacy,reset:true},{...legacy,context_instance_id:'other'}].entries()){
   const result=await invoke(store,'synthetic','dialogues_exchange',{...inputExample,context,arguments:{...inputExample.arguments,request_id:'input-'+index}});
   assert.equal(result.context.context_instance_id,index===3?'other':'default');
  }

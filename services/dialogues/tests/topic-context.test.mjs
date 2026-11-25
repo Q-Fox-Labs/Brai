@@ -2,7 +2,7 @@
 // ABOUTME: Тест модели использует заглушку; настоящий PostgreSQL проверяется отдельно.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {countContextTokens,topicCardChanges} from '../dist/compact-context.js';
+import {countContextTokens,topicIndexChanges} from '../dist/compact-context.js';
 import {chooseGrouping,summarizeTopic} from '../dist/topic-jobs.js';
 import {matchesTopicReference} from '../dist/topic-references.js';
 import {invoke} from '../dist/api.js';
@@ -30,18 +30,17 @@ test('граница свёртки беседы не становится сс�
 
 test('смена уровня карточки и вытеснение темы видны после ACK',()=>{
  const topics=Array.from({length:220},(_,i)=>({
-  topic_id:'topic-'+i,title:'Тема '+i,version:'1',last_activity:new Date(i),
+  topic_id:'T'+(i+1),title:'Тема '+i,version:'1',last_activity:new Date(i),
   extended:'Развёрнуто',compact:'Коротко',extended_tokens:3,compact_tokens:2
  }));
- const before=topicCardChanges(topics,{});
- assert.equal(before.items.filter(item=>item.tier==='extended').length,20);
- assert.equal(before.items.filter(item=>item.tier==='compact').length,200);
- assert.deepEqual(topicCardChanges(topics,before.view).items,[]);
- const newTopic={...topics[0],topic_id:'new'};
- const after=topicCardChanges([newTopic,...topics.slice(0,219)],before.view);
- assert.deepEqual(after.items.map(({type,topic_id,tier})=>[type,topic_id,tier]),[
-  ['topic_summary','new','extended'],['topic_summary','topic-19','compact'],['topic_removed','topic-219',undefined]
- ]);
+ const before=topicIndexChanges(topics,{});
+ assert.equal(before.lines.length,220);
+ assert.equal(before.lines.filter(line=>line.includes('Развёрнуто')).length,20);
+ assert.equal(before.lines.filter(line=>line.includes('Коротко')).length,200);
+ assert.deepEqual(topicIndexChanges(topics,before.view).lines,[]);
+ const newTopic={...topics[0],topic_id:'T221'};
+ const after=topicIndexChanges([newTopic,...topics.slice(0,219)],before.view);
+ assert.deepEqual(after.lines,['T221 "Тема 0" "Развёрнуто"','T20 "Тема 19" "Коротко"','-T220']);
 });
 
 test('поиск, тема и чтение архива не создают выдачу контекста',async()=>{

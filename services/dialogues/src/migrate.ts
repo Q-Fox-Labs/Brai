@@ -22,6 +22,7 @@ export async function migrate(pool:Pool,owner:string,app:string) {
     await db.query(readFileSync(new URL("../migrations/005_context_exchange.sql",import.meta.url),"utf8"));
     await db.query(readFileSync(new URL("../migrations/007_topics.sql",import.meta.url),"utf8"));
     await db.query(readFileSync(new URL("../migrations/008_topic_work.sql",import.meta.url),"utf8"));
+    await db.query(readFileSync(new URL("../migrations/009_archive_numbers.sql",import.meta.url),"utf8"));
     const isolated=Boolean((await db.query("SELECT 1 FROM dialogues_live.migrations WHERE version=6")).rowCount);
     const bound=isolated&&Boolean((await db.query('SELECT 1 FROM dialogues_access.sys_owner_bindings WHERE login_role=$1 AND enabled',[app])).rowCount);
     const revoke=bound?'PUBLIC':'PUBLIC,'+quote(app);

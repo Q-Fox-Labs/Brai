@@ -33,7 +33,7 @@ test('30 владельцев: личный транспорт, одинаков
    const context={consumer_id:'same-consumer',context_instance_id:'same-instance'};
    let seq=0;const request=()=> 'stack-'+i+'-'+(++seq);
    const call=async(action,args,ctx=context)=>{
-    const reply=await client.call('dialogues_exchange',{action,arguments:args,context:ctx});
+    const reply=await client.call('dialogues_exchange',{action,arguments:args,context:{format:'legacy',...ctx}});
     assert.equal(reply.isError,undefined,JSON.stringify(reply));
     return reply.structuredContent;
    };

@@ -76,6 +76,20 @@ test('RLS: независимые логины, старая история, з�
   assert.deepEqual((await b.query(`SELECT evidence_seq,dirty_seq FROM dialogues_live.topic_members
    JOIN dialogues_live.topics ON topics.owner_id=topic_members.owner_id AND topics.id=topic_members.topic_id WHERE dialogue_id='same'`)).rows,
   [{evidence_seq:'3',dirty_seq:'3'}]);
+  // Переход с 008 назначает номера даже строкам под FORCE RLS, повтор их сохраняет.
+  await owner.query(`ALTER TABLE dialogues_live.topics DROP COLUMN short_id;
+   ALTER TABLE dialogues_live.dialogues DROP COLUMN short_id;
+   ALTER TABLE dialogues_live.messages DROP COLUMN short_id;
+   DELETE FROM dialogues_live.migrations WHERE version=9`);
+  const shortIdsSql=`SELECT t.short_id AS topic,m.short_id AS message,d.short_id AS dialogue
+   FROM dialogues_live.topics t,dialogues_live.messages m,dialogues_live.dialogues d`;
+  await migrateIsolation(owner,who);
+  const archived=(await b.query(shortIdsSql)).rows;
+  assert.equal(archived.length,1);
+  assert.ok(Object.values(archived[0]).every(n=>/^[1-9]\d*$/.test(n)));
+  assert.deepEqual((await a.query(shortIdsSql)).rows,[]);
+  await migrateIsolation(owner,who);
+  assert.deepEqual((await b.query(shortIdsSql)).rows,archived);
   const checks=await Promise.all(Array.from({length:60},async(_,i)=>({i,rows:await read(i%2?a:b)})));
   for(const {i,rows}of checks)assert.equal(rows[0].owner_id,i%2?'legacy-owner':'account-b');
   await owner.query("UPDATE dialogues_access.sys_owner_bindings SET enabled=false WHERE login_role='dialogues_fixture_a'");

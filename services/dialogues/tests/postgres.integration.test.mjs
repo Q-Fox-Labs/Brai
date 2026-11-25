@@ -17,7 +17,7 @@ test('PostgreSQL: обмен, контекст, история и перенос
  const owner=new Pool({connectionString:ownerUrl}),app=new Pool({connectionString:appUrl,max:8}),who='test-owner';
  const api=createStore(app,'synthetic-key'),ctx={consumer_id:'reader',context_instance_id:'instance'};
  let counter=0;const req=()=>`new-test-${++counter}`;
- const execute=(action,args,context=ctx)=>exchange(api,who,{action,arguments:args,context});
+ const execute=(action,args,context=ctx)=>exchange(api,who,{action,arguments:args,context:{format:'legacy',...context}});
  async function consume(result){
   let page=result.context;
   if(result.context_error){assert.equal(result.context_error.code,'CONTEXT_DEFERRED');page=await api.pull(who,result.context_error.arguments);}
@@ -36,45 +36,87 @@ test('PostgreSQL: обмен, контекст, история и перенос
   await owner.query(legacy);await migrate(owner,'dialogues_test_owner','dialogues_test_app');await migrate(owner,'dialogues_test_owner','dialogues_test_app');
   await assert.rejects(app.query("UPDATE dialogues_live.messages SET text='forbidden'"),{code:'42501'});
 
-  await t.test('темы, поиск оригинала и компактный снимок с подтверждением',async()=>{
-   const profile='topics-fixture';
-   const stable={consumer_id:'topic-consumer',format:'compact'};
-   const archive={consumer_id:'topic-consumer',context_instance_id:'default'};
-   const operation=(action,arguments_,context)=>exchange(api,profile,{action,arguments:{request_id:req(),...arguments_},context});
-   const first=await operation('input',{dialogue:{id:'initial',channel:'synthetic',title:'Фикс отправки'},messages:[
-    {id:'original',text:'Привет. '.repeat(800)+'точная строка PR #599',summary:'Работа продолжается. '.repeat(400)}
-   ]},stable);
-   assert.equal(first.context.context_format,'compact');
-   assert.equal(first.context.context_instance_id,'default');
-   const topic=first.context.items.find(item=>item.type==='topic_summary');
-   assert.ok(topic?.topic_id);
-   assert.ok(!first.context.items.some(item=>item.message_id==='original'));
-   const found=await operation('search',{query:'точная строка PR #599'});
-   assert.equal(found.messages[0].message_id,'original');
-   assert.ok(found.messages[0].offset>4096);
-   const read=await operation('read',{archive_only:true,dialogue_id:'initial',message_id:'original',offset:found.messages[0].offset});
-   assert.match(read.text,/точная строка PR #599/);
-   assert.equal(read.context,undefined);
-   await api.ack(profile,{...archive,request_id:req(),delivery_id:first.context.delivery_id});
-   const next=await operation('input',{dialogue:{id:'next',channel:'synthetic'},messages:[{id:'next-in',text:'Уточнение'}]},stable);
-   assert.equal(next.context.summaries_mode,'updates');
-   const oversized=next.context.items.find(item=>item.message_id==='original');
-   assert.equal(oversized,undefined); // Вход первого хода уже получен клиентом.
-   const nextTopic=next.context.items.find(item=>item.type==='topic_summary').topic_id;
-   await operation('topic_move',{dialogue_id:'next',topic_id:topic.topic_id});
-   assert.equal((await operation('topic_get',{topic_id:nextTopic})).topic_id,topic.topic_id);
-   assert.equal((await operation('topic_get',{topic_id:topic.topic_id})).dialogues.length,2);
-   const third=await operation('input',{dialogue:{id:'third',channel:'synthetic'},messages:[{id:'third-in',text:'Третий тред'}]},stable);
-   const thirdTopic=third.context.items.find(item=>item.type==='topic_summary'&&item.topic_id!==topic.topic_id&&item.topic_id!==nextTopic).topic_id;
-   await operation('topic_move',{dialogue_id:'next',topic_id:thirdTopic});
-   await operation('topic_move',{dialogue_id:'initial',topic_id:thirdTopic});
-   await operation('topic_move',{dialogue_id:'initial',topic_id:null});
-   assert.equal((await operation('topic_get',{topic_id:nextTopic})).topic_id,thirdTopic);
-   await operation('topic_move',{dialogue_id:'next',topic_id:null});
-   assert.equal((await operation('topic_get',{topic_id:nextTopic})).topic_id,nextTopic);
-   const restart=await operation('poll',{dialogue_id:'next'},{...stable,reset:true});
-   assert.equal(restart.context.summaries_mode,'bootstrap');
-   assert.equal(restart.context.items.find(item=>item.message_id==='original').representation,'reference');
+  await t.test('один input получает только невиденные тредом изменения и сохраняет стир',async()=>{
+   const profile='one-input-fixture';
+   const input=(dialogue,id,text,request_id=req(),owner=profile)=>exchange(api,owner,{action:'input',
+    arguments:{request_id,dialogue:{id:dialogue,channel:'synthetic',title:dialogue},messages:[{id,text}]}});
+   const first=await input('thread-a','start','Первая задача');
+   assert.equal(first.context,null);
+   const other=await input('thread-b','start','Параллельная задача');
+   assert.match(other.context,/Первая задача/);
+   assert.doesNotMatch(other.context,/Параллельная задача/);
+
+   const request=req();
+   const steer=await input('thread-a','steer-1','Дополнение к первой задаче',request);
+   assert.equal(steer.turn_id,first.turn_id);
+   assert.equal(steer.created,false);
+   assert.match(steer.context,/Параллельная задача/);
+   assert.doesNotMatch(steer.context,/Дополнение к первой задаче/);
+   assert.deepEqual(await input('thread-a','steer-1','Дополнение к первой задаче',request),steer);
+   const noUpdates=await input('thread-a','steer-2','Ещё одно уточнение');
+   assert.equal(noUpdates.context,null);
+
+   await input('foreign','start','Чужой профиль',req(),'another-profile');
+   assert.equal((await input('thread-a','steer-3','Локальное уточнение')).context,null);
+   await input('thread-b','steer-1','В параллельном треде новая деталь');
+   const update=await input('thread-a','steer-4','Ещё локальное уточнение');
+   assert.match(update.context,/В параллельном треде новая деталь/);
+   assert.doesNotMatch(update.context,/Параллельная задача|Чужой профиль|Локальное уточнение/);
+   assert.equal((await input('thread-a','steer-5','Продолжаем')).context,null);
+
+   const emptyProfile='empty-thread-fixture',emptyRequest=req();
+   assert.equal((await input('empty','first','Пустой снимок',emptyRequest,emptyProfile)).context,null);
+   await api.append(emptyProfile,{request_id:req(),dialogue:{id:'new-other-thread',channel:'synthetic'},
+    messages:Array.from({length:25},(_,i)=>({id:'new-'+i,turn_id:'turn',role:'user',kind:'input',text:'Событие архива '+i}))});
+   assert.equal((await input('empty','first','Пустой снимок',emptyRequest,emptyProfile)).context,null);
+   const afterEmpty=await input('empty','new','Обновления',req(),emptyProfile);
+   assert.equal(afterEmpty.context.split('Событие архива ').length-1,25);
+  });
+
+  await t.test('темы дают свёртки бесед, история — короткие оригиналы и пакетное чтение M',async()=>{
+   const profile='archive-fixture';
+   const long='А🙂Б'.repeat(5600);
+   const run=(action,arguments_,owner=profile)=>exchange(api,owner,{action,arguments:{request_id:req(),...arguments_}});
+   const create=(dialogue,messages)=>api.append(profile,{request_id:req(),dialogue:{id:dialogue,channel:'synthetic',title:dialogue},
+    messages:messages.map(message=>({turn_id:'turn',role:'user',kind:'input',...message}))});
+   await create('thread-first',[{id:'m-first',text:'Короткий оригинал.'},{id:'m-long',text:long,summary:'Краткая свёртка длинного.'}]);
+   await create('thread-second',[{id:'m-other',text:'Родственная задача.'}]);
+   const page=await api.pull(profile,{request_id:req(),consumer_id:'index',context_instance_id:'default',format:'compact'});
+   const lines=page.items[0].text.split('\n');
+   assert.match(lines[0],/topic_get.*dialogue_get.*read_many/u);
+   const topicFor=title=>lines.find(line=>line.includes('"'+title+'"')).split(' ')[0];
+   const firstTopic=topicFor('thread-first'),secondTopic=topicFor('thread-second');
+   assert.match(firstTopic,/^T[1-9]\d*$/);
+   assert.match(secondTopic,/^T[1-9]\d*$/);
+   await run('topic_move',{dialogue_id:'thread-second',topic_id:firstTopic});
+   const detail=await run('topic_get',{topic_id:firstTopic});
+   assert.equal(detail.dialogues.length,2);
+   assert.ok(detail.dialogues.every(d=>/^D[1-9]\d*$/.test(d.dialogue_id)&&d.summary));
+   assert.equal((await run('topic_get',{topic_id:secondTopic})).topic_id,firstTopic);
+   const dialog=detail.dialogues.find(d=>d.title==='thread-first').dialogue_id;
+   const history=await run('dialogue_get',{dialogue_id:dialog});
+   assert.deepEqual(history.items.map(i=>[i.representation,i.text]),
+    [['original','Короткий оригинал.'],['summary','Краткая свёртка длинного.']]);
+   const ids=history.items.map(i=>i.message_id);
+   assert.ok(ids.every(i=>/^M[1-9]\d*$/.test(i)));
+   let cursor,combined=new Map();
+   do{
+    const read=await run('read_many',{message_ids:ids,...(cursor?{cursor}:{})});
+    for(const message of read.messages){
+     const prior=combined.get(message.message_id)??'';
+     assert.equal(Array.from(prior).length,message.offset);
+     combined.set(message.message_id,prior+message.text);
+    }
+    if(read.continuation_cursor)await assert.rejects(run('read_many',{message_ids:ids.slice().reverse(),cursor:read.continuation_cursor}),{code:'INVALID_CURSOR'});
+    cursor=read.continuation_cursor;
+   }while(cursor);
+   assert.deepEqual(ids.map(id=>combined.get(id)),['Короткий оригинал.',long]);
+   const found=await run('search',{query:'Короткий оригинал.'});
+   assert.equal(found.messages[0].message_id,'m-first');
+   assert.equal((await run('read',{dialogue_id:'thread-first',message_id:'m-long',target:'original',archive_only:true,limit:3})).text,'А🙂Б');
+   await assert.rejects(run('topic_get',{topic_id:firstTopic},'foreign'),{code:'NOT_FOUND'});
+   await assert.rejects(run('dialogue_get',{dialogue_id:dialog},'foreign'),{code:'NOT_FOUND'});
+   await assert.rejects(run('read_many',{message_ids:ids},'foreign'),{code:'NOT_FOUND'});
   });
 
   await t.test('фон сохраняет компактную версию отдельно от обычного саммари',async()=>{
@@ -103,8 +145,8 @@ test('PostgreSQL: обмен, контекст, история и перенос
    const same=await api.message(profile,{dialogue_id:dialogue.id,message_id:'big',target:'message_summary'});
    assert.match(same.text,/Обычное саммари/);
    const context=await api.pull(profile,{request_id:req(),consumer_id:'worker-reader',context_instance_id:'default',format:'compact'});
-   assert.equal(context.items.find(item=>item.message_id==='big').text,'Короткая проверка.');
-   assert.equal(context.items.find(item=>item.type==='topic_summary').text,'Запланирована проверка.');
+   assert.match(context.items[0].text,/Запланирована проверка\./);
+   assert.match(context.items[0].text,/Короткая проверка\./);
   });
 
   await t.test('фон автоматически группирует одну задачу и сохраняет ручное разделение',async()=>{
@@ -243,10 +285,11 @@ test('PostgreSQL: обмен, контекст, история и перенос
      continuation_cursor:page.continuation_cursor});
     items.push(...page.items);pages.push(page);
    }
-   assert.equal(items.filter(item=>item.tier==='extended').length,20);
-   assert.equal(items.filter(item=>item.tier==='compact').length,200);
-   assert.equal(items.filter(item=>item.type==='message_representation').length,20);
-   assert.ok(items.reduce((sum,item)=>sum+(item.tokens??0),0)<=22000);
+   const index=items.find(item=>item.type==='context_index').text;
+   assert.equal(index.split('Расширенная архивная карточка').length-1,20);
+   assert.equal(index.split('Короткая карточка').length-1,200);
+   assert.equal(index.split('Последние сообщения\n')[1].split('\n').length,20);
+   assert.ok(countContextTokens(index)<=22000);
    assert.equal((await api.ack(profile,{request_id:req(),delivery_id:delivery,consumer_id:context.consumer_id,context_instance_id:context.context_instance_id})).acknowledged,true);
    const legacyReq=req(),legacy={consumer_id:'legacy-reader',context_instance_id:'default'};
    let legacyPage=await api.pull(profile,{request_id:legacyReq,...legacy});
@@ -266,15 +309,15 @@ test('PostgreSQL: обмен, контекст, история и перенос
    await api.append(profile,{request_id:req(),dialogue:{id:'dialogue-1',channel:'synthetic'},messages:changes});
    const update=await api.pull(profile,{request_id:req(),...context});
    assert.equal(update.summaries_mode,'updates');
-   assert.equal(update.items.filter(item=>item.message_id?.startsWith('old-')).length,21);
+   assert.equal(update.items[0].text.split('Исторический импорт ').length-1,21);
    assert.equal((await api.topics.search(profile,'Запись dialogue-1')).messages[0].dialogue_id,'dialogue-1');
-   const {id:oldTopic}=(await app.query(`SELECT id FROM dialogues_live.topics
+   const {id:oldTopic}=(await app.query(`SELECT 'T'||short_id AS id FROM dialogues_live.topics
     WHERE owner_id=$1 AND home_dialogue_id='dialogue-1' AND dirty_seq IS NOT NULL`,[profile])).rows[0];
    await api.append(profile,{request_id:req(),dialogue:{id:'explicit-continuation',channel:'synthetic'},
     messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:'Вернёмся к теме «Проверка архива 1».'}]});
    const pinned=await api.pull(profile,{request_id:req(),consumer_id:'pinned-reader',context_instance_id:'default',
     format:'compact',dialogue_id:'explicit-continuation'});
-   assert.equal(pinned.items.find(item=>item.topic_id===oldTopic)?.tier,'extended');
+   assert.ok(pinned.items[0].text.split('\n')[1].startsWith(oldTopic+' '));
   });
 
   await t.test('правило 100 символов и атомарный пакет',async()=>{
