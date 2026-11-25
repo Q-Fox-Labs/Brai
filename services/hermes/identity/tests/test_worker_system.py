@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import instructions, images
+from identity.native_policy import install_dialogues_result_budget
 from identity.skills import catalog_files
 from identity import skills as system_skills
 from identity.synthesize import synthesize_file
@@ -208,6 +209,38 @@ class SystemTests(unittest.TestCase):
                 with native.conversation(agent, 'hello'):
                     self.fail('Missing mandatory context must stop the turn')
         self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
+
+    def test_dialogues_policy_replaces_old_profile_without_rewriting_it(self):
+        root = self.root / 'instructions'
+        for relative in (*instructions.FILES, instructions.DIALOGUES):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Current ' + relative)
+        previous = ('Приоритет общения.' + instructions.LEGACY_DIALOGUES_START
+                    + 'mcp__brai__dialogues_context_ack ' + instructions.LEGACY_DIALOGUES_END
+                    + ' Личное дополнение.')
+        with patch.dict(os.environ, BRAI_DIALOGUES_REQUIRED='1'):
+            self.assertEqual(instructions.without_legacy_dialogues(previous),
+                             'Приоритет общения. Личное дополнение.')
+            self.assertIn('Current policies/DIALOGUES.md', instructions.read_context(root))
+        self.assertEqual(instructions.without_legacy_dialogues(previous), previous)
+
+    def test_dialogues_context_uses_turn_budget_but_archive_reads_keep_existing_budget(self):
+        calls = []
+        def persist(content, tool_name, tool_use_id, **options):
+            calls.append(options)
+            return content
+        executor = NS(maybe_persist_tool_result=persist)
+        install_dialogues_result_budget(executor)
+        name = 'mcp__brai__dialogues_exchange'
+        budget = NS(turn_budget=200000)
+        payload = json.dumps({'structuredContent': {'context': 'Карточка темы ' * 6000}}, ensure_ascii=False)
+        wrapped = f'<untrusted_tool_result source="{name}">\n{payload}\n</untrusted_tool_result>'
+        self.assertGreater(len(wrapped), 50000)
+        self.assertEqual(executor.maybe_persist_tool_result(wrapped, name, 'input', config=budget), wrapped)
+        executor.maybe_persist_tool_result('{"messages": []}', name, 'archive', config=budget)
+        self.assertEqual(calls[0]['threshold'], 200000)
+        self.assertNotIn('threshold', calls[1])
 
     def test_short_bug_hunt_reminder_is_loaded_without_the_detailed_guide(self):
         repository = Path(__file__).resolve().parents[4]

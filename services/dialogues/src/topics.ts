@@ -42,19 +42,19 @@ async function resolveTopic(db:PoolClient,owner:string,id:string):Promise<string
 }
 
 /** Выбирает недавние карточки; для старых тем остаётся только доступ по ID и поиск. */
-export async function recentTopics(db:PoolClient,owner:string,pinned?:string,currentDialogue?:string){
- return (await db.query(`SELECT 'T'||t.short_id AS topic_id,left(t.title,128) AS title,
-  max(COALESCE(m.occurred_at,m.recorded_at)) AS last_activity,s.version,s.extended,s.compact
+export async function recentTopics(db:PoolClient,owner:string,pinned?:string,currentDialogue?:string,legacy=false){
+ return (await db.query(`SELECT CASE WHEN $4::boolean THEN t.id ELSE 'T'||t.short_id END AS topic_id,left(t.title,128) AS title,
+  max(COALESCE(m.occurred_at,m.recorded_at)) AS last_activity,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
   FROM dialogues_live.topics t JOIN dialogues_live.topic_members tm ON tm.owner_id=t.owner_id AND tm.topic_id=t.id
   JOIN LATERAL (SELECT occurred_at,recorded_at FROM dialogues_live.messages m
    WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND ${visibleMessage}
   AND ($3::text IS NULL OR tm.dialogue_id<>$3)
    ORDER BY COALESCE(occurred_at,recorded_at) DESC,m.change_seq DESC LIMIT 1) m ON true
-  LEFT JOIN LATERAL (SELECT version,extended,compact FROM dialogues_live.topic_summaries
+  LEFT JOIN LATERAL (SELECT version,extended,compact,extended_tokens,compact_tokens,source_refs FROM dialogues_live.topic_summaries
    WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
   WHERE t.owner_id=$1 AND t.merged_into IS NULL
-  GROUP BY t.id,t.short_id,t.title,s.version,s.extended,s.compact
-  ORDER BY (t.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,t.id LIMIT 220`,[owner,pinned??null,currentDialogue??null])).rows;
+  GROUP BY t.id,t.short_id,t.title,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
+  ORDER BY (t.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,t.id LIMIT 220`,[owner,pinned??null,currentDialogue??null,legacy])).rows;
 }
 
 /** Выдаёт компактные совпадения без передачи целых сообщений поисковому клиенту. */
@@ -62,7 +62,7 @@ export async function searchArchive(db:PoolClient,owner:string,query:string,topi
  const messageMatches=await db.query(`WITH q AS (
   SELECT plainto_tsquery('pg_catalog.russian',$2) AS words
  ), matched AS (
-  SELECT m.dialogue_id,m.id AS message_id,'T'||t.short_id AS topic_id,m.text,
+  SELECT m.dialogue_id,m.id AS message_id,tm.topic_id,'T'||t.short_id AS topic_ref,m.text,
    strpos(lower(m.text),lower($2)) AS position, m.change_seq,
    ts_rank((${vector}),(SELECT words FROM q)) AS rank
   FROM dialogues_live.messages m
@@ -71,11 +71,11 @@ export async function searchArchive(db:PoolClient,owner:string,query:string,topi
   WHERE m.owner_id=$1 AND ($3::text IS NULL OR tm.topic_id=$3) AND ${visibleMessage}
    AND ((${vector}) @@ (SELECT words FROM q) OR strpos(lower(m.text),lower($2))>0)
   ORDER BY (strpos(lower(m.text),lower($2))>0) DESC,rank DESC,m.change_seq DESC,m.dialogue_id,m.id LIMIT 20
- ) SELECT dialogue_id,message_id,topic_id,position>0 AS exact,
+ ) SELECT dialogue_id,message_id,topic_id,topic_ref,position>0 AS exact,
   CASE WHEN position>0 THEN greatest(0,position-41) END AS offset,
   substring(text FROM greatest(1,position-40) FOR 240) AS snippet
  FROM matched ORDER BY (position>0) DESC,rank DESC,change_seq DESC,dialogue_id,message_id`,[owner,query,topic??null]);
- const topicMatches=await db.query(`SELECT 'T'||t.short_id AS topic_id,left(t.title,128) AS title,
+ const topicMatches=await db.query(`SELECT t.id AS topic_id,'T'||t.short_id AS topic_ref,left(t.title,128) AS title,
   left(s.compact,240) AS snippet,COALESCE(strpos(lower(t.title),lower($2))>0,false) AS exact
   FROM dialogues_live.topics t
   LEFT JOIN LATERAL (SELECT extended,compact FROM dialogues_live.topic_summaries WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
@@ -88,7 +88,25 @@ export async function searchArchive(db:PoolClient,owner:string,query:string,topi
 
 /** Открывает тему и ограниченную страницу тредов либо перемещает тред с сохранением ID. */
 export function createTopics(pool:DB){
+ async function getLegacy(owner:string,id:string,after?:string){
+  const db=await pool.connect();
+  try{
+   await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+   const topic=await resolveTopic(db,owner,id);
+   const card=(await db.query(`SELECT t.id AS topic_id,left(t.title,128) AS title,s.version,s.extended AS text,s.source_refs
+    FROM dialogues_live.topics t LEFT JOIN LATERAL (SELECT version,extended,source_refs FROM dialogues_live.topic_summaries
+    WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
+    WHERE t.owner_id=$1 AND t.id=$2`,[owner,topic])).rows[0];
+   const dialogues=(await db.query(`SELECT d.id AS dialogue_id,left(d.title,128) AS title,d.channel FROM dialogues_live.topic_members tm
+    JOIN dialogues_live.dialogues d ON d.owner_id=tm.owner_id AND d.id=tm.dialogue_id
+    WHERE tm.owner_id=$1 AND tm.topic_id=$2 AND ($3::text IS NULL OR d.id>$3) ORDER BY d.id LIMIT 51`,[owner,topic,after??null])).rows;
+   await db.query('COMMIT');
+   const page=dialogues.slice(0,50);
+   return {...card,dialogues:page,next_after:dialogues.length>page.length?page.at(-1).dialogue_id:null};
+  }catch(e){await db.query('ROLLBACK').catch(()=>{});throw e;}finally{db.release();}
+ }
  async function get(owner:string,id:string,after?:string){
+  if(!shortNumber(id,'T'))return getLegacy(owner,id,after);
   const db=await pool.connect();
   try{
    await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -146,7 +164,7 @@ export function createTopics(pool:DB){
    const topic=await moveTopicMember(db,owner,dialogue,destination);
    await db.query('UPDATE dialogues_live.topic_members SET manually_assigned=true WHERE owner_id=$1 AND dialogue_id=$2',[owner,dialogue]);
    const {topic_id}=(await db.query("SELECT 'T'||short_id AS topic_id FROM dialogues_live.topics WHERE owner_id=$1 AND id=$2",[owner,topic])).rows[0];
-   const receipt={dialogue_id:dialogue,topic_id};
+   const receipt={dialogue_id:dialogue,topic_id:destination&&shortNumber(destination,'T')?topic_id:topic};
    await db.query("INSERT INTO dialogues_live.requests(owner_id,id,operation,hash,result,change_seq) VALUES($1,$2,$3,$4,$5,nextval('dialogues_live.change_seq'))",[owner,requestId,operation,hash,receipt]);
    return receipt;
   });

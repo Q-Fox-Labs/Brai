@@ -14,6 +14,8 @@
   "guestRemote": [
     "dialogues_exchange",
     "dialogues_context_ack",
+    "bug_hunt_help",
+    "bug_hunt_report",
     "files_get",
     "files_list",
     "files_prepare"

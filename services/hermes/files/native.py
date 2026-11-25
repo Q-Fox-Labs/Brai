@@ -151,6 +151,8 @@ async def _capture(adapter, event):
 
 async def accept_event(event, admit=True):
     """Сохранить весь принятый состав и допустить только новые готовые элементы."""
+    if not hasattr(event, '_brai_original_text'):
+        event._brai_original_text = event.text or ''
     if admit:
         track_inbound(event)
     if (getattr(event, 'metadata', None) or {}).get('fileSetStatus') == 'incomplete':
@@ -313,6 +315,30 @@ def admit_steer(agent, text):
         admission()
         text.admission = None
     return True
+
+
+def dialogues_finish(agent, send, is_completed):
+    """Отделить входы открытого хода от новых входов до записи финала в Диалоги."""
+    turn = getattr(agent, '_brai_steer_turn', None)
+    if turn is None:
+        return send()
+    with _steer_lock(turn), agent._pending_steer_lock:
+        if agent._pending_steer or any(not ready.is_set() for ready in getattr(turn, '_brai_preparing_inputs', {}).values()):
+            return json.dumps({'code': 'STEER_PENDING', 'applied': False,
+                               'next_action': 'Обработай дополнение и снова запиши финал.'}, ensure_ascii=False)
+        was_closed = getattr(agent, '_brai_steer_closed', False)
+        agent._brai_steer_closed = True
+    if was_closed:
+        return send()
+    completed = False
+    try:
+        result = send()
+        completed = is_completed(result)
+        return result
+    finally:
+        if not completed:
+            with agent._pending_steer_lock:
+                agent._brai_steer_closed = False
 
 
 def continue_final_steer(agent, messages):
@@ -544,6 +570,16 @@ async def steer_active_input(runner, event, session_key):
     if getattr(getattr(event, 'raw_message', None), 'edit_date', None):
         text = '[Правка сообщения ' + str(event.message_id) + ': новая редакция заменяет прежнюю.]\n' + text
     origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
+    original = event._brai_original_text
+    if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and original and event.message_id is not None:
+        header, separator, _ = origin.partition('\n\n')
+        try:
+            message_id = json.loads(header.split('\n', 2)[1])['message_id']
+        except (IndexError, KeyError, TypeError, ValueError):
+            message_id = event.message_id
+        payload_text = {'id': str(message_id), 'text': original}
+        envelope = 'Точное сообщение для записи в Диалоги (JSON):\n' + json.dumps(payload_text, ensure_ascii=False)
+        origin = header + separator + envelope + ('\n\n' + text if text != original else '')
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(event), str(event.message_id)) else None
     payload = SteerText(origin, images, lambda: commit_inbound(event.source, event.message_id, ticket))
@@ -803,11 +839,13 @@ def conversation(agent, user_message, task_id=None):
     previous_prompt = getattr(agent, 'ephemeral_system_prompt', None)
     try:
         shared_context = ''
+        effective_prompt = previous_prompt
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
-            from identity.instructions import system_context
+            from identity.instructions import system_context, without_legacy_dialogues
             shared_context = system_context()
+            effective_prompt = without_legacy_dialogues(previous_prompt)
         # API-only context: keep the user's persisted text and the shared process environment unchanged.
-        agent.ephemeral_system_prompt = shared_context + (previous_prompt or '') + (
+        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + (
             '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
             + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
             'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '

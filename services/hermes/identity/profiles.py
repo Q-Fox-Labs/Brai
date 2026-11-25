@@ -183,13 +183,13 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
         config['delegation'] = {'enabled': False}
     if dialogues:
         config['agent']['system_prompt'] += (
-            ' На каждое публичное сообщение пользователя и дополнение вызови '
-            'mcp__brai__dialogues_exchange с action input и стабильными ID беседы и сообщения. '
+            ' Диалоги обязательны на каждом публичном ходе. До разбора поручения вызови '
+            'mcp__brai__dialogues_exchange с action input: сохрани точное сообщение, '
+            'стабильные ID беседы и сообщения, consumer_id и context_instance_id. '
             'Для текста длиннее 100 символов добавь отдельное непустое summary. '
-            'Прочитай возвращённый context. Диалоги сами выбирают изменения относительно треда. '
-            'Для прежней постраничной выдачи context_request_id и mcp__brai__dialogues_context_ack определены в протоколе. '
-            'При context_error вход уже сохранён, получи контекст через poll. '
-            'При тайм-ауте вызови bug_hunt_help, зарегистрируй сбой и продолжай работу. '
+            'Полностью дочитай context через page с исходным context_request_id, '
+            'проверь размер и SHA-256, затем отдельно вызови mcp__brai__dialogues_context_ack. '
+            'context_error означает, что запись уже сохранена: дочитай, не повторяй input. '
             'Существенные результаты фиксируй через update с текущей версией. '
             'Перед финалом дочитай snapshot; сохрани точный ответ через finish и только после '
             'квитанции отправь его пользователю. Незаполненные результаты требуют продолжить работу. '

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { ErrorCode as McpErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { connect, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
 import { compileInput, natsTools, gameCoreNames, historyNames, transcriptionNames } from './catalog.mjs';
 import { planningReadTool, readPlanningPacket } from './planning-read.mjs';
@@ -143,7 +144,8 @@ export async function connectPorts(config) {
       if(name==='dialogues'&&config.dialogues?.enabled!==true)continue;
       if (config[name]?.enabled === false) continue;
       const endpoint = config[name];
-      const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
+      const endpointClient = await connectMcpEndpoint(endpoint, { timeout,
+        callTimeout: name==='dialogues'?timeout:config.longRequestTimeoutMs??300_000, endpointName: name });
       clients.push(endpointClient);
       endpoints[name] = endpointClient;
     }
@@ -329,8 +331,14 @@ export async function createBraiTools(config, ports) {
             try{return await ports.mcp(upstream.endpoint,name,args,signal);}
             catch(error){
               const forbidden=error.code===401||error.code===403;
-              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
-              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую'})}]};
+              const timedOut=[McpErrorCode.RequestTimeout,'TIMEOUT','DEADLINE_EXCEEDED'].includes(error.code);
+              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:
+                timedOut?{code:'DEADLINE_EXCEEDED',...(error.applied===false?{applied:false}:{})}:
+                error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
+              const next_action=forbidden?'Проверьте доступ':timedOut?'Вызови bug_hunt_help, зарегистрируй тайм-аут и продолжай разрешённую работу. Сохрани прежний request_id для сверки исхода.':
+                error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':
+                'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую';
+              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action})}]};
             }
           }
           return await ports.mcp(upstream.endpoint, name, args, signal);

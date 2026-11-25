@@ -1,6 +1,7 @@
 // ABOUTME: Описывает единый MCP-обмен и подтверждение полученного контекста.
 // ABOUTME: Владелец приходит от оператора, а не из аргументов модели.
 import type {createStore} from './store.js';
+import type {DeliveryCommit} from './context.js';
 import {fail} from './domain.js';
 import {exchange} from './exchange.js';
 import {validate,validateMessage} from './validate.js';
@@ -15,7 +16,7 @@ const callExamples=' Пример input: '+JSON.stringify(inputExample)+'. Пр�
 export const agentInstructions=baseInstructions+callExamples;
 const str={type:'string'};
 const identifier={type:'string',pattern:'^[A-Za-z0-9_.:/-]{1,256}$'};
-const format={enum:['legacy','compact']};
+const format={enum:['legacy','compact','index']};
 const count={type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER};
 const expected={type:'string',pattern:'^[1-9][0-9]*$'};
 const obj=(properties:Record<string,any>,required:string[]=[])=>({type:'object',additionalProperties:false,properties,required});
@@ -53,7 +54,7 @@ export const toolDefinitions=[
  {name:operations[1],description:'Подтвердить все страницы конкретной выдачи и получить квитанцию.',inputSchema:ack}
 ];
 /** Вызывает только действующий MCP-интерфейс с операторской идентичностью. */
-export function invoke(store:ReturnType<typeof createStore>,owner:string,name:string,args:unknown) {
+export function invoke(store:ReturnType<typeof createStore>,owner:string,name:string,args:unknown,afterResponse?:DeliveryCommit) {
  if(!owner)fail('INVALID_OWNER');
  if(name===operations[0]){
   validate(args,obj({action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object'},context},['action','arguments']),'');
@@ -62,7 +63,7 @@ export function invoke(store:ReturnType<typeof createStore>,owner:string,name:st
   validate(a.arguments,variants[a.action],'arguments');
   if(a.action==='input'||a.action==='import')a.arguments.messages.forEach((m:Record<string,any>,i:number)=>validateMessage(m,'arguments.messages['+i+']'));
   if(a.action==='finish')validateMessage(a.arguments.final,'arguments.final');
-  return exchange(store,owner,args);
+  return exchange(store,owner,args,afterResponse);
  }
  if(name===operations[1]){validate(args,ack,'');return store.ack(owner,args);}
  return fail('UNKNOWN_OPERATION');

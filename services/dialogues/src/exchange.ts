@@ -3,12 +3,13 @@
 import {createHash} from 'node:crypto';
 import {bytes,DialoguesFault,fail,id,limits,object} from './domain.js';
 import type {createStore} from './store.js';
+import type {DeliveryCommit} from './context.js';
 
 type Store=ReturnType<typeof createStore>;
 const contextId=(request:string,consumer:string,instance:string)=>'exchange-context-'+createHash('sha256').update(JSON.stringify([request,consumer,instance])).digest('hex');
 
 /** Выполняет одну операцию и, кроме успешного финала, возвращает доступный контекст. */
-export async function exchange(store:Store,owner:string,raw:unknown) {
+export async function exchange(store:Store,owner:string,raw:unknown,afterResponse?:DeliveryCommit) {
  const a=object(raw,['action','arguments','context']);
  const args=object(a.arguments??{},['request_id','dialogue','dialogue_id','turn_id','expected_version','messages','reconciled_no_final','changes','final','cursor','continuation_cursor','consumer_id','context_instance_id','reset','message_id','message_ids','offset','limit','target','summary_version','through_message_id','text','final_message_id','evidence','topic_id','query','after','format','input_ids','archive_only']);
  if(typeof a.action!=='string')fail('INVALID_ARGUMENT');
@@ -47,7 +48,7 @@ export async function exchange(store:Store,owner:string,raw:unknown) {
    const request_id=contextId(args.request_id,dialogue,'server');
    const inputs=input?args.messages.map((message:{id:string})=>message.id):[];
    try{
-    return {...receipt,context:await store.pullThread(owner,dialogue,request_id,inputs)};
+    return {...receipt,context:await store.pullThread(owner,dialogue,request_id,inputs,afterResponse)};
    }catch(error){
     return {...receipt,context_error:{code:error instanceof DialoguesFault?error.code:'CONTEXT_UNAVAILABLE'}};
    }
@@ -78,7 +79,7 @@ export async function exchange(store:Store,owner:string,raw:unknown) {
   await store.logExchange(owner,args.request_id,receipt.status==='rejected'?'finish_rejected':a.action,dialogue,args.turn_id??null,(receipt.pending??[]).map((x:any)=>x.id));
  if(archive||!context)return receipt;
  const request_id=contextId(args.request_id,context!.consumer_id,context!.context_instance_id);
- const omitted=context?.format==='compact'&&a.action==='input'?{input_ids:args.messages.map((message:{id:string})=>message.id)}:{};
+ const omitted=(context?.format==='compact'||context?.format==='index')&&a.action==='input'?{input_ids:args.messages.map((message:{id:string})=>message.id)}:{};
  const query={request_id,dialogue_id:dialogue,...context,...omitted};
  try{
   const page=await store.pull(owner,query);

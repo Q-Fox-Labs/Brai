@@ -69,6 +69,51 @@ test('30 владельцев: личный транспорт, одинаков
   }));
   for(const run of runs)if(run.status==='rejected')throw run.reason;
   const first=results[0],second=results[1];
+  const automatic = async (profile, action, arguments_) => {
+   const reply = await profile.client.call('dialogues_exchange', {action, arguments:arguments_});
+   assert.equal(reply.isError, undefined, JSON.stringify(reply));
+   return reply.structuredContent;
+  };
+  const input = (profile, thread, id, text, request_id=profile.request(), summary) =>
+   automatic(profile, 'input', {request_id, dialogue:{id:thread,channel:'synthetic'},
+    messages:[{id,text,...(summary ? {summary} : {})}]});
+  const a = await input(first, 'auto-a', 'one', 'Задача в первом треде');
+  assert.match(a.context, /private-user-0:/u);
+  assert.doesNotMatch(a.context, /private-user-1:|Задача в первом треде/u);
+  await input(first, 'auto-b', 'one', 'Изменение в параллельном треде');
+  const request = first.request();
+  const steer = await input(first, 'auto-a', 'two', 'Уточнение из стир', request);
+  assert.equal(steer.turn_id, a.turn_id);
+  assert.match(steer.context, /Изменение в параллельном треде/u);
+  assert.doesNotMatch(steer.context, /Уточнение из стир/u);
+  assert.deepEqual(await input(first, 'auto-a', 'two', 'Уточнение из стир', request), steer);
+  assert.equal((await input(first, 'auto-a', 'three', 'Продолжаем')).context, null);
+  const original = 'Полный текст обновления из другого треда. '.repeat(15);
+  await input(first, 'auto-b', 'two', original, first.request(), 'Краткая свёртка обновления');
+  const delta = await input(first, 'auto-a', 'four', 'Ещё уточнение');
+  assert.match(delta.context, /Краткая свёртка обновления/u);
+  assert.doesNotMatch(delta.context, /Полный текст обновления/u);
+  const shortId = delta.context.split('\n').find(line=>line.includes('Краткая свёртка обновления')).match(/M\d+/u)[0];
+  const exact = await automatic(first, 'read_many', {request_id:first.request(), message_ids:[shortId]});
+  assert(JSON.stringify(exact).includes(original));
+  const foreignRead = await second.client.call('dialogues_exchange', {action:'read_many', arguments:{request_id:second.request(),message_ids:[shortId]}});
+  assert.equal(foreignRead.isError, true);
+  assert.equal((await input(first, 'auto-a', 'five', 'Ничего нового')).context, null);
+  const isolated = await input(second, 'auto-a', 'one', 'Соседний профиль');
+  assert.doesNotMatch(isolated.context, /Изменение в параллельном треде|Краткая свёртка обновления|private-user-0:/u);
+  const authorization=first.config.personal.authorize;
+  const droppedRequest=first.request();
+  await input(first, 'auto-b', 'three', 'Дельта после сбоя доставки');
+  first.config.personal.authorize=async()=>{
+   await authorization();
+   if((await first.pool.query('SELECT 1 FROM dialogues_live.requests WHERE id=$1',[droppedRequest])).rowCount)
+    throw Error('fixture loses the response after committing input');
+  };
+  try{
+   await assert.rejects(input(first, 'auto-a', 'six', 'Сохранённое уточнение', droppedRequest));
+  }finally{first.config.personal.authorize=authorization;}
+  assert.match((await input(first, 'auto-a', 'seven', 'Следующий запрос')).context,/Дельта после сбоя доставки/u);
+  assert.equal((await input(first, 'auto-a', 'eight', 'Всё дочитано')).context,null);
   const foreign=await second.client.call('dialogues_context_ack',{request_id:second.request(),...second.context,delivery_id:first.delivery});
   assert.equal(foreign.isError,true);
   assert(!JSON.stringify(foreign).includes('private-user-0:'));

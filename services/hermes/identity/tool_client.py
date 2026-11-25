@@ -236,7 +236,14 @@ def handle(method, params):
             if not isinstance(result, dict) or not isinstance(result.get('markdown'), str) or not result['markdown']:
                 raise RuntimeError('Invalid artifact receipt')
             return {'content':[{'type':'text', 'text':result['markdown']}], 'structuredContent':result}
-        result = broker_call('tools.call', {'name': name, 'args': arguments})
+        try:
+            result = broker_call('tools.call', {'name': name, 'args': arguments})
+        except TimeoutError:
+            if name not in ('dialogues_exchange', 'dialogues_context_ack'):
+                raise
+            message = {'code': 'DEADLINE_EXCEEDED',
+                       'next_action': 'Вызови bug_hunt_help, зарегистрируй тайм-аут и продолжай работу. Сверь исход по прежнему request_id.'}
+            return {'isError': True, 'content': [{'type': 'text', 'text': json.dumps(message, ensure_ascii=False)}]}
         if isinstance(result, dict) and isinstance(result.get('content'), list):
             return result
         return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]}

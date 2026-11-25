@@ -76,16 +76,24 @@ test('PostgreSQL: обмен, контекст, история и перенос
   await t.test('темы дают свёртки бесед, история — короткие оригиналы и пакетное чтение M',async()=>{
    const profile='archive-fixture';
    const long='А🙂Б'.repeat(5600);
+   const rareOriginal=String.fromCodePoint(0x10ffff).repeat(100);
    const run=(action,arguments_,owner=profile)=>exchange(api,owner,{action,arguments:{request_id:req(),...arguments_}});
    const create=(dialogue,messages)=>api.append(profile,{request_id:req(),dialogue:{id:dialogue,channel:'synthetic',title:dialogue},
     messages:messages.map(message=>({turn_id:'turn',role:'user',kind:'input',...message}))});
    await create('thread-first',[{id:'m-first',text:'Короткий оригинал.'},{id:'m-long',text:long,summary:'Краткая свёртка длинного.'}]);
-   await create('thread-second',[{id:'m-other',text:'Родственная задача.'}]);
-   const page=await api.pull(profile,{request_id:req(),consumer_id:'index',context_instance_id:'default',format:'compact'});
+   await create('thread-second',[{id:'m-other',text:'Родственная задача.'},{id:'m-rare',text:rareOriginal}]);
+   const page=await api.pull(profile,{request_id:req(),consumer_id:'index',context_instance_id:'default',format:'index'});
    const lines=page.items[0].text.split('\n');
+   assert(lines.some(line=>line.includes(JSON.stringify(rareOriginal))));
    assert.match(lines[0],/topic_get.*dialogue_get.*read_many/u);
    const topicFor=title=>lines.find(line=>line.includes('"'+title+'"')).split(' ')[0];
    const firstTopic=topicFor('thread-first'),secondTopic=topicFor('thread-second');
+   const oldClient = await api.pull(profile,{request_id:req(),consumer_id:'old-compact',context_instance_id:'default',format:'compact'});
+   const oldCard = oldClient.items.find(i=>i.type==='topic_summary'&&i.title==='thread-first');
+   assert.match(oldCard.topic_id,/^topic-[0-9a-f]{64}$/);
+   const oldTopic = await run('topic_get',{topic_id:oldCard.topic_id,after:'thread-firs'});
+   assert.deepEqual(oldTopic.dialogues,[{dialogue_id:'thread-first',title:'thread-first',channel:'synthetic'}]);
+
    assert.match(firstTopic,/^T[1-9]\d*$/);
    assert.match(secondTopic,/^T[1-9]\d*$/);
    await run('topic_move',{dialogue_id:'thread-second',topic_id:firstTopic});
@@ -144,7 +152,7 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal(await jobs.tick(),true);
    const same=await api.message(profile,{dialogue_id:dialogue.id,message_id:'big',target:'message_summary'});
    assert.match(same.text,/Обычное саммари/);
-   const context=await api.pull(profile,{request_id:req(),consumer_id:'worker-reader',context_instance_id:'default',format:'compact'});
+   const context=await api.pull(profile,{request_id:req(),consumer_id:'worker-reader',context_instance_id:'default',format:'index'});
    assert.match(context.items[0].text,/Запланирована проверка\./);
    assert.match(context.items[0].text,/Короткая проверка\./);
   });
@@ -260,7 +268,7 @@ test('PostgreSQL: обмен, контекст, история и перенос
   });
 
   await t.test('архив из 1000 тем сохраняет лимит bootstrap и исторический импорт в дельте',async()=>{
-   const profile='large-topic-fixture',context={consumer_id:'large-reader',context_instance_id:'default',format:'compact'};
+   const profile='large-topic-fixture',context={consumer_id:'large-reader',context_instance_id:'default',format:'index'};
    await app.query(`INSERT INTO dialogues_live.dialogues(owner_id,id,channel,title)
     SELECT $1,'dialogue-'||i,'synthetic','Проверка архива '||i FROM generate_series(1,1000) g(i)`,[profile]);
    await app.query(`INSERT INTO dialogues_live.turns(owner_id,dialogue_id,id,turn_order,status,change_seq)
@@ -316,7 +324,7 @@ test('PostgreSQL: обмен, контекст, история и перенос
    await api.append(profile,{request_id:req(),dialogue:{id:'explicit-continuation',channel:'synthetic'},
     messages:[{id:'request',turn_id:'turn',role:'user',kind:'input',text:'Вернёмся к теме «Проверка архива 1».'}]});
    const pinned=await api.pull(profile,{request_id:req(),consumer_id:'pinned-reader',context_instance_id:'default',
-    format:'compact',dialogue_id:'explicit-continuation'});
+    format:'index',dialogue_id:'explicit-continuation'});
    assert.ok(pinned.items[0].text.split('\n')[1].startsWith(oldTopic+' '));
   });
 
