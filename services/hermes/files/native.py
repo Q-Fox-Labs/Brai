@@ -483,6 +483,19 @@ def clear_steer_turn(turn):
         turn._brai_adapter_event = None
 
 
+async def transcribe_voice_once(event, path, transcribe, *providers):
+    """Share one transcription of a clip throughout the life of its inbound event."""
+    if event is None:
+        return await transcribe(path, *providers)
+    cache = getattr(event, '_brai_voice_transcription_tasks', None)
+    if cache is None:
+        cache = event._brai_voice_transcription_tasks = {}
+    task = cache.get(path)
+    if task is None:
+        task = cache[path] = asyncio.create_task(transcribe(path, *providers))
+    return await asyncio.shield(task)
+
+
 async def steer_active_input(runner, event, session_key):
     """Передать авторизованный Telegram-вход текущему ходу вместо FIFO новых задач."""
     platform = str(getattr(event.source.platform, 'value', event.source.platform))
@@ -500,7 +513,9 @@ async def steer_active_input(runner, event, session_key):
         return False
     with _steer_lock(turn):
         generation = turn._brai_steer_generation
+        previous_agent = getattr(turn, '_brai_steer_agent', None)
     if reserved is not None and (reserved[0] is not turn or reserved[1] is not generation):
+        reserved[2].set()
         release_event(event)
         return True  # Завершённый/остановленный ход не передаёт свой отложенный вход новому.
     identity, revision = _steer_identity(event.source, event.message_id), _steer_revision(event)
@@ -550,6 +565,16 @@ async def steer_active_input(runner, event, session_key):
     with _steer_lock(turn):
         current = runner._peek_session_state(session_key)
         if current is None or current.turn is not turn or turn._brai_steer_generation is not generation:
+            if audio_paths:
+                finish_steer_preparation(event)
+                event._brai_preparation = None
+                route_current = getattr(runner, '_brai_consent_route_current', None)
+                if not getattr(previous_agent, '_interrupt_requested', False) and (
+                        route_current is None or route_current(event)):
+                    # AIDEV-NOTE: Обычный финал прежнего хода передаёт тот же
+                    # объект дальше. Native queue сохранит STT и lease входа.
+                    return False
+                event._gateway_accepted = True
             release_event(event)
             if reserved is not None:
                 reserved[2].set()
@@ -557,6 +582,8 @@ async def steer_active_input(runner, event, session_key):
         agent = getattr(turn, '_brai_steer_agent', None)
         if agent is not None:
             if not agent.steer(payload):
+                finish_steer_preparation(event)
+                event._brai_preparation = None
                 return False  # Финал уже зафиксирован; это следующий пользовательский ход.
         else:
             pending = getattr(turn, '_brai_pending_steers', [])
