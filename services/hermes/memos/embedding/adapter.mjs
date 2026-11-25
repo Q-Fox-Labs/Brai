@@ -216,33 +216,23 @@ export function createEmbeddingServer(config, invokeEmbedding, isReady = () => t
   });
 }
 
-export async function startEmbeddingAdapter(config) {
-  const nc = await connect({
+/** Запустить HTTP-адаптер; dial и уведомление об отказе можно подменить в тесте. */
+export async function startEmbeddingAdapter(config, connectNats = connect, onTerminal = () => { process.exitCode = 1; }) {
+  const privateRelease = config.ownerId === 'release-memos'
+    && config.nats.servers.length === 1 && config.nats.servers[0] === 'nats://brai-release-nats:4222';
+  const nc = await connectNats({
     servers: config.nats.servers,
     user: config.nats.user,
     pass: config.nats.password,
     inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.memos_embedding',
     timeout: 5_000,
     name: 'memos_embedding_adapter',
-    // AIDEV-NOTE: Остановка NATS на время резервирования может длиться дольше стандартных попыток.
-    maxReconnectAttempts: -1,
-    ignoreClusterUpdates: true,
+    // AIDEV-NOTE: При разрыве supervisor запускает процесс заново; просроченные запросы не буферизуются.
+    ...(privateRelease ? { reconnect: false, ignoreClusterUpdates: true } : {}),
   });
-  let connected = true;
-  const statuses = nc.status();
-  void (async () => {
-    try {
-      for await (const event of statuses) {
-        if (event.type === 'disconnect' || event.type === 'reconnecting') connected = false;
-        if (event.type === 'reconnect') connected = true;
-      }
-    } finally {
-      connected = false;
-    }
-  })();
-  void nc.closed().then(() => { connected = false; });
+  let closing;
   const server = createEmbeddingServer(config, async (invocation) => {
-    if (!connected || nc.isClosed() || nc.isDraining()) throw new Error('NATS unavailable');
+    if (nc.isClosed() || nc.isDraining()) throw new Error('NATS unavailable');
     const message = await nc.request(SUBJECT, Buffer.from(JSON.stringify(invocation)), { timeout: config.embedding.timeoutMs });
     const status = message.headers?.get('Nats-Service-Error-Code');
     if (status) {
@@ -251,17 +241,50 @@ export async function startEmbeddingAdapter(config) {
       throw error;
     }
     return JSON.parse(new TextDecoder().decode(message.data));
-  }, () => connected && !nc.isClosed() && !nc.isDraining());
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(config.embedding.port, config.embedding.host, resolve);
-  });
-  const close = async () => {
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-    await nc.drain();
+  }, () => !nc.isClosed() && !nc.isDraining());
+  const onSignal = () => { void close().catch(() => { onTerminal(); }); };
+  const close = (failed = false) => {
+    if (closing) return closing;
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
+    if (failed) onTerminal();
+    closing = (async () => {
+      if (server.listening) {
+        const stopped = new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        if (failed) server.closeAllConnections();
+        await stopped;
+      }
+      if (!nc.isClosed()) await nc.drain();
+    })();
+    return closing;
   };
-  process.once('SIGINT', () => void close());
-  process.once('SIGTERM', () => void close());
+  if (privateRelease) {
+    // AIDEV-NOTE: closed() сохраняет факт отказа даже если событие случилось до подписки.
+    void nc.closed().then(() => {
+      if (!closing && server.listening) {
+        process.stderr.write('MemOS embedding adapter: NATS connection closed\n');
+        void close(true).catch(() => { onTerminal(); });
+      }
+    });
+  }
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(config.embedding.port, config.embedding.host, () => {
+        server.removeListener('error', reject);
+        resolve();
+      });
+    });
+  } catch (error) {
+    if (!nc.isClosed()) await nc.close();
+    throw error;
+  }
+  if (nc.isClosed()) {
+    await close(true);
+    throw new Error('NATS connection closed during adapter startup');
+  }
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
   return { close, server, nc };
 }
 

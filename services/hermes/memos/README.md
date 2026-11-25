@@ -4,7 +4,7 @@
 
 ## Эмбеддинги
 
-`embedding/adapter.mjs` предоставляет MemOS HTTP интерфейс `POST /v1/embeddings` и передаёт текстовые запросы в `brai.local_ai.v1.invoke.embed`. Адаптер использует DEV NATS loopback на порту `4223`, закреплённую модель EmbeddingGemma 2 Q8, 768 измерений и назначение `symmetric`. Он сохраняет порядок пакета. Префикс назначения формирует LocalAI согласно своему профилю.
+`embedding/adapter.mjs` предоставляет MemOS HTTP интерфейс `POST /v1/embeddings` и передаёт текстовые запросы в `brai.local_ai.v1.invoke.embed`. Адаптер поддерживает NATS на loopback-портах `4222` и `4223`, закреплённую модель EmbeddingGemma 2 Q8, 768 измерений и назначение `symmetric`. Он сохраняет порядок пакета. Префикс назначения формирует LocalAI согласно своему профилю.
 
 Процесс читает JSON-конфигурацию по пути `BRAI_HERMES_CONFIG`. Он использует эти поля верхнего уровня; остальные поля общей конфигурации Hermes не меняет:
 
@@ -32,7 +32,9 @@
 
 `apiKey` нужен, если `host` доступен за пределами loopback. Укажите случайный ключ длиной не менее 32 символов; HTTP-запросы должны передавать `Authorization: Bearer <apiKey>`. Значение ключа не попадает в журнал. `BRAI_HERMES_OWNER_ID`, если задан, должен совпасть с `ownerId` в JSON. Секретные значения хранит оператор в защищённом файле, не в репозитории.
 
-Запуск адаптера: `node services/hermes/memos/embedding/adapter.mjs`. Команда `node services/hermes/memos/embedding/adapter.mjs --health` проверяет уже запущенный HTTP endpoint через `GET /health`; она не отправляет текст и не вызывает модель. Проверки преобразования и ошибок запускаются командой `node services/hermes/memos/embedding/adapter.test.mjs` без NATS и модели.
+Для отдельной закрытой сети RELEASE конфигурация с `ownerId: release-memos` может использовать только адрес `nats://brai-release-nats:4222` и должна содержать имя и пароль NATS. Сеть, учётные данные, права на NATS и ограниченный доступ к HTTP endpoint обеспечивает оператор. Транспорт в этой сети не шифруется. При потере NATS адаптер завершает работу; для восстановления оператор обязан настроить его автоматический перезапуск. Незавершённый запрос при этом не повторяется адаптером.
+
+Запуск адаптера: `node services/hermes/memos/embedding/adapter.mjs`. Команда `node services/hermes/memos/embedding/adapter.mjs --health` проверяет уже запущенный HTTP endpoint через `GET /health`; она не отправляет текст и не вызывает модель. Успешный health не подтверждает работу модели или полный поиск памяти. Проверки преобразования и ошибок запускаются командой `node services/hermes/memos/embedding/adapter.test.mjs` без NATS и модели.
 
 ## Codex bridge
 
