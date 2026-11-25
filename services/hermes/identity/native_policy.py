@@ -256,9 +256,13 @@ def install_dialogues_result_budget(tool_executor):
     """Передать компактный индекс целиком в пределах штатного бюджета хода."""
     persist = tool_executor.maybe_persist_tool_result
     def preserve_context(content, tool_name, tool_use_id, env=None, config=None):
-        if (tool_name == 'mcp__brai__dialogues_exchange' and config is not None
-                and isinstance(dialogues_result(content).get('context'), str)):
-            return persist(content, tool_name, tool_use_id, env=env, config=config, threshold=config.turn_budget)
+        if tool_name == 'mcp__brai__dialogues_exchange' and config is not None:
+            result = dialogues_result(content)
+            archive = ('messages' in result and 'continuation_cursor' in result or
+                       'dialogues' in result and 'topic_id' in result or
+                       'items' in result and str(result.get('dialogue_id', '')).startswith('D'))
+            if isinstance(result.get('context'), str) or archive:
+                return persist(content, tool_name, tool_use_id, env=env, config=config, threshold=config.turn_budget)
         options = {} if config is None else {'config': config}
         return persist(content, tool_name, tool_use_id, env=env, **options)
     tool_executor.maybe_persist_tool_result = preserve_context

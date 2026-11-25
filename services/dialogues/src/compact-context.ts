@@ -81,7 +81,7 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
   view[topic_id]=digest(line);
   if(previous[topic_id]!==view[topic_id])lines.push(line);
  }
- for(const id of Object.keys(previous))if(!Object.hasOwn(view,id))lines.push('-'+id);
+ for(const id of Object.keys(previous))if(id.startsWith('T')&&!Object.hasOwn(view,id))lines.push('-'+id);
  return {lines,view};
 }
 
@@ -151,15 +151,16 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
   const detail=contextExcerpt(JSON.stringify({purpose,constraints:constraints_text,pending}),topicLimits.message);
   return reference+' '+quote(detail.text)+(detail.truncated?' [подробнее в snapshot]':'');
  };
- const messages=selected.map(row=>({revision:BigInt(row.revision),line:messageLine(row)}));
+ const messages=selected.filter(row=>previous[row.message_id]!==row.revision)
+  .map(row=>({id:row.message_id,revision:BigInt(row.revision),line:messageLine(row)}));
  const work=active.map(row=>({revision:BigInt(row.revision),line:workLine(row)}));
  const heading=bootstrap?'Последние сообщения':'Новые сообщения';
  const remaining='Остальные изменения придут при следующем input.';
  let through=BigInt(boundary);
  const budget=limits.requestBytes-limits.responseBytes-limits.metadataBytes;
- const fixed=[indexInstruction,...lines];
+ const fixed=[indexInstruction,...lines,...(bootstrap&&messages.length?[heading,...messages.map(row=>row.line)]:[])];
  const render=()=>{
-  const visible=messages.filter(row=>row.revision<=through).map(row=>row.line);
+  const visible=bootstrap?[]:messages.filter(row=>row.revision<=through).map(row=>row.line);
   return [...fixed,...(visible.length?[heading,...visible]:[]),...work.filter(row=>row.revision<=through).map(row=>row.line),
    ...(through<BigInt(boundary)?[remaining]:[])].join('\n');
  };
@@ -167,7 +168,7 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
  const tokenBudget=20*topicLimits.extended+200*topicLimits.compact+20*topicLimits.message;
  if(automatic&&(bytes({text})>budget||quote(text).length>nativeIndexChars||!bootstrap&&text.length>tokenBudget&&countContextTokens(text)>tokenBudget)){
   const revisions=new Map<bigint,{bytes:number;tokens:number;chars:number}>();
-  for(const row of [...messages,...work]){
+  for(const row of [...(bootstrap?[]:messages),...work]){
    const cost=revisions.get(row.revision)??{bytes:0,tokens:0,chars:0};
    cost.bytes+=bytes(row.line)+1;
    cost.tokens+=countContextTokens(row.line)+1;
@@ -186,8 +187,12 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
   }
   text=render();
  }
+ if(automatic){
+  for(const [id,revision] of Object.entries(previous))if(id.startsWith('M')&&BigInt(revision)>through)view[id]=revision;
+  if(bootstrap)for(const row of messages)if(row.revision>through)view[row.id]=String(row.revision);
+ }
  const items=lines.length||messages.length||work.length?[{type:'context_index',text}]:[];
- return {items,view,through:String(through),selected:messages.filter(row=>row.revision<=through).length,missing:topics.filter(topic=>!topic.version).length};
+ return {items,view,through:String(through),selected:bootstrap?messages.length:messages.filter(row=>row.revision<=through).length,missing:topics.filter(topic=>!topic.version).length};
 }
 
 /** Считает карточки и новые сообщения внутри той же транзакции, что и выдачу. */

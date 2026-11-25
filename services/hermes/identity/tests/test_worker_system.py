@@ -225,7 +225,7 @@ class SystemTests(unittest.TestCase):
             self.assertIn('Current policies/DIALOGUES.md', instructions.read_context(root))
         self.assertEqual(instructions.without_legacy_dialogues(previous), previous)
 
-    def test_dialogues_context_uses_turn_budget_but_archive_reads_keep_existing_budget(self):
+    def test_dialogues_context_and_short_id_pages_use_turn_budget(self):
         calls = []
         def persist(content, tool_name, tool_use_id, **options):
             calls.append(options)
@@ -238,9 +238,11 @@ class SystemTests(unittest.TestCase):
         wrapped = f'<untrusted_tool_result source="{name}">\n{payload}\n</untrusted_tool_result>'
         self.assertGreater(len(wrapped), 50000)
         self.assertEqual(executor.maybe_persist_tool_result(wrapped, name, 'input', config=budget), wrapped)
-        executor.maybe_persist_tool_result('{"messages": []}', name, 'archive', config=budget)
+        executor.maybe_persist_tool_result('{"messages": [], "continuation_cursor": null}', name, 'archive', config=budget)
+        executor.maybe_persist_tool_result('{"text": "Другой результат"}', name, 'other', config=budget)
         self.assertEqual(calls[0]['threshold'], 200000)
-        self.assertNotIn('threshold', calls[1])
+        self.assertEqual(calls[1]['threshold'], 200000)
+        self.assertNotIn('threshold', calls[2])
 
     def test_short_bug_hunt_reminder_is_loaded_without_the_detailed_guide(self):
         repository = Path(__file__).resolve().parents[4]

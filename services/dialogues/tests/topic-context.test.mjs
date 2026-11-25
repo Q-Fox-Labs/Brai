@@ -2,7 +2,7 @@
 // ABOUTME: Тест модели использует заглушку; настоящий PostgreSQL проверяется отдельно.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {countContextTokens,topicIndexChanges} from '../dist/compact-context.js';
+import {collectCompact,countContextTokens,topicIndexChanges} from '../dist/compact-context.js';
 import {chooseGrouping,summarizeTopic} from '../dist/topic-jobs.js';
 import {matchesTopicReference} from '../dist/topic-references.js';
 import {invoke} from '../dist/api.js';
@@ -53,6 +53,26 @@ test('индекс сохраняет все 220 тем даже с длинны
  assert.ok(JSON.stringify(lines.join('\n')).length<200_000);
  assert.ok(lines.every((line,i)=>line.startsWith('T'+(i+1)+' ')&&line.includes('international')));
  assert.deepEqual(topicIndexChanges(topics,view).lines,[]);
+});
+
+test('старые незакрытые ходы не вытесняют двадцать свежих сообщений',async()=>{
+ const topics=Array.from({length:220},(_,i)=>({topic_id:'T'+(i+1),title:'Тема '+i,version:'1',
+  extended:' international'.repeat(400),compact:' international'.repeat(50)}));
+ const messages=Array.from({length:20},(_,i)=>({message_id:'M'+(i+1),revision:String(401+i),
+  role:'user',text:'Свежее сообщение '+i,exact:true}));
+ const work=Array.from({length:400},(_,i)=>({dialogue_id:'open-thread-'+i,turn_id:'turn-'+i,version:'1',
+  status:'open',purpose:' international'.repeat(150),constraints_text:null,pending:[],revision:String(i+1)}));
+ const db={async query(sql){
+  if(sql.includes('FROM dialogues_live.topics'))return {rows:topics};
+  if(sql.includes('FROM dialogues_live.messages m'))return {rows:[...messages].reverse()};
+  return {rows:work};
+ }};
+ const first=await collectCompact(db,'owner',{boundary:'420',checkpoint:'0',bootstrap:true,inputIds:[],automatic:true,previous:{}});
+ assert.equal(first.selected,20);
+ assert.ok(Number(first.through)<400);
+ assert.equal(first.items[0].text.match(/^M\d+ /gmu).length,20);
+ const next=await collectCompact(db,'owner',{boundary:'420',checkpoint:first.through,bootstrap:false,inputIds:[],automatic:true,previous:first.view});
+ assert.doesNotMatch(next.items[0].text,/^M\d+ /mu);
 });
 
 test('поиск, тема и чтение архива не создают выдачу контекста',async()=>{
