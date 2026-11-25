@@ -3,9 +3,11 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import test from 'node:test';
-import {connect, JSONCodec} from 'nats';
+import {connect, headers, JSONCodec} from 'nats';
 import {connection, createLocalConnectionProvider} from '../../dist/coordinator/main.js';
 import {createDependencyPorts} from '../../dist/coordinator/transport/dependencies.js';
+import {createPublicGateway} from '../../dist/coordinator/transport/boundary.js';
+import {startNatsTransport} from '../../dist/coordinator/transport/nats.js';
 
 const container=process.env.BRAI_RECONNECT_FIXTURE_CONTAINER;
 const server=process.env.BRAI_RECONNECT_FIXTURE_NATS;
@@ -29,6 +31,16 @@ test('catalog reconnects after the isolated NATS restart', {skip:!container||!se
   const localConnection=await local.get();
   const service=await connect({servers:server,inboxPrefix:'_INBOX.reconnect_fixture',maxReconnectAttempts:-1});
   t.after(async()=>{await Promise.allSettled([main.close(),local.close(),service.close()]);});
+  const settingsResult={settings:{defaultLocalModel:null,allowReplacement:false,policyVersion:1},revision:1};
+  const gateway=createPublicGateway({maxConcurrent:1,bindings:[{token:'fixture-public-token',
+    principal:{scopeType:'user',scopeId:'fixture',ownerId:'fixture-owner',permissions:['transcription:use']}}],
+    invoke:async()=>settingsResult});
+  const listener=await startNatsTransport(main,gateway,{requestBytes:4096,responseBytes:4096});
+  t.after(async()=>{await listener.close();await listener.settled();});
+  const auth=headers();auth.set('Authorization','Bearer fixture-public-token');
+  const metadata=async()=>JSON.parse(new TextDecoder().decode((await service.request('brai.transcription.v1.settings.get',
+    Buffer.from('{}'),{timeout:3000,headers:auth})).data));
+  assert.deepEqual(await metadata(),settingsResult);
   const card={modelId:'whisper',name:'model',description:'',source:'fixture',license:null,revision:'v1',profileId:'cpu',supported:true,
     operations:['transcribe'],languages:[],inputKinds:['audio_artifact'],outputKinds:['transcription'],files:[],
     hardwareRequirements:{cpuArchitectures:[],minMemoryBytes:null,accelerator:null},limits:{maxInputBytes:null,maxAudioSeconds:null,maxItems:null,maxResultBytes:null,vectorDimensions:null},
@@ -52,5 +64,6 @@ test('catalog reconnects after the isolated NATS restart', {skip:!container||!se
   assert.deepEqual(fresh.NetworkSettings.Ports['4222/tcp'],published);
   await Promise.all([main.flush(),localConnection.flush(),service.flush()]);
   assert.equal((await ports.localCatalog.list()).length,1);
+  assert.deepEqual(await metadata(),settingsResult);
   assert.equal(requests,2,'no catalog request is replayed after reconnect');
 });
