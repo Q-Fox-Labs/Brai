@@ -851,12 +851,14 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(agent.steer('После начала finish'))
             return 'completed'
         self.assertTrue(agent.steer('До начала finish'))
-        self.assertIn('STEER_PENDING',native.dialogues_finish(agent,complete,lambda result:result=='completed'))
+        self.assertIn('STEER_PENDING',native.dialogues_finish(agent,complete,lambda _result:False))
         agent._pending_steer=None
-        self.assertEqual(native.dialogues_finish(agent,lambda:'timeout',lambda _result:False),'timeout')
+        self.assertEqual(native.dialogues_finish(agent,lambda:'rejected',lambda _result:True),'rejected')
         self.assertTrue(agent.steer('После отказа finish'))
         agent._pending_steer=None
-        self.assertEqual(native.dialogues_finish(agent,complete,lambda result:result=='completed'),'completed')
+        self.assertEqual(native.dialogues_finish(agent,lambda:'timeout',lambda _result:False),'timeout')
+        self.assertFalse(agent.steer('После неясного исхода'))
+        self.assertEqual(native.dialogues_finish(agent,complete,lambda _result:False),'completed')
         self.assertFalse(agent.steer('После квитанции'))
         native.clear_steer_turn(turn)
 

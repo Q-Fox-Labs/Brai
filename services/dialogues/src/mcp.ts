@@ -43,7 +43,10 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         const response=httpDelivery.getStore();
         const thread=req.params.name==='dialogues_exchange'&&raw?.context===undefined&&['input','poll'].includes(raw?.action)
           ?safeId(raw.arguments?.dialogue_id??raw.arguments?.dialogue?.id):undefined;
+        const clientDelivery=req.params._meta?.brai_dialogues_delivery;
+        const clientConfirms=clientDelivery==='start'||typeof clientDelivery==='string'&&/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/.test(clientDelivery);
         let confirm:(()=>Promise<unknown>)|undefined;
+        let deliveredId:string|undefined;
         let deliver=false;
         if(thread&&response){
           const previous=deliveries.get(thread);
@@ -53,7 +56,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
           deliveries.set(thread,ordered);
           const release=()=>{done();if(deliveries.get(thread)===ordered)deliveries.delete(thread);};
           response.finish=()=>{
-            if(!deliver||!confirm){release();return;}
+            if(!deliver||!confirm||clientConfirms){release();return;}
             void confirm().catch(()=>{
               try{log({service:'dialogues',event:'context_confirmation_failed',request_id:safeId(raw.arguments?.request_id)});}catch{/* Следующий вызов повторно получит дельту. */}
             }).finally(release);
@@ -61,14 +64,15 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
           response.cancel=()=>{void Promise.resolve(previous).then(release);};
           await previous;
           if(response.closed){release();throw new DialoguesFault('CANCELLED');}
+          if(clientConfirms&&clientDelivery!=='start')await store.confirmThread(cfg.owner,thread,clientDelivery);
         }
-        const result=await invoke(store,cfg.owner,req.params.name,raw??{},thread&&response?commit=>{confirm=commit;}:undefined);
+        const result=await invoke(store,cfg.owner,req.params.name,raw??{},thread&&response?(commit,id)=>{confirm=commit;deliveredId=id;}:undefined);
         // AIDEV-NOTE: Поздний отказ может следовать за commit: исход не объявляется неприменённым.
         await cfg.personal?.authorize();
         if(Buffer.byteLength(JSON.stringify(result))>(typeof result.context==='string'?limits.requestBytes:limits.responseBytes))throw new DialoguesFault("RESPONSE_TOO_LARGE");
         if(result.status==='rejected')rejected(req.params.name,req.params.arguments,{code:result.code,applied:false},started);
         deliver=true;
-        return {content:[],structuredContent:result};
+        return {content:[],structuredContent:result,...(clientConfirms&&deliveredId?{_meta:{brai_dialogues_delivery:deliveredId}}:{})};
       } catch(error) {
         const code=error instanceof DialoguesFault?error.code:"INTERNAL";
         const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте field по expected и allowed; сразу повторите с новым request_id, сохранив ID сообщения и исходный текст":"Проверьте данные и состояние перед повтором";

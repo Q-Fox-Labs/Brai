@@ -69,9 +69,15 @@ test('30 владельцев: личный транспорт, одинаков
   }));
   for(const run of runs)if(run.status==='rejected')throw run.reason;
   const first=results[0],second=results[1];
+  const receipts=new Map();
   const automatic = async (profile, action, arguments_) => {
-   const reply = await profile.client.call('dialogues_exchange', {action, arguments:arguments_});
+   const thread=action==='input'?arguments_.dialogue.id:action==='poll'?arguments_.dialogue_id:null;
+   const scope=thread?profile.i+':'+thread:null;
+   const receipt=scope?(receipts.get(scope)??'start'):undefined;
+   const reply = await profile.client.call('dialogues_exchange', {action, arguments:arguments_},undefined,receipt);
    assert.equal(reply.isError, undefined, JSON.stringify(reply));
+   const delivered=reply._meta?.brai_dialogues_delivery;
+   if(scope&&delivered)receipts.set(scope,delivered);
    return reply.structuredContent;
   };
   const input = (profile, thread, id, text, request_id=profile.request(), summary) =>
@@ -114,6 +120,14 @@ test('30 владельцев: личный транспорт, одинаков
   }finally{first.config.personal.authorize=authorization;}
   assert.match((await input(first, 'auto-a', 'seven', 'Следующий запрос')).context,/Дельта после сбоя доставки/u);
   assert.equal((await input(first, 'auto-a', 'eight', 'Всё дочитано')).context,null);
+  await input(first, 'auto-b', 'four', 'Дельта, потерянная после HTTP finish');
+  const lost=await first.client.call('dialogues_exchange', {action:'input',arguments:{request_id:first.request(),
+   dialogue:{id:'auto-a',channel:'synthetic'},messages:[{id:'nine',text:'Запись есть, квитанция потеряна'}]}},
+   undefined,receipts.get(first.i+':auto-a'));
+  assert.match(lost.structuredContent.context,/Дельта, потерянная после HTTP finish/u);
+  assert.ok(lost._meta?.brai_dialogues_delivery);
+  assert.match((await input(first, 'auto-a', 'ten', 'Новый вход после сбоя')).context,/Дельта, потерянная после HTTP finish/u);
+  assert.equal((await input(first, 'auto-a', 'eleven', 'Контекст подтверждён')).context,null);
   const foreign=await second.client.call('dialogues_context_ack',{request_id:second.request(),...second.context,delivery_id:first.delivery});
   assert.equal(foreign.isError,true);
   assert(!JSON.stringify(foreign).includes('private-user-0:'));

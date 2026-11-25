@@ -317,7 +317,7 @@ def admit_steer(agent, text):
     return True
 
 
-def dialogues_finish(agent, send, is_completed):
+def dialogues_finish(agent, send, can_retry):
     """Отделить входы открытого хода от новых входов до записи финала в Диалоги."""
     turn = getattr(agent, '_brai_steer_turn', None)
     if turn is None:
@@ -330,13 +330,13 @@ def dialogues_finish(agent, send, is_completed):
         agent._brai_steer_closed = True
     if was_closed:
         return send()
-    completed = False
+    may_reopen = False
     try:
         result = send()
-        completed = is_completed(result)
+        may_reopen = can_retry(result)
         return result
     finally:
-        if not completed:
+        if may_reopen:
             with agent._pending_steer_lock:
                 agent._brai_steer_closed = False
 

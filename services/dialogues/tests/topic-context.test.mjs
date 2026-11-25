@@ -43,6 +43,18 @@ test('смена уровня карточки и вытеснение темы 
  assert.deepEqual(after.lines,['T221 "Тема 0" "Развёрнуто"','T20 "Тема 19" "Коротко"','-T220']);
 });
 
+test('индекс сохраняет все 220 тем даже с длинным написанием одного токена',()=>{
+ const word=' international';
+ assert.equal(countContextTokens(word.repeat(400)),400);
+ const topics=Array.from({length:220},(_,i)=>({topic_id:'T'+(i+1),title:'Тема '+i,version:'1',
+  extended:word.repeat(400),compact:word.repeat(50)}));
+ const {lines,view}=topicIndexChanges(topics,{});
+ assert.equal(lines.length,220);
+ assert.ok(JSON.stringify(lines.join('\n')).length<200_000);
+ assert.ok(lines.every((line,i)=>line.startsWith('T'+(i+1)+' ')&&line.includes('international')));
+ assert.deepEqual(topicIndexChanges(topics,view).lines,[]);
+});
+
 test('поиск, тема и чтение архива не создают выдачу контекста',async()=>{
  const store={
   topics:{async search(owner,query){return {owner,query};},async get(owner,id){return {owner,id};}},

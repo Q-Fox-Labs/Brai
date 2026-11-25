@@ -50,14 +50,34 @@ type TopicCard={topic_id:string;title:string|null;version:string|null;extended:s
 
 const quote=(value:string)=>JSON.stringify(value);
 const indexInstruction='В dialogues_exchange: topic_get(T…) — свёртки бесед; dialogue_get(D…) — сообщения; read_many([M…]) — оригиналы. -T… убирает тему из списка.';
+// Keep the index within Hermes's existing 200,000-character turn result budget.
+const nativeIndexChars=200_000-limits.metadataBytes;
 
 /** Сравнивает короткие строки с последней подтверждённой выдачей. */
 export function topicIndexChanges(topics:TopicCard[],previous:View){
  const lines:string[]=[];
  const view:View={};
- for(const [index,{topic_id,title,extended,compact}] of topics.entries()){
-  const summary=index<20?extended:compact;
-  const line=topic_id+' '+quote(title??'')+' '+(summary?quote(summary):'[свёртка готовится]');
+ const titles=topics.map(({topic_id,title})=>topic_id+' '+quote((title??'').replace(/[\u0000-\u001f]/gu,' '))+' ');
+ const summaries=topics.map(({extended,compact},index)=>index<20?extended:compact);
+ const fixedChars=titles.reduce((n,title)=>n+title.length+24,0);
+ const summaryChars=summaries.reduce((n,summary)=>n+(summary?quote(quote(summary)).length:0),0);
+ // Reserve the full start window for the twenty message representations.
+ const factor=summaryChars?Math.min(1,Math.max(0,(nativeIndexChars-20*(6*100+topicLimits.message*4)-fixedChars)/summaryChars)):1;
+ for(const [index,{topic_id}] of topics.entries()){
+  const summary=summaries[index];
+  let excerpt=summary;
+  if(summary&&factor<1){
+   const budget=Math.floor(quote(quote(summary)).length*factor);
+   let chars=0;
+   excerpt='';
+   for(const ch of summary){
+    chars+=quote(quote(ch)).length-6;
+    if(chars>budget)break;
+    excerpt+=ch;
+   }
+   excerpt=excerpt.trimEnd()+'…';
+  }
+  const line=titles[index]+(excerpt?quote(excerpt):'[свёртка готовится]');
   view[topic_id]=digest(line);
   if(previous[topic_id]!==view[topic_id])lines.push(line);
  }
@@ -145,20 +165,23 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
  };
  let text=render();
  const tokenBudget=20*topicLimits.extended+200*topicLimits.compact+20*topicLimits.message;
- if(automatic&&(bytes({text})>budget||!bootstrap&&text.length>tokenBudget&&countContextTokens(text)>tokenBudget)){
-  const revisions=new Map<bigint,{bytes:number;tokens:number}>();
+ if(automatic&&(bytes({text})>budget||quote(text).length>nativeIndexChars||!bootstrap&&text.length>tokenBudget&&countContextTokens(text)>tokenBudget)){
+  const revisions=new Map<bigint,{bytes:number;tokens:number;chars:number}>();
   for(const row of [...messages,...work]){
-   const cost=revisions.get(row.revision)??{bytes:0,tokens:0};
+   const cost=revisions.get(row.revision)??{bytes:0,tokens:0,chars:0};
    cost.bytes+=bytes(row.line)+1;
    cost.tokens+=countContextTokens(row.line)+1;
+   cost.chars+=quote(row.line).length;
    revisions.set(row.revision,cost);
   }
   const prefix=[...fixed,heading,remaining].join('\n');
   let availableBytes=budget-bytes({text:prefix});
+  let availableChars=nativeIndexChars-quote(prefix).length;
   let availableTokens=bootstrap?Infinity:Math.max(0,tokenBudget-countContextTokens(prefix));
   for(const [index,[revision,cost]] of Array.from(revisions).sort(([a],[b])=>a<b?-1:1).entries()){
-   if(cost.bytes>availableBytes||cost.tokens>availableTokens&&(index>0||lines.length>0)){through=revision-1n;break;}
+   if(cost.bytes>availableBytes||cost.chars>availableChars||cost.tokens>availableTokens&&(index>0||lines.length>0)){through=revision-1n;break;}
    availableBytes-=cost.bytes;
+   availableChars-=cost.chars;
    availableTokens-=cost.tokens;
   }
   text=render();

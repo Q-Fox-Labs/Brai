@@ -5,7 +5,7 @@ import {randomUUID,createHmac,timingSafeEqual,createHash} from 'node:crypto';
 import {object,id,digest,fail,limits,DialoguesFault} from './domain.js';
 import {collectCompact,collectLegacyCompact} from './compact-context.js';
 type DB=Pick<Pool,'connect'>;
-export type DeliveryCommit=(confirm:()=>Promise<unknown>)=>void;
+export type DeliveryCommit=(confirm:()=>Promise<unknown>,deliveryId:string)=>void;
 /** Сериализует снимок с commit записей владельца. */
 export async function ownerTransaction<T>(pool:DB,owner:string,fn:(db:PoolClient)=>Promise<T>):Promise<T>{
  const db=await pool.connect();
@@ -154,7 +154,7 @@ export function createContext(pool:DB,key:string){
  if(automatic&&delivery.state==='active'){
   const acknowledgement={request_id:'auto-ack-'+delivery.id,consumer_id:a.consumer_id,
    context_instance_id:a.context_instance_id,delivery_id:delivery.id};
-  if(afterResponse)afterResponse(()=>ownerTransaction(pool,owner,db=>ackInTransaction(db,owner,acknowledgement,true)));
+  if(afterResponse)afterResponse(()=>ownerTransaction(pool,owner,db=>ackInTransaction(db,owner,acknowledgement,true)),delivery.id);
   else await ackInTransaction(db,owner,acknowledgement,true);
  }
  return delivery.pages[index];});
@@ -178,6 +178,16 @@ export function createContext(pool:DB,key:string){
   const delivered=await pull(owner,{request_id,consumer_id,context_instance_id:'default',dialogue_id:dialogue,format:'index',input_ids},true,afterResponse);
   return delivered.items[0]?.text??null;
  }
+ async function confirmThread(owner:string,dialogue:string,delivery_id:string){
+  const consumer_id='thread-'+createHash('sha256').update(dialogue).digest('hex');
+  return ownerTransaction(pool,owner,async db=>{
+   const fields={consumer_id,context_instance_id:'default',delivery_id};
+   const result=await db.query(`SELECT 1 FROM dialogues_live.context_deliveries
+    WHERE owner_id=$1 AND consumer_id=$2 AND context_instance_id=$3 AND id=$4 AND state='active'`,
+   [owner,consumer_id,fields.context_instance_id,delivery_id]);
+   if(result.rowCount)await ackInTransaction(db,owner,{request_id:'auto-ack-'+delivery_id,...fields},true);
+  });
+ }
  async function ack(owner:string,raw:unknown){return ownerTransaction(pool,owner,db=>ackInTransaction(db,owner,raw));}
- return {pull,pullThread,ack,ackInTransaction};
+ return {pull,pullThread,confirmThread,ack,ackInTransaction};
 }

@@ -281,7 +281,10 @@ def install_executor_guard():
     def dispatch(agent, name, args, send):
         if name == 'mcp__brai__dialogues_exchange' and isinstance(args, dict) and args.get('action') == 'finish':
             from files.native import dialogues_finish
-            return dialogues_finish(agent, send, lambda result: dialogues_result(result).get('status') == 'completed')
+            def can_retry(result):
+                receipt = dialogues_result(result)
+                return receipt.get('applied') is False or receipt.get('status') == 'rejected'
+            return dialogues_finish(agent, send, can_retry)
         return send()
     def guarded_common(agent, state, ref, *, execute, scope_block, display_index,
                        begin_execution, authorization_gate):
