@@ -3,6 +3,7 @@
 import { connect, type NatsConnection } from 'nats';
 import { assertDto } from '#transcription-contracts';
 import type { NatsSettings } from '../config.js';
+import { canSend } from './nats.js';
 
 /** Ленивая связь использует identity coordinator и свой inbox без управления брокером. */
 export function createAlertsPublisher(settings: NatsSettings, timeout: number) {
@@ -24,6 +25,7 @@ export function createAlertsPublisher(settings: NatsSettings, timeout: number) {
       const bytes = Buffer.from(JSON.stringify(valid));
       if (bytes.byteLength > 8192) throw new Error('ALERTS_EVENT_INVALID');
       const active = await connection();
+      if (!canSend(active)) throw new Error('ALERTS_PUBLISH_UNAVAILABLE');
       const ack = await active.jetstream({ timeout }).publish('brai.alerts.v1.ingest', bytes,
         { timeout, msgID: 'transcription/' + valid.id, expect: { streamName: 'BRAI_ALERTS_INGEST_V1' } });
       if (ack.stream !== 'BRAI_ALERTS_INGEST_V1') throw new Error('ALERTS_PUBLISH_UNAVAILABLE');
