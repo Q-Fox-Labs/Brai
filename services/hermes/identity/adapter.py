@@ -10,7 +10,8 @@ import uuid
 from contextvars import ContextVar
 from types import SimpleNamespace
 from .ipc import RpcError
-from .scope import delivery_scope, input_delivery, ephemeral_input, final_text_session, prepared_response, prepared_voice
+from .scope import (delivery_scope, input_delivery, ephemeral_input, final_text_session,
+                    operator_assignment, prepared_response, prepared_voice)
 from .telegram_proxy import BotProxy
 
 
@@ -270,9 +271,21 @@ def make_adapter(config, platform, peer, publish_file):
             return (getattr(result, 'error_kind', None) in {'delivery_pending', 'forbidden'}
                     or super()._send_retry_is_final(result))
 
+        async def handle_message(self, event):
+            assignment = operator_assignment.get()
+            if assignment is not None:
+                metadata = event.metadata or {}
+                if (event.internal is not True or metadata.get('gateway_session_strict') is not True
+                        or metadata.get('gateway_session_key') != assignment.session_key
+                        or metadata.get('gateway_session_id') != assignment.session_id
+                        or not assignment.can_start()):
+                    raise PermissionError('Operator assignment session changed before admission')
+            return await super().handle_message(event)
+
         async def _record_delivery_obligation(self, *args, **kwargs):
             """Один владелец ответа: современный IPC input сохраняет worker/ingress outbox."""
-            if getattr(self, '_brai_delivery_journal', None) is not None and input_delivery.get() is not None:
+            if (operator_assignment.get() is not None
+                    or getattr(self, '_brai_delivery_journal', None) is not None and input_delivery.get() is not None):
                 return None
             return await super()._record_delivery_obligation(*args, **kwargs)
 
@@ -346,6 +359,8 @@ def make_adapter(config, platform, peer, publish_file):
             self._bot = None
 
         async def _action(self, name, payload):
+            if operator_assignment.get() is not None:
+                return SendResult(success=False, retryable=False, error_kind='operator_assignment_held')
             metadata = payload.get('metadata') or {}
             if (delivery_scope.get() is None and ephemeral_input.get() is None and input_delivery.get() is None and name in {
                     'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video',

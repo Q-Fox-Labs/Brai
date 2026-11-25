@@ -896,9 +896,22 @@ def conversation(agent, user_message, task_id=None):
                 db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
 
 
+def operator_assignment_requires_foreground():
+    """Check the personal Hermes turn context at the tool execution boundary."""
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+        from identity.scope import operator_assignment
+        return operator_assignment.get() is not None
+    return False
+
+
 def before_tool(name, args, **ids):
     """Проверить чтения и направить изменения и terminal во временный cwd."""
     args = dict(args)
+    if operator_assignment_requires_foreground() and (
+            name in {'cronjob_manage', 'delegate_task', 'process_manage', 'send_message'}
+            or name == 'terminal' and any(args.get(key) for key in
+                ('background', 'notify_on_complete', 'watch_patterns', 'heartbeat', 'persist_on_release'))):
+        raise FileError('OPERATOR_ASSIGNMENT_REQUIRES_FOREGROUND_TOOLS')
     operation = operation_for(ids)
     workspace = store().workspace(operation)
     # Native skill resolvers own their package-relative paths and their write policy.
@@ -1233,11 +1246,8 @@ def telegram_format(adapter, text):
     return formatter(text)
 
 
-async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None):
-    """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
-    from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
-    from contextlib import ExitStack
-    bot, target = adapter._bot, {'chat_id': int(chat_id)}
+def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False):
+    target = {'chat_id': int(chat_id)}
     routing = getattr(adapter, '_media_send_kwargs', None)
     if callable(routing):
         _, target = routing(chat_id, reply_to, metadata)
@@ -1247,11 +1257,43 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             target['message_thread_id'] = int(thread)
         if reply_to:
             target['reply_to_message_id'] = int(reply_to)
+    if exact:
+        expected = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id') or (metadata or {}).get('direct_messages_topic_id')
+        actual = target.get('message_thread_id') or target.get('direct_messages_topic_id')
+        if (str(target['chat_id']) != str(chat_id) or str(actual or '') != str(expected or '')
+                or not reply_to or str(target.get('reply_to_message_id')) != str(reply_to)):
+            raise PermissionError('Operator assignment Telegram route changed')
+        target['allow_sending_without_reply'] = False
+    return target
+
+
+def verify_telegram_target(message, target):
+    """Require the Bot API receipt to name the same chat and explicit topic."""
+    chat_id = getattr(message, 'chat_id', None)
+    topic = target.get('message_thread_id') or target.get('direct_messages_topic_id')
+    actual = (getattr(message, 'message_thread_id', None)
+              or getattr(getattr(message, 'direct_messages_topic', None), 'topic_id', None))
+    if topic is None and actual == 1:
+        actual = None
+    if chat_id != target['chat_id'] or actual != topic:
+        raise FileError('DELIVERY_ROUTE_UNCONFIRMED')
+
+
+async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict=False,
+                          before_send=None):
+    """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
+    from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
+    from contextlib import ExitStack
+    bot = adapter._bot
+    target = telegram_target(adapter, chat_id, reply_to, metadata, exact=strict)
     captions = []
     for item in items:
         caption = item.get('caption', '')
         formatted = telegram_format(adapter, caption) if caption else ''
         if text_units(formatted) > 1024:
+            if strict:
+                # The approval accompanies the attachment in the same API call.
+                raise FileError('TELEGRAM_CAPTION_TOO_LONG')
             if text_units(formatted) <= 3500:
                 notice = await bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
                 message_id = getattr(notice, 'message_id', None)
@@ -1290,11 +1332,16 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             else:
                 from types import SimpleNamespace
                 media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
+        if before_send is not None:
+            await before_send()
         if kind == 'album':
             result = await bot.send_media_group(**target, media=media)
         else:
             field = items[0]['presentation']
             result = [await getattr(bot, 'send_' + field)(**target, **{field: media[0].media}, caption=media[0].caption, parse_mode='MarkdownV2' if media[0].caption else None)]
+    if strict:
+        for message in result:
+            verify_telegram_target(message, target)
     return [getattr(message, 'message_id', None) for message in result]
 
 

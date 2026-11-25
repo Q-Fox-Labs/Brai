@@ -6,6 +6,10 @@ import logging
 from .delivery_journal import canonical, DeliveryJournal
 
 
+class DeliveryDeferred(Exception):
+    """The delivery port verified that no network call could have started."""
+
+
 class ReplyOutbox:
     """Очередь принадлежит ingress; одна блокировка на владельца сохраняет порядок его ответов."""
     def __init__(self, db, deliver, *, retry_unknown=True):
@@ -42,6 +46,11 @@ class ReplyOutbox:
         row = self.db.execute('SELECT state,receipt FROM reply_outbox WHERE id=?', (ident,)).fetchone()
         return json.loads(row[1]) if row and row[1] else None
 
+    def cancel_pending(self, ident, owner):
+        receipt = {'success': False, 'retryable': False, 'error_kind': 'cancelled'}
+        return self.db.execute("UPDATE reply_outbox SET state='blocked',receipt=? WHERE id=? AND owner=? AND state='pending'",
+                               (canonical(receipt), ident, owner)).rowcount == 1
+
     def retry_blocked(self, ident, owner, body, receipt):
         """Адресно вернуть ошибочно запрещённую отправку после операторской проверки.
 
@@ -69,23 +78,47 @@ class ReplyOutbox:
         async with self.locks.setdefault(owner, asyncio.Lock()):
             rows = self.db.execute("SELECT id,body,state FROM reply_outbox WHERE owner=? AND state IN ('pending','sending') ORDER BY seq", (owner,)).fetchall()
             for ident, raw, previous in rows:
-                if previous == 'sending' and not self.retry_unknown:
+                body = json.loads(raw)
+                operator_assignment = 'operatorAssignmentId' in body
+                retry_unknown = self.retry_unknown and not operator_assignment
+                if previous == 'sending' and not retry_unknown:
                     result = self._unknown_delivery()
                 else:
-                    self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
+                    attempted = False
+
+                    def begin_attempt():
+                        nonlocal attempted
+                        if not self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=? AND state='pending'",
+                                               (ident,)).rowcount:
+                            raise PermissionError('Delivery reservation changed')
+                        attempted = True
                     try:
-                        result = await self.deliver(json.loads(raw))
+                        if operator_assignment:
+                            result = await self.deliver(body, begin_attempt=begin_attempt)
+                        else:
+                            self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
+                            result = await self.deliver(body)
+                    except DeliveryDeferred:
+                        continue
                     except PermissionError:
                         result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
-                        result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
-                                  if self.retry_unknown else self._unknown_delivery())
+                    except Exception as error:
+                        if operator_assignment and not attempted:
+                            if isinstance(error, (ConnectionError, TimeoutError)):
+                                continue
+                            result = {'success': False, 'retryable': False, 'error_kind': 'preparation_failed'}
+                        else:
+                            result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
+                                      if retry_unknown else self._unknown_delivery())
                 sent = result.get('success') is True and bool(result.get('message_id'))
+                if operator_assignment and not sent and result.get('retryable') is not False:
+                    result = self._unknown_delivery()
                 blocked = result.get('retryable') is False
                 state = 'sent' if sent else 'blocked' if blocked else 'pending'
-                self.db.execute('UPDATE reply_outbox SET state=?,receipt=? WHERE id=?', (state, canonical(result), ident))
+                self.db.execute("UPDATE reply_outbox SET state=?,receipt=? WHERE id=? AND state IN ('pending','sending')",
+                                (state, canonical(result), ident))
                 if state == 'pending':
                     break
 

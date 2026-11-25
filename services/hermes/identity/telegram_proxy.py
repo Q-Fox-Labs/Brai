@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import math
 
-from .scope import delivery_scope
+from .scope import delivery_scope, operator_assignment
 
 TELEGRAM_API_METHODS = frozenset({
     'send_message', 'edit_message_text', 'edit_message_reply_markup',
@@ -45,6 +45,8 @@ class BotProxy:
         self._on_content_action = on_content_action
 
     async def _call(self, method, payload, *, message=False):
+        if operator_assignment.get() is not None:
+            raise PermissionError('Operator assignment delivery is held')
         if method not in TELEGRAM_API_METHODS:
             raise PermissionError('Telegram method denied')
         if self._on_content_action is not None and method in {

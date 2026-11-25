@@ -236,7 +236,8 @@ class NativeRelease:
             raise RuntimeError('NATIVE_LIFECYCLE_FAILED')
         if self.sources or any(not task.done() for task in self.tasks):
             return True
-        if worker.active or any(worker.chat_dispatches.values()) or any(worker.chat_interactive.values()):
+        if (worker.active or getattr(worker, 'operator_run', None) is not None
+                or any(worker.chat_dispatches.values()) or any(worker.chat_interactive.values())):
             return True
         # Неинициализированный bootstrap не запускал recovery/ticker/watchers.
         if not worker.activation.is_set():

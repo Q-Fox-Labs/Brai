@@ -6,6 +6,7 @@ import dataclasses
 import importlib.util
 import asyncio
 from contextlib import nullcontext, suppress
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -16,8 +17,9 @@ import struct
 import threading
 import zlib
 from types import SimpleNamespace, ModuleType, MethodType
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from files import native
@@ -64,6 +66,107 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         path = self.input / 'input.txt'
         path.write_text('user input')
         return path
+
+    async def test_hidden_result_persisted_before_crash_is_not_owed_on_startup(self):
+        from identity.scope import operator_assignment
+        from identity.worker import Worker
+
+        now = datetime.now(timezone.utc)
+        source = SimpleNamespace(platform='telegram', chat_id='101', thread_id='202')
+        hidden = SimpleNamespace(session_key='held', session_id='private', origin=source,
+                                 active_turn_token=None, active_turn_started_at=None, suspended=False)
+        normal = SimpleNamespace(session_key='ordinary', session_id='normal', origin=source,
+                                 active_turn_token='ordinary-token', active_turn_started_at=now,
+                                 suspended=False, transport_profile=None)
+        entries = {entry.session_key: entry for entry in (hidden, normal)}
+        written = []
+        stored = {'private': 'Private result', 'normal': 'Ordinary result'}
+        async_store = SimpleNamespace(load_transcript=AsyncMock(side_effect=stored.get),
+                                      clear_turn_active=AsyncMock(return_value=True),
+                                      recover_interrupted_turns=AsyncMock(return_value=0))
+        native_store = SimpleNamespace(_lock=threading.RLock(), _entries=entries, _ensure_loaded_locked=lambda: None)
+        runner = SimpleNamespace(session_store=native_store, async_session_store=async_store,
+                                 _crash_left_reply=lambda transcript, timestamp, origin: transcript,
+                                 _hmwa_shape_agent_response=AsyncMock(), _hmwa_agent_error_reply=AsyncMock(),
+                                 _hmwa_deliver_turn_response=AsyncMock(), _run_startup_resume_event=AsyncMock())
+
+        async def native_mark(event, session_key):
+            entries[session_key].active_turn_token = 'new-token'
+            entries[session_key].active_turn_started_at = now
+            return True
+
+        runner._mark_durable_active_turn = native_mark
+        worker = Worker(os.getuid() + 1, 'owner', '101', AsyncMock())
+        worker._install_failure_recovery(runner)
+        token = operator_assignment.set(SimpleNamespace(session_key='held', session_id='private'))
+        try:
+            self.assertFalse(await runner._mark_durable_active_turn(None, 'held'))
+        finally:
+            operator_assignment.reset(token)
+        restart = function('gateway/run_startup.py', {'_recover_unclean_sessions', '_ledger_crash_left_replies'},
+                           {'asyncio': asyncio, 'time': time, 'logging': SimpleNamespace(WARNING=1),
+                            '_log_suppressed': lambda *_: nullcontext()})
+        runner._ledger_crash_left_replies = MethodType(restart['_ledger_crash_left_replies'], runner)
+        with patch.dict(sys.modules, {
+            'gateway.run': module(_float_env=lambda _name, default: default),
+            'gateway.delivery_ledger': module(ledger_enabled=lambda: True,
+                compute_obligation_id=lambda *parts: parts, record_crash_left_reply=lambda **value: written.append(value)),
+        }):
+            self.assertEqual(await restart['_recover_unclean_sessions'](runner), (0, 1))
+        self.assertEqual([(value['session_key'], value['content']) for value in written], [('ordinary', 'Ordinary result')])
+        async_store.load_transcript.assert_awaited_once_with('normal')
+
+    async def test_hidden_assignment_cannot_schedule_or_send_a_separate_caption(self):
+        from identity.scope import operator_assignment
+
+        token = operator_assignment.set(SimpleNamespace())
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}):
+                for name, args in [('cronjob_manage', {}), ('delegate_task', {}), ('terminal', {'heartbeat': True})]:
+                    with self.assertRaisesRegex(FileError, 'OPERATOR_ASSIGNMENT_REQUIRES_FOREGROUND_TOOLS'):
+                        native.before_tool(name, args)
+        finally:
+            operator_assignment.reset(token)
+        bot = SimpleNamespace(send_message=AsyncMock(), send_media_group=AsyncMock())
+        adapter = SimpleNamespace(_bot=bot, format_message=lambda value: value.replace('!', '\\!'))
+        telegram = module(**{name: object for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument')})
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            with self.assertRaisesRegex(FileError, 'TELEGRAM_CAPTION_TOO_LONG'):
+                await native.telegram_sender(adapter, '101', {'thread_id': '202'}, 'album',
+                                             [{'caption': '!' * 700}], False, reply_to='203', strict=True)
+        bot.send_message.assert_not_awaited()
+        bot.send_media_group.assert_not_awaited()
+
+        with self.assertRaisesRegex(FileError, 'DELIVERY_ROUTE_UNCONFIRMED'):
+            native.verify_telegram_target(SimpleNamespace(chat_id=101, message_thread_id=202), {'chat_id': 101})
+
+    def test_hidden_terminal_cannot_promote_timeout_or_yield_to_a_watcher(self):
+        from identity.scope import operator_assignment
+
+        class Rejected(Exception):
+            def __init__(self, result):
+                self.result_json = result
+
+        acquired = []
+        invoked = []
+        hooks = function('tools/terminal_tool.py', {'terminal_tool', '_yield_kwargs'}, {
+            '_plan_execution': lambda *args, **kwargs: SimpleNamespace(promoted_from_foreground_timeout=600),
+            '_acquire_env': lambda *args: acquired.append(args),
+            '_Rejected': Rejected, '_error_json': str, 'EnvironmentConnectionError': OSError,
+            'yield_to_background_handler': lambda **kwargs: invoked.append(kwargs) or 'yield handler',
+        })
+        token = operator_assignment.set(SimpleNamespace())
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules, {
+                'brai_files': native,
+                'hermes_cli.observability.shared_metrics_loop': module(record_terminal_backend=lambda *_: None),
+            }):
+                self.assertEqual(hooks['_yield_kwargs']('sleep 5'), {})
+                self.assertIn('requires a foreground', hooks['terminal_tool']('sleep 5', timeout=600))
+        finally:
+            operator_assignment.reset(token)
+        self.assertEqual(acquired, [])
+        self.assertEqual(invoked, [])
 
     def loop(self, callback):
         ports = {'brai_files': native,

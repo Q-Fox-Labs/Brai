@@ -996,7 +996,15 @@
              return _resolve_ssh_path(".", task_id)
 --- a/tools/terminal_tool.py
 +++ b/tools/terminal_tool.py
-@@ -1403,6 +1403,8 @@
+@@ -1234,4 +1234,7 @@
+ def _yield_kwargs(command: str, **ctx) -> dict:
+     """``env.execute`` kwargs enabling yield-to-background (local backend only)."""
++    import brai_files
++    if brai_files.operator_assignment_requires_foreground():
++        return {}
+     handler = yield_to_background_handler(command=command, **ctx)
+     return {"yield_handler": handler} if handler is not None else {}
+@@ -1403,10 +1406,15 @@
      ``_host_local`` forces the local backend for Hermes-owned control-plane
      children (kept in a separate env cache from the configured backend).
      """
@@ -1005,6 +1013,13 @@
      from hermes_cli.observability.shared_metrics_loop import record_terminal_backend as _metered
      plan = None
      try:
+         plan = _plan_execution(
+             command, task_id=task_id, timeout=timeout, background=background, _host_local=_host_local,
+         )
++        if (brai_files.operator_assignment_requires_foreground()
++                and (background or plan.promoted_from_foreground_timeout is not None)):
++            raise _Rejected(_error_json("Operator assignment requires a foreground terminal command."))
+         env = _acquire_env(plan, task_id)
 --- a/tools/code_execution_env.py
 +++ b/tools/code_execution_env.py
 @@ -278,6 +278,9 @@
