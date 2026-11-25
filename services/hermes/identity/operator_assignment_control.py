@@ -9,6 +9,7 @@ from .artifact_read import receive_artifact
 from .delivery_journal import delivery_id
 from .ipc import RpcError
 from .operator_assignments import OperatorAssignments
+from .reply_outbox import DeliveryDeferred
 
 
 class OperatorAssignmentControl:
@@ -168,17 +169,22 @@ class OperatorAssignmentControl:
         await self.resolver.reply_outbox.flush_owner(owner)
 
     async def check_target(self, profile, route, ident, request):
+        if self.resolver._startup_held() or getattr(self.resolver.release_gate, 'operation', None) is not None:
+            raise DeliveryDeferred('Operator assignment waits for RELEASE')
         peer = await self.resolver._bridge(profile).connect()
         checked = await peer.call('operator.assignment', {
             **self.worker_params(ident, profile['userId'], request), 'checkOnly': True}, timeout=15)
+        if checked.get('state') == 'busy':
+            raise DeliveryDeferred('Operator assignment waits for its worker')
         if checked.get('state') != 'validated':
             raise PermissionError('Operator assignment session changed')
         active = await self.resolver._account(profile, route[0])
         if (active.get('role'), active.get('generation')) != (request['role'], request['authGeneration']):
             raise PermissionError('Operator assignment authorization changed')
         self.resolver._chat_generation(profile, route, request['chatGeneration'])
-        if (self.resolver._startup_held() or getattr(self.resolver.release_gate, 'operation', None) is not None
-                or not self.resolver.ledger.owns(profile, route, request['anchor'], outgoing=False)):
+        if self.resolver._startup_held() or getattr(self.resolver.release_gate, 'operation', None) is not None:
+            raise DeliveryDeferred('Operator assignment waits for RELEASE')
+        if not self.resolver.ledger.owns(profile, route, request['anchor'], outgoing=False):
             raise PermissionError('Operator assignment route unavailable')
 
     async def check_delivery(self, body, route):

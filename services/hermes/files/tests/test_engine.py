@@ -133,9 +133,37 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, {'telegram': telegram}):
             with self.assertRaisesRegex(FileError, 'TELEGRAM_CAPTION_TOO_LONG'):
                 await native.telegram_sender(adapter, '101', {'thread_id': '202'}, 'album',
-                                             [{'caption': '!' * 700}], False, strict_caption=True)
+                                             [{'caption': '!' * 700}], False, reply_to='203', strict=True)
         bot.send_message.assert_not_awaited()
         bot.send_media_group.assert_not_awaited()
+
+    def test_hidden_terminal_cannot_promote_timeout_or_yield_to_a_watcher(self):
+        from identity.scope import operator_assignment
+
+        class Rejected(Exception):
+            def __init__(self, result):
+                self.result_json = result
+
+        acquired = []
+        invoked = []
+        hooks = function('tools/terminal_tool.py', {'terminal_tool', '_yield_kwargs'}, {
+            '_plan_execution': lambda *args, **kwargs: SimpleNamespace(promoted_from_foreground_timeout=600),
+            '_acquire_env': lambda *args: acquired.append(args),
+            '_Rejected': Rejected, '_error_json': str, 'EnvironmentConnectionError': OSError,
+            'yield_to_background_handler': lambda **kwargs: invoked.append(kwargs) or 'yield handler',
+        })
+        token = operator_assignment.set(SimpleNamespace())
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules, {
+                'brai_files': native,
+                'hermes_cli.observability.shared_metrics_loop': module(record_terminal_backend=lambda *_: None),
+            }):
+                self.assertEqual(hooks['_yield_kwargs']('sleep 5'), {})
+                self.assertIn('requires a foreground', hooks['terminal_tool']('sleep 5', timeout=600))
+        finally:
+            operator_assignment.reset(token)
+        self.assertEqual(acquired, [])
+        self.assertEqual(invoked, [])
 
     def loop(self, callback):
         ports = {'brai_files': native,

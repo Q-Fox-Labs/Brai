@@ -410,64 +410,71 @@ class Worker:
             raise RpcError(-32602, 'Invalid operator assignment')
         if self.operator_lock.locked():
             return {'state': 'busy'}
-        from .scope import delivery_scope, input_delivery, operator_assignment
         async with self.operator_lock:
             if (not self.operational.is_set() or self.release.operation is not None
                     or self.policy_stopping or self.chat_dispatches
                     or any(not task.done() for task in self.adapter._session_tasks.values())):
                 return {'state': 'busy'}
-            runner, adapter = self.runner, self.adapter
-            entry = await runner.async_session_store.lookup_by_session_key(sessionKey)
-            if self.release.operation is not None or self.policy_stopping:
-                return {'state': 'busy'}
-            if entry is None or entry.origin is None or entry.session_id != sessionId:
-                return {'state': 'session_changed'}
-            source = runner._restored_source(entry)
             route = (chat, thread)
-
-            def can_start():
-                task = adapter._session_tasks.get(sessionKey)
-                return (self.release.operation is None and not self.policy_stopping
-                        and not self.chat_dispatches.get(route) and not self.chat_interactive.get(route)
-                        and (task is None or task.done()) and self.route_allowed(source, recovery=True)
-                        and self.chat_states.get(route, {}).get('generation', 0) == chatGeneration)
-
-            if (self._chat_route(source) != route
-                    or str(getattr(source, 'user_id', '') or '') != self.telegram_id or not can_start()):
-                return {'state': 'route_changed'}
-            if checkOnly:
-                authorized = runner._plugin_injection_authorized(source, plugin_id='brai-telegram', target=sessionKey)
-                return {'state': 'validated' if authorized else 'route_changed'}
-            if entry.resume_pending or getattr(entry, 'active_turn_token', None):
-                return {'state': 'busy'}
-            if not getattr(self, 'operator_hooks_ready', False):
-                return {'state': 'unsupported'}
-            self._enable_delivery()
-            self.delivery_journal.hold_operator_turn(sessionKey, sessionId, operationId)
-            assignment = SimpleNamespace(session_key=sessionKey, session_id=sessionId, can_start=can_start,
-                                         completed=False, result=None)
-            assignment_token = operator_assignment.set(assignment)
-            scope_token = delivery_scope.set('operator-assignment:' + operationId)
-            source_token = input_delivery.set(None)
-            self.operator_route = route
-            self.operator_run = operationId, asyncio.current_task()
+            if not checkOnly:
+                self.operator_route = route
+                self.operator_run = operationId, asyncio.current_task()
             try:
-                adapter.bind_source(source)
-                accepted = await runner._dispatch_plugin_message_injection(
-                    session_key=sessionKey, content=instructions, plugin_id='brai-telegram')
-                task = adapter._session_tasks.get(sessionKey)
-                if not accepted or task is None:
-                    return {'state': 'not_started'}
-                await task
-                if not assignment.completed or assignment.result is None:
-                    return {'state': 'incomplete'}
-                return {'state': 'ready', 'result': assignment.result}
+                return await self._run_operator_session(operationId, sessionKey, sessionId, route,
+                                                        chatGeneration, instructions, checkOnly)
             finally:
                 self.operator_run = None
                 self.operator_route = None
-                input_delivery.reset(source_token)
-                delivery_scope.reset(scope_token)
-                operator_assignment.reset(assignment_token)
+
+    async def _run_operator_session(self, ident, key, session_id, route, generation, instructions, check_only):
+        from .scope import delivery_scope, input_delivery, operator_assignment
+        runner, adapter = self.runner, self.adapter
+        entry = await runner.async_session_store.lookup_by_session_key(key)
+        if self.release.operation is not None or self.policy_stopping:
+            return {'state': 'busy'}
+        if entry is None or entry.origin is None or entry.session_id != session_id:
+            return {'state': 'session_changed'}
+        source = runner._restored_source(entry)
+
+        def can_start():
+            task = adapter._session_tasks.get(key)
+            return (self.release.operation is None and not self.policy_stopping
+                    and not self.chat_dispatches.get(route) and not self.chat_interactive.get(route)
+                    and (task is None or task.done()) and self.route_allowed(source, recovery=True)
+                    and self.chat_states.get(route, {}).get('generation', 0) == generation)
+
+        if (self._chat_route(source) != route or str(getattr(source, 'user_id', '') or '') != self.telegram_id
+                or not can_start()):
+            return {'state': 'route_changed'}
+        if check_only:
+            authorized = runner._plugin_injection_authorized(source, plugin_id='brai-telegram', target=key)
+            return {'state': 'validated' if authorized else 'route_changed'}
+        if entry.resume_pending or getattr(entry, 'active_turn_token', None):
+            return {'state': 'busy'}
+        if not getattr(self, 'operator_hooks_ready', False):
+            return {'state': 'unsupported'}
+        self._enable_delivery()
+        self.delivery_journal.hold_operator_turn(key, session_id, ident)
+        assignment = SimpleNamespace(session_key=key, session_id=session_id, can_start=can_start,
+                                     completed=False, result=None)
+        assignment_token = operator_assignment.set(assignment)
+        scope_token = delivery_scope.set('operator-assignment:' + ident)
+        source_token = input_delivery.set(None)
+        try:
+            adapter.bind_source(source)
+            accepted = await runner._dispatch_plugin_message_injection(
+                session_key=key, content=instructions, plugin_id='brai-telegram')
+            task = adapter._session_tasks.get(key)
+            if not accepted or task is None:
+                return {'state': 'not_started'}
+            await task
+            if not assignment.completed or assignment.result is None:
+                return {'state': 'incomplete'}
+            return {'state': 'ready', 'result': assignment.result}
+        finally:
+            input_delivery.reset(source_token)
+            delivery_scope.reset(scope_token)
+            operator_assignment.reset(assignment_token)
 
     async def cancel_operator_assignment(self, owner, operationId):
         if owner != self.user_id or not isinstance(operationId, str) or str(uuid.UUID(operationId)) != operationId:

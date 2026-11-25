@@ -6,6 +6,10 @@ import logging
 from .delivery_journal import canonical, DeliveryJournal
 
 
+class DeliveryDeferred(Exception):
+    """The delivery port verified that no network call could have started."""
+
+
 class ReplyOutbox:
     """Очередь принадлежит ingress; одна блокировка на владельца сохраняет порядок его ответов."""
     def __init__(self, db, deliver, *, retry_unknown=True):
@@ -78,6 +82,9 @@ class ReplyOutbox:
                     self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
                     try:
                         result = await self.deliver(body)
+                    except DeliveryDeferred:
+                        self.db.execute("UPDATE reply_outbox SET state='pending' WHERE id=?", (ident,))
+                        break
                     except PermissionError:
                         result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
                     except asyncio.CancelledError:

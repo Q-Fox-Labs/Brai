@@ -18,6 +18,7 @@ from identity.reply_outbox import ReplyOutbox
 from identity.routes import RouteLedger
 from identity.scope import operator_assignment
 from identity.telegram_proxy import BotProxy
+from identity.telegram_runtime import Resolver
 from identity.worker import Worker
 
 
@@ -153,6 +154,17 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['state'], 'delivery_blocked')
         self.assertEqual(self.sent, [])
 
+    async def test_proven_busy_before_transport_preserves_the_approved_result(self):
+        ready = await self.start()
+        self.worker.side_effect = [{'state': 'validated'}, {'state': 'busy'}, {'state': 'validated'}]
+        status = await self.control('approve', **self.selector, resultDigest=ready['resultDigest'])
+        self.assertEqual(status['state'], 'sending')
+        self.assertEqual(self.sent, [])
+        await self.outbox.flush()
+        self.assertEqual(len(self.sent), 1)
+        status = await self.control('status', **self.selector)
+        self.assertEqual(status['state'], 'delivered')
+
     async def test_reopened_store_does_not_restart_unconfirmed_running_assignment(self):
         entered = asyncio.Event()
 
@@ -171,6 +183,27 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
 
 
 class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_reserves_operation_before_lookup(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker.operational.set()
+        lookup_started = asyncio.Event()
+
+        async def lookup(_session):
+            lookup_started.set()
+            await asyncio.Future()
+
+        worker.adapter = SimpleNamespace(_session_tasks={})
+        injection = AsyncMock()
+        worker.runner = SimpleNamespace(async_session_store=SimpleNamespace(lookup_by_session_key=lookup),
+                                        _dispatch_plugin_message_injection=injection)
+        ident = str(uuid.uuid4())
+        turn = asyncio.create_task(worker.run_operator_assignment('owner', ident, 'session', 'existing',
+                                                                  '123', '88', 0, 'Выполни поручение.'))
+        await lookup_started.wait()
+        self.assertEqual(await worker.cancel_operator_assignment('owner', ident), {'state': 'stopped'})
+        self.assertTrue(turn.cancelled())
+        injection.assert_not_awaited()
+
     async def test_personal_runner_completes_without_sending_and_is_held_on_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             journal_path = Path(directory) / 'delivery.sqlite3'
@@ -226,6 +259,34 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
                 original_resume.assert_not_awaited()
                 await runner._run_startup_resume_event(worker.adapter, None, 'other-session')
                 original_resume.assert_awaited_once()
+
+
+class OperatorTransportTest(unittest.IsolatedAsyncioTestCase):
+    async def test_text_uses_one_exact_bot_call_and_confirmed_route(self):
+        async def send(**kwargs):
+            self.assertEqual(checked.await_count, 1)
+            self.assertEqual({key: kwargs[key] for key in ('chat_id', 'message_thread_id', 'reply_to_message_id',
+                'allow_sending_without_reply')}, {'chat_id': 123, 'message_thread_id': 88, 'reply_to_message_id': 93,
+                                                  'allow_sending_without_reply': False})
+            return SimpleNamespace(chat_id=123, message_thread_id=88, message_id=101)
+
+        resolver = Resolver.__new__(Resolver)
+        normal_send = AsyncMock()
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+        resolver.adapter = SimpleNamespace(_bot=bot, format_message=str, send=normal_send)
+        resolver.journal = None
+        recorded = []
+        resolver._record_delivery = lambda *args, **kwargs: recorded.append(args)
+        checked = AsyncMock()
+        current = lambda: None
+        current.generation = 5
+        result = await resolver._deliver_route({'uid': 1}, 'send',
+            {'chat_id': '123', 'reply_to': '93', 'content': 'Prepared response'}, ('123', '88'),
+            {'thread_id': '88'}, None, current, before_send=checked)
+        self.assertEqual(result, {'success': True, 'message_id': '101'})
+        self.assertEqual(recorded[0][1:], (('123', '88'), 101, 5))
+        bot.send_message.assert_awaited_once()
+        normal_send.assert_not_awaited()
 
 
 if __name__ == '__main__':

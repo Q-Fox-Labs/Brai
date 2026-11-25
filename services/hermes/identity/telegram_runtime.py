@@ -1021,7 +1021,7 @@ class Resolver:
                 # Только media API receipt означает доставку файла. Native text fallback
                 # после ошибки не может превратиться в успешный голосовой ответ.
                 with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
-                    parameters = {'strict_caption': True} if before_send is not None else {}
+                    parameters = {'strict': True} if before_send is not None else {}
                     ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
                                                 fallback, reply_to=payload.get('reply_to'), **parameters)
                 if (not isinstance(ids, list) or len(ids) != len(prepared)
@@ -1039,14 +1039,25 @@ class Resolver:
         if action == 'send_image':
             raise PermissionError('Publish local media first')
         values = {**payload, 'metadata': metadata}
+        if before_send is not None:
+            from files.native import telegram_format, telegram_target, text_units, verify_telegram_target
+            formatted = telegram_format(self.adapter, values['content'])
+            if action != 'send' or text_units(formatted) > 3500:
+                raise PermissionError('Operator assignment requires one complete message')
+            target = telegram_target(self.adapter, values['chat_id'], values['reply_to'], metadata, exact=True)
+            await before_send()
+            current()
+            with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
+                sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
+            verify_telegram_target(sent, target)
+            message_id = getattr(sent, 'message_id', None)
+            if type(message_id) is not int or message_id <= 0:
+                raise ValueError('Missing operator assignment delivery receipt')
+            self._record_delivery(profile, route, message_id, current.generation, created=True)
+            return {'success': True, 'message_id': str(message_id)}
         method = getattr(self.adapter, action, None)
         if not callable(method):
             raise ValueError('Native delivery unavailable')
-        if before_send is not None:
-            from files.native import telegram_format, text_units
-            if action != 'send' or text_units(telegram_format(self.adapter, values['content'])) > 3500:
-                raise PermissionError('Operator assignment requires one complete message')
-            await before_send()
         current()
         with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
             result = await method(**values)
