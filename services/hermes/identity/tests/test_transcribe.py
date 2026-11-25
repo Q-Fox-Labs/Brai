@@ -262,7 +262,64 @@ class AudioPartTests(unittest.TestCase):
                     self.output.unlink()
             self.assertEqual(len(set(attempts)), 2)
             self.assertEqual(len(paths), 2)
-            self.assertEqual(list((self.home / 'workspace').iterdir()), [])
+            workspace = self.home / 'workspace'
+            self.assertEqual(list(workspace.glob('.stt-*')), [workspace / '.stt-progress'])
+            self.assertEqual(len(list((workspace / '.stt-progress').glob('*.sqlite3'))), int(failed))
+
+    def test_long_audio_resumes_confirmed_parts_and_reconciles_the_same_request(self):
+        source = self.make_audio('resume.ogg', 181)
+        ids = ['22222222-2222-4222-8222-000000000001', '22222222-2222-4222-8222-000000000002']
+        for lost_submit in (False, True):
+            requests = {}
+            artifact_ids = []
+            submitted_count = []
+            fetched = []
+            failed = False
+
+            def call(method, params, **kwargs):
+                nonlocal failed
+                if method == 'files.publish':
+                    artifact = '11111111-1111-4111-8111-' + f'{len(artifact_ids) + 1:012d}'
+                    artifact_ids.append(artifact)
+                    return {'artifactId': artifact, 'mimeType': 'audio/wav'}
+                action, args = params['name'], params['args']
+                if action == 'transcription_request_submit':
+                    key = args['clientIdempotencyKey']
+                    if key in requests:
+                        record, original = requests[key]
+                        self.assertEqual(args, original)
+                    else:
+                        record = submitted(args)
+                        record['request']['requestId'] = ids[len(requests)]
+                        requests[key] = record, args
+                    submitted_count.append(record['request']['requestId'])
+                    if lost_submit and record['request']['requestId'] == ids[1] and not failed:
+                        failed = True
+                        raise ConnectionError('Lost acceptance receipt')
+                    return record
+                if action == 'transcription_request_get':
+                    return next(record for record, _ in requests.values()
+                                if record['request']['requestId'] == args['requestId'])
+                self.assertEqual(action, 'transcription_result_get')
+                ident = args['requestId']
+                fetched.append(ident)
+                if not lost_submit and ident == ids[1] and not failed:
+                    failed = True
+                    raise ConnectionError('Lost result receipt')
+                result = recognized('Часть ' + str(ids.index(ident) + 1))
+                result['result']['requestId'] = ident
+                return result
+
+            with self.subTest(lost_submit=lost_submit), patch.dict(os.environ, {'HERMES_HOME': str(self.home)}):
+                with self.assertRaises(ConnectionError):
+                    transcribe_audio(source, self.output, MODEL, call=call)
+                self.assertFalse(self.output.exists())
+                transcribe_audio(source, self.output, MODEL, call=call)
+                self.assertEqual(self.output.read_text(), 'Часть 1\nЧасть 2')
+                self.output.unlink()
+                self.assertEqual(len(artifact_ids), 2)
+                self.assertEqual(fetched.count(ids[0]), 1)
+                self.assertEqual(submitted_count, ids + ([ids[1]] if lost_submit else []))
 
     def test_aac_document_uses_normalized_wav_and_short_ogg_reuses_original(self):
         for name in ('voice.ogg', 'document.aac', 'album.m4a', 'recording.webm'):

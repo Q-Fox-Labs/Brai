@@ -2,13 +2,16 @@
 # ABOUTME: Публикует только собственное аудио и получает результат по квитанции сервиса.
 """Голосовой вход с владельцем из SO_PEERCRED, без общего Transcription bearer."""
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
+import fcntl
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import stat
+import sqlite3
 import sys
 import tempfile
 import time
@@ -28,7 +31,7 @@ TERMINAL_CODES = {'DEADLINE_EXCEEDED', 'DEPENDENCY_UNAVAILABLE', 'MODEL_UNAVAILA
                   'MODEL_CATALOG_UNAVAILABLE', 'ARTIFACT_OWNER_MISMATCH', 'ARTIFACT_NOT_READY'}
 
 
-def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
+def _transcribe_part(source, model, call, timeout, *, allow_silence=False, progress=None, index=None):
     if (not source.is_absolute()
             or not isinstance(model, dict) or set(model) != {'modelId', 'revision', 'profileId'}
             or any(not isinstance(v, str) or not v.strip() for v in model.values())
@@ -41,6 +44,15 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
     request_key = None
     request_id = None
+    saved = None
+    if progress is not None:
+        progress.execute('INSERT OR IGNORE INTO parts (part,key,deadline) VALUES(?,?,?)',
+                         (index, str(uuid.uuid4()), deadline))
+        saved = progress.execute('SELECT key,deadline,artifact,request,text FROM parts WHERE part=?',
+                                 (index,)).fetchone()
+        if saved['text'] is not None:
+            return saved['text']
+        request_key, deadline, request_id = saved['key'], saved['deadline'], saved['request']
 
     def log_failure(reason, stage, method, error_type):
         logger.warning('identity_stt_failed %s', json.dumps({
@@ -68,25 +80,14 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
             log_failure(diagnostic['reason'], diagnostic['stage'], method, type(error).__name__)
             raise
 
-    cached_id = source.parent.name
-    try:
-        cached = (str(uuid.UUID(cached_id)) == cached_id and
-                  source.parent.parent == Path(os.environ.get('HERMES_HOME', '')) / 'results')
-    except ValueError:
-        cached = False
-    # AIDEV-NOTE: Native ingest уже опубликовал голосовое. Повторно проверяем owner
-    # через fetch и используем прежний ID; локальный путь сам не подтверждает владение.
-    published = (invoke('files.fetch', {'artifactId': cached_id}) if cached else
-                 invoke('files.publish', {'path': str(source), 'requestId': 'hermes-stt:' + str(uuid.uuid4())}))
-    if cached and (published.get('artifactId') != cached_id or published.get('localPath') != str(source)):
-        raise ValueError('INVALID_AUDIO_ARTIFACT')
-    aid = published.get('artifactId')
-    if (not isinstance(aid, str) or str(uuid.UUID(aid)) != aid
-            or published.get('mimeType') not in AUDIO_TYPES):
-        raise ValueError('INVALID_AUDIO_ARTIFACT')
     # AIDEV-NOTE: Артефакт может быть явно запрошен повторно после утраты
     # результата. Идентификатор файла сам по себе не является ID задания.
-    request_key = str(uuid.uuid4())
+    request_key = request_key or str(uuid.uuid4())
+    aid = saved['artifact'] if saved is not None else None
+    if aid is None:
+        aid = _publish_audio_input(source, invoke, request_key)
+        if progress is not None:
+            progress.execute('UPDATE parts SET artifact=? WHERE part=?', (aid, index))
 
     def transcription(action, args):
         result = invoke('tools.call', {'name': 'transcription_' + action, 'args': args})
@@ -97,7 +98,8 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     submission = {'clientIdempotencyKey': request_key, 'audioArtifactId': aid,
                   'requestedModel': {'route': 'local', 'selection': 'required', 'modelId': model['modelId']},
                   'deadlineAt': deadline}
-    status = transcription('request_submit', submission)
+    status = (transcription('request_get', {'requestId': request_id}) if request_id is not None else
+              transcription('request_submit', submission))
     while True:
         record = status.get('request')
         if not isinstance(record, dict) or record.get('requestedModel') != submission['requestedModel']:
@@ -107,6 +109,9 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
                 or request_id is not None and current_id != request_id):
             raise ValueError('INVALID_TRANSCRIPTION_REQUEST')
         request_id = current_id
+        if progress is not None and saved['request'] is None:
+            progress.execute('UPDATE parts SET request=? WHERE part=?', (request_id, index))
+            saved = {'request': request_id}
         state = record.get('taskState')
         if state == 'succeeded':
             break
@@ -135,14 +140,75 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
         raise ValueError('INVALID_TRANSCRIPT')
     if time.monotonic() - started >= timeout:
         raise TimeoutError('DEADLINE_EXCEEDED')
+    if progress is not None:
+        progress.execute('UPDATE parts SET text=? WHERE part=?', (text, index))
     return text
 
 
+def _publish_audio_input(source, invoke, request_key):
+    cached_id = source.parent.name
+    try:
+        cached = (str(uuid.UUID(cached_id)) == cached_id and
+                  source.parent.parent == Path(os.environ.get('HERMES_HOME', '')) / 'results')
+    except ValueError:
+        cached = False
+    # Native ingest уже опубликовал голосовое. Локальный путь сам не подтверждает владение.
+    published = (invoke('files.fetch', {'artifactId': cached_id}) if cached else
+                 invoke('files.publish', {'path': str(source), 'requestId': 'hermes-stt:' + request_key}))
+    aid = published.get('artifactId')
+    if (not isinstance(aid, str) or str(uuid.UUID(aid)) != aid or published.get('mimeType') not in AUDIO_TYPES
+            or cached and (aid != cached_id or published.get('localPath') != str(source))):
+        raise ValueError('INVALID_AUDIO_ARTIFACT')
+    return aid
+
+
+@contextmanager
+def _audio_progress(home, source, output, model):
+    """Pin one invocation and its completed segments across process and service restarts."""
+    with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+        content = hashlib.file_digest(stream, 'sha256').hexdigest()
+    binding = json.dumps([str(source.resolve()), content, model], sort_keys=True).encode()
+    fingerprint = hashlib.sha256(binding).hexdigest()
+    folder = home / 'workspace' / '.stt-progress'
+    folder.mkdir(mode=0o700, exist_ok=True)
+    meta = folder.lstat()
+    if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+        raise PermissionError('INVALID_TRANSCRIPTION_PROGRESS')
+    path = folder / (hashlib.sha256(os.fsencode(output.resolve())).hexdigest() + '.sqlite3')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or meta.st_mode & 0o077:
+            raise PermissionError('INVALID_TRANSCRIPTION_PROGRESS')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with closing(sqlite3.connect(path, isolation_level=None)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute('PRAGMA synchronous=FULL')
+            db.execute('CREATE TABLE IF NOT EXISTS job (fingerprint TEXT NOT NULL)')
+            job = db.execute('SELECT fingerprint FROM job').fetchone()
+            if job is None:
+                db.execute('INSERT INTO job VALUES(?)', (fingerprint,))
+            elif job['fingerprint'] != fingerprint:
+                raise ValueError('TRANSCRIPTION_OUTPUT_BOUND_TO_ANOTHER_INPUT')
+            db.execute('''CREATE TABLE IF NOT EXISTS parts (
+                part INTEGER PRIMARY KEY, key TEXT NOT NULL, deadline TEXT NOT NULL,
+                artifact TEXT, request TEXT, text TEXT)''')
+            yield db, path
+    finally:
+        os.close(fd)
+
+
 def _write_output(output, text):
-    # AIDEV-NOTE: O_EXCL сохраняет чужой output и отклоняет подмену пути ссылкой.
-    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-        stream.write(text)
+    # File link publishes complete bytes without replacing a prior output or symlink.
+    fd, scratch = tempfile.mkstemp(prefix='.stt-result-', dir=output.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(scratch, output)
+    finally:
+        Path(scratch).unlink()
 
 
 def _checked_output(output_path):
@@ -177,21 +243,25 @@ def transcribe_audio(input_path, output_path, model, *, call=broker_call):
     if not home.is_absolute():
         raise ValueError('INVALID_ARGUMENT')
     transcripts, size = [], 0
-    with tempfile.TemporaryDirectory(prefix='.stt-', dir=home / 'workspace') as folder:
+    with _audio_progress(home, source, output, model) as (progress, checkpoint), \
+            tempfile.TemporaryDirectory(prefix='.stt-', dir=home / 'workspace') as folder:
+        _checked_output(output)
         with closing(audio_parts(source, Path(folder), duration)) as parts:
             for index, part in enumerate(parts, start=1):
                 # Native command provider ждёт прогресс; речь и пути не пишутся.
                 print(f'HERMES_IDENTITY_STT_PART {index}', flush=True)
-                text = _transcribe_part(part, model, call, PART_TIMEOUT, allow_silence=True).strip()
+                text = _transcribe_part(part, model, call, PART_TIMEOUT, allow_silence=True,
+                                        progress=progress, index=index).strip()
                 if not text:
                     continue
                 size += len(text.encode('utf-8')) + bool(transcripts)
                 if size > MAX_TRANSCRIPT_BYTES:
                     raise ValueError('INVALID_TRANSCRIPT')
                 transcripts.append(text)
-    if not transcripts:
-        raise ValueError('INVALID_TRANSCRIPT')
-    _write_output(output, '\n'.join(transcripts))
+        if not transcripts:
+            raise ValueError('INVALID_TRANSCRIPT')
+        _write_output(output, '\n'.join(transcripts))
+        checkpoint.unlink()
 
 
 def main():
