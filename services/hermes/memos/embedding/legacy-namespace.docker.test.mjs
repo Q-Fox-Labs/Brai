@@ -165,7 +165,10 @@ test('loopback RELEASE adapter recovers its namespace after broker restart',
       docker('stop', '--time', '1', broker);
       await wait(() => {
         const currentCount = Number(status(candidate, '.RestartCount'));
-        if (currentCount <= beforeUnpaused) throw Error('adapter has not attempted restart while broker is stopped');
+        const restartError = status(candidate, '.State.Error');
+        if (currentCount <= beforeUnpaused || !restartError) {
+          throw Error('failed adapter restart while broker is stopped has not been observed');
+        }
       });
       docker('start', broker);
       await wait(() => probeNats(responder));
