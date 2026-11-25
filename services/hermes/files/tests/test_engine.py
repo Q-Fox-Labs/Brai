@@ -8,9 +8,12 @@ import asyncio
 from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 import json
+import logging
 import os
 import re
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 import tempfile
 import struct
@@ -19,6 +22,8 @@ import zlib
 from types import SimpleNamespace, ModuleType, MethodType
 import time
 import unittest
+import uuid
+import wave
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -167,6 +172,111 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             operator_assignment.reset(token)
         self.assertEqual(acquired, [])
         self.assertEqual(invoked, [])
+
+    async def test_hidden_result_keeps_files_from_shaped_native_response(self):
+        from identity.scope import operator_assignment
+        from identity.worker import Worker
+
+        file = self.input_file()
+        response = native.final_text(f'Готово.\nMEDIA:"{file}"', 'hidden')
+        expected = native.result_envelope({'final_response': response}, SimpleNamespace(platform='telegram'))
+        artifact = expected['fileSets'][0]['items'][0]['file']['artifactId']
+        worker = Worker(os.getuid() + 1, 'owner', '101', AsyncMock())
+        worker.adapter = SimpleNamespace(strip_media_directives_for_display=lambda text: text.split('\n', 1)[0])
+        runner = SimpleNamespace(_hmwa_shape_agent_response=AsyncMock(return_value=(response, False, [])))
+        worker._install_failure_recovery(runner)
+
+        assignment = SimpleNamespace(session_key='current', result=None)
+        token = operator_assignment.set(assignment)
+        try:
+            with patch.dict(sys.modules, {'brai_files': native}):
+                await runner._hmwa_shape_agent_response({'completed': True}, None, [], None, 'current')
+        finally:
+            operator_assignment.reset(token)
+        self.assertEqual(assignment.result, {'text': 'Готово.', 'artifactIds': [artifact]})
+
+    async def test_managed_command_resumes_same_media_after_new_temporary_output(self):
+        from identity.audio_parts import PART_SECONDS, RATE
+        from identity.transcribe import PART_TIMEOUT, transcribe_audio
+
+        source = self.input / 'long audio.wav'
+        frames = RATE * 830
+        with wave.open(str(source), 'wb') as audio:
+            audio.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
+            for _ in range(830):
+                audio.writeframesraw(bytes(RATE * 2))
+        self.assertGreater(source.stat().st_size, 25 * 1024 * 1024)
+        model = {'modelId': 'fixture', 'revision': 'v1', 'profileId': 'asr'}
+        (self.root / 'workspace').mkdir()
+        published, requests, invocations = [], {}, []
+
+        def broker(method, params, *, timeout):
+            if method == 'files.publish':
+                with wave.open(params['path'], 'rb') as part:
+                    published.append(part.getnframes())
+                return {'artifactId': str(uuid.uuid4()), 'mimeType': 'audio/wav'}
+            self.assertEqual(method, 'tools.call')
+            args = params['args']
+            if params['name'] == 'transcription_request_submit':
+                request = str(uuid.uuid4())
+                requests[request] = f'part {len(requests) + 1}'
+                return {'request': {'taskState': 'succeeded', 'requestId': request,
+                                    'actualModel': model, 'requestedModel': args['requestedModel']}}
+            self.assertEqual(params['name'], 'transcription_result_get')
+            return {'state': 'available', 'result': {'requestId': args['requestId'], 'actualModel': model,
+                                                     'text': requests[args['requestId']]}}
+
+        def run_command(command, timeout, *, env_passthrough):
+            name, input_flag, audio, output_flag, output, key_flag, operation = shlex.split(command)
+            self.assertEqual((name, input_flag, output_flag, key_flag),
+                             ('fixture', '--input', '--output', '--operation-id'))
+            self.assertEqual(Path(audio), source)
+            self.assertGreater(timeout, PART_TIMEOUT)
+            invocations.append((output, operation))
+            transcribe_audio(audio, output, model, call=broker, operation_id=operation)
+            return SimpleNamespace(stdout='HERMES_IDENTITY_STT_PART 1')
+
+        render = function('tools/tts_command_provider.py',
+                          {'render_command_template', 'shell_quote_context', 'quote_command_placeholder'},
+                          {'os': os, 're': re, 'shlex': shlex, 'subprocess': subprocess})['render_command_template']
+        command = function('tools/transcription_command.py', {'_transcribe_command_stt', '_read_command_stt_output'}, {
+            'tempfile': tempfile, 'Path': Path, 'subprocess': subprocess, 'logger': logging.getLogger(__name__),
+            '_get_command_stt_timeout': lambda config: config['timeout'], '_get_command_stt_output_format': lambda _: 'txt',
+            '_command_stt_env_passthrough': lambda _: [], '_normalize_command_stt_input': lambda audio, *_: (str(audio), None),
+            '_render_command_stt_template': render, '_run_command_stt': run_command,
+            '_ok_result': lambda result, name: (result, name),
+        })['_transcribe_command_stt']
+        config = {'command': 'fixture --input {input_path} --output {output_path}', 'timeout': 200, 'language': 'ru'}
+
+        def reject_generic_route(*args, **kwargs):
+            self.fail('Managed long audio entered the generic remote splitting path')
+
+        hooks = function('tools/transcription_tools.py', {'transcribe_audio', '_transcribe_prepared_audio'}, {
+            'Path': Path, '_read_block_error': lambda *_: None, '_validate_audio_file': lambda *_, **__: None,
+            '_validate_audio_source_file': lambda *_, **__: None, '_load_stt_config': lambda: config,
+            '_prepare_audio_for_transcription': lambda path: (path, None, None), 'is_stt_enabled': lambda _: True,
+            '_get_provider': lambda _: 'brai_local_ai', '_is_local_stt_provider': reject_generic_route,
+            '_dispatch_stt_provider': lambda path, name, stt, *_: command(path, name, stt, stt),
+        })
+
+        async def transcribe(path):
+            return await asyncio.to_thread(hooks['transcribe_audio'], path)
+
+        operation = 'd' * 64
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': str(self.root)}), \
+                patch.dict(sys.modules, {'brai_files': native,
+                                        'tools.transcription_tools': module(_resolve_stt_language=lambda *_: 'ru')}):
+            first = await native.transcribe_voice_once(SimpleNamespace(_brai_voice_operations={str(source): operation}),
+                                                       str(source), transcribe)
+            recovered = await native.transcribe_voice_once(SimpleNamespace(_brai_voice_operations={str(source): operation}),
+                                                           str(source), transcribe)
+        self.assertEqual(first, recovered)
+        self.assertEqual(first, ('\n'.join(requests.values()), 'brai_local_ai'))
+        self.assertEqual(sum(published), frames)
+        self.assertTrue(all(part <= RATE * PART_SECONDS for part in published))
+        self.assertEqual(len(published), len(requests))
+        self.assertEqual([value[1] for value in invocations], [operation, operation])
+        self.assertNotEqual(invocations[0][0], invocations[1][0])
 
     async def test_pending_voice_merge_shares_computation_and_echoes_each_clip_once(self):
         ready, release = asyncio.Event(), asyncio.Event()

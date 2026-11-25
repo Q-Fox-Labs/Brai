@@ -165,6 +165,13 @@ async def accept_event(event, admit=True):
     event.metadata = dict(getattr(event, 'metadata', None) or {})
     refs = event.metadata.get('_brai_artifacts')
     inputs = getattr(event, '_brai_identity_inputs', None)
+    source = source_of(event)
+    media_types = getattr(event, 'media_types', []) or []
+
+    def audio_mime(index):
+        mime = media_types[index] if index < len(media_types) else ''
+        return mime if mime.startswith('audio/') else ''
+
     if refs is None and inputs:
         # AIDEV-NOTE: Ingress сохранил исходные message/attachment IDs до native album merge.
         # Прежние fixed-owner aliases и artifact metadata через эту границу не принимаются.
@@ -173,20 +180,21 @@ async def accept_event(event, admit=True):
                        or not isinstance(item.get('itemId'), str) or not item['itemId']
                        for item, path in zip(inputs, paths))):
             raise FileError('INVALID_SOURCE')
-        source, refs = source_of(event), []
+        refs = []
         for position, item in enumerate(inputs):
             message_id, _, attachment_id = item['itemId'].rpartition(':')
             if message_id.isdecimal() and attachment_id.isdecimal():
                 position = int(message_id) * 1000 + int(attachment_id)
             refs.append(await asyncio.to_thread(files.ingest, source, item['itemId'], item['path'],
-                position, item.get('caption') or '', item.get('groupId') or str(event.message_id)))
+                position, item.get('caption') or '', item.get('groupId') or str(event.message_id),
+                audio_mime=audio_mime(len(refs))))
         event.metadata['_brai_artifacts'] = refs
         with files.db() as db:
             route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
             for gid in {item['groupId'] for item in refs}:
                 db.execute('INSERT OR REPLACE INTO routes VALUES (?,?)', (gid, canonical(route)))
     if refs is None:
-        source, msg = source_of(event), str(event.message_id or '')
+        msg = str(event.message_id or '')
         if not msg:
             raise FileError('SOURCE_MESSAGE_REQUIRED')
         group = str(getattr(getattr(event, 'raw_message', None), 'media_group_id', None) or event.metadata.get('_brai_photo_group') or msg)
@@ -219,7 +227,8 @@ async def accept_event(event, admit=True):
                         with files.db() as db:
                             db.execute('UPDATE items SET path=? WHERE identity=? AND artifact IS NULL', (str(path), item_key))
                 refs.append(await asyncio.to_thread(files.ingest, source, msg + ':' + str(index), path,
-                            position * 1000 + index, event.text or '', item_groups[index]))
+                            position * 1000 + index, event.text or '', item_groups[index],
+                            audio_mime=audio_mime(index)))
             except Exception as error:
                 failures.append(error)
         if failures:
@@ -232,7 +241,13 @@ async def accept_event(event, admit=True):
             route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
             for gid in {item['groupId'] for item in refs}:
                 db.execute('INSERT OR REPLACE INTO routes VALUES (?,?)', (gid, canonical(route)))
+    retry = getattr(event, '_brai_input_delivery_id', None) if getattr(event, '_brai_voice_retry', False) else None
+    prefix = ['voice-retry', retry] if retry else ['voice-file']
+    event._brai_voice_operations = {item['localPath']: key([*prefix, item['itemId'], item['file']['artifactId']])
+                                    for item in refs}
     event.media_urls = [item['localPath'] for item in refs]
+    event._brai_audio_paths = {item['localPath'] for index, item in enumerate(refs)
+                              if audio_mime(index) or item['file']['mimeType'].startswith('audio/')}
     if not admit:
         return True
     groups = list(dict.fromkeys(item['groupId'] for item in refs))
@@ -246,20 +261,26 @@ async def accept_event(event, admit=True):
             raise FileError('INVALID_VOICE_RETRY')
         # AIDEV-NOTE: Только доверенный ingress разрешает новую обработку
         # уже принятого voice. Публикация и запись прежнего набора сохраняются.
-        items = [{'file': refs[0]['file'], 'caption': inputs[0].get('caption') or ''}]
+        items = [{'file': refs[0]['file'], 'caption': inputs[0].get('caption') or '',
+                  'source': {**source, 'itemId': inputs[0]['itemId'], 'audioMime': audio_mime(0)}}]
         event._brai_voice_retry = False
     else:
         items = [item for value in accepted for item in value['items']]
     lease = files.materialize([item['file'] for item in items], ['inbound', groups, str(uuid.uuid4())])
     copies = await asyncio.to_thread(lease.__enter__)
+    previous_lease = getattr(event, '_brai_file_lease', None)
     event._brai_file_lease = lease
-    if inputs:
-        # AIDEV-NOTE: Artifacts определяет MIME для выдачи файла. Для STT
-        # сохраняем входную аудиометку для того же проверенного вложения.
-        audio_items = {ref['file']['artifactId'] for ref, mime in zip(refs, getattr(event, 'media_types', []) or [])
-                       if mime.startswith('audio/')}
-        event._brai_audio_paths = {value['localPath'] for value in copies
-                                   if value['artifactId'] in audio_items}
+    if previous_lease is not None:
+        previous_lease.__exit__(None, None, None)
+    event._brai_voice_operations = {}
+    for item, value in zip(items, copies):
+        origin = item['source']
+        identity = key([files.owner, {name: origin[name] for name in source}, origin['itemId']])
+        event._brai_voice_operations[value['localPath']] = key([*prefix, identity, value['artifactId']])
+    # Artifacts keeps its own detected MIME. A verified incoming audio label
+    # survives FileStore recovery, including when the detected MIME is opaque.
+    event._brai_audio_paths = {value['localPath'] for item, value in zip(items, copies)
+                               if item['source'].get('audioMime') or value['mimeType'].startswith('audio/')}
     event.media_urls = [value['localPath'] for value in copies]
     event.media_types = [value['mimeType'] for value in copies]
     ticket = (_VOICE_RETRY_ADMISSION if repeat_admission
@@ -483,6 +504,17 @@ def clear_steer_turn(turn):
         turn._brai_adapter_event = None
 
 
+_voice_transcription = ContextVar('brai_voice_transcription', default=None)
+
+
+def is_managed_voice_provider(provider):
+    return provider == 'brai_local_ai' and os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
+
+
+def voice_transcription_operation():
+    return _voice_transcription.get()
+
+
 async def transcribe_voice_once(event, path, transcribe, *providers):
     """Share one transcription of a clip throughout the life of its inbound event."""
     if event is None:
@@ -492,7 +524,12 @@ async def transcribe_voice_once(event, path, transcribe, *providers):
         cache = event._brai_voice_transcription_tasks = {}
     task = cache.get(path)
     if task is None:
-        task = cache[path] = asyncio.create_task(transcribe(path, *providers))
+        operation = getattr(event, '_brai_voice_operations', {}).get(path)
+        token = _voice_transcription.set(operation)
+        try:
+            task = cache[path] = asyncio.create_task(transcribe(path, *providers))
+        finally:
+            _voice_transcription.reset(token)
     return await asyncio.shield(task)
 
 
@@ -722,6 +759,8 @@ def merge_events(existing, event):
     old = list((existing.metadata or {}).get('_brai_artifacts', []))
     new = list((event.metadata or {}).get('_brai_artifacts', []))
     existing.metadata = {**(existing.metadata or {}), '_brai_artifacts': old + new}
+    existing._brai_voice_operations = {**getattr(event, '_brai_voice_operations', {}),
+                                        **getattr(existing, '_brai_voice_operations', {})}
     existing._brai_capture_leases = (getattr(existing, '_brai_capture_leases', [])
                                     + getattr(event, '_brai_capture_leases', []))
     event._brai_capture_leases = []
@@ -1607,6 +1646,8 @@ async def recover(adapter):
             event = MessageEvent(text=rows[0]['caption'], message_type=MessageType.DOCUMENT, source=source,
                                  message_id=origin['itemId'].rsplit(':', 1)[0],
                                  media_urls=[item['localPath'] for item in refs],
+                                 media_types=[json.loads(row['source']).get('audioMime') or item['file']['mimeType']
+                                              for row, item in zip(rows, refs)],
                                  metadata={'_brai_artifacts': refs, 'recovered': True})
             await adapter.handle_message(event)
     except Exception:

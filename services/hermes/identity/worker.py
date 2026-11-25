@@ -309,7 +309,13 @@ class Worker:
                         and not any(result.get(key) for key in ('failed', 'partial', 'error',
                                                                'interrupted', 'guardrail'))
                         and not value[1] and isinstance(value[0], str) and value[0].strip()):
-                    artifacts = [item['file']['artifactId'] for group in result.get('fileSets', [])
+                    groups = result.get('fileSets', [])
+                    if not groups and 'MEDIA:' in value[0]:
+                        import brai_files
+                        # The gateway result can omit the file envelope while retaining prepared media paths.
+                        groups = brai_files.result_envelope({'final_response': value[0]},
+                                                           SimpleNamespace(platform='telegram')).get('fileSets', [])
+                    artifacts = [item['file']['artifactId'] for group in groups
                                  for item in group['items']]
                     text = self.adapter.strip_media_directives_for_display(value[0]) if artifacts else value[0]
                     assignment.result = {'text': text, 'artifactIds': list(dict.fromkeys(artifacts))}
@@ -939,6 +945,8 @@ class Worker:
         fields['user_id'] = self.telegram_id
         self.adapter.bind_source(source)
         message = MessageEvent(source=source, message_type=MessageType(event.get('message_type', 'text')), **fields)
+        from .scope import input_delivery
+        message._brai_input_delivery_id = input_delivery.get()
         from gateway.platforms import base as native_base
         coerce = getattr(native_base, 'coerce_plaintext_gateway_command', None)
         if callable(coerce):

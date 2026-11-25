@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import stat
 import sqlite3
 import sys
@@ -162,19 +163,28 @@ def _publish_audio_input(source, invoke, request_key):
     return aid
 
 
+def _source_stamp(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 @contextmanager
-def _audio_progress(home, source, output, model):
+def _audio_progress(home, source, output, model, operation_id):
     """Pin one invocation and its completed segments across process and service restarts."""
     with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+        original = _source_stamp(os.fstat(stream.fileno()))
         content = hashlib.file_digest(stream, 'sha256').hexdigest()
-    binding = json.dumps([str(source.resolve()), content, model], sort_keys=True).encode()
+        if original != _source_stamp(os.fstat(stream.fileno())):
+            raise ValueError('TRANSCRIPTION_SOURCE_CHANGED')
+    path_binding = None if operation_id is not None else str(source.resolve())
+    binding = json.dumps([path_binding, content, model], sort_keys=True).encode()
     fingerprint = hashlib.sha256(binding).hexdigest()
     folder = home / 'workspace' / '.stt-progress'
     folder.mkdir(mode=0o700, exist_ok=True)
     meta = folder.lstat()
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
         raise PermissionError('INVALID_TRANSCRIPTION_PROGRESS')
-    path = folder / (hashlib.sha256(os.fsencode(output.resolve())).hexdigest() + '.sqlite3')
+    scope = ['ingress', operation_id] if operation_id is not None else ['output', str(output.resolve())]
+    path = folder / (hashlib.sha256(json.dumps(scope).encode()).hexdigest() + '.sqlite3')
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         meta = os.fstat(fd)
@@ -184,16 +194,16 @@ def _audio_progress(home, source, output, model):
         with closing(sqlite3.connect(path, isolation_level=None)) as db:
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA synchronous=FULL')
-            db.execute('CREATE TABLE IF NOT EXISTS job (fingerprint TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS job (fingerprint TEXT NOT NULL, result TEXT)')
             job = db.execute('SELECT fingerprint FROM job').fetchone()
             if job is None:
-                db.execute('INSERT INTO job VALUES(?)', (fingerprint,))
+                db.execute('INSERT INTO job (fingerprint) VALUES(?)', (fingerprint,))
             elif job['fingerprint'] != fingerprint:
                 raise ValueError('TRANSCRIPTION_OUTPUT_BOUND_TO_ANOTHER_INPUT')
             db.execute('''CREATE TABLE IF NOT EXISTS parts (
                 part INTEGER PRIMARY KEY, key TEXT NOT NULL, deadline TEXT NOT NULL,
                 artifact TEXT, request TEXT, text TEXT)''')
-            yield db, path
+            yield db, path, original
     finally:
         os.close(fd)
 
@@ -226,28 +236,15 @@ def transcribe_file(input_path, output_path, model, *, call=broker_call, timeout
     _write_output(output, _transcribe_part(Path(input_path), model, call, timeout))
 
 
-def transcribe_audio(input_path, output_path, model, *, call=broker_call):
-    """Распознать один аудиофайл и передать результат лишь после всех частей."""
-    output = _checked_output(output_path)
-    source = Path(input_path)
-    if not source.is_absolute() or not stat.S_ISREG(source.lstat().st_mode):
-        raise ValueError('INVALID_AUDIO')
-    duration, directly_supported = audio_info(source)
-    if directly_supported and duration <= PART_SECONDS:
-        transcribe_file(source, output, model, call=call)
-        return
-
+def _transcribe_segments(home, source, duration, original, model, call, progress):
     # AIDEV-NOTE: PrivateTmp worker недоступен broker. Workspace доступен
     # только владельцу, а broker публикует собственную копию каждой части.
-    home = Path(os.environ['HERMES_HOME'])
-    if not home.is_absolute():
-        raise ValueError('INVALID_ARGUMENT')
     transcripts, size = [], 0
-    with _audio_progress(home, source, output, model) as (progress, checkpoint), \
-            tempfile.TemporaryDirectory(prefix='.stt-', dir=home / 'workspace') as folder:
-        _checked_output(output)
+    with tempfile.TemporaryDirectory(prefix='.stt-', dir=home / 'workspace') as folder:
         with closing(audio_parts(source, Path(folder), duration)) as parts:
             for index, part in enumerate(parts, start=1):
+                if index == 1 and original != _source_stamp(source.lstat()):
+                    raise ValueError('TRANSCRIPTION_SOURCE_CHANGED')
                 # Native command provider ждёт прогресс; речь и пути не пишутся.
                 print(f'HERMES_IDENTITY_STT_PART {index}', flush=True)
                 text = _transcribe_part(part, model, call, PART_TIMEOUT, allow_silence=True,
@@ -258,10 +255,44 @@ def transcribe_audio(input_path, output_path, model, *, call=broker_call):
                 if size > MAX_TRANSCRIPT_BYTES:
                     raise ValueError('INVALID_TRANSCRIPT')
                 transcripts.append(text)
-        if not transcripts:
-            raise ValueError('INVALID_TRANSCRIPT')
-        _write_output(output, '\n'.join(transcripts))
-        checkpoint.unlink()
+    if not transcripts:
+        raise ValueError('INVALID_TRANSCRIPT')
+    return '\n'.join(transcripts)
+
+
+def transcribe_audio(input_path, output_path, model, *, call=broker_call, operation_id=None):
+    """Распознать один аудиофайл и передать результат лишь после всех частей."""
+    output = _checked_output(output_path)
+    source = Path(input_path)
+    if not source.is_absolute() or not stat.S_ISREG(source.lstat().st_mode):
+        raise ValueError('INVALID_AUDIO')
+    if operation_id is not None and (not isinstance(operation_id, str) or not re.fullmatch('[a-f0-9]{64}', operation_id)):
+        raise ValueError('INVALID_TRANSCRIPTION_OPERATION')
+    duration, directly_supported = audio_info(source)
+    short = directly_supported and duration <= PART_SECONDS
+    if short and operation_id is None:
+        transcribe_file(source, output, model, call=call)
+        return
+    home = Path(os.environ['HERMES_HOME'])
+    if not home.is_absolute():
+        raise ValueError('INVALID_ARGUMENT')
+    with _audio_progress(home, source, output, model, operation_id) as (progress, checkpoint, original):
+        _checked_output(output)
+        text = progress.execute('SELECT result FROM job').fetchone()['result']
+        if text is None:
+            if short:
+                if original != _source_stamp(source.lstat()):
+                    raise ValueError('TRANSCRIPTION_SOURCE_CHANGED')
+                text = _transcribe_part(source, model, call, SINGLE_TIMEOUT, progress=progress, index=1)
+            else:
+                text = _transcribe_segments(home, source, duration, original, model, call, progress)
+            progress.execute('BEGIN')
+            progress.execute('UPDATE job SET result=?', (text,))
+            progress.execute('DELETE FROM parts')
+            progress.execute('COMMIT')
+        _write_output(output, text)
+        if operation_id is None:
+            checkpoint.unlink()
 
 
 def main():
@@ -269,10 +300,12 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ('input', 'output', 'model-id', 'revision', 'profile-id'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--operation-id')
     args = parser.parse_args()
     try:
         transcribe_audio(args.input, args.output, {
-            'modelId': args.model_id, 'revision': args.revision, 'profileId': args.profile_id})
+            'modelId': args.model_id, 'revision': args.revision, 'profileId': args.profile_id},
+            operation_id=args.operation_id)
     except Exception:
         print('HERMES_IDENTITY_TRANSCRIPTION_FAILED', file=sys.stderr)
         return 1

@@ -30,6 +30,19 @@ def media_file_limit(path, mime_type=None):
     return MAX_FILE
 
 
+def opaque_audio_header(filename, source):
+    """Recognize formats stored as application/octet-stream by the publisher."""
+    suffix = Path(filename).suffix.lower()
+    header = os.pread(source, 16, 0)
+    if suffix == '.aac' and len(header) >= 7 and header[0] == 0xff and header[1] & 0xf6 == 0xf0:
+        frame_size = (header[3] & 3) << 11 | header[4] << 3 | header[5] >> 5
+        next_frame = os.pread(source, 2, frame_size) if frame_size >= 7 else b''
+        return len(next_frame) == 2 and next_frame[0] == 0xff and next_frame[1] & 0xf6 == 0xf0
+    if suffix == '.m4a' and len(header) >= 16:
+        return header[4:8] == b'ftyp' and header[8:12] in {b'M4A ', b'M4B ', b'mp41', b'mp42', b'isom', b'iso2'}
+    return False
+
+
 def open_directory(path, uid):
     """Закрепить каталог без symlink и проверить владельца и права."""
     path = Path(path)
@@ -210,8 +223,15 @@ class OwnerFiles:
         """Вернуть только копию результата в собственном results worker."""
         mime = result.get('mimeType')
         maximum = media_file_limit(result['filename'], mime) if isinstance(mime, str) else MAX_FILE
+        size = result.get('sizeBytes')
+        opaque_media = (mime == 'application/octet-stream' and type(size) is int and size > MAX_FILE
+                        and Path(result['filename']).suffix.lower() in {'.aac', '.m4a'})
+        if opaque_media:
+            maximum = MAX_MEDIA_FILE
         source = self.open_cache(uid, result, profile, maximum=maximum)
         try:
+            if opaque_media and not opaque_audio_header(result['filename'], source):
+                raise PermissionError('Unsupported large audio format')
             path = copy_to_profile(source, profile['home'], 'results', result['artifactId'],
                                    result['filename'], uid, result, maximum=maximum)
         finally:

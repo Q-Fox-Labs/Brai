@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет скрытый запуск и единственную доставку принятого результата на синтетическом owner.
 # ABOUTME: Использует реальную SQLite, штатную исходящую очередь и подставной Telegram transport.
 import asyncio
+from io import BytesIO
 import os
 from pathlib import Path
 import sys
@@ -10,9 +11,10 @@ from types import ModuleType
 import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
+from zipfile import ZipFile
 
 from identity.delivery_journal import DeliveryJournal, delivery_id
-from identity.operator_assignment_control import OperatorAssignmentControl
+from identity.operator_assignment_control import OFFICE_DOCUMENTS, OperatorAssignmentControl
 from identity.operator_assignments import OperatorAssignments
 from identity.reply_outbox import ReplyOutbox
 from identity.routes import RouteLedger
@@ -72,6 +74,29 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state['state'], 'running')
         await self.control.tasks[self.selector['operationId']]
         return await self.control('status', **self.selector)
+
+    async def test_office_documents_are_verified_when_publisher_uses_octet_stream(self):
+        artifact = str(uuid.uuid4())
+        for suffix, (mime, main_part, main_mime) in OFFICE_DOCUMENTS.items():
+            request = {'requiredMimeTypes': [mime]}
+            result = {'text': 'Проверенный ответ.', 'artifactIds': [artifact]}
+            for expected, declared in ((True, main_mime), (False, 'application/xml')):
+                stream = BytesIO()
+                with ZipFile(stream, 'w') as file:
+                    xml = ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                           f'<Override PartName="/{main_part}" ContentType="{declared}" /></Types>')
+                    file.writestr('[Content_Types].xml', xml)
+                    file.writestr(main_part, '<test/>')
+                meta = {'artifactId': artifact, 'sizeBytes': stream.tell(), 'filename': 'result' + suffix,
+                        'mimeType': 'application/octet-stream'}
+                with patch('identity.operator_assignment_control.receive_artifact', return_value=(meta, stream)):
+                    if expected:
+                        items = await self.control.checked_artifacts(self.binding, request, result)
+                        self.assertEqual(items[0]['artifact']['artifact_id'], artifact)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'Invalid Office document'):
+                            await self.control.checked_artifacts(self.binding, request, result)
+                self.assertTrue(stream.closed)
 
     async def test_approved_new_answer_does_not_reopen_old_output(self):
         ready = await self.start()

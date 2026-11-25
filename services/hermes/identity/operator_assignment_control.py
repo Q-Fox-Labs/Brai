@@ -2,14 +2,25 @@
 # ABOUTME: Этот порт вызывается через защищённый root Unix socket Telegram ingress.
 """Owner-bound native assignment lifecycle and approval at the delivery boundary."""
 import asyncio
+from pathlib import PurePath
 import re
 import uuid
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 from .artifact_read import receive_artifact
 from .delivery_journal import delivery_id
 from .ipc import RpcError
 from .operator_assignments import OperatorAssignments
 from .reply_outbox import DeliveryDeferred
+
+OFFICE_DOCUMENTS = {
+    '.docx': ('application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              'word/document.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'),
+    '.pptx': ('application/vnd.openxmlformats-officedocument.presentationml.presentation',
+              'ppt/presentation.xml', 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'),
+}
+OFFICE_CONTENT_TYPES = '{http://schemas.openxmlformats.org/package/2006/content-types}'
 
 
 class OperatorAssignmentControl:
@@ -128,12 +139,32 @@ class OperatorAssignmentControl:
             try:
                 if metadata['artifactId'] != ident or metadata['sizeBytes'] <= 0:
                     raise ValueError('Incomplete operator assignment artifact')
-                kinds.append(metadata['mimeType'])
+                kind = metadata['mimeType']
+                if kind == 'application/octet-stream':
+                    office = OFFICE_DOCUMENTS.get(PurePath(metadata['filename']).suffix.lower())
+                    if office is not None and office[0] in request['requiredMimeTypes']:
+                        kind = self.checked_office_type(office, stream)
+                kinds.append(kind)
             finally:
                 stream.close()
         if sorted(kinds) != sorted(request['requiredMimeTypes']):
             raise ValueError('Incorrect operator assignment artifacts')
         return [{'artifact': {'artifact_id': ident}, 'presentation': 'document', 'caption': ''} for ident in ids]
+
+    @staticmethod
+    def checked_office_type(office, stream):
+        """Recognize a published Office document using its OPC manifest and main part."""
+        mime, main_part, main_mime = office
+        with ZipFile(stream) as archive:
+            types = archive.getinfo('[Content_Types].xml')
+            if types.file_size > 64 * 1024 or archive.getinfo(main_part).file_size <= 0:
+                raise ValueError('Invalid Office document package')
+            root = ElementTree.fromstring(archive.read(types))
+            if root.tag != OFFICE_CONTENT_TYPES + 'Types' or not any(
+                    part.get('PartName') == '/' + main_part and part.get('ContentType') == main_mime
+                    for part in root.findall(OFFICE_CONTENT_TYPES + 'Override')):
+                raise ValueError('Invalid Office document package')
+        return mime
 
     @staticmethod
     def outbox_id(ident, part):

@@ -256,6 +256,33 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PermissionError, 'File denied'):
             await self.port.prepare_ingress(self.uid, self.profile, [str(source.with_suffix('.txt'))])
 
+    def test_media_header_applies_full_limit_to_aac_and_m4a_from_real_publisher_type(self):
+        import subprocess
+
+        cache = self.cached.parent
+        open_file = identity.open_file
+        with patch.object(identity, 'MAX_FILE', 1024), patch.object(
+                identity, 'open_file', side_effect=lambda root, path, uid, **kwargs:
+                open_file(root, path, self.uid, **kwargs)):
+            for name in ('voice.aac', 'voice.m4a'):
+                path = cache / name
+                subprocess.run(['/usr/bin/ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                                '-i', 'sine=duration=2', str(path)], check=True)
+                media = path.read_bytes()
+                self.assertGreater(len(media), 1024)
+                result = {**self.result, 'localPath': str(path), 'filename': name,
+                          'mimeType': 'application/octet-stream', 'sizeBytes': len(media),
+                          'sha256': sha256(media).hexdigest()}
+                materialized = self.port.materialize(self.uid, self.profile, result)
+                self.assertEqual(Path(materialized['localPath']).read_bytes(), media)
+            path = cache / 'opaque.m4a'
+            path.write_bytes(b'x' * 2048)
+            result = {**self.result, 'localPath': str(path), 'filename': path.name,
+                      'mimeType': 'application/octet-stream', 'sizeBytes': 2048,
+                      'sha256': sha256(path.read_bytes()).hexdigest()}
+            with self.assertRaisesRegex(PermissionError, 'Unsupported large audio'):
+                self.port.materialize(self.uid, self.profile, result)
+
     def test_runtime_mapping_reloads_and_rejects_changed_owner(self):
         entry = {'userId': 'owner', 'profileId': 'profile', 'home': str(self.home),
                  'cacheRoot': str(self.cache), 'stagingRoot': str(self.stage)}

@@ -544,6 +544,39 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         native.release_event(recovered)
         self.assertFalse(await native.accept_event(self.event('11')))
 
+    async def test_unadmitted_voice_recovers_its_mime_and_transcription_operation(self):
+        first = self.event('91')
+        first.media_types = ['audio/aac']
+        first._brai_identity_inputs = [{'path': first.media_urls[0], 'itemId': '91:0'}]
+        self.assertTrue(await native.accept_event(first, admit=False))
+        path = first.media_urls[0]
+        operation = first._brai_voice_operations[path]
+        self.assertEqual(first._brai_audio_paths, {path})
+        self.assertFalse(first.metadata['_brai_artifacts'][0]['file']['mimeType'].startswith('audio/'))
+        native.configure(self.config, self.backend)
+
+        observed = []
+
+        async def handle_message(event):
+            self.assertEqual(event.media_types, ['audio/aac'])
+            self.assertTrue(await native.accept_event(event))
+            observed.append((event._brai_voice_operations[event.media_urls[0]], event._brai_audio_paths))
+            self.assertTrue(native.commit_inbound(event.source, event.message_id))
+            native.release_event(event)
+
+        config = ModuleType('gateway.config'); config.Platform = lambda value: value
+        session = ModuleType('gateway.session'); session.SessionSource = SimpleNamespace
+        event = ModuleType('gateway.platforms.event')
+        event.MessageType = SimpleNamespace(DOCUMENT='document')
+        event.MessageEvent = SimpleNamespace
+        ports = {'gateway.config': config, 'gateway.session': session, 'gateway.platforms.event': event}
+        with patch.dict(sys.modules, ports):
+            adapter = SimpleNamespace(platform='telegram', handle_message=handle_message)
+            await native.recover(adapter)
+            await native.recover(adapter)
+        self.assertEqual(observed, [(operation, {path})])
+        self.assertEqual(sum(method == 'files.publish' for method, _ in self.backend.calls), 1)
+
     async def test_conflicting_pending_album_schedules_recovery_without_restart(self):
         first = self.event('10')
         await native.accept_event(first)
