@@ -1166,6 +1166,95 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             await scope['_edit_markdown_or_plain'](SimpleNamespace(_edit_text=edit), '1', '2', '*formatted*', '**raw**', '')
         self.assertEqual(edits, [('*formatted*', 'MarkdownV2')])
 
+    async def test_pinned_telegram_retries_only_the_same_private_topic(self):
+        class BadRequest(OSError):
+            pass
+
+        class PrivateTopicRetryFailed(Exception):
+            pass
+
+        async def deadline(awaitable, **kwargs):
+            return await awaitable
+
+        async def record(*args):
+            pass
+
+        native_methods = (
+            '_metadata_thread_id', '_metadata_reply_to_message_id', '_metadata_direct_messages_topic_id',
+            '_dm_topic_fallback', '_is_private_dm_topic_send', '_chunk_reply_routing', '_should_thread_reply',
+            '_thread_kwargs_for_send', '_message_thread_id_for_send', '_direct_topic_kwargs',
+            '_compute_single_send_routing', '_brai_private_topic_route', '_brai_private_topic_rejected',
+            '_brai_send_with_private_topic_retry',
+            '_send_chunk_with_retries', '_try_send_rich', '_is_thread_not_found_error',
+        )
+        scope = function('plugins/platforms/telegram/adapter.py', native_methods, {
+            'os': os, 'normalize_telegram_chat_id': int, 'SendResult': SimpleNamespace,
+            '_await_with_thread_deadline': deadline, '_TEXT_SEND_DEADLINE': 1,
+            '_BraiPrivateTopicRetryFailed': PrivateTopicRetryFailed,
+            'logger': SimpleNamespace(warning=lambda *args: None),
+        })
+        adapter = type('TelegramFixture', (), {
+            **{name: scope[name] for name in native_methods}, '_GENERAL_TOPIC_THREAD_ID': '1',
+        })()
+        types = (OSError, BadRequest, TimeoutError)
+        adapter._telegram_error_types = lambda: types
+        adapter._link_preview_kwargs = dict
+        adapter._notification_kwargs = lambda metadata: {}
+        adapter._rich_payload_base = lambda chat, content: {'chat_id': int(chat), 'rich_message': {'markdown': content}}
+        adapter._record_rich_sent = record
+        adapter._rich_rejected = lambda *_: self.fail('private topic rejection fell back to Markdown')
+        anchor = 93
+        topic = {'thread_id': '88', 'telegram_dm_topic_reply_fallback': True,
+                 'telegram_reply_to_message_id': str(anchor), 'direct_messages_topic_id': '88'}
+
+        denied = BadRequest('Message thread not found')
+        delivered = SimpleNamespace(message_id=101)
+        for rich in (False, True):
+            for results, created, mode, error in (
+                    ((denied, delivered), False, 'all', None),
+                    ((denied, denied), False, 'all', 'topic_unavailable'),
+                    ((denied,), True, 'all', 'topic_unavailable'),
+                    ((denied,), False, 'off', 'topic_unavailable'),
+                    ((denied, BadRequest('Message to be replied not found')), False, 'all', 'delivery_unknown'),
+                    ((denied, OSError('connection state unknown')), False, 'all', 'delivery_unknown'),
+                    ((denied, {}), False, 'all', 'delivery_unknown'),
+                    (({'result': []},), False, 'all', 'delivery_unknown'),
+                    (({'message_id': 0, 'result': {'message_id': 101}},), False, 'all', 'delivery_unknown')):
+                with self.subTest(rich=rich, results=results, created=created, reply_mode=mode):
+                    attempts = []
+
+                    async def send(method, kwargs):
+                        attempts.append((method, dict(kwargs)))
+                        result = results[len(attempts) - 1]
+                        if isinstance(result, Exception):
+                            raise result
+                        return result
+
+                    adapter._reply_to_mode = mode
+                    adapter._bot = SimpleNamespace(do_api_request=lambda method, api_kwargs: send(method, api_kwargs))
+                    adapter._send_chunk_markdown_or_plain = send
+                    metadata = {**topic, 'telegram_dm_topic_created_for_send': created}
+                    with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                        if rich:
+                            actual = await adapter._try_send_rich('23', 'готовый ответ', None, metadata)
+                        else:
+                            actual = await adapter._send_chunk_with_retries('23', 'готовый ответ', 0, None,
+                                                                           metadata, '88', False, types)
+                    expected = {'chat_id': 23, 'message_thread_id': 88}
+                    if rich:
+                        expected['rich_message'] = {'markdown': 'готовый ответ'}
+                        if mode != 'off':
+                            expected['reply_parameters'] = {'message_id': anchor}
+                    else:
+                        expected['reply_to_message_id'] = anchor if mode != 'off' else None
+                    method = 'sendRichMessage' if rich else 'готовый ответ'
+                    self.assertEqual(attempts, [(method, expected)] * len(results))
+                    if error is None:
+                        self.assertEqual(actual.message_id if rich else actual[0].message_id, '101' if rich else 101)
+                    else:
+                        self.assertFalse(actual.retryable)
+                        self.assertEqual(actual.error_kind, error)
+
     async def test_pinned_telegram_draft_never_retries_with_raw_markup(self):
         async def deadline(value, **kwargs):
             return await value

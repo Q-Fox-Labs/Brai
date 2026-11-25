@@ -364,7 +364,8 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, **values):
                 super().__init__(**{'raw_response': None, **values})
         scope = {'os': os, 'SendResult': Result, 'logger': logging.getLogger(__name__)}
-        chunk = self.function('plugins/platforms/telegram/adapter.py', '_send_chunk_with_retries', scope)
+        telegram_source = 'plugins/platforms/telegram/adapter.py'
+        chunk = self.function(telegram_source, '_send_chunk_with_retries', scope)
         chunks = self.function('plugins/platforms/telegram/adapter.py', '_send_chunks', scope)
         partial = self.function('plugins/platforms/telegram/adapter.py', '_with_partial_send', scope)
         calls = []
@@ -382,6 +383,16 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
             _metadata_thread_id=lambda m: m['thread_id'], _message_thread_id_for_send=lambda t: int(t),
             _retrigger_typing=AsyncMock(), _with_partial_send=partial,
             _send_chunk_markdown_or_plain=send)
+        if '_brai_send_with_private_topic_retry' in chunk.__code__.co_names:
+            class PrivateTopicRetryFailed(Exception):
+                pass
+
+            scope['_BraiPrivateTopicRetryFailed'] = PrivateTopicRetryFailed
+            adapter._dm_topic_fallback = lambda metadata: bool(metadata.get('telegram_dm_topic_reply_fallback'))
+            adapter._telegram_error_types = lambda: (Exception, BadRequest, TimeoutError)
+            for method in ('_brai_private_topic_route', '_brai_private_topic_rejected',
+                           '_brai_send_with_private_topic_retry'):
+                setattr(adapter, method, MethodType(self.function(telegram_source, method, scope), adapter))
         adapter._send_chunk_with_retries = MethodType(chunk, adapter)
         scope['normalize_telegram_chat_id'] = int
         async def operation(route, metadata):
