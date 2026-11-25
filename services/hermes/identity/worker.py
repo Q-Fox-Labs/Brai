@@ -412,7 +412,7 @@ class Worker:
             return {'state': 'busy'}
         async with self.operator_lock:
             if (not self.operational.is_set() or self.release.operation is not None
-                    or self.policy_stopping or self.chat_dispatches
+                    or self.policy_stopping or any(self.chat_dispatches.values())
                     or any(not task.done() for task in self.adapter._session_tasks.values())):
                 return {'state': 'busy'}
             route = (chat, thread)

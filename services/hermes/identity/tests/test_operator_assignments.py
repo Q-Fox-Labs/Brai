@@ -273,6 +273,7 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
             worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
             worker.delivery_journal = DeliveryJournal(journal_path, 'owner')
             worker.operational.set()
+            worker.chat_dispatches[('123', '88')] = 0  # The first regular turn has already finished.
             worker.route_allowed = lambda *args, **kwargs: True
             worker.adapter = SimpleNamespace(_session_tasks={}, bind_source=lambda source: None)
             entry = SimpleNamespace(session_id='existing', origin={}, resume_pending=False)

@@ -69,7 +69,10 @@ class OperatorAssignmentControl:
             if self.store.begin(operationId, owner):
                 task = asyncio.create_task(self.run(peer, operationId, owner, userId, request))
                 self.tasks[operationId] = task
-                task.add_done_callback(lambda _: self.tasks.pop(operationId, None))
+                def finished(completed):
+                    if self.tasks.get(operationId) is completed:
+                        self.tasks.pop(operationId, None)
+                task.add_done_callback(finished)
         value = self.store.read(operationId, owner)
         if (value is None or any(value['request'][key] != expected
                 for key, expected in (('chat', chat), ('thread', thread), ('anchor', anchor)))):
