@@ -231,6 +231,8 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     ...(privateRelease ? { reconnect: false, ignoreClusterUpdates: true } : {}),
   });
   let closing;
+  let terminal = false;
+  let drainingNats = false;
   const server = createEmbeddingServer(config, async (invocation) => {
     if (nc.isClosed() || nc.isDraining()) throw new Error('NATS unavailable');
     const message = await nc.request(SUBJECT, Buffer.from(JSON.stringify(invocation)), { timeout: config.embedding.timeoutMs });
@@ -244,24 +246,31 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
   }, () => !nc.isClosed() && !nc.isDraining());
   const onSignal = () => { void close().catch(() => { onTerminal(); }); };
   const close = (failed = false) => {
+    if (failed && !terminal) {
+      terminal = true;
+      onTerminal();
+      server.closeAllConnections();
+    }
     if (closing) return closing;
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
-    if (failed) onTerminal();
     closing = (async () => {
       if (server.listening) {
         const stopped = new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         if (failed) server.closeAllConnections();
         await stopped;
       }
-      if (!nc.isClosed()) await nc.drain();
+      if (!nc.isClosed()) {
+        drainingNats = true;
+        await nc.drain();
+      }
     })();
     return closing;
   };
   if (privateRelease) {
     // AIDEV-NOTE: closed() сохраняет факт отказа даже если событие случилось до подписки.
     void nc.closed().then(() => {
-      if (!closing && server.listening) {
+      if (!drainingNats && (server.listening || closing)) {
         process.stderr.write('MemOS embedding adapter: NATS connection closed\n');
         void close(true).catch(() => { onTerminal(); });
       }
