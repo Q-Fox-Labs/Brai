@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет личный STT через broker без настоящей модели и Telegram.
-# ABOUTME: Проверяет одну попытку, привязку результата и сохранность output при отказе.
+# ABOUTME: Проверяет контракт Transcription, связь квитанции с файлом и отсутствие output при отказе.
 import json
+from datetime import datetime
 import os
 from pathlib import Path
 import shlex
@@ -18,6 +19,23 @@ from identity.transcribe import PART_TIMEOUT, transcribe_audio, transcribe_file
 
 MODEL = {'modelId': 'selected-model', 'revision': 'selected-revision', 'profileId': 'selected-profile'}
 AID = '11111111-1111-4111-8111-111111111111'
+RID = '22222222-2222-4222-8222-222222222222'
+REQUESTED_MODEL = {'route': 'local', 'selection': 'required', 'modelId': MODEL['modelId']}
+
+
+def submitted(args, *, state='succeeded'):
+    # Полный закрытый PublicRequestView без внутренних owner/asset/selector полей.
+    finished = state == 'succeeded'
+    return {'request': {'requestId': RID, 'requestedModel': args.get('requestedModel', REQUESTED_MODEL),
+                        'actualModel': MODEL if finished else None, 'taskState': state,
+                        'resultState': 'available' if finished else 'not_ready', 'revision': 1,
+                        'errorCode': None, 'createdAt': '2026-11-25T00:00:00Z',
+                        'updatedAt': '2026-11-25T00:00:00Z'}}
+
+
+def recognized(text):
+    return {'state': 'available', 'result': {'requestId': RID, 'actualModel': MODEL, 'text': text,
+                                             'segments': None}}
 
 
 class TranscriptionTests(unittest.TestCase):
@@ -35,19 +53,21 @@ class TranscriptionTests(unittest.TestCase):
         self.calls.append((method, params, kwargs))
         if method == 'files.publish':
             return {'artifactId': AID, 'mimeType': 'audio/ogg'}
-        args = params['args']
-        return {'requestId': args['requestId'], 'operationId': args['operationId'],
-                'model': MODEL, 'text': 'Проверка голоса.\nТочные слова.'}
+        if params['name'] == 'transcription_request_submit':
+            return submitted(params['args'])
+        self.assertEqual(params, {'name': 'transcription_result_get', 'args': {'requestId': RID}})
+        return recognized('Проверка голоса.\nТочные слова.')
 
     def test_exact_text_and_ids_without_owner_credentials_or_repeat(self):
         transcribe_file(self.source, self.output, MODEL, call=self.call)
         self.assertEqual(self.output.read_text(), 'Проверка голоса.\nТочные слова.')
         self.assertEqual(self.output.stat().st_mode & 0o777, 0o600)
-        self.assertEqual([m for m, _, _ in self.calls], ['files.publish', 'tools.call'])
+        self.assertEqual([m for m, _, _ in self.calls], ['files.publish', 'tools.call', 'tools.call'])
         args = self.calls[1][1]['args']
+        self.assertEqual(self.calls[1][1]['name'], 'transcription_request_submit')
         self.assertEqual(args['audioArtifactId'], AID)
-        self.assertEqual(args['model'], MODEL)
-        self.assertNotEqual(args['requestId'], args['operationId'])
+        self.assertEqual(args['requestedModel'], {'route':'local', 'selection':'required', 'modelId': MODEL['modelId']})
+        self.assertIsNotNone(datetime.fromisoformat(args['deadlineAt']).utcoffset())
         self.assertNotIn('ownerId', args)
         self.assertNotIn('token', json.dumps(self.calls))
         self.assertGreater(self.calls[0][2]['timeout'], self.calls[1][2]['timeout'])
@@ -63,8 +83,32 @@ class TranscriptionTests(unittest.TestCase):
             return self.call(method, params, **kwargs)
         with patch.dict(os.environ, {'HERMES_HOME': self.temp.name}):
             transcribe_file(source, self.output, MODEL, call=fetched)
-        self.assertEqual([m for m, _, _ in self.calls], ['files.fetch', 'tools.call'])
+        self.assertEqual([m for m, _, _ in self.calls], ['files.fetch', 'tools.call', 'tools.call'])
         self.assertEqual(self.calls[1][1]['args']['audioArtifactId'], AID)
+
+    def test_waits_on_receipt_without_submitting_again(self):
+        def running(method, params, **kwargs):
+            name = params.get('name')
+            if name == 'transcription_request_submit':
+                self.calls.append((method, params, kwargs))
+                return submitted(params['args'], state='running')
+            if name == 'transcription_request_get':
+                self.calls.append((method, params, kwargs))
+                self.assertEqual(params['args'], {'requestId': RID})
+                return submitted(params['args'])
+            return self.call(method, params, **kwargs)
+        with patch('identity.transcribe.time.sleep'):
+            transcribe_file(self.source, self.output, MODEL, call=running)
+        self.assertEqual([p['name'] for m, p, _ in self.calls if m == 'tools.call'],
+                         ['transcription_request_submit', 'transcription_request_get', 'transcription_result_get'])
+
+    def test_second_explicit_command_can_recognize_the_same_artifact(self):
+        for _ in range(2):
+            transcribe_file(self.source, self.output, MODEL, call=self.call)
+            self.output.unlink()
+        submissions = [p['args'] for m, p, _ in self.calls if p.get('name') == 'transcription_request_submit']
+        self.assertEqual(len(submissions), 2)
+        self.assertNotEqual(submissions[0]['clientIdempotencyKey'], submissions[1]['clientIdempotencyKey'])
 
     def test_unknown_invoke_never_retries_or_creates_output(self):
         def fail(method, params, **kwargs):
@@ -77,17 +121,40 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertFalse(self.output.exists())
 
+    def test_terminal_service_deadline_has_receipt_and_no_result_or_repeat(self):
+        def stopped(method, params, **kwargs):
+            if params.get('name') == 'transcription_request_submit':
+                self.calls.append((method, params, kwargs))
+                result = submitted(params['args'], state='failed')
+                result['request']['errorCode'] = 'DEADLINE_EXCEEDED'
+                return result
+            return self.call(method, params, **kwargs)
+        with self.assertLogs('identity.transcribe', level='WARNING') as logs:
+            with self.assertRaisesRegex(ValueError, 'TRANSCRIPTION_REQUEST_NOT_COMPLETED'):
+                transcribe_file(self.source, self.output, MODEL, call=stopped)
+        self.assertIn(RID, logs.output[0])
+        self.assertIn('DEADLINE_EXCEEDED', logs.output[0])
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(self.output.exists())
+
     def test_mismatched_response_and_broker_denial_never_create_output(self):
-        for field, value in [('requestId', 'wrong'), ('operationId', 'wrong'), ('model', {}),
+        for field, value in [('requestId', 'wrong'), ('actualModel', {}),
                              ('text', ''), ('text', ' '), ('text', None)]:
             def changed(method, params, **kwargs):
                 result = self.call(method, params, **kwargs)
-                if method == 'tools.call':
-                    result[field] = value
+                if params.get('name') == 'transcription_result_get':
+                    result['result'][field] = value
                 return result
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 transcribe_file(self.source, self.output, MODEL, call=changed)
             self.assertFalse(self.output.exists())
+        def lost(method, params, **kwargs):
+            if params.get('name') == 'transcription_result_get':
+                return {'state': 'lost', 'errorCode': 'RESULT_UNAVAILABLE'}
+            return self.call(method, params, **kwargs)
+        with self.assertRaises(ValueError):
+            transcribe_file(self.source, self.output, MODEL, call=lost)
+        self.assertFalse(self.output.exists())
         with self.assertRaises(PermissionError):
             transcribe_file(self.source, self.output, MODEL,
                             call=lambda *a, **k: (_ for _ in ()).throw(PermissionError('denied')))
@@ -173,13 +240,17 @@ class AudioPartTests(unittest.TestCase):
                     paths.append(path)
                     self.assertTrue(path.is_file())
                     self.assertTrue(path.is_relative_to(self.home / 'workspace'))
-                    return {'artifactId': AID, 'mimeType': 'audio/wav'}
-                args = params['args']
+                    aid = '11111111-1111-4111-8111-' + f'{len(paths):012d}'
+                    return {'artifactId': aid, 'mimeType': 'audio/wav'}
                 self.assertGreater(kwargs['timeout'], PART_TIMEOUT - 10)
-                attempts.append(args['operationId'])
-                if failed and len(attempts) == 2:
-                    raise TimeoutError('unknown')
-                return {**args, 'text': f'Часть {len(attempts)}'}
+                if params['name'] == 'transcription_request_submit':
+                    args = params['args']
+                    attempts.append(args['clientIdempotencyKey'])
+                    if failed and len(attempts) == 2:
+                        raise TimeoutError('unknown')
+                    return submitted(args)
+                self.assertEqual(params, {'name': 'transcription_result_get', 'args': {'requestId': RID}})
+                return recognized(f'Часть {len(attempts)}')
             with patch.dict(os.environ, {'HERMES_HOME': str(self.home)}):
                 if failed:
                     with self.assertRaises(TimeoutError):
@@ -202,7 +273,9 @@ class AudioPartTests(unittest.TestCase):
                     path = Path(params['path'])
                     paths.append(path)
                     return {'artifactId': AID, 'mimeType': 'audio/ogg' if path == source else 'audio/wav'}
-                return {**params['args'], 'text': 'Готово'}
+                if params['name'] == 'transcription_request_submit':
+                    return submitted(params['args'])
+                return recognized('Готово')
             with self.subTest(name=name), patch.dict(os.environ, {'HERMES_HOME': str(self.home)}):
                 transcribe_audio(source, self.output, MODEL, call=call)
                 self.assertEqual(self.output.read_text(), 'Готово')
@@ -230,6 +303,8 @@ class ManagedVoiceSettingsTests(unittest.TestCase):
             loaded = tools.transcription_tools._load_stt_config()
             self.assertGreater(loaded['providers']['brai_local_ai'].pop('timeout'), PREPARE_TIMEOUT)
             self.assertEqual(loaded, expected)
+            self.assertEqual(tools.transcription_tools.transcribe_audio_local_fallback('voice.ogg'),
+                             {'success': False, 'error': 'TRANSCRIPTION_UNAVAILABLE'})
             loaded['enabled'] = False
             self.assertTrue(tools.transcription_tools._load_stt_config()['enabled'])
 
