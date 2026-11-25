@@ -95,6 +95,11 @@ def install_managed_stt(path):
         # Дневника. Каждая часть по-прежнему имеет собственный срок invoke.
         managed['providers']['brai_local_ai']['timeout'] = PREPARE_TIMEOUT + 20
         transcription_tools._load_stt_config = lambda: deepcopy(managed)
+        # AIDEV-NOTE: Native voice пробует локальный Whisper после отказа command.
+        # У управляемого профиля модель выбирает сервис; отказ не меняет маршрут.
+        transcription_tools.transcribe_audio_local_fallback = lambda *_args, **_kwargs: {
+            'success': False, 'error': 'TRANSCRIPTION_UNAVAILABLE',
+        }
         return True
     return False
 

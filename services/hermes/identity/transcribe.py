@@ -1,11 +1,10 @@
-# ABOUTME: Подключает command STT личного Hermes к существующему Local AI через broker.
-# ABOUTME: Публикует только собственное аудио; не получает credentials и не повторяет invoke.
+# ABOUTME: Направляет command STT личного Hermes в сервис Transcription через broker.
+# ABOUTME: Публикует только собственное аудио и получает результат по квитанции сервиса.
 """Голосовой вход с владельцем из SO_PEERCRED, без общего Transcription bearer."""
 import argparse
 from contextlib import closing
 import json
 import logging
-from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import stat
@@ -36,14 +35,16 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     if not stat.S_ISREG(info.st_mode) or not info.st_size:
         raise ValueError('INVALID_AUDIO')
     started = time.monotonic()
-    deadline = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
+    request_key = None
 
-    request_id, operation_id = str(uuid.uuid4()), str(uuid.uuid4())
-
-    def invoke(method, params):
+    def seconds_left():
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError('DEADLINE_EXCEEDED')
+        return remaining
+
+    def invoke(method, params):
+        remaining = seconds_left()
         try:
             return call(method, params, timeout=remaining)
         except Exception as error:
@@ -53,7 +54,7 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
                     reason='FORBIDDEN' if isinstance(error, PermissionError) else
                     'DEADLINE_EXCEEDED' if isinstance(error, TimeoutError) else 'INTERNAL'))
             logger.warning('identity_stt_failed %s', json.dumps({
-                'requestId': request_id, 'operationId': operation_id, 'method': method,
+                'clientIdempotencyKey': request_key, 'method': method,
                 'elapsedMs': max(0, int((time.monotonic()-started)*1000)),
                 'errorType': type(error).__name__, **diagnostic}, sort_keys=True))
             raise
@@ -74,11 +75,45 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     if (not isinstance(aid, str) or str(uuid.UUID(aid)) != aid
             or published.get('mimeType') not in AUDIO_TYPES):
         raise ValueError('INVALID_AUDIO_ARTIFACT')
-    result = invoke('tools.call', {'name': 'local_ai_invoke_transcribe', 'args': {
-        'requestId': request_id, 'operationId': operation_id, 'model': model,
-        'deadlineAt': deadline, 'audioArtifactId': aid}})
-    if (not isinstance(result, dict) or result.get('requestId') != request_id
-            or result.get('operationId') != operation_id or result.get('model') != model
+    # AIDEV-NOTE: У повторно доставленного вложения тот же owner artifact.
+    # Клиентский timeout меняется между доставками, поэтому не входит в запрос.
+    request_key = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([
+        'brai:hermes:command-stt', aid, model['modelId'], model['revision'], model['profileId'],
+    ], separators=(',', ':'))))
+
+    def transcription(action, args):
+        result = invoke('tools.call', {'name': 'transcription_' + action, 'args': args})
+        if not isinstance(result, dict):
+            raise ValueError('INVALID_TRANSCRIPTION_RESULT')
+        return result
+
+    submission = {'clientIdempotencyKey': request_key, 'audioArtifactId': aid,
+                  'requestedModel': {'route': 'local', 'selection': 'required', 'modelId': model['modelId']},
+                  'deadlineAt': None}
+    status = transcription('request_submit', submission)
+    request_id = None
+    while True:
+        record = status.get('request')
+        if not isinstance(record, dict) or record.get('audioArtifactId') != aid:
+            raise ValueError('INVALID_TRANSCRIPTION_REQUEST')
+        current_id = record.get('requestId')
+        if (not isinstance(current_id, str) or str(uuid.UUID(current_id)) != current_id
+                or request_id is not None and current_id != request_id):
+            raise ValueError('INVALID_TRANSCRIPTION_REQUEST')
+        request_id = current_id
+        state = record.get('taskState')
+        if state == 'succeeded':
+            break
+        if state not in ('accepted', 'dispatching', 'running'):
+            raise ValueError('TRANSCRIPTION_REQUEST_NOT_COMPLETED')
+        if record.get('selectedModel') != model:
+            raise ValueError('TRANSCRIPTION_MODEL_MISMATCH')
+        time.sleep(min(1, seconds_left()))
+        status = transcription('request_get', {'requestId': request_id})
+    delivery = transcription('result_get', {'requestId': request_id})
+    result = delivery.get('result')
+    if (delivery.get('state') != 'available' or not isinstance(result, dict)
+            or result.get('requestId') != request_id or result.get('actualModel') != model
             or not isinstance(result.get('text'), str)):
         raise ValueError('INVALID_TRANSCRIPTION_RESULT')
     text = result['text']

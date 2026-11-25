@@ -16,6 +16,7 @@ import { readProtectedJSON, runStdio as runControl } from './control.mjs';
 const invalid=()=>{throw new Error('IDENTITY_RUNTIME_CONFIG_NOT_READY');};
 const object=value=>value && typeof value==='object' && !Array.isArray(value);
 const overlaps=(a,b)=>a===b||a.startsWith(b+sep)||b.startsWith(a+sep);
+const privateTools=new Set(['publish_file','fetch_file','local_ai_invoke_transcribe']);
 function rootDirectory(path) {
  if(typeof path!=='string'||!isAbsolute(path)||normalize(path)!==path||realpathSync(path)!==path)invalid();
  for(let dir=path;;dir=dirname(dir)){
@@ -142,10 +143,10 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    return runtime;
    });
    return {
-    async listTools(){return [...(await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name)),...(bugHunt?.list()??[])];},
+    async listTools(){return [...(await runtime.listTools()).filter(tool=>!privateTools.has(tool.name)),...(bugHunt?.list()??[])];},
     async callTool(name,args,signal){
      if(phase==='provisioning')invalid();
-     if(['publish_file','fetch_file'].includes(name))invalid();
+     if(privateTools.has(name))invalid();
      if(name.startsWith('bug_hunt_')){if(!bugHunt)invalid();return bugHunt.call(name,args,signal);}
      // Личный broker принимает тот же короткий голосовой ввод, что и MCP.
      return name==='local_ai_invoke_synthesize'

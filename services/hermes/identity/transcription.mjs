@@ -30,7 +30,9 @@ export function createOwnerTranscription(profile, endpoint, {isAdmin = async () 
  if (!validateDto('TrustedPrincipal', principal)) throw fault('INVALID_HERMES_CONFIG');
  return {
   list() {
-   return [...methods].map(([name, entry]) => ({name, description:'Операция Transcription в личной области текущего профиля.',
+   return [...methods].map(([name, entry]) => ({name, description:entry.method==='request.submit'
+    ? 'Штатная расшифровка аудио Hermes. Передай ID готового личного артефакта, сохрани ключ и полученный requestId. Для видео сначала извлеки аудио. После submit проверяй состояние и получай текст по requestId.'
+    : 'Операция Transcription в личной области текущего профиля.',
     inputSchema:expand(schemas.definitions[entry.input])}));
   },
   async call(name, args = {}, signal) {
