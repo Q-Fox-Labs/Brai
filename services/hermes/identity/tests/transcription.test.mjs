@@ -64,3 +64,19 @@ test('bounded response and safe error DTO; transport never retries', async () =>
   Response.json({privateException:'secret'}, {status:500})});
  await assert.rejects(malformed.call('transcription_result_get', {requestId}), {code:'INVALID_UPSTREAM_RESPONSE'});
 });
+
+test('a lost or invalid submit receipt is unknown and a cancelled unsent request stays cancelled', async () => {
+ const args = {clientIdempotencyKey:requestId, audioArtifactId:requestId, requestedModel:null, deadlineAt:null};
+ let calls = 0;
+ const adapter = createOwnerTranscription(profile, endpoint, {fetchImpl:async () => {
+  calls++;
+  if (calls === 1) throw new TypeError('connection closed after admission');
+  return Response.json({request:{unknown:'malformed receipt'}});
+ }});
+ const cancelled = AbortSignal.abort();
+ await assert.rejects(adapter.call('transcription_request_submit',args,cancelled), {code:'CANCELLED'});
+ assert.equal(calls,0);
+ await assert.rejects(adapter.call('transcription_request_submit',args), {code:'OUTCOME_UNKNOWN'});
+ await assert.rejects(adapter.call('transcription_request_submit',args), {code:'OUTCOME_UNKNOWN'});
+ assert.equal(calls,2);
+});

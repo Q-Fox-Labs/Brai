@@ -24,6 +24,8 @@ AUDIO_TYPES = {'audio/ogg', 'audio/wav', 'audio/flac', 'audio/mpeg'}
 MAX_TRANSCRIPT_BYTES = 1_048_576
 SINGLE_TIMEOUT = 180
 PART_TIMEOUT = 900
+TERMINAL_CODES = {'DEADLINE_EXCEEDED', 'DEPENDENCY_UNAVAILABLE', 'MODEL_UNAVAILABLE',
+                  'MODEL_CATALOG_UNAVAILABLE', 'ARTIFACT_OWNER_MISMATCH', 'ARTIFACT_NOT_READY'}
 
 
 def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
@@ -111,6 +113,9 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
         if state not in ('accepted', 'dispatching', 'running'):
             reason = {'failed': 'TRANSCRIPTION_FAILED', 'outcome_unknown': 'OUTCOME_UNKNOWN',
                       'cancelled': 'CANCELLED'}.get(state, 'INVALID_UPSTREAM_RESPONSE')
+            code = record.get('errorCode')
+            if state == 'failed' and isinstance(code, str) and code in TERMINAL_CODES:
+                reason = code
             log_failure(reason, 'transcription', 'request.get', 'TerminalRequest')
             raise ValueError('TRANSCRIPTION_REQUEST_NOT_COMPLETED')
         if record.get('actualModel') is not None and record['actualModel'] != model:

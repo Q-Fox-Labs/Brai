@@ -5,6 +5,9 @@ import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { fault } from '../runtime.mjs';
 
 const maxRequestBytes = 65_536, maxResponseBytes = 1_048_576;
+const writeMethods = new Set(['request.submit', 'request.cancel', 'settings.set']);
+const uncertainErrors = new Set(['DEADLINE_EXCEEDED', 'CANCELLED', 'INVALID_UPSTREAM_RESPONSE', 'RESULT_TOO_LARGE',
+ 'UPSTREAM_UNAVAILABLE', 'REQUEST_OUTCOME_UNKNOWN', 'INTERNAL']);
 function expand(value) {
  if (!value || typeof value !== 'object') return value;
  if (Array.isArray(value)) return value.map(expand);
@@ -45,6 +48,7 @@ export function createOwnerTranscription(profile, endpoint, {isAdmin = async () 
    }
    const body = JSON.stringify({method:entry.method, params:args, principal:trusted});
    if (Buffer.byteLength(body) > maxRequestBytes) throw fault('REQUEST_TOO_LARGE');
+   if (signal?.aborted) throw fault('CANCELLED');
    const abort = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]);
    let response;
    try {
@@ -72,7 +76,12 @@ export function createOwnerTranscription(profile, endpoint, {isAdmin = async () 
     if (!validateDto(entry.output, result)) throw fault('INVALID_UPSTREAM_RESPONSE');
     return result;
    } catch (error) {
-    if (typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code)) throw error;
+    const code = error?.code;
+    const declared = schemas.definitions.ErrorCode.enum.includes(code) || uncertainErrors.has(code);
+    // AIDEV-NOTE: HTTP сбой после submit может скрыть уже принятый запрос.
+    // Не повторяем запись и не выдаём неизвестный исход за отказ до допуска.
+    if (writeMethods.has(entry.method) && (!declared || uncertainErrors.has(code))) throw fault('OUTCOME_UNKNOWN');
+    if (declared) throw error;
     throw fault(signal?.aborted ? 'CANCELLED' : abort.aborted ? 'DEADLINE_EXCEEDED' : 'UPSTREAM_UNAVAILABLE');
    }
   },

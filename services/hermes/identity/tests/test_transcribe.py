@@ -121,6 +121,22 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertFalse(self.output.exists())
 
+    def test_terminal_service_deadline_has_receipt_and_no_result_or_repeat(self):
+        def stopped(method, params, **kwargs):
+            if params.get('name') == 'transcription_request_submit':
+                self.calls.append((method, params, kwargs))
+                result = submitted(params['args'], state='failed')
+                result['request']['errorCode'] = 'DEADLINE_EXCEEDED'
+                return result
+            return self.call(method, params, **kwargs)
+        with self.assertLogs('identity.transcribe', level='WARNING') as logs:
+            with self.assertRaisesRegex(ValueError, 'TRANSCRIPTION_REQUEST_NOT_COMPLETED'):
+                transcribe_file(self.source, self.output, MODEL, call=stopped)
+        self.assertIn(RID, logs.output[0])
+        self.assertIn('DEADLINE_EXCEEDED', logs.output[0])
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(self.output.exists())
+
     def test_mismatched_response_and_broker_denial_never_create_output(self):
         for field, value in [('requestId', 'wrong'), ('actualModel', {}),
                              ('text', ''), ('text', ' '), ('text', None)]:
