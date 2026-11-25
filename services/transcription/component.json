@@ -81,6 +81,7 @@
       "services/transcription/tests/integration/fixtures/restart-process.mjs",
       "services/transcription/tests/integration/local-route.test.mjs",
       "services/transcription/tests/integration/metadata.test.mjs",
+      "services/transcription/tests/integration/nats-reconnect.test.mjs",
       "services/transcription/tests/integration/restart.test.mjs",
       "services/transcription/tests/local/adapter.test.mjs",
       "services/transcription/tests/local/stdio-child.mjs",

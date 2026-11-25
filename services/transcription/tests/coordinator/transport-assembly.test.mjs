@@ -5,6 +5,7 @@ import test from 'node:test';
 import { headers } from 'nats';
 import { loadCoordinatorConfig } from '../../dist/coordinator/config.js';
 import { spawnCoordinatorChildren } from '../../dist/coordinator/childspawn.js';
+import { createLocalConnectionProvider } from '../../dist/coordinator/main.js';
 import { createDependencyPorts } from '../../dist/coordinator/transport/dependencies.js';
 import { validateDto } from '../../contracts/index.mjs';
 
@@ -91,25 +92,25 @@ test('mocked history owner error DTO classifies permanent rejection; malformed/t
   assert.equal(validateDto('HistoryAppendRequest', event), true);
   for (const [code, status] of [['EVENT_ID_CONFLICT', '409'], ['INVALID_ARGUMENT', '400'], ['REQUEST_TOO_LARGE', '413']]) {
     let sends = 0;
-    const ports = await createDependencyPorts({ request: async () => { sends++; return reply({ code, message: 'private-message', retryable: false }, code, status); } }, undefined, bounds);
+    const ports = await createDependencyPorts({ request: async () => { sends++; return reply({ code, message: 'private-message', retryable: false }, code, status); } }, undefined, bounds, () => true);
     await assert.rejects(ports.history.append(event), (error) => error.errorCode === 'HISTORY_REJECTED' && error.outcome === 'failed' && !JSON.stringify(error).includes('private-message'));
     assert.equal(sends, 1);
   }
   for (const response of [reply({ code: 'EVENT_ID_CONFLICT', message: 'private', retryable: false, extra: true }, 'EVENT_ID_CONFLICT', '409'),
     reply({ code: 'EVENT_ID_CONFLICT', message: 'private', retryable: false }, 'EVENT_ID_CONFLICT', '500'),
     reply({ code: 'DATABASE_UNAVAILABLE', message: 'private', retryable: true }, 'DATABASE_UNAVAILABLE', '503')]) {
-    const ports = await createDependencyPorts({ request: async () => response }, undefined, bounds);
+    const ports = await createDependencyPorts({ request: async () => response }, undefined, bounds, () => true);
     await assert.rejects(ports.history.append(event), (error) => error.errorCode === 'HISTORY_DELIVERY_FAILED' && error.outcome === 'unknown');
   }
 });
 
 test('mocked owner artifact NOT_FOUND preserves safe code; absent catalog and malformed/oversize replies are outages', async () => {
-  const missing = await createDependencyPorts({ request: async () => reply(undefined, 'NOT_FOUND', '404') }, undefined, bounds);
+  const missing = await createDependencyPorts({ request: async () => reply(undefined, 'NOT_FOUND', '404') }, undefined, bounds, () => true);
   await assert.rejects(missing.artifacts.get({ artifactId: id }), (error) => error.errorCode === 'NOT_FOUND');
   await assert.rejects(missing.localCatalog.list(), (error) => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE');
-  const malformed = await createDependencyPorts({ request: async () => ({ data: Buffer.from('{private'), headers: headers() }) }, undefined, bounds);
+  const malformed = await createDependencyPorts({ request: async () => ({ data: Buffer.from('{private'), headers: headers() }) }, undefined, bounds, () => true);
   await assert.rejects(malformed.artifacts.get({ artifactId: id }), (error) => error.errorCode === 'DEPENDENCY_UNAVAILABLE');
-  const huge = await createDependencyPorts({ request: async () => ({ data: Buffer.alloc(4097), headers: headers() }) }, undefined, bounds);
+  const huge = await createDependencyPorts({ request: async () => ({ data: Buffer.alloc(4097), headers: headers() }) }, undefined, bounds, () => true);
   await assert.rejects(huge.artifacts.get({ artifactId: id }), (error) => error.errorCode === 'DEPENDENCY_UNAVAILABLE');
 });
 
@@ -120,12 +121,53 @@ test('mocked localAI catalog omits unsupported null profile, keeps full selector
     parameters: { embed: null, transcribe: {} }, installationState: 'installed', runtimeState: 'ready' };
   const unsupported = { ...card, profileId: null, supported: false, installationState: 'unsupported', runtimeState: null };
   const local = { request: async () => reply({ items: [unsupported, card], nextCursor: null }) };
-  const ports = await createDependencyPorts({}, local, bounds);
+  const ports = await createDependencyPorts({}, local, bounds, () => true);
   assert.deepEqual(await ports.localCatalog.list(), [{ selector: { modelId: 'whisper', revision: 'v1', profileId: 'cpu' }, supported: true, installed: true, ready: true }]);
-  const broken = await createDependencyPorts({}, { request: async () => reply({ items: [{ ...card, profileId: null }], nextCursor: null }) }, bounds);
+  const broken = await createDependencyPorts({}, { request: async () => reply({ items: [{ ...card, profileId: null }], nextCursor: null }) }, bounds, () => true);
   await assert.rejects(broken.localCatalog.list(), (error) => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE');
   let pages = 0;
-  const cycling = await createDependencyPorts({}, { request: async () => { pages++; return reply({ items: [card], nextCursor: 'same' }); } }, bounds);
+  const cycling = await createDependencyPorts({}, { request: async () => { pages++; return reply({ items: [card], nextCursor: 'same' }); } }, bounds, () => true);
   await assert.rejects(cycling.localCatalog.list(), (error) => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE');
   assert.equal(pages, 2);
+});
+
+
+test('catalog retries connection after initial failure without replaying a request', async () => {
+  let connects = 0, requests = 0;
+  const card = { modelId: 'whisper', name: 'model', description: '', source: 'fixture', license: null, revision: 'v1', profileId: 'cpu', supported: true,
+    operations: ['transcribe'], languages: [], inputKinds: ['audio_artifact'], outputKinds: ['transcription'], files: [],
+    hardwareRequirements: { cpuArchitectures: [], minMemoryBytes: null, accelerator: null }, limits: { maxInputBytes: null, maxAudioSeconds: null, maxItems: null, maxResultBytes: null, vectorDimensions: null },
+    parameters: { embed: null, transcribe: {} }, installationState: 'installed', runtimeState: 'ready' };
+  const ports = await createDependencyPorts({}, async () => {
+    connects++;
+    if (connects === 1) return undefined;
+    return { request: async () => { requests++; return reply({ items: [card], nextCursor: null }); } };
+  }, bounds, () => true);
+  await assert.rejects(ports.localCatalog.list(), error => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE');
+  assert.equal(requests, 0);
+  assert.equal((await ports.localCatalog.list()).length, 1);
+  assert.equal(connects, 2); assert.equal(requests, 1);
+});
+
+test('dependency requests do not enter the NATS buffer while transport is disconnected', async () => {
+  let sends = 0;
+  const nc = {isClosed:()=>false, protocol:{connected:false}, request:async()=>{sends++;return reply({});}};
+  const ports = await createDependencyPorts(nc, nc, bounds);
+  await assert.rejects(ports.artifacts.get({artifactId:id}), error => error.errorCode === 'DEPENDENCY_UNAVAILABLE' && error.outcome === 'not_started');
+  await assert.rejects(ports.history.append(event), error => error.errorCode === 'HISTORY_DELIVERY_FAILED' && error.outcome === 'not_started');
+  await assert.rejects(ports.localCatalog.list(), error => error.errorCode === 'MODEL_CATALOG_UNAVAILABLE' && error.outcome === 'not_started');
+  assert.equal(sends, 0);
+});
+
+
+test('local readiness retries a failed startup connection and shares concurrent attempts', async () => {
+  let attempts=0, closed=false, finish;
+  const ended=new Promise(resolve=>{finish=resolve;});
+  const nc={protocol:{connected:true},isClosed:()=>closed,async close(){closed=true;finish();},async *status(){await ended;}};
+  const settings={servers:'nats://127.0.0.1:4222',inboxPrefix:'_INBOX.fixture'};
+  const local=createLocalConnectionProvider(settings,1000,async()=>{attempts++;if(attempts===1)throw Error('unavailable');return nc;});
+  assert.equal(await local.get(),undefined);assert.equal(local.ready(),false);
+  const [first,second]=await Promise.all([local.get(),local.get()]);
+  assert.equal(first,nc);assert.equal(second,nc);assert.equal(attempts,2);assert.equal(local.ready(),true);
+  await local.close();assert.equal(local.ready(),false);assert.equal(await local.get(),undefined);
 });
