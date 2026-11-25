@@ -75,7 +75,7 @@ class OperatorAssignmentControl:
                 for key, expected in (('chat', chat), ('thread', thread), ('anchor', anchor)))):
             raise RpcError(-32602, 'Unknown operator assignment')
         if action == 'cancel':
-            if self.store.cancel(operationId, owner):
+            if self.cancel(operationId, owner):
                 task = self.tasks.get(operationId)
                 if task is not None:
                     peer = await self.resolver._bridge(profile).connect()
@@ -157,7 +157,7 @@ class OperatorAssignmentControl:
         db = self.resolver.ledger.db
         db.execute('BEGIN IMMEDIATE')
         try:
-            if not self.store.approve(ident, owner, digest) or not self.store.sending(ident, owner):
+            if not self.store.approve(ident, owner, digest):
                 raise ValueError('Operator assignment changed')
             self.resolver.reply_outbox.enqueue(self.outbox_id(ident, 'result'), owner,
                 {'profile': profile, 'action': action, 'payload': payload,
@@ -167,6 +167,19 @@ class OperatorAssignmentControl:
             db.execute('ROLLBACK')
             raise
         await self.resolver.reply_outbox.flush_owner(owner)
+
+    def cancel(self, ident, owner):
+        db = self.resolver.ledger.db
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            cancelled = self.store.cancel(ident, owner)
+            if cancelled:
+                self.resolver.reply_outbox.cancel_pending(self.outbox_id(ident, 'result'), owner)
+            db.execute('COMMIT')
+            return cancelled
+        except BaseException:
+            db.execute('ROLLBACK')
+            raise
 
     async def check_target(self, profile, route, ident, request):
         if self.resolver._startup_held() or getattr(self.resolver.release_gate, 'operation', None) is not None:
@@ -191,7 +204,7 @@ class OperatorAssignmentControl:
         ident, profile, payload = body['operatorAssignmentId'], body['profile'], body['payload']
         owner = self.resolver.ledger.owner(profile)
         value = self.store.read(ident, owner)
-        if value is None or value['state'] != 'sending':
+        if value is None or value['state'] != 'approved':
             raise PermissionError('Operator assignment is not approved for delivery')
         request = value['request']
         if ((request['chat'], request['thread']) != route or payload.get('reply_to') != request['anchor']
@@ -199,9 +212,23 @@ class OperatorAssignmentControl:
             raise PermissionError('Operator assignment route changed')
         await self.check_target(profile, route, ident, request)
 
+    def begin_delivery(self, body, begin_attempt):
+        ident = body['operatorAssignmentId']
+        owner = self.resolver.ledger.owner(body['profile'])
+        db = self.resolver.ledger.db
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            if not self.store.sending(ident, owner):
+                raise PermissionError('Operator assignment no longer approved')
+            begin_attempt()
+            db.execute('COMMIT')
+        except BaseException:
+            db.execute('ROLLBACK')
+            raise
+
     def status(self, ident, owner):
         value = self.store.read(ident, owner)
-        if value['state'] == 'sending':
+        if value['state'] in ('approved', 'sending'):
             receipt = self.resolver.reply_outbox.result(self.outbox_id(ident, 'result'))
             if receipt and (receipt.get('success') is True and receipt.get('message_id')
                             or receipt.get('retryable') is False):

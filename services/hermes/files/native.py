@@ -1212,11 +1212,14 @@ def verify_telegram_target(message, target):
     topic = target.get('message_thread_id') or target.get('direct_messages_topic_id')
     actual = (getattr(message, 'message_thread_id', None)
               or getattr(getattr(message, 'direct_messages_topic', None), 'topic_id', None))
-    if chat_id != target['chat_id'] or topic is not None and actual != topic:
+    if topic is None and actual == 1:
+        actual = None
+    if chat_id != target['chat_id'] or actual != topic:
         raise FileError('DELIVERY_ROUTE_UNCONFIRMED')
 
 
-async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict=False):
+async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict=False,
+                          before_send=None):
     """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
     from contextlib import ExitStack
@@ -1268,6 +1271,8 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             else:
                 from types import SimpleNamespace
                 media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
+        if before_send is not None:
+            await before_send()
         if kind == 'album':
             result = await bot.send_media_group(**target, media=media)
         else:

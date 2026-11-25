@@ -46,6 +46,11 @@ class ReplyOutbox:
         row = self.db.execute('SELECT state,receipt FROM reply_outbox WHERE id=?', (ident,)).fetchone()
         return json.loads(row[1]) if row and row[1] else None
 
+    def cancel_pending(self, ident, owner):
+        receipt = {'success': False, 'retryable': False, 'error_kind': 'cancelled'}
+        return self.db.execute("UPDATE reply_outbox SET state='blocked',receipt=? WHERE id=? AND owner=? AND state='pending'",
+                               (canonical(receipt), ident, owner)).rowcount == 1
+
     def retry_blocked(self, ident, owner, body, receipt):
         """Адресно вернуть ошибочно запрещённую отправку после операторской проверки.
 
@@ -79,12 +84,18 @@ class ReplyOutbox:
                 if previous == 'sending' and not retry_unknown:
                     result = self._unknown_delivery()
                 else:
-                    self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
+                    def begin_attempt():
+                        if not self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=? AND state='pending'",
+                                               (ident,)).rowcount:
+                            raise PermissionError('Delivery reservation changed')
                     try:
-                        result = await self.deliver(body)
+                        if operator_assignment:
+                            result = await self.deliver(body, begin_attempt=begin_attempt)
+                        else:
+                            self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
+                            result = await self.deliver(body)
                     except DeliveryDeferred:
-                        self.db.execute("UPDATE reply_outbox SET state='pending' WHERE id=?", (ident,))
-                        break
+                        continue
                     except PermissionError:
                         result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
                     except asyncio.CancelledError:
@@ -97,7 +108,8 @@ class ReplyOutbox:
                     result = self._unknown_delivery()
                 blocked = result.get('retryable') is False
                 state = 'sent' if sent else 'blocked' if blocked else 'pending'
-                self.db.execute('UPDATE reply_outbox SET state=?,receipt=? WHERE id=?', (state, canonical(result), ident))
+                self.db.execute("UPDATE reply_outbox SET state=?,receipt=? WHERE id=? AND state IN ('pending','sending')",
+                                (state, canonical(result), ident))
                 if state == 'pending':
                     break
 

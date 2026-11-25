@@ -64,7 +64,7 @@ class OperatorAssignments:
 
     def cancel(self, ident, owner):
         return self.db.execute("""UPDATE operator_assignments SET state='cancelled'
-            WHERE id=? AND owner=? AND state IN ('prepared','running','ready')""",
+            WHERE id=? AND owner=? AND state IN ('prepared','running','ready','approved')""",
             (ident, owner)).rowcount == 1
 
     def approve(self, ident, owner, result_digest):
@@ -84,5 +84,5 @@ class OperatorAssignments:
     def complete(self, ident, owner, receipt):
         state = 'delivered' if receipt.get('success') is True and receipt.get('message_id') else 'delivery_blocked'
         return self.db.execute("""UPDATE operator_assignments SET state=?,receipt=?
-            WHERE id=? AND owner=? AND state='sending'""",
+            WHERE id=? AND owner=? AND state IN ('approved','sending')""",
             (state, canonical(receipt), ident, owner)).rowcount == 1

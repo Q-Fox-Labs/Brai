@@ -137,6 +137,9 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_not_awaited()
         bot.send_media_group.assert_not_awaited()
 
+        with self.assertRaisesRegex(FileError, 'DELIVERY_ROUTE_UNCONFIRMED'):
+            native.verify_telegram_target(SimpleNamespace(chat_id=101, message_thread_id=202), {'chat_id': 101})
+
     def test_hidden_terminal_cannot_promote_timeout_or_yield_to_a_watcher(self):
         from identity.scope import operator_assignment
 

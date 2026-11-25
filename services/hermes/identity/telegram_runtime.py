@@ -686,7 +686,7 @@ class Resolver:
         self.ledger.admit(profile, route, metadata, message_id)
         return metadata
 
-    async def _deliver_saved_reply(self, body):
+    async def _deliver_saved_reply(self, body, *, begin_attempt=None):
         """Восстановить доставку готового ответа при актуальных Auth и поколении беседы."""
         profile, payload = body['profile'], body['payload']
         metadata = payload['metadata']
@@ -706,6 +706,8 @@ class Resolver:
             control = self.operator_assignment
             async def before_send():
                 await control.check_delivery(body, route)
+                current()
+                control.begin_delivery(body, begin_attempt)
             control.deliveries.add(ident)
             try:
                 return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current,
@@ -1015,13 +1017,11 @@ class Resolver:
                     prepared.append({'readHandle': stream, 'file': artifact,
                         'caption': item['caption'], 'presentation': view})
                 validate_telegram(prepared)
-                if before_send is not None:
-                    await before_send()
                 current()
                 # Только media API receipt означает доставку файла. Native text fallback
                 # после ошибки не может превратиться в успешный голосовой ответ.
                 with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
-                    parameters = {'strict': True} if before_send is not None else {}
+                    parameters = {'strict': True, 'before_send': before_send} if before_send is not None else {}
                     ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
                                                 fallback, reply_to=payload.get('reply_to'), **parameters)
                 if (not isinstance(ids, list) or len(ids) != len(prepared)
@@ -1046,7 +1046,6 @@ class Resolver:
                 raise PermissionError('Operator assignment requires one complete message')
             target = telegram_target(self.adapter, values['chat_id'], values['reply_to'], metadata, exact=True)
             await before_send()
-            current()
             with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
                 sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
             verify_telegram_target(sent, target)

@@ -61,8 +61,9 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
             return {'state': 'validated'}
         return {'state': 'ready', 'result': self.output}
 
-    async def deliver(self, envelope):
+    async def deliver(self, envelope, *, begin_attempt):
         await self.control.check_delivery(envelope, self.route)
+        self.control.begin_delivery(envelope, begin_attempt)
         self.sent.append(envelope)
         return {'success': True, 'message_id': '101'}
 
@@ -158,12 +159,65 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
         ready = await self.start()
         self.worker.side_effect = [{'state': 'validated'}, {'state': 'busy'}, {'state': 'validated'}]
         status = await self.control('approve', **self.selector, resultDigest=ready['resultDigest'])
-        self.assertEqual(status['state'], 'sending')
+        self.assertEqual(status['state'], 'approved')
         self.assertEqual(self.sent, [])
         await self.outbox.flush()
         self.assertEqual(len(self.sent), 1)
         status = await self.control('status', **self.selector)
         self.assertEqual(status['state'], 'delivered')
+
+    async def test_cancel_while_approved_delivery_is_waiting(self):
+        ready = await self.start()
+        self.worker.side_effect = [{'state': 'validated'}, {'state': 'busy'}]
+        approved = await self.control('approve', **self.selector, resultDigest=ready['resultDigest'])
+        self.assertEqual(approved['state'], 'approved')
+        status = await self.control('cancel', **self.selector)
+        self.assertEqual(status['state'], 'cancelled')
+        await self.outbox.flush()
+        self.assertEqual(self.sent, [])
+
+    async def test_approved_attempt_interrupted_before_network_can_resume(self):
+        ready = await self.start()
+        self.worker.side_effect = self.worker_method
+        entered = asyncio.Event()
+
+        async def blocked(envelope, *, begin_attempt):
+            entered.set()
+            await asyncio.Future()
+
+        self.outbox.deliver = blocked
+        attempt = asyncio.create_task(self.control('approve', **self.selector, resultDigest=ready['resultDigest']))
+        await entered.wait()
+        attempt.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await attempt
+        self.resolver.reply_outbox = ReplyOutbox(self.ledger.db, self.deliver, retry_unknown=False)
+        await self.resolver.reply_outbox.flush()
+        self.assertEqual(len(self.sent), 1)
+        status = await self.control('status', **self.selector)
+        self.assertEqual(status['state'], 'delivered')
+
+    async def test_interrupted_network_attempt_is_never_reissued(self):
+        ready = await self.start()
+        attempted = asyncio.Event()
+
+        async def blocked(envelope, *, begin_attempt):
+            await self.control.check_delivery(envelope, self.route)
+            self.control.begin_delivery(envelope, begin_attempt)
+            attempted.set()
+            await asyncio.Future()
+
+        self.outbox.deliver = blocked
+        attempt = asyncio.create_task(self.control('approve', **self.selector, resultDigest=ready['resultDigest']))
+        await attempted.wait()
+        attempt.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await attempt
+        self.resolver.reply_outbox = ReplyOutbox(self.ledger.db, self.deliver, retry_unknown=True)
+        await self.resolver.reply_outbox.flush()
+        self.assertEqual(self.sent, [])
+        status = await self.control('status', **self.selector)
+        self.assertEqual((status['state'], status['receipt']['error_kind']), ('delivery_blocked', 'delivery_unknown'))
 
     async def test_reopened_store_does_not_restart_unconfirmed_running_assignment(self):
         entered = asyncio.Event()
