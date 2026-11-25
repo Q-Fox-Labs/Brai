@@ -850,6 +850,13 @@ def conversation(agent, user_message, task_id=None):
 def before_tool(name, args, **ids):
     """Проверить чтения и направить изменения и terminal во временный cwd."""
     args = dict(args)
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+        from identity.scope import operator_assignment
+        if operator_assignment.get() is not None and (
+                name in {'cronjob_manage', 'delegate_task', 'process_manage', 'send_message'}
+                or name == 'terminal' and any(args.get(key) for key in
+                    ('background', 'notify_on_complete', 'watch_patterns', 'heartbeat', 'persist_on_release'))):
+            raise FileError('OPERATOR_ASSIGNMENT_REQUIRES_FOREGROUND_TOOLS')
     operation = operation_for(ids)
     workspace = store().workspace(operation)
     # Native skill resolvers own their package-relative paths and their write policy.
@@ -1172,7 +1179,7 @@ def telegram_format(adapter, text):
     return formatter(text)
 
 
-async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None):
+async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict_caption=False):
     """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
     from contextlib import ExitStack
@@ -1191,6 +1198,8 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
         caption = item.get('caption', '')
         formatted = telegram_format(adapter, caption) if caption else ''
         if text_units(formatted) > 1024:
+            if strict_caption:
+                raise FileError('TELEGRAM_CAPTION_TOO_LONG')
             if text_units(formatted) <= 3500:
                 notice = await bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
                 message_id = getattr(notice, 'message_id', None)

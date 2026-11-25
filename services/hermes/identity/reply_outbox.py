@@ -69,20 +69,25 @@ class ReplyOutbox:
         async with self.locks.setdefault(owner, asyncio.Lock()):
             rows = self.db.execute("SELECT id,body,state FROM reply_outbox WHERE owner=? AND state IN ('pending','sending') ORDER BY seq", (owner,)).fetchall()
             for ident, raw, previous in rows:
-                if previous == 'sending' and not self.retry_unknown:
+                body = json.loads(raw)
+                operator_assignment = 'operatorAssignmentId' in body
+                retry_unknown = self.retry_unknown and not operator_assignment
+                if previous == 'sending' and not retry_unknown:
                     result = self._unknown_delivery()
                 else:
                     self.db.execute("UPDATE reply_outbox SET state='sending' WHERE id=?", (ident,))
                     try:
-                        result = await self.deliver(json.loads(raw))
+                        result = await self.deliver(body)
                     except PermissionError:
                         result = {'success': False, 'retryable': False, 'error': 'Delivery forbidden', 'error_kind': 'forbidden'}
                     except asyncio.CancelledError:
                         raise
                     except Exception:
                         result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
-                                  if self.retry_unknown else self._unknown_delivery())
+                                  if retry_unknown else self._unknown_delivery())
                 sent = result.get('success') is True and bool(result.get('message_id'))
+                if operator_assignment and not sent and result.get('retryable') is not False:
+                    result = self._unknown_delivery()
                 blocked = result.get('retryable') is False
                 state = 'sent' if sent else 'blocked' if blocked else 'pending'
                 self.db.execute('UPDATE reply_outbox SET state=?,receipt=? WHERE id=?', (state, canonical(result), ident))

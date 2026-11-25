@@ -296,11 +296,14 @@ class Resolver:
         self.bridges, self.turns = {}, {}
         self.ledger = ledger if ledger is not None else RouteLedger()
         self.reply_outbox = None
+        self.operator_assignment = None
         if self.mirror is not None and self.mirror.restartable:
             from .reply_outbox import ReplyOutbox
+            from .operator_assignment_control import OperatorAssignmentControl
             self.reply_outbox = ReplyOutbox(
                 self.ledger.db, self._deliver_saved_reply,
                 retry_unknown=os.environ.get('BRAI_IDENTITY_INSTANCE') != 'release')
+            self.operator_assignment = OperatorAssignmentControl(self, broker_call)
         self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None
@@ -368,7 +371,8 @@ class Resolver:
         """Держать native lifetime всех active профилей без нового сообщения."""
         path = os.environ.get('BRAI_IDENTITY_INGRESS_CONTROL_SOCKET')
         if path and not self.closed and self.control_server is None:
-            self.control_server = asyncio.create_task(serve_chat_control(path, self.chat_control, self.release_gate))
+            self.control_server = asyncio.create_task(serve_chat_control(
+                path, self.chat_control, self.release_gate, self.operator_assignment))
         if not self.closed and self.supervisor is None:
             self.supervisor = asyncio.create_task(self._supervise())
 
@@ -405,6 +409,8 @@ class Resolver:
         """Проверить каждого active worker после удержания входного транспорта."""
         blocked = {'operationId': operationId, 'state': 'blocked', 'reason': 'worker_control_unavailable'}
         try:
+            if self.operator_assignment is not None and (self.operator_assignment.tasks or self.operator_assignment.deliveries):
+                return {'operationId': operationId, 'state': 'draining', 'reason': 'operator_assignments'}
             # Native batch callbacks outlive PTB queue.task_done and can still dispatch.
             for name in ('_pending_text_batches', '_pending_text_batch_tasks',
                          '_pending_photo_batches', '_pending_photo_batch_tasks',
@@ -475,6 +481,8 @@ class Resolver:
             self.control_server.cancel()
             await asyncio.gather(self.control_server, return_exceptions=True)
             self.control_server = None
+        if self.operator_assignment is not None:
+            await self.operator_assignment.close()
         if self.supervisor is not None:
             self.supervisor.cancel()
             await asyncio.gather(self.supervisor, return_exceptions=True)
@@ -693,6 +701,17 @@ class Resolver:
         def current():
             self._chat_generation(profile, route, body['generation'])
         current.generation = body['generation']
+        if 'operatorAssignmentId' in body:
+            ident = body['operatorAssignmentId']
+            control = self.operator_assignment
+            async def before_send():
+                await control.check_delivery(body, route)
+            control.deliveries.add(ident)
+            try:
+                return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current,
+                                                 before_send=before_send)
+            finally:
+                control.deliveries.discard(ident)
         turn = self.turns.get(profile['uid'])
         if turn is not None and turn['route'] == route and request_scope.get() == turn['id']:
             return await self.deliver(profile, profile['userId'], body['action'], payload)
@@ -959,7 +978,7 @@ class Resolver:
                                                     text=action == 'send')
         return await self._deliver_route(profile, action, payload, route, metadata, turn, current)
 
-    async def _deliver_route(self, profile, action, payload, route, metadata, turn, current):
+    async def _deliver_route(self, profile, action, payload, route, metadata, turn, current, *, before_send=None):
         """Отправить в уже проверенный маршрут и сохранить только фактические квитанции."""
         uid = profile['uid']
         input_id = turn.get('inputId') if turn else None
@@ -996,12 +1015,15 @@ class Resolver:
                     prepared.append({'readHandle': stream, 'file': artifact,
                         'caption': item['caption'], 'presentation': view})
                 validate_telegram(prepared)
+                if before_send is not None:
+                    await before_send()
                 current()
                 # Только media API receipt означает доставку файла. Native text fallback
                 # после ошибки не может превратиться в успешный голосовой ответ.
                 with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
+                    parameters = {'strict_caption': True} if before_send is not None else {}
                     ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
-                                                fallback, reply_to=payload.get('reply_to'))
+                                                fallback, reply_to=payload.get('reply_to'), **parameters)
                 if (not isinstance(ids, list) or len(ids) != len(prepared)
                         or any(type(value) not in (int, str) or not str(value).isdecimal()
                                or int(value) <= 0 for value in ids)):
@@ -1020,6 +1042,11 @@ class Resolver:
         method = getattr(self.adapter, action, None)
         if not callable(method):
             raise ValueError('Native delivery unavailable')
+        if before_send is not None:
+            from files.native import telegram_format, text_units
+            if action != 'send' or text_units(telegram_format(self.adapter, values['content'])) > 3500:
+                raise PermissionError('Operator assignment requires one complete message')
+            await before_send()
         current()
         with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
             result = await method(**values)
