@@ -29,16 +29,10 @@ export function validateConfig(value) {
   if (!value?.ownerId || (process.env.BRAI_HERMES_OWNER_ID && process.env.BRAI_HERMES_OWNER_ID !== value.ownerId)) {
     throw new Error('Invalid Hermes owner configuration');
   }
-  // AIDEV-NOTE: RELEASE использует только выделенный DNS в закрытой сети и обязательные credentials.
-  const releaseNats = value.ownerId === 'release-memos'
-    && Array.isArray(nats?.servers) && nats.servers.length === 1
-    && nats.servers[0] === 'nats://brai-release-nats:4222'
-    && typeof nats.user === 'string' && nats.user.length > 0
-    && typeof nats.password === 'string' && nats.password.length > 0;
   if (!Array.isArray(nats?.servers) || nats.servers.length === 0
-    || (!releaseNats && !nats.servers.every(isLocalNatsServer))
+    || !nats.servers.every(isLocalNatsServer)
     || (nats.user && !nats.password) || (!nats.user && nats.password)) {
-    throw new Error('Hermes NATS servers must target an allowed loopback or private RELEASE listener on port 4222 or 4223');
+    throw new Error('Hermes NATS servers must target a loopback listener on port 4222 or 4223');
   }
   if (model?.modelId !== MODEL_ID || model?.revision !== MODEL_REVISION || model?.profileId !== PROFILE_ID) {
     throw new Error('Hermes embedding model must match the pinned LocalAI profile');
@@ -218,8 +212,9 @@ export function createEmbeddingServer(config, invokeEmbedding, isReady = () => t
 
 /** Запустить HTTP-адаптер; dial и уведомление об отказе можно подменить в тесте. */
 export async function startEmbeddingAdapter(config, connectNats = connect, onTerminal = () => { process.exitCode = 1; }) {
+  // AIDEV-NOTE: Имя owner само по себе не определяет RELEASE; закрепляем и выделенный NATS user.
   const privateRelease = config.ownerId === 'release-memos' && config.nats.servers.length === 1
-    && ['nats://127.0.0.1:4222', 'nats://brai-release-nats:4222'].includes(config.nats.servers[0]);
+    && config.nats.servers[0] === 'nats://127.0.0.1:4222' && config.nats.user === 'release_embeddings';
   const nc = await connectNats({
     servers: config.nats.servers,
     user: config.nats.user,
@@ -230,11 +225,8 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     // AIDEV-NOTE: При разрыве supervisor запускает процесс заново; просроченные запросы не буферизуются.
     ...(privateRelease ? { reconnect: false, ignoreClusterUpdates: true } : {}),
   });
-  let closing;
-  let terminal = false;
-  let drainingNats = false;
   const server = createEmbeddingServer(config, async (invocation) => {
-    if (nc.isClosed() || nc.isDraining()) throw new Error('NATS unavailable');
+    if (privateRelease && (nc.isClosed() || nc.isDraining())) throw new Error('NATS unavailable');
     const message = await nc.request(SUBJECT, Buffer.from(JSON.stringify(invocation)), { timeout: config.embedding.timeoutMs });
     const status = message.headers?.get('Nats-Service-Error-Code');
     if (status) {
@@ -244,6 +236,23 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     }
     return JSON.parse(new TextDecoder().decode(message.data));
   }, () => !nc.isClosed() && !nc.isDraining());
+  if (!privateRelease) {
+    // Сохранить исходный lifecycle остальных контуров.
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(config.embedding.port, config.embedding.host, resolve);
+    });
+    const close = async () => {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await nc.drain();
+    };
+    process.once('SIGINT', () => void close());
+    process.once('SIGTERM', () => void close());
+    return { close, server, nc };
+  }
+  let closing;
+  let terminal = false;
+  let drainingNats = false;
   const onSignal = () => { void close().catch(() => { onTerminal(); }); };
   const close = (failed = false) => {
     if (failed && !terminal) {
@@ -267,15 +276,13 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     })();
     return closing;
   };
-  if (privateRelease) {
-    // AIDEV-NOTE: closed() сохраняет факт отказа даже если событие случилось до подписки.
-    void nc.closed().then(() => {
-      if (!drainingNats && (server.listening || closing)) {
-        process.stderr.write('MemOS embedding adapter: NATS connection closed\n');
-        void close(true).catch(() => { onTerminal(); });
-      }
-    });
-  }
+  // AIDEV-NOTE: closed() сохраняет факт отказа даже если событие случилось до подписки.
+  void nc.closed().then(() => {
+    if (!drainingNats && (server.listening || closing)) {
+      process.stderr.write('MemOS embedding adapter: NATS connection closed\n');
+      void close(true).catch(() => { onTerminal(); });
+    }
+  });
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject);

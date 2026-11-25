@@ -36,4 +36,4 @@ jobs:
       - name: Exercise NATS restart and replacement
         env:
           MEMOS_DOCKER_TEST: '1'
-        run: node --test services/hermes/memos/embedding/adapter.docker.test.mjs services/hermes/memos/embedding/legacy-namespace.docker.test.mjs
+        run: node --test services/hermes/memos/embedding/legacy-namespace.docker.test.mjs

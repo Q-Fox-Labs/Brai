@@ -159,6 +159,17 @@ test('loopback RELEASE adapter recovers its namespace after broker restart',
         'node', '--input-type=module', '-e',
         "import {readlinkSync} from 'node:fs'; console.log(readlinkSync('/proc/self/ns/net'))");
       assert.equal(readNamespace(candidate), newest);
+
+      // Брокер может остановиться без паузы адаптера: дождаться первой попытки restart до его запуска.
+      const beforeUnpaused = Number(status(candidate, '.RestartCount'));
+      docker('stop', '--time', '1', broker);
+      await wait(() => {
+        const currentCount = Number(status(candidate, '.RestartCount'));
+        if (currentCount <= beforeUnpaused) throw Error('adapter has not attempted restart while broker is stopped');
+      });
+      docker('start', broker);
+      await wait(() => probeNats(responder));
+      await wait(() => probe(responder));
     } catch (error) {
       failure = error;
     } finally {

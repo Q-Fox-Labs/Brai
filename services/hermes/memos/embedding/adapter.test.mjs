@@ -32,24 +32,11 @@ test('accepts DEV and PROD loopback NATS listeners and rejects other endpoints',
   assert.throws(() => validateConfig({ ...config, nats: { servers: ['nats://example.com:4222'] } }), /loopback/);
 });
 
-test('accepts only the authenticated RELEASE broker on its private service address', () => {
+test('RELEASE still rejects non-loopback NATS addresses', () => {
   const value = { ...config, ownerId: 'release-memos', nats: {
     servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
   } };
-  assert.deepEqual(validateConfig(value).nats.servers, ['nats://brai-release-nats:4222']);
-  for (const servers of [
-    ['nats://brai-release-nats:4223'], ['tls://brai-release-nats:4222'],
-    ['nats://brai-release-nats:4222/'], ['nats://brai-release-nats:4222?x=1'],
-    ['nats://evil@brai-release-nats:4222'], ['nats://other:4222'],
-    ['nats://brai-release-nats:4222', 'nats://127.0.0.1:4222'],
-  ]) assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, servers } }));
-  for (const user of ['', null, 5]) {
-    assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, user } }));
-  }
-  for (const password of ['', null, 5]) {
-    assert.throws(() => validateConfig({ ...value, nats: { ...value.nats, password } }));
-  }
-  assert.throws(() => validateConfig({ ...value, ownerId: 'another-owner' }));
+  assert.throws(() => validateConfig(value), /loopback/);
 });
 
 test('private RELEASE adapter stops listening after a terminal NATS disconnect', async () => {
@@ -68,7 +55,7 @@ test('private RELEASE adapter stops listening after a terminal NATS disconnect',
   };
   let options;
   const release = { ...config, ownerId: 'release-memos', nats: {
-    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+    servers: ['nats://127.0.0.1:4222'], user: 'release_embeddings', password: 'synthetic',
   }, embedding: { ...config.embedding, port: 0 } };
   let terminal = 0;
   const beforeInt = process.listenerCount('SIGINT');
@@ -100,35 +87,10 @@ test('private RELEASE adapter stops listening after a terminal NATS disconnect',
   assert.equal(process.listenerCount('SIGTERM'), beforeTerm);
 });
 
-test('existing RELEASE loopback configuration also exits on a lost NATS connection', async () => {
-  let notifyClosed;
-  let closed = false;
-  const closedPromise = new Promise((resolve) => { notifyClosed = resolve; });
-  const nc = {
-    isClosed: () => closed, isDraining: () => false, closed: () => closedPromise,
-    drain: async () => { closed = true; notifyClosed(); },
-  };
-  const release = { ...config, ownerId: 'release-memos', nats: {
-    servers: ['nats://127.0.0.1:4222'], user: 'release_embeddings', password: 'synthetic',
-  }, embedding: { ...config.embedding, port: 0 } };
-  let options;
-  let terminal = 0;
-  const { server } = await startEmbeddingAdapter(release, async (value) => { options = value; return nc; },
-    () => { terminal++; });
-  assert.equal(options.reconnect, false);
-  assert.equal(options.ignoreClusterUpdates, true);
-  const stopped = once(server, 'close');
-  closed = true;
-  notifyClosed();
-  await stopped;
-  assert.equal(server.listening, false);
-  assert.equal(terminal, 1);
-});
-
 test('private RELEASE adapter rejects a connection already closed during startup', async () => {
   const nc = { isClosed: () => true, isDraining: () => false, closed: () => Promise.resolve() };
   const release = { ...config, ownerId: 'release-memos', nats: {
-    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+    servers: ['nats://127.0.0.1:4222'], user: 'release_embeddings', password: 'synthetic',
   }, embedding: { ...config.embedding, port: 0 } };
   await assert.rejects(startEmbeddingAdapter(release, async () => nc, () => {}), /closed during adapter startup/);
 });
@@ -142,7 +104,7 @@ test('NATS disconnect interrupts a graceful stop waiting for a slow HTTP client'
     drain: async () => { closed = true; notifyClosed(); },
   };
   const release = { ...config, ownerId: 'release-memos', nats: {
-    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+    servers: ['nats://127.0.0.1:4222'], user: 'release_embeddings', password: 'synthetic',
   }, embedding: { ...config.embedding, port: 0 } };
   let terminal = 0;
   const { server, close } = await startEmbeddingAdapter(release, async () => nc, () => { terminal++; });
@@ -169,24 +131,38 @@ test('closes NATS if the HTTP listener cannot bind its port', async (t) => {
     closed: () => new Promise(() => {}),
     close: async () => { closed = true; },
   };
-  const local = { ...config, embedding: { ...config.embedding, port: occupied.address().port } };
+  const local = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://127.0.0.1:4222'], user: 'release_embeddings', password: 'synthetic',
+  },
+    embedding: { ...config.embedding, port: occupied.address().port } };
   await assert.rejects(startEmbeddingAdapter(local, async () => nc), { code: 'EADDRINUSE' });
   assert.equal(closed, true);
 });
 
-test('loopback configurations retain existing NATS connection defaults', async () => {
-  let options;
-  let closed;
-  const nc = {
-    isClosed: () => false, isDraining: () => false,
-    closed: () => new Promise((resolve) => { closed = resolve; }),
-    drain: async () => { closed?.(); },
-  };
-  const result = await startEmbeddingAdapter({ ...config, embedding: { ...config.embedding, port: 0 } },
-    async (value) => { options = value; return nc; });
-  assert.equal(options.reconnect, undefined);
-  assert.equal(options.ignoreClusterUpdates, undefined);
-  await result.close();
+test('all other loopback configurations retain existing NATS connection defaults', async () => {
+  for (const value of [
+    { ...config, nats: { servers: ['nats://127.0.0.1:4222'] } },
+    { ...config, ownerId: 'release-memos', nats: {
+      servers: ['nats://127.0.0.1:4222'], user: 'hermes', password: 'synthetic',
+    } },
+    { ...config, ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4222'] } },
+    { ...config, ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4223'] } },
+    { ...config, ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4222', 'nats://127.0.0.1:4223'] } },
+  ]) {
+    const priorInt = new Set(process.listeners('SIGINT'));
+    const priorTerm = new Set(process.listeners('SIGTERM'));
+    let options;
+    const nc = {
+      isClosed: () => false, isDraining: () => false, drain: async () => {},
+    };
+    const result = await startEmbeddingAdapter({ ...value, embedding: { ...config.embedding, port: 0 } },
+      async (item) => { options = item; return nc; });
+    assert.equal(options.reconnect, undefined);
+    assert.equal(options.ignoreClusterUpdates, undefined);
+    await result.close();
+    for (const listener of process.listeners('SIGINT')) if (!priorInt.has(listener)) process.removeListener('SIGINT', listener);
+    for (const listener of process.listeners('SIGTERM')) if (!priorTerm.has(listener)) process.removeListener('SIGTERM', listener);
+  }
 });
 
 test('rejects malformed input and a request for another model before invoking NATS', async () => {
