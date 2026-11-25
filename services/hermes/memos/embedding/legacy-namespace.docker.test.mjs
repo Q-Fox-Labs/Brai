@@ -51,42 +51,71 @@ test('legacy adapter can rejoin the restarted broker without changing its contai
       const v=await r.json();if(!r.ok||v.data?.[0]?.embedding?.length!==768)process.exit(1);`;
     const probe = (id) => execFileSync('docker', ['exec', id, 'node', '--input-type=module', '-e', probeCode],
       { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const natsProbeCode = `import {connect} from 'nats';
+      const nc=await connect({servers:'nats://brai-release-nats:4222',user:'responder',pass:'fixture',
+        inboxPrefix:'_INBOX.fixture_probe',timeout:3000});
+      try {const m=await nc.request('brai.fixture.ping',new Uint8Array(),{timeout:3000});
+        if(new TextDecoder().decode(m.data)!=='pong')process.exitCode=1;} finally {await nc.close();}`;
+    const probeNats = (id) => execFileSync('docker', ['exec', '--workdir', '/work', id,
+      'node', '--input-type=module', '-e', natsProbeCode],
+    { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
     try {
       docker('network', 'create', '--label', marker, '--internal', network);
       const configPath = path.join(directory, 'config.json');
       const legacyPath = path.join(directory, 'adapter.mjs');
-      const config = { ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4222'] },
+      const brokerPath = path.join(directory, 'nats.json');
+      const config = { ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4222'],
+        user: 'release_embeddings', password: 'fixture', inboxPrefix: '_INBOX.memos_embedding' },
         embedding: { host: '0.0.0.0', port: 19573, apiKey: 'x'.repeat(32),
           model: { modelId: 'embeddinggemma-2-q8', revision: 'bfcd298762cc34d0357ece5ebdd31791a3a374d8',
             profileId: 'embeddinggemma2_llama_cpp' } } };
+      const brokerConfig = { port: 4222, authorization: { users: [
+        { user: 'release_embeddings', password: 'fixture', permissions: {
+          publish: { allow: ['brai.local_ai.v1.invoke.embed'] },
+          subscribe: { allow: ['_INBOX.memos_embedding.>'] } } },
+        { user: 'responder', password: 'fixture', permissions: {
+          publish: { allow: ['_INBOX.memos_embedding.>', '_INBOX.fixture_probe.>', 'brai.fixture.ping'] },
+          subscribe: { allow: ['brai.local_ai.v1.invoke.embed', 'brai.fixture.ping', '_INBOX.fixture_probe.>'] } } },
+      ] } };
       writeFileSync(configPath, JSON.stringify(config), { mode: 0o444 });
+      writeFileSync(brokerPath, JSON.stringify(brokerConfig), { mode: 0o444 });
       // Базовый файл берётся из принятого RELEASE, а не из проверяемого нового адаптера.
       const old = execFileSync('git', ['show', `5a6dec0c3b833b7aba3565e937afc855e6f71964:${modulePath}`]);
       writeFileSync(legacyPath, old, { mode: 0o444 });
       chmodSync(configPath, 0o444);
       chmodSync(legacyPath, 0o444);
-      const broker = start('--network', network, '--network-alias', 'brai-release-nats', 'nats:2.15.0');
+      chmodSync(brokerPath, 0o444);
+      const broker = start('--network', network, '--network-alias', 'brai-release-nats',
+        '--mount', `type=bind,src=${brokerPath},dst=/nats.json,readonly`, 'nats:2.15.0', '-c', '/nats.json');
       await wait(() => { if (!logs(broker).includes('Server is ready')) throw Error('broker not ready'); });
       const responderCode = `import {connect} from 'nats';
-        const nc=await connect({servers:'nats://brai-release-nats:4222',waitOnFirstConnect:true,maxReconnectAttempts:-1});
-        const sub=nc.subscribe('brai.local_ai.v1.invoke.embed');console.log('READY');
-        for await(const m of sub){const v=JSON.parse(new TextDecoder().decode(m.data));
+        const nc=await connect({servers:'nats://brai-release-nats:4222',user:'responder',pass:'fixture',
+          waitOnFirstConnect:true,maxReconnectAttempts:-1});
+        const embedding=nc.subscribe('brai.local_ai.v1.invoke.embed'), ping=nc.subscribe('brai.fixture.ping');
+        await nc.flush();console.log('READY');
+        await Promise.all([(async()=>{for await(const m of embedding){
+          const v=JSON.parse(new TextDecoder().decode(m.data));
           m.respond(Buffer.from(JSON.stringify({requestId:v.requestId,operationId:v.operationId,model:v.model,
-            vectors:v.texts.map(()=>Array(768).fill(0.5))})));}`;
+            vectors:v.texts.map(()=>Array(768).fill(0.5))})));}})(),
+          (async()=>{for await(const m of ping)m.respond(Buffer.from('pong'));})()]);`;
       const responder = start('--network', network, '--mount', sourceMount, '--workdir', '/work', image,
         'node', '--input-type=module', '-e', responderCode);
       await wait(() => { if (!logs(responder).includes('READY')) throw Error('responder not ready'); });
-      adapter = start('--network', `container:${broker}`, '--user', '1000:1000', '--read-only',
-        '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--init', '--mount', sourceMount,
+      adapter = start('--network', `container:${broker}`, '--restart', 'unless-stopped',
+        '--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+        '--tmpfs', '/tmp:rw,nosuid,nodev,mode=1777', '--init', '--mount', sourceMount,
         '--mount', `type=bind,src=${legacyPath},dst=/work/${modulePath},readonly`,
         '--mount', `type=bind,src=${configPath},dst=/config.json,readonly`, '--workdir', '/work',
         '--env', 'BRAI_HERMES_CONFIG=/config.json', image, 'node', modulePath);
       await wait(() => probe(responder));
       docker('pause', adapter);
+      docker('pause', responder);
       docker('stop', '--time', '1', broker);
       docker('start', broker);
+      docker('unpause', responder);
       docker('unpause', adapter);
-      await wait(() => { if (!logs(broker).includes('Server is ready')) throw Error('broker not ready'); });
+      // Подтвердить повторное подключение responder после рестарта, а не старую строку из docker logs.
+      await wait(() => probeNats(responder));
       const before = readNamespace(adapter);
       const current = docker('run', '--rm', '--label', marker, '--network', `container:${broker}`, image,
         'node', '--input-type=module', '-e',
@@ -97,7 +126,7 @@ test('legacy adapter can rejoin the restarted broker without changing its contai
       assert.equal(status(adapter, '.Id'), adapter, 'restart must retain the journaled container ID');
       assert.equal(readNamespace(adapter), current);
       await wait(() => probe(responder));
-      // Проверка повторного входа после обрыва между stop и start.
+      // Проверка той же последовательности stop/start; cold recovery проверяется отдельно.
       docker('stop', '--time', '1', adapter);
       docker('start', adapter);
       assert.equal(status(adapter, '.Id'), adapter);
@@ -113,7 +142,7 @@ test('legacy adapter can rejoin the restarted broker without changing its contai
       } catch { errors.push('container discovery'); }
       for (const id of [...containers].reverse()) {
         try {
-          if (id === adapter && status(id, '.State.Paused') === 'true') docker('unpause', id);
+          if (status(id, '.State.Paused') === 'true') docker('unpause', id);
           docker('rm', '-f', id);
         } catch { errors.push('container'); }
       }
