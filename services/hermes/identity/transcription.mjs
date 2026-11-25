@@ -31,7 +31,7 @@ export function createOwnerTranscription(profile, endpoint, {isAdmin = async () 
  return {
   list() {
    return [...methods].map(([name, entry]) => ({name, description:entry.method==='request.submit'
-    ? 'Штатная расшифровка аудио Hermes. Передай ID готового личного артефакта, сохрани ключ и полученный requestId. Для видео сначала извлеки аудио. После submit проверяй состояние и получай текст по requestId.'
+    ? 'Штатная расшифровка аудио Hermes. Передай ID готового личного аудиоартефакта. Скачанное медиа при необходимости приведи к mono WAV 16 кГц. Сохрани ключ и полученный requestId, затем проверь состояние и получи текст.'
     : 'Операция Transcription в личной области текущего профиля.',
     inputSchema:expand(schemas.definitions[entry.input])}));
   },

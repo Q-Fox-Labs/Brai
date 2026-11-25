@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет личный STT через broker без настоящей модели и Telegram.
 # ABOUTME: Проверяет контракт Transcription, связь квитанции с файлом и отсутствие output при отказе.
 import json
+from datetime import datetime
 import os
 from pathlib import Path
 import shlex
@@ -19,16 +20,22 @@ from identity.transcribe import PART_TIMEOUT, transcribe_audio, transcribe_file
 MODEL = {'modelId': 'selected-model', 'revision': 'selected-revision', 'profileId': 'selected-profile'}
 AID = '11111111-1111-4111-8111-111111111111'
 RID = '22222222-2222-4222-8222-222222222222'
+REQUESTED_MODEL = {'route': 'local', 'selection': 'required', 'modelId': MODEL['modelId']}
 
 
 def submitted(args, *, state='succeeded'):
-    aid = args.get('audioArtifactId', AID)
-    return {'request': {'audioArtifactId': aid, 'requestId': RID,
-                        'selectedModel': MODEL, 'taskState': state}}
+    # Полный закрытый PublicRequestView без внутренних owner/asset/selector полей.
+    finished = state == 'succeeded'
+    return {'request': {'requestId': RID, 'requestedModel': args.get('requestedModel', REQUESTED_MODEL),
+                        'actualModel': MODEL if finished else None, 'taskState': state,
+                        'resultState': 'available' if finished else 'not_ready', 'revision': 1,
+                        'errorCode': None, 'createdAt': '2026-11-25T00:00:00Z',
+                        'updatedAt': '2026-11-25T00:00:00Z'}}
 
 
 def recognized(text):
-    return {'state': 'available', 'result': {'requestId': RID, 'actualModel': MODEL, 'text': text}}
+    return {'state': 'available', 'result': {'requestId': RID, 'actualModel': MODEL, 'text': text,
+                                             'segments': None}}
 
 
 class TranscriptionTests(unittest.TestCase):
@@ -60,7 +67,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(self.calls[1][1]['name'], 'transcription_request_submit')
         self.assertEqual(args['audioArtifactId'], AID)
         self.assertEqual(args['requestedModel'], {'route':'local', 'selection':'required', 'modelId': MODEL['modelId']})
-        self.assertIsNone(args['deadlineAt'])
+        self.assertIsNotNone(datetime.fromisoformat(args['deadlineAt']).utcoffset())
         self.assertNotIn('ownerId', args)
         self.assertNotIn('token', json.dumps(self.calls))
         self.assertGreater(self.calls[0][2]['timeout'], self.calls[1][2]['timeout'])
@@ -95,13 +102,13 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual([p['name'] for m, p, _ in self.calls if m == 'tools.call'],
                          ['transcription_request_submit', 'transcription_request_get', 'transcription_result_get'])
 
-    def test_replay_of_owned_artifact_reuses_same_submission(self):
-        transcribe_file(self.source, self.output, MODEL, call=self.call)
-        self.output.unlink()
-        transcribe_file(self.source, self.output, MODEL, call=self.call)
+    def test_second_explicit_command_can_recognize_the_same_artifact(self):
+        for _ in range(2):
+            transcribe_file(self.source, self.output, MODEL, call=self.call)
+            self.output.unlink()
         submissions = [p['args'] for m, p, _ in self.calls if p.get('name') == 'transcription_request_submit']
         self.assertEqual(len(submissions), 2)
-        self.assertEqual(submissions[0], submissions[1])
+        self.assertNotEqual(submissions[0]['clientIdempotencyKey'], submissions[1]['clientIdempotencyKey'])
 
     def test_unknown_invoke_never_retries_or_creates_output(self):
         def fail(method, params, **kwargs):

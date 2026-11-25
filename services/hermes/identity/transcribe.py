@@ -3,6 +3,7 @@
 """Голосовой вход с владельцем из SO_PEERCRED, без общего Transcription bearer."""
 import argparse
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -35,7 +36,16 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     if not stat.S_ISREG(info.st_mode) or not info.st_size:
         raise ValueError('INVALID_AUDIO')
     started = time.monotonic()
+    deadline = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
     request_key = None
+    request_id = None
+
+    def log_failure(reason, stage, method, error_type):
+        logger.warning('identity_stt_failed %s', json.dumps({
+            'clientIdempotencyKey': request_key, 'requestId': request_id, 'method': method,
+            'elapsedMs': max(0, int((time.monotonic() - started) * 1000)),
+            'errorType': error_type, 'reason': reason, 'stage': stage,
+        }, sort_keys=True))
 
     def seconds_left():
         remaining = timeout - (time.monotonic() - started)
@@ -53,10 +63,7 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
                 if isinstance(data, dict) else safe_failure(
                     reason='FORBIDDEN' if isinstance(error, PermissionError) else
                     'DEADLINE_EXCEEDED' if isinstance(error, TimeoutError) else 'INTERNAL'))
-            logger.warning('identity_stt_failed %s', json.dumps({
-                'clientIdempotencyKey': request_key, 'method': method,
-                'elapsedMs': max(0, int((time.monotonic()-started)*1000)),
-                'errorType': type(error).__name__, **diagnostic}, sort_keys=True))
+            log_failure(diagnostic['reason'], diagnostic['stage'], method, type(error).__name__)
             raise
 
     cached_id = source.parent.name
@@ -75,11 +82,9 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     if (not isinstance(aid, str) or str(uuid.UUID(aid)) != aid
             or published.get('mimeType') not in AUDIO_TYPES):
         raise ValueError('INVALID_AUDIO_ARTIFACT')
-    # AIDEV-NOTE: У повторно доставленного вложения тот же owner artifact.
-    # Клиентский timeout меняется между доставками, поэтому не входит в запрос.
-    request_key = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([
-        'brai:hermes:command-stt', aid, model['modelId'], model['revision'], model['profileId'],
-    ], separators=(',', ':'))))
+    # AIDEV-NOTE: Артефакт может быть явно запрошен повторно после утраты
+    # результата. Идентификатор файла сам по себе не является ID задания.
+    request_key = str(uuid.uuid4())
 
     def transcription(action, args):
         result = invoke('tools.call', {'name': 'transcription_' + action, 'args': args})
@@ -89,12 +94,11 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
 
     submission = {'clientIdempotencyKey': request_key, 'audioArtifactId': aid,
                   'requestedModel': {'route': 'local', 'selection': 'required', 'modelId': model['modelId']},
-                  'deadlineAt': None}
+                  'deadlineAt': deadline}
     status = transcription('request_submit', submission)
-    request_id = None
     while True:
         record = status.get('request')
-        if not isinstance(record, dict) or record.get('audioArtifactId') != aid:
+        if not isinstance(record, dict) or record.get('requestedModel') != submission['requestedModel']:
             raise ValueError('INVALID_TRANSCRIPTION_REQUEST')
         current_id = record.get('requestId')
         if (not isinstance(current_id, str) or str(uuid.UUID(current_id)) != current_id
@@ -105,13 +109,18 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
         if state == 'succeeded':
             break
         if state not in ('accepted', 'dispatching', 'running'):
+            reason = {'failed': 'TRANSCRIPTION_FAILED', 'outcome_unknown': 'OUTCOME_UNKNOWN',
+                      'cancelled': 'CANCELLED'}.get(state, 'INVALID_UPSTREAM_RESPONSE')
+            log_failure(reason, 'transcription', 'request.get', 'TerminalRequest')
             raise ValueError('TRANSCRIPTION_REQUEST_NOT_COMPLETED')
-        if record.get('selectedModel') != model:
+        if record.get('actualModel') is not None and record['actualModel'] != model:
             raise ValueError('TRANSCRIPTION_MODEL_MISMATCH')
         time.sleep(min(1, seconds_left()))
         status = transcription('request_get', {'requestId': request_id})
     delivery = transcription('result_get', {'requestId': request_id})
     result = delivery.get('result')
+    if delivery.get('state') in ('lost', 'expired', 'not_ready', 'delivery_unknown'):
+        log_failure('RESULT_' + delivery['state'].upper(), 'transcription', 'result.get', 'UnavailableResult')
     if (delivery.get('state') != 'available' or not isinstance(result, dict)
             or result.get('requestId') != request_id or result.get('actualModel') != model
             or not isinstance(result.get('text'), str)):

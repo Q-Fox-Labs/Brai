@@ -76,8 +76,8 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
                     transcribe_file(source, output, MODEL, call=call)
             log = '\n'.join(captured.output)
             args = calls[-1][1]['args']
-            self.assertIn(args['requestId'], log)
-            self.assertIn(args['operationId'], log)
+            self.assertIn(args['clientIdempotencyKey'], log)
+            self.assertIn('"requestId": null', log)
             self.assertIn('OUTCOME_UNKNOWN', log)
             self.assertNotIn('secret-token', log)
             self.assertNotIn(str(source), log)
