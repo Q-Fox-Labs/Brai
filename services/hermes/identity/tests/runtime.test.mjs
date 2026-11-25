@@ -12,7 +12,8 @@ function fixture(){
   records[p.toolsConfigPath]={ownerId:p.userId,nats:{servers:['nats://fixture']},gameCore:{enabled:false},history:{enabled:false},transcription:{enabled:false},publisher:{configPath:'/pub/'+uid}};
   records['/pub/'+uid]={ownerId:p.userId,allowedReadRoots:[p.stagingRoot],resultRoot:'/result/'+uid};
  }
- const start=async config=>({async listTools(){return [{name:'history_list'},{name:'publish_file'},{name:'fetch_file'},{name:'timer_snapshot_get'}];},
+ const start=async config=>({async listTools(){return [{name:'history_list'},{name:'publish_file'},{name:'fetch_file'},
+  {name:'local_ai_invoke_transcribe'},{name:'timer_snapshot_get'}];},
   async call(name,args){calls.push([config.ownerId,name,args]);return {name,owner:config.ownerId};},
   async synthesizeVoice(args,signal){signal?.throwIfAborted();calls.push([config.ownerId,'voice',args,signal]);return {artifactId:'voice-'+config.ownerId};},
   async filesConfiguration(){const home='/home/'+config.ownerId;return {ownerId:config.ownerId,stateRoot:home+'/workspace/files',resultRoot:home+'/results',readRoots:[home+'/workspace',home+'/media',home+'/results']};},
@@ -28,6 +29,7 @@ test('factory binds owner and staging to UID and separates history and publisher
  assert.deepEqual((await a.listTools()).map(x=>x.name),['history_list','timer_snapshot_get']);
  assert.equal((await a.filesConfiguration()).resultRoot,'/home/u1/results');
  await assert.rejects(a.callTool('publish_file',{path:'/etc/passwd'}),/CONFIG_NOT_READY/);
+ await assert.rejects(a.callTool('local_ai_invoke_transcribe',{}),/CONFIG_NOT_READY/);
  await assert.rejects(a.publishSnapshot('/stage/1002/file','r'),/bad snapshot/);
  await a.publishSnapshot('/stage/1001/file','r');await b.fetchArtifact('artifact');
  await f.adapters.historyCall(f.profile('1001'),'history_list',{});await f.adapters.historyCall(f.profile('1001'),'history_categories_list',{});await assert.rejects(f.adapters.historyCall(f.profile('1001'),'history_delete',{}),/CONFIG_NOT_READY/);

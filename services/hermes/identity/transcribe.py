@@ -1,11 +1,11 @@
-# ABOUTME: Подключает command STT личного Hermes к существующему Local AI через broker.
-# ABOUTME: Публикует только собственное аудио; не получает credentials и не повторяет invoke.
+# ABOUTME: Направляет command STT личного Hermes в сервис Transcription через broker.
+# ABOUTME: Публикует только собственное аудио и получает результат по квитанции сервиса.
 """Голосовой вход с владельцем из SO_PEERCRED, без общего Transcription bearer."""
 import argparse
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import json
 import logging
-from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import stat
@@ -24,6 +24,8 @@ AUDIO_TYPES = {'audio/ogg', 'audio/wav', 'audio/flac', 'audio/mpeg'}
 MAX_TRANSCRIPT_BYTES = 1_048_576
 SINGLE_TIMEOUT = 180
 PART_TIMEOUT = 900
+TERMINAL_CODES = {'DEADLINE_EXCEEDED', 'DEPENDENCY_UNAVAILABLE', 'MODEL_UNAVAILABLE',
+                  'MODEL_CATALOG_UNAVAILABLE', 'ARTIFACT_OWNER_MISMATCH', 'ARTIFACT_NOT_READY'}
 
 
 def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
@@ -37,13 +39,24 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
         raise ValueError('INVALID_AUDIO')
     started = time.monotonic()
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
+    request_key = None
+    request_id = None
 
-    request_id, operation_id = str(uuid.uuid4()), str(uuid.uuid4())
+    def log_failure(reason, stage, method, error_type):
+        logger.warning('identity_stt_failed %s', json.dumps({
+            'clientIdempotencyKey': request_key, 'requestId': request_id, 'method': method,
+            'elapsedMs': max(0, int((time.monotonic() - started) * 1000)),
+            'errorType': error_type, 'reason': reason, 'stage': stage,
+        }, sort_keys=True))
 
-    def invoke(method, params):
+    def seconds_left():
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError('DEADLINE_EXCEEDED')
+        return remaining
+
+    def invoke(method, params):
+        remaining = seconds_left()
         try:
             return call(method, params, timeout=remaining)
         except Exception as error:
@@ -52,10 +65,7 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
                 if isinstance(data, dict) else safe_failure(
                     reason='FORBIDDEN' if isinstance(error, PermissionError) else
                     'DEADLINE_EXCEEDED' if isinstance(error, TimeoutError) else 'INTERNAL'))
-            logger.warning('identity_stt_failed %s', json.dumps({
-                'requestId': request_id, 'operationId': operation_id, 'method': method,
-                'elapsedMs': max(0, int((time.monotonic()-started)*1000)),
-                'errorType': type(error).__name__, **diagnostic}, sort_keys=True))
+            log_failure(diagnostic['reason'], diagnostic['stage'], method, type(error).__name__)
             raise
 
     cached_id = source.parent.name
@@ -74,11 +84,50 @@ def _transcribe_part(source, model, call, timeout, *, allow_silence=False):
     if (not isinstance(aid, str) or str(uuid.UUID(aid)) != aid
             or published.get('mimeType') not in AUDIO_TYPES):
         raise ValueError('INVALID_AUDIO_ARTIFACT')
-    result = invoke('tools.call', {'name': 'local_ai_invoke_transcribe', 'args': {
-        'requestId': request_id, 'operationId': operation_id, 'model': model,
-        'deadlineAt': deadline, 'audioArtifactId': aid}})
-    if (not isinstance(result, dict) or result.get('requestId') != request_id
-            or result.get('operationId') != operation_id or result.get('model') != model
+    # AIDEV-NOTE: Артефакт может быть явно запрошен повторно после утраты
+    # результата. Идентификатор файла сам по себе не является ID задания.
+    request_key = str(uuid.uuid4())
+
+    def transcription(action, args):
+        result = invoke('tools.call', {'name': 'transcription_' + action, 'args': args})
+        if not isinstance(result, dict):
+            raise ValueError('INVALID_TRANSCRIPTION_RESULT')
+        return result
+
+    submission = {'clientIdempotencyKey': request_key, 'audioArtifactId': aid,
+                  'requestedModel': {'route': 'local', 'selection': 'required', 'modelId': model['modelId']},
+                  'deadlineAt': deadline}
+    status = transcription('request_submit', submission)
+    while True:
+        record = status.get('request')
+        if not isinstance(record, dict) or record.get('requestedModel') != submission['requestedModel']:
+            raise ValueError('INVALID_TRANSCRIPTION_REQUEST')
+        current_id = record.get('requestId')
+        if (not isinstance(current_id, str) or str(uuid.UUID(current_id)) != current_id
+                or request_id is not None and current_id != request_id):
+            raise ValueError('INVALID_TRANSCRIPTION_REQUEST')
+        request_id = current_id
+        state = record.get('taskState')
+        if state == 'succeeded':
+            break
+        if state not in ('accepted', 'dispatching', 'running'):
+            reason = {'failed': 'TRANSCRIPTION_FAILED', 'outcome_unknown': 'OUTCOME_UNKNOWN',
+                      'cancelled': 'CANCELLED'}.get(state, 'INVALID_UPSTREAM_RESPONSE')
+            code = record.get('errorCode')
+            if state == 'failed' and isinstance(code, str) and code in TERMINAL_CODES:
+                reason = code
+            log_failure(reason, 'transcription', 'request.get', 'TerminalRequest')
+            raise ValueError('TRANSCRIPTION_REQUEST_NOT_COMPLETED')
+        if record.get('actualModel') is not None and record['actualModel'] != model:
+            raise ValueError('TRANSCRIPTION_MODEL_MISMATCH')
+        time.sleep(min(1, seconds_left()))
+        status = transcription('request_get', {'requestId': request_id})
+    delivery = transcription('result_get', {'requestId': request_id})
+    result = delivery.get('result')
+    if delivery.get('state') in ('lost', 'expired', 'not_ready', 'delivery_unknown'):
+        log_failure('RESULT_' + delivery['state'].upper(), 'transcription', 'result.get', 'UnavailableResult')
+    if (delivery.get('state') != 'available' or not isinstance(result, dict)
+            or result.get('requestId') != request_id or result.get('actualModel') != model
             or not isinstance(result.get('text'), str)):
         raise ValueError('INVALID_TRANSCRIPTION_RESULT')
     text = result['text']

@@ -7,6 +7,7 @@
 ## Продуктовый MCP-каталог
 
 Источники: `catalog.mjs`, `runtime.mjs`, `files/metadata.mjs`, `planning-read.mjs`, `identity/control.mjs` и `tool-policy.json`. `publish_file`/`fetch_file` исключены из remote Control и добавляются личным клиентом ниже.
+Личный runtime исключает `local_ai_invoke_transcribe` из каталога и dispatch. В личном профиле распознавание идёт через операции Transcription.
 
 | Имя | creator | admin | user | guest |
 | --- | --- | --- | --- | --- |
