@@ -10,3 +10,6 @@
 
 - [CONTRACT.md](CONTRACT.md).
 - [PACKAGING.md](PACKAGING.md).
+
+Coordinator восстанавливает NATS соединения после обрыва; вычисление с
+неизвестным исходом не запускается повторно.
