@@ -868,7 +868,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         runner._steer_text_with_origin=lambda text,event: 'Origin\n'+json.dumps({'message_id':event.message_id})+'\n\n'+text
         with patch.dict(sys.modules, {'brai_files':native}), patch.dict(os.environ, BRAI_DIALOGUES_REQUIRED='1'):
             for ident,text in [('one','  Первое\n'),('two','\nВторое  ')]:
-                event=SimpleNamespace(source=source,message_id=ident,text=text,media_urls=[],media_types=[],metadata={})
+                event=SimpleNamespace(source=source,message_id=ident,text=text+' (https://example.org)',
+                                      _brai_original_text=text,media_urls=[],media_types=[],metadata={})
                 self.assertTrue(await native.steer_active_input(runner,event,'session'))
         payloads=[json.loads(line) for line in agent._pending_steer.splitlines() if line.startswith('{"id":')]
         self.assertEqual(payloads,[{'id':'one','text':'  Первое\n'},{'id':'two','text':'\nВторое  '}])

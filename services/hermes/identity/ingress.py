@@ -151,6 +151,13 @@ class Bridge:
         # AIDEV-NOTE: Внутри профиля автор канонический; исходный личный chat_id
         # сохраняет Telegram-аккаунт и отдельную native session. Права задаёт Auth.
         data['source']['user_id'] = self.worker_telegram_id
+        raw = getattr(event, 'raw_message', None)
+        if raw is not None:
+            original = getattr(raw, 'text', None)
+            if not isinstance(original, str):
+                original = getattr(raw, 'caption', None)
+            # The existing free-form source object is safe for workers that ignore this field.
+            data['source']['brai_dialogues_original'] = original if isinstance(original, str) else ''
         # Не переносить текст другого пользователя или общий групповой контекст.
         data.pop('reply_to_text', None)
         route = (str(source.chat_id), str(source.thread_id or ''))

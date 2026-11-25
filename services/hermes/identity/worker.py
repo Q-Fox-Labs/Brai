@@ -1015,6 +1015,17 @@ class Worker:
         fields['user_id'] = self.telegram_id
         self.adapter.bind_source(source)
         message = MessageEvent(source=source, message_type=MessageType(event.get('message_type', 'text')), **fields)
+        original = event['source'].get('brai_dialogues_original')
+        if isinstance(original, str):
+            message._brai_original_text = original
+            if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and message.message_id is not None:
+                origin = self.runner._steer_text_with_origin('Вход пользователя', message)
+                try:
+                    archive_id = json.loads(origin.split('\n', 2)[1])['message_id']
+                except (IndexError, KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    source._brai_dialogues_input = (str(archive_id), original)
         from .scope import input_delivery
         message._brai_identity_input_id = input_delivery.get()
         from gateway.platforms import base as native_base

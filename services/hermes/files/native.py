@@ -375,6 +375,10 @@ def _steer_identity(source, message_id):
             str(source.thread_id or ''), str(source.user_id or ''), str(message_id))
 
 
+def dialogues_input_text(ident, original):
+    return 'Точное сообщение для записи в Диалоги (JSON):\n' + json.dumps({'id': ident, 'text': original}, ensure_ascii=False)
+
+
 def _steer_revision(event):
     """Сравнить последнюю редакцию без временных путей скачанных файлов."""
     refs = (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])
@@ -571,14 +575,13 @@ async def steer_active_input(runner, event, session_key):
         text = '[Правка сообщения ' + str(event.message_id) + ': новая редакция заменяет прежнюю.]\n' + text
     origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
     original = event._brai_original_text
-    if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and original and event.message_id is not None:
+    if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and event.message_id is not None:
         header, separator, _ = origin.partition('\n\n')
         try:
             message_id = json.loads(header.split('\n', 2)[1])['message_id']
         except (IndexError, KeyError, TypeError, ValueError):
             message_id = event.message_id
-        payload_text = {'id': str(message_id), 'text': original}
-        envelope = 'Точное сообщение для записи в Диалоги (JSON):\n' + json.dumps(payload_text, ensure_ascii=False)
+        envelope = dialogues_input_text(str(message_id), original)
         origin = header + separator + envelope + ('\n\n' + text if text != original else '')
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(event), str(event.message_id)) else None
@@ -852,6 +855,14 @@ def conversation(agent, user_message, task_id=None):
             'This turn-specific directory supersedes generic working/scratch paths in older context. '
             'Publish finished files through the file tools. Do not read another agent workspace.')
         prepared = input_text(user_message, operation)
+        archive_input = getattr(source, '_brai_dialogues_input', None) if inbound is not None else None
+        if archive_input is not None and os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
+            ident, original = archive_input
+            marker = dialogues_input_text(ident, original)
+            if isinstance(prepared, str):
+                prepared = marker + ('\n\n' + prepared if prepared != original else '')
+            elif isinstance(prepared, list):
+                prepared = [{'type': 'text', 'text': marker}, *prepared]
         inbound = _inbound.get()
         if inbound is not None:
             commit_inbound(*inbound)
