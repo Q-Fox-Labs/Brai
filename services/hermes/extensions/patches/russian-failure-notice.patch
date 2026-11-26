@@ -9487,3 +9487,67 @@ diff --git a/gateway/run.py b/gateway/run.py
 +                return "⚠️ Не удалось сократить историю разговора. Сообщения сохранены."
 +            return "⚠️ Возникла проблема при сокращении истории разговора. Подробности сохранены в журнале."
          from agent.i18n import _russian_gateway_error
+diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1722,7 +1722,7 @@
+                 setattr(self, attr, default())
+         if self._completion_notification_batches_stopping:
+             return False
+-        key = self._event_route_key(evt, self._COMPLETION_BATCH_KEY_FIELDS)
++        key = self._event_route_key(evt, (*self._COMPLETION_BATCH_KEY_FIELDS, "parent_session_id"))
+         future = asyncio.get_running_loop().create_future()
+         self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
+         if key not in self._completion_notification_batch_tasks:
+@@ -1992,26 +1992,12 @@
+         }
+ 
+     def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
+-        """Human-facing completion message. Every mode shares the one-line status header; the
+-        raw-output modes (all/result/error) append the bounded output tail under it instead of the
+-        old bracketed ``[Background process proc_… finished~ …]`` debug wrapper (#54266)."""
+-        from gateway.run import _format_concise_process_notification, _redact_gateway_user_facing_secrets
+-        new_output = self._redacted_output_tail(session, 1000)
+-        _started = getattr(session, "started_at", None)
+-        _dur = max(0.0, time.time() - _started) if isinstance(_started, (int, float)) else None
+-        command = _redact_gateway_user_facing_secrets(getattr(session, "command", "") or "")
+-        if notify_mode == "concise":
+-            return _format_concise_process_notification(session_id, command, session.exit_code, new_output,
+-                                                        duration_seconds=_dur)
+-        header = _format_concise_process_notification(session_id, command, session.exit_code, "", duration_seconds=_dur)
+-        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
++        if session.exit_code and logger.isEnabledFor(logging.WARNING):
++            return f"{t('gateway.background.task_failed')} · Номер в журнале: {session_id.removeprefix('proc_')}"
++        return t("gateway.background.task_finished") if session.exit_code == 0 else "⚠️ Ошибка задачи или результат неизвестен."
+ 
+     def _format_process_running_message(self, session) -> str:
+-        from gateway.run import _redact_gateway_user_facing_secrets, _shorten_command_for_display
+-        new_output = self._redacted_output_tail(session, 500)
+-        short_cmd = _shorten_command_for_display(_redact_gateway_user_facing_secrets(getattr(session, "command", "") or ""))
+-        header = t("gateway.background.still_running") + (f" — `{short_cmd}`" if short_cmd else "")
+-        return t("gateway.background.recent_output", header=header, output=new_output.strip()) if new_output.strip() else header
++        return t("gateway.background.still_running")
+ 
+     def arm_process_watcher(self, watcher: dict) -> bool:
+         """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
+@@ -2055,6 +2041,9 @@
+             session = process_registry.get(session_id)
+             if session is None:
+                 break
++            if session.exited and session.exit_code and logger.isEnabledFor(logging.WARNING):
++                async with self._completion_event_scope(watcher):
++                    logger.warning("BACKGROUND_FAILURE reference=%s output=%s", session_id.removeprefix("proc_"), self._redacted_output_tail(session, 1000))
+             if silent:
+                 # Still wait for the process to exit so we can log it, but don't push any messages.
+                 if session.exited:
+@@ -2066,8 +2055,9 @@
+             if session.exited:
+                 # Agent-notify: inject a synthetic message unless the agent already consumed the result via
+                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).
+-                if agent_notify and not process_registry.is_completion_consumed(session_id):
++                if (agent_notify or (session.exit_code == 0 and notify_mode != "error" and (watcher.get("parent_session_id") or getattr(session, "parent_session_id", "")))) and not process_registry.is_completion_consumed(session_id):
+                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
++                    if session.exit_code != 0: completion_evt.update(command="", output=self._format_process_final_message(session_id, session, notify_mode))
+                     synth_text = format_process_notification(completion_evt)
+                     if not synth_text:
+                         break
