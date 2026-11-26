@@ -94,18 +94,18 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
                 log.disabled = True
                 self.assertNotIn('abcdef123456', runner._format_process_final_message('proc_abcdef123456', session, 'error'))
                 log.disabled = False
+                self.assertEqual(runner._format_process_running_message(session), 'Фоновая задача выполняется')
                 session.exit_code, session.output_buffer = 0, 'готовый результат'
                 runner = Runner('result', busy=False)
-                await runner._run_process_watcher({**watcher, 'notify_on_complete': False})
+                await runner._run_process_watcher({**watcher, 'notify_on_complete': False, 'parent_session_id': 'new-session'})
                 self.assertIn('готовый результат', runner.agent[0][0])
-                self.assertEqual(runner.agent[0][1]['parent_session_id'], '')
-                self.assertNotIn('готовый результат', ' '.join(runner.direct))
-                self.assertEqual(runner._format_process_running_message(session), 'Фоновая задача выполняется')
-                session.output_buffer = '[Errno 17] /private/path'
-                runner = Runner('result', busy=False)
-                await runner._run_process_watcher({**watcher, 'notify_on_complete': False})
-                self.assertIn('[Errno 17]', runner.agent[0][0])
+                self.assertEqual(runner.agent[0][1]['parent_session_id'], 'new-session')
                 self.assertEqual(runner.direct, [])
+                for mode in ('off', 'error'):
+                    runner = Runner(mode, busy=False)
+                    await runner._run_process_watcher({**watcher, 'notify_on_complete': False, 'parent_session_id': 'new-session'})
+                    self.assertEqual(runner.agent, [])
+                    self.assertEqual(runner.direct, [])
                 running = SimpleNamespace(exited=False, exit_code=None, output_buffer='Traceback /private/path')
                 failed = SimpleNamespace(exited=True, exit_code=1, output_buffer='Traceback /private/path SECRET')
                 states = iter((running, failed))
@@ -119,6 +119,7 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
         finally:
             log.removeHandler(handler)
             log.level, log.propagate, log.disabled = previous
+
 
     async def test_batch_separates_conversations(self):
         source = methods({'_enqueue_process_completion_notification'})
@@ -141,6 +142,19 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*(runner._enqueue_process_completion_notification('result',
             {'session_key': 'same', 'platform': 'telegram', 'parent_session_id': parent}) for parent in ('old', 'new')))
         self.assertEqual({key[-1] for key in runner.keys}, {'old', 'new'})
+
+
+    async def test_batch_keeps_each_error_reference_for_agent(self):
+        formatter = methods({'_format_coalesced_process_completions'})['_format_coalesced_process_completions']
+        run = ModuleType('gateway.run')
+        run._redact_gateway_user_facing_secrets = lambda text: text
+        entries = [('', {'session_id': f'proc_{number}', 'exit_code': 1,
+                         'output': 'x' * 1000 + f'\n[Без сырых ошибок. Номер в журнале: {number}]'}, None)
+                   for number in ('abcdef123456', 'fedcba654321')]
+        with patch.dict(sys.modules, {'gateway.run': run}):
+            text = formatter(entries)
+        self.assertIn('Номер в журнале: abcdef123456', text)
+        self.assertIn('Номер в журнале: fedcba654321', text)
 
 
 if __name__ == '__main__':
