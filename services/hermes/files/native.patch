@@ -333,7 +333,7 @@
          if skip_entity_detection:
              payload["skip_entity_detection"] = True
          return payload
-@@ -1478,6 +1497,44 @@
+@@ -1478,6 +1497,68 @@
          except Exception:
              pass
 
@@ -348,22 +348,46 @@
 +                and bad_request is not None and isinstance(error, bad_request)
 +                and str(error).strip().casefold() in {"message thread not found", "bad request: message thread not found"})
 +
-+    async def _brai_send_with_private_topic_retry(self, send, metadata, thread_kwargs, reply_to_id):
-+        """Retry one explicit Bot API refusal with the same topic and reply anchor."""
-+        if not self._brai_private_topic_route(metadata, thread_kwargs):
-+            return await send()
++    async def _brai_send_with_private_topic_retry(self, send, metadata, payload, reply_to_id):
++        """After a rejected private topic ID, reply to the original message and verify the route."""
++        if not self._brai_private_topic_route(metadata, payload):
++            return await send(payload)
 +        try:
-+            result = await send()
++            result = await send(payload)
 +        except Exception as error:
 +            if (not reply_to_id or (metadata or {}).get("telegram_dm_topic_created_for_send")
-+                    or not self._brai_private_topic_rejected(error, metadata, thread_kwargs)):
++                    or not self._brai_private_topic_rejected(error, metadata, payload)):
 +                raise
++            # Telegram can accept the topic's reply anchor while rejecting its explicit thread ID.
++            reply_to_id = int(reply_to_id)
++            if reply_to_id != self._metadata_reply_to_message_id(metadata):
++                raise
++            by_anchor = dict(payload)
++            thread_id = by_anchor.pop("message_thread_id")
++            if "reply_parameters" in by_anchor:
++                by_anchor["reply_parameters"] = {"message_id": reply_to_id, "allow_sending_without_reply": False}
++            else:
++                by_anchor["allow_sending_without_reply"] = False
 +            try:
-+                result = await send()
++                result = await send(by_anchor)
 +            except Exception as second_error:
-+                reason = ("topic_unavailable" if self._brai_private_topic_rejected(second_error, metadata, thread_kwargs)
++                reason = ("topic_unavailable" if self._brai_private_topic_rejected(second_error, metadata, payload)
 +                          else "delivery_unknown")
 +                raise _BraiPrivateTopicRetryFailed(reason) from second_error
++            message = result
++            if isinstance(message, dict) and message.get("message_id") is None:
++                message = message.get("result")
++            if isinstance(message, dict):
++                chat = message.get("chat")
++                reply = message.get("reply_to_message")
++                route = (chat.get("id") if isinstance(chat, dict) else None, message.get("message_thread_id"),
++                         reply.get("message_id") if isinstance(reply, dict) else None)
++            else:
++                route = (getattr(getattr(message, "chat", None), "id", None),
++                         getattr(message, "message_thread_id", None),
++                         getattr(getattr(message, "reply_to_message", None), "message_id", None))
++            if route != (int(payload["chat_id"]), thread_id, reply_to_id):
++                raise _BraiPrivateTopicRetryFailed("delivery_unknown")
 +        if isinstance(result, dict):
 +            message_id = result.get("message_id")
 +            nested = result.get("result")
@@ -378,7 +402,7 @@
      async def _try_send_rich(
          self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]) -> Optional[SendResult]:
          """Attempt a single ``sendRichMessage``. Returns a SendResult (success, or a transient failure the
-@@ -1494,13 +1551,21 @@
+@@ -1494,13 +1575,21 @@
          if reply_to_id is not None:
              # sendRichMessage takes reply_parameters, NOT reply_to_message_id (silently ignored → anchor dropped).
              payload["reply_parameters"] = {"message_id": reply_to_id}
@@ -386,14 +410,15 @@
 -            # Raw Bot API result: return_type=Message would make PTB deserialize a 10.1 shape it doesn't
 -            # fully model; a post-delivery parse error ≠ send failure.
 -            msg = await _await_with_thread_deadline(
-+        async def send_rich():
++        async def send_rich(target):
 +            # Keep the raw Bot API receipt to avoid post-delivery deserialization errors.
 +            return await _await_with_thread_deadline(
-                 self._bot.do_api_request("sendRichMessage", api_kwargs=payload),
+-                self._bot.do_api_request("sendRichMessage", api_kwargs=payload),
++                self._bot.do_api_request("sendRichMessage", api_kwargs=target),
                  timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
 +
 +        try:
-+            msg = await self._brai_send_with_private_topic_retry(send_rich, metadata, thread_kwargs, reply_to_id)
++            msg = await self._brai_send_with_private_topic_retry(send_rich, metadata, payload, reply_to_id)
 +        except _BraiPrivateTopicRetryFailed as error:
 +            return SendResult(success=False, error="Telegram private topic delivery failed", retryable=False,
 +                              error_kind=error.args[0])
@@ -404,7 +429,7 @@
              if self._rich_rejected(exc, "sendRichMessage", "MarkdownV2"):
                  return None
              # Honor Telegram's flood-control retry_after over the base retry schedule.
-@@ -3461,18 +3526,10 @@
+@@ -3461,18 +3550,10 @@
          return _NetErr, _BadReq, _TimedOut
 
      async def _send_chunk_markdown_or_plain(self, chunk: str, send_kwargs: dict[str, Any]):
@@ -427,13 +452,13 @@
 
      async def _send_chunk_with_retries(
          self, chat_id: str, chunk: str, index: int, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
-@@ -3497,10 +3554,18 @@
+@@ -3497,10 +3578,18 @@
                  send_kwargs = {
                      "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id, **thread_kwargs,
                      **self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
 -                return await self._send_chunk_markdown_or_plain(chunk, send_kwargs), used_thread_fallback
 +                msg = await self._brai_send_with_private_topic_retry(
-+                    lambda: self._send_chunk_markdown_or_plain(chunk, send_kwargs), metadata, thread_kwargs, reply_to_id)
++                    lambda target: self._send_chunk_markdown_or_plain(chunk, target), metadata, send_kwargs, reply_to_id)
 +                return msg, used_thread_fallback
 +            except _BraiPrivateTopicRetryFailed as error:
 +                return SendResult(success=False, error="Telegram private topic delivery failed", retryable=False,
@@ -447,7 +472,7 @@
                      if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
                          if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
                              return SendResult(success=False, error=str(send_err), retryable=False)
-@@ -3811,22 +3876,13 @@
+@@ -3811,22 +3900,13 @@
              self._bot.edit_message_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
 
      async def _edit_markdown_or_plain(self, chat_id: str, message_id: str, formatted: str, plain: str, warn_fmt: str) -> bool:
@@ -474,7 +499,7 @@
          return False
 
      async def edit_message(
-@@ -3928,7 +3984,7 @@
+@@ -3928,7 +4008,7 @@
                  truncated = self._truncate_stream_overflow_preview(content)
                  if self._last_overflow_preview.get(_preview_key) == truncated:
                      return SendResult(success=True, message_id=message_id)
@@ -483,7 +508,7 @@
                  self._last_overflow_preview[_preview_key] = truncated
                  return SendResult(success=True, message_id=message_id)
              # Flood control: short waits retry inline; long waits fail immediately so streaming falls back
-@@ -3989,42 +4045,28 @@
+@@ -3989,42 +4069,28 @@
      async def _send_overflow_continuation(
          self, chat_id: str, chunk: str, reply_to_id: Optional[int], thread_kwargs: dict[str, Any],
          thread_id: Optional[str], metadata: Optional[dict[str, Any]], finalize: bool):
@@ -547,7 +572,7 @@
 
      async def _edit_overflow_split(
          self, chat_id: str, message_id: str, content: str, *, finalize: bool, metadata: Optional[dict[str, Any]] = None) -> SendResult:
-@@ -4041,7 +4083,7 @@
+@@ -4041,7 +4107,7 @@
                      chat_id, message_id, _separate_chunk_indicator_from_fence(self.format_message(first_chunk)), _strip_mdv2(first_chunk),
                      "[%s] Overflow split: MarkdownV2 first-chunk edit failed, falling back to plain text: %s")
              else:
@@ -556,7 +581,7 @@
          except Exception as e:
              if "not modified" not in str(e).lower():  # identical first chunk still sends continuations
                  logger.error("[%s] Overflow split: first-chunk edit failed: %s", self.name, _redact_telegram_error_text(e), exc_info=True)
-@@ -4114,35 +4156,18 @@
+@@ -4114,35 +4180,18 @@
          # Drafts share the regular-send UTF-16 length contract.
          text = content if len(
              content) <= self.MAX_MESSAGE_LENGTH else self.truncate_message(content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)[0]
@@ -604,7 +629,7 @@
 
      async def _send_message_with_thread_fallback(self, **kwargs):
          """Send a control-style message (approval prompts, pickers), retrying once without
-@@ -4370,13 +4395,12 @@
+@@ -4370,13 +4419,12 @@
              reply_to_mode=self._reply_to_mode)
 
      async def _edit_result_text(self, query, result_text: str) -> None:
@@ -620,7 +645,7 @@
 
      async def _handle_choice_picker_callback(self, query, data: str, chat_id: str) -> None:
          """Handle choice picker button taps (cp:<index>)."""
-@@ -5651,6 +5675,7 @@
+@@ -5651,6 +5699,7 @@
          modified), markdown constructs become MarkdownV2 syntax, everything else is escaped."""
          if not content:
              return content
@@ -628,7 +653,7 @@
          placeholders: dict = {}
          counter = [0]
 
-@@ -6514,8 +6539,15 @@
+@@ -6514,8 +6563,15 @@
              return
          if not self._gate_or_observe(msg, update, MessageType.TEXT):
              return
@@ -646,7 +671,7 @@
 
      async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
          """Handle incoming command messages."""
-@@ -6591,6 +6623,24 @@
+@@ -6591,6 +6647,24 @@
          event = None
          try:
              await asyncio.sleep(delay)
@@ -671,7 +696,7 @@
              # Superseded flush (a newer chunk re-armed the timer while our sleep was already done):
              # CancelledError only lands at the next await, so check synchronously before the pop.
              owner = tasks.get(key)
-@@ -6599,7 +6649,9 @@
+@@ -6599,7 +6673,9 @@
              event = pending.pop(key, None)
              if not event:
                  return
@@ -682,7 +707,7 @@
                  self._hold_inbound_event(event, where=f"{where}-flush")
                  event = None
                  return
-@@ -6657,6 +6709,8 @@
+@@ -6657,6 +6733,8 @@
          if existing is None:
              pending[key] = event
              return
@@ -691,7 +716,7 @@
          existing.media_urls.extend(event.media_urls)
          existing.media_types.extend(event.media_types)
          if event.text:
-@@ -6678,7 +6732,12 @@
+@@ -6678,7 +6756,12 @@
          """Album items debounce on media_group_id; singles go through the photo burst batcher."""
          if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it
              return
@@ -704,7 +729,7 @@
          if media_group_id:
              await self._queue_media_group_event(str(media_group_id), event)
          else:
-@@ -6714,6 +6773,9 @@
+@@ -6714,6 +6797,9 @@
                  cached_path = await cache_audio_from_bytes_async(bytes(data), ext=ext)
              event.media_urls = [cached_path]
              event.media_types = [mime]
@@ -714,7 +739,7 @@
              logger.info("[Telegram] Cached user %s at %s", kind, cached_path)
          except Exception as e:
              logger.warning("[Telegram] Failed to cache %s: %s", kind, _redact_telegram_error_text(e), exc_info=True)
-@@ -6782,7 +6844,7 @@
+@@ -6782,7 +6868,7 @@
                  self._set_cached_media(
                      event, await cache_video_from_bytes_async(bytes(video_bytes), ext=ext), SUPPORTED_VIDEO_TYPES[ext], MessageType.VIDEO,
                      "[Telegram] Cached user video document at %s")
@@ -723,7 +748,7 @@
                  return True
              # Any file type is accepted (authorization is the gate, not the extension); unknown types get
              # application/octet-stream. Image documents already returned above.
-@@ -6794,6 +6856,9 @@
+@@ -6794,6 +6880,9 @@
                  return await self._dispatch_with_text(event, f"Document '{display}' could not be cached.")
              event.media_urls = [cached.path]
              event.media_types = [cached.media_type]
@@ -733,7 +758,7 @@
              event.media_text_inlined = [False]  # flipped below once the text is actually injected
              if cached.kind == "audio":
                  event.message_type = MessageType.AUDIO
-@@ -6833,46 +6898,53 @@
+@@ -6833,46 +6922,53 @@
                  self._observe_unmentioned_group_message(msg, _event.message_type, update_id=update.update_id, event=_event)
              return
          event = self._build_message_event(msg, self._media_message_type(msg), update_id=update.update_id)
@@ -824,7 +849,7 @@
 
      async def _queue_media_group_event(self, media_group_id: str, event: MessageEvent) -> None:
          """Debounce album items (shared media_group_id) into one MessageEvent so the second image isn't
-@@ -6880,7 +6952,13 @@
+@@ -6880,7 +6976,13 @@
          if self._should_drop_delayed_delivery():
              self._hold_inbound_event(event, where="media-group-enqueue")
              return
@@ -838,7 +863,7 @@
          self._accept_update()
          prior_task = self._media_group_tasks.get(media_group_id)
          if prior_task:
-@@ -6912,6 +6990,11 @@
+@@ -6912,6 +7014,11 @@
              file_obj = await sticker.get_file()
              image_bytes = await file_obj.download_as_bytearray()
              cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=".webp")

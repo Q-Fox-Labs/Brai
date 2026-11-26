@@ -1638,7 +1638,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             await scope['_edit_markdown_or_plain'](SimpleNamespace(_edit_text=edit), '1', '2', '*formatted*', '**raw**', '')
         self.assertEqual(edits, [('*formatted*', 'MarkdownV2')])
 
-    async def test_pinned_telegram_retries_only_the_same_private_topic(self):
+    async def test_pinned_telegram_recovers_private_topic_by_reply_anchor(self):
         class BadRequest(OSError):
             pass
 
@@ -1683,10 +1683,17 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                  'telegram_reply_to_message_id': str(anchor), 'direct_messages_topic_id': '88'}
 
         denied = BadRequest('Message thread not found')
-        delivered = SimpleNamespace(message_id=101)
+        delivered = SimpleNamespace(message_id=101, chat=SimpleNamespace(id=23), message_thread_id=88,
+                                    reply_to_message=SimpleNamespace(message_id=anchor))
+        wrong_topic = SimpleNamespace(**{**vars(delivered), 'message_thread_id': 89})
+        wrong_anchor = SimpleNamespace(**{**vars(delivered), 'reply_to_message': None})
+        wrapped = {'result': {'message_id': 101, 'chat': {'id': 23}, 'message_thread_id': 88,
+                              'reply_to_message': {'message_id': anchor}}}
         for rich in (False, True):
             for results, created, mode, error in (
                     ((denied, delivered), False, 'all', None),
+                    ((denied, wrong_topic), False, 'all', 'delivery_unknown'),
+                    ((denied, wrong_anchor), False, 'all', 'delivery_unknown'),
                     ((denied, denied), False, 'all', 'topic_unavailable'),
                     ((denied,), True, 'all', 'topic_unavailable'),
                     ((denied,), False, 'off', 'topic_unavailable'),
@@ -1701,6 +1708,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                     async def send(method, kwargs):
                         attempts.append((method, dict(kwargs)))
                         result = results[len(attempts) - 1]
+                        if rich and result is delivered:
+                            return wrapped
                         if isinstance(result, Exception):
                             raise result
                         return result
@@ -1723,12 +1732,32 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                     else:
                         expected['reply_to_message_id'] = anchor if mode != 'off' else None
                     method = 'sendRichMessage' if rich else 'готовый ответ'
-                    self.assertEqual(attempts, [(method, expected)] * len(results))
+                    expected_calls = [(method, expected)]
+                    if len(results) == 2:
+                        by_anchor = {key: value for key, value in expected.items() if key != 'message_thread_id'}
+                        if rich:
+                            by_anchor['reply_parameters'] = {'message_id': anchor, 'allow_sending_without_reply': False}
+                        else:
+                            by_anchor['allow_sending_without_reply'] = False
+                        expected_calls.append((method, by_anchor))
+                    self.assertEqual(attempts, expected_calls)
                     if error is None:
                         self.assertEqual(actual.message_id if rich else actual[0].message_id, '101' if rich else 101)
                     else:
                         self.assertFalse(actual.retryable)
                         self.assertEqual(actual.error_kind, error)
+
+        adapter._reply_to_mode = 'all'
+        adapter._send_chunk_markdown_or_plain = AsyncMock(side_effect=denied)
+        adapter._bot = SimpleNamespace(do_api_request=AsyncMock(side_effect=denied))
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+            result = await adapter._send_chunk_with_retries('23', 'готовый ответ', 0, '94',
+                                                            topic, '88', False, types)
+            self.assertEqual(result.error_kind, 'topic_unavailable')
+            result = await adapter._try_send_rich('23', 'готовый ответ', '94', topic)
+            self.assertEqual(result.error_kind, 'topic_unavailable')
+        adapter._send_chunk_markdown_or_plain.assert_awaited_once()
+        adapter._bot.do_api_request.assert_awaited_once()
 
         from identity.telegram_runtime import Resolver
 
@@ -1740,12 +1769,13 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         resolver._record_delivery = lambda *args, **kwargs: recorded.append(args)
         current = lambda: None
         current.generation = 1
-        receipt = SimpleNamespace(chat_id=23, message_thread_id=88, message_id=101)
+        receipt = SimpleNamespace(**vars(delivered), chat_id=23)
         ports = {'plugins.platforms.telegram.adapter': module(_BraiPrivateTopicRetryFailed=PrivateTopicRetryFailed),
                  'telegram.error': module(BadRequest=BadRequest, Forbidden=Forbidden)}
         for outcomes, retry_error, error_kind in (
                 ((receipt,), None, None), ((denied, receipt), None, None),
                 ((denied, denied), None, 'topic_unavailable'),
+                ((denied, wrong_topic), None, 'delivery_unknown'),
                 ((denied, BadRequest('Message to be replied not found')), None, 'telegram_rejected'),
                 ((denied, Forbidden()), None, 'telegram_rejected'),
                 ((denied, TimeoutError()), None, 'delivery_unknown'),
@@ -1762,10 +1792,12 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 admitted.assert_awaited_once()
                 self.assertEqual(retry_admitted.await_count, int(outcomes[0] is denied))
                 self.assertEqual(wire.await_count, len(outcomes))
-                for attempt in wire.await_args_list:
-                    self.assertEqual(attempt.args, ('готовый ответ', {
-                        'chat_id': 23, 'message_thread_id': 88, 'reply_to_message_id': anchor,
-                        'allow_sending_without_reply': False}))
+                initial = {'chat_id': 23, 'message_thread_id': 88, 'reply_to_message_id': anchor,
+                           'allow_sending_without_reply': False}
+                self.assertEqual(wire.await_args_list[0].args, ('готовый ответ', initial))
+                if len(outcomes) == 2:
+                    by_anchor = {key: value for key, value in initial.items() if key != 'message_thread_id'}
+                    self.assertEqual(wire.await_args_list[1].args, ('готовый ответ', by_anchor))
                 if error_kind:
                     self.assertEqual(result, {'success': False, 'retryable': False, 'error_kind': error_kind})
                 else:

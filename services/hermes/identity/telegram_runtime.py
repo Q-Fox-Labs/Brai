@@ -1065,16 +1065,18 @@ class Resolver:
                     from telegram.error import BadRequest, Forbidden
                     attempted = False
 
-                    async def wire():
+                    async def wire(target_payload):
                         nonlocal attempted
                         if attempted:
                             await before_retry()
                             current()
                         attempted = True
-                        return await self.adapter._send_chunk_markdown_or_plain(formatted, target)
+                        return await self.adapter._send_chunk_markdown_or_plain(formatted, target_payload)
 
                     try:
-                        sent = await send(wire, metadata, target, values['reply_to'])
+                        anchor = values['reply_to']
+                        trusted = {**metadata, 'telegram_reply_to_message_id': anchor}
+                        sent = await send(wire, trusted, target, anchor)
                     except _BraiPrivateTopicRetryFailed as error:
                         kind = error.args[0]
                         if isinstance(error.__cause__, PermissionError):
@@ -1090,6 +1092,10 @@ class Resolver:
                 raise ValueError('Missing operator assignment delivery receipt')
             self._record_delivery(profile, route, message_id, current.generation, created=True)
             return {'success': True, 'message_id': str(message_id)}
+        anchor = values.get('reply_to')
+        if (action == 'send' and metadata.get('telegram_dm_topic_reply_fallback') and anchor
+                and self.ledger.owns(profile, route, anchor, outgoing=False)):
+            values['metadata'] = {**metadata, 'telegram_reply_to_message_id': anchor}
         method = getattr(self.adapter, action, None)
         if not callable(method):
             raise ValueError('Native delivery unavailable')
