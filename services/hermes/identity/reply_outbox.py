@@ -68,8 +68,9 @@ class ReplyOutbox:
                                (ident, row[3])).rowcount == 1
 
     @staticmethod
-    def _unknown_delivery():
-        logging.getLogger(__name__).warning('TELEGRAM_OUTBOX_DELIVERY_UNCONFIRMED')
+    def _unknown_delivery(ident, stage):
+        logging.getLogger(__name__).warning(
+            'TELEGRAM_OUTBOX_DELIVERY_UNCONFIRMED deliveryId=%s stage=%s', ident, stage)
         return {'success': False, 'retryable': False,
                 'error': 'Telegram delivery outcome unknown', 'error_kind': 'delivery_unknown'}
 
@@ -82,7 +83,7 @@ class ReplyOutbox:
                 operator_assignment = 'operatorAssignmentId' in body
                 retry_unknown = self.retry_unknown and not operator_assignment
                 if previous == 'sending' and not retry_unknown:
-                    result = self._unknown_delivery()
+                    result = self._unknown_delivery(ident, 'restarted_while_sending')
                 else:
                     attempted = False
 
@@ -109,16 +110,20 @@ class ReplyOutbox:
                             logging.getLogger(__name__).warning(
                                 'BRAI_OPERATOR_DELIVERY_EXCEPTION id=%s attempted=%s class=%s',
                                 body['operatorAssignmentId'], attempted, type(error).__name__)
+                        else:
+                            logging.getLogger(__name__).warning(
+                                'TELEGRAM_OUTBOX_DELIVERY_EXCEPTION deliveryId=%s stage=dispatch class=%s',
+                                ident, type(error).__name__)
                         if operator_assignment and not attempted:
                             if isinstance(error, (ConnectionError, TimeoutError)):
                                 continue
                             result = {'success': False, 'retryable': False, 'error_kind': 'preparation_failed'}
                         else:
                             result = ({'success': False, 'retryable': True, 'error': 'Delivery pending'}
-                                      if retry_unknown else self._unknown_delivery())
+                                      if retry_unknown else self._unknown_delivery(ident, 'dispatch_exception'))
                 sent = result.get('success') is True and bool(result.get('message_id'))
                 if operator_assignment and not sent and result.get('retryable') is not False:
-                    result = self._unknown_delivery()
+                    result = self._unknown_delivery(ident, 'unconfirmed_result')
                 blocked = result.get('retryable') is False
                 state = 'sent' if sent else 'blocked' if blocked else 'pending'
                 self.db.execute("UPDATE reply_outbox SET state=?,receipt=? WHERE id=? AND state IN ('pending','sending')",

@@ -1286,12 +1286,25 @@ def verify_telegram_target(message, target):
 
 
 async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict=False,
-                          before_send=None):
-    """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
+                          before_send=None, before_retry=None, topic_anchor=None):
+    """Deliver media once, with an anchored retry after a confirmed topic refusal."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
     from contextlib import ExitStack
     bot = adapter._bot
     target = telegram_target(adapter, chat_id, reply_to, metadata, exact=strict)
+    retry = getattr(adapter, '_brai_send_with_private_topic_retry', None)
+    private_topic = callable(retry) and adapter._brai_private_topic_route(metadata, target)
+    anchored = (private_topic and before_retry is not None and topic_anchor is not None
+                and str(target.get('reply_to_message_id') or '') == str(topic_anchor))
+
+    async def send(wire, *, batch=False):
+        if not private_topic:
+            return await wire(target)
+        if not anchored:
+            return await retry(wire, metadata, target, None, batch=batch)
+        trusted = {**metadata, 'telegram_reply_to_message_id': topic_anchor}
+        return await retry(wire, trusted, target, topic_anchor, batch=batch, before_retry=before_retry)
+
     captions = []
     for item in items:
         caption = item.get('caption', '')
@@ -1301,7 +1314,10 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
                 # The approval accompanies the attachment in the same API call.
                 raise FileError('TELEGRAM_CAPTION_TOO_LONG')
             if text_units(formatted) <= 3500:
-                notice = await bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
+                async def send_caption(options):
+                    return await bot.send_message(**options, text=formatted, parse_mode='MarkdownV2')
+
+                notice = await send(send_caption)
                 message_id = getattr(notice, 'message_id', None)
             else:
                 formatter = getattr(adapter, '_rich_message_payload', None)
@@ -1319,7 +1335,17 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
                                            'caption:' + key([str(chat_id), target, caption]))
                     message_id = receipt.get('message_id') if isinstance(receipt, dict) else None
                 else:
-                    response = await bot.do_api_request('sendRichMessage', api_kwargs={**target, 'rich_message': rich})
+                    async def send_rich_caption(options):
+                        values = {**options, 'rich_message': rich}
+                        anchor = values.pop('reply_to_message_id', None)
+                        allow_missing = values.pop('allow_sending_without_reply', None)
+                        if anchor is not None:
+                            values['reply_parameters'] = {'message_id': anchor}
+                            if allow_missing is not None:
+                                values['reply_parameters']['allow_sending_without_reply'] = allow_missing
+                        return await bot.do_api_request('sendRichMessage', api_kwargs=values)
+
+                    response = await send(send_rich_caption)
                     message_id = (response.get('message_id') or (response.get('result') or {}).get('message_id')) if isinstance(response, dict) else getattr(response, 'message_id', None)
             if not message_id:
                 raise FileError('DELIVERY_UNKNOWN')
@@ -1328,23 +1354,39 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             captions.append(formatted or None)
     classes = {'photo': InputMediaPhoto, 'video': InputMediaVideo, 'audio': InputMediaAudio, 'document': InputMediaDocument}
     with ExitStack() as stack:
-        media = []
-        for item, caption in zip(items, captions):
+        sources = []
+        for item in items:
             file = item.get('readHandle')
             if file is None:
                 file = stack.enter_context(open(item['localPath'], 'rb'))
-            if item['presentation'] in classes:
-                media.append(classes[item['presentation']](media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
-            else:
-                from types import SimpleNamespace
-                media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
-        if before_send is not None:
-            await before_send()
-        if kind == 'album':
-            result = await bot.send_media_group(**target, media=media)
-        else:
+            sources.append(file)
+        positions = [file.tell() for file in sources] if anchored else []
+        album = kind == 'album'
+
+        async def send_media(options):
+            if options is not target:
+                for file, position in zip(sources, positions):
+                    file.seek(position)
+            media = []
+            for item, file, caption in zip(items, sources, captions):
+                view = item['presentation']
+                if view in classes:
+                    media.append(classes[view](media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
+                else:
+                    from types import SimpleNamespace
+                    media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
+            if options is target and before_send is not None:
+                await before_send()
+            if album:
+                return await bot.send_media_group(**options, media=media)
             field = items[0]['presentation']
-            result = [await getattr(bot, 'send_' + field)(**target, **{field: media[0].media}, caption=media[0].caption, parse_mode='MarkdownV2' if media[0].caption else None)]
+            return await getattr(bot, 'send_' + field)(**options, **{field: media[0].media},
+                                                      caption=media[0].caption,
+                                                      parse_mode='MarkdownV2' if media[0].caption else None)
+
+        result = await send(send_media, batch=album)
+        if not album:
+            result = [result]
     if strict:
         for message in result:
             verify_telegram_target(message, target)

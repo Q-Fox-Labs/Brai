@@ -470,7 +470,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_topic_failure_cannot_trigger_a_native_resend(self):
         send = self.native_function('gateway/platforms/base.py', 'BasePlatformAdapter', '_send_with_retry',
                                     {'logger': Mock(), 'records_delivery': lambda method: method})
-        for kind in ('topic_unavailable', 'delivery_unknown'):
+        for kind in ('topic_unavailable', 'telegram_rejected', 'delivery_unknown'):
             with self.subTest(kind=kind):
                 peer = NS(call=AsyncMock(return_value={
                     'success': False, 'retryable': False, 'retry_after': None,

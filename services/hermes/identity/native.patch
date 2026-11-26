@@ -1124,7 +1124,7 @@ diff --git a/agent/redact.py b/agent/redact.py
      def _send_failure_may_have_delivered(result_or_exc: Any) -> bool:
 -        """Return True for timeout failures where retrying may duplicate."""
 +        """Recognize unconfirmed sends that could be duplicated by a new send."""
-+        if getattr(result_or_exc, "error_kind", None) == "delivery_unknown":
++        if getattr(result_or_exc, "error_kind", None) in ("delivery_unknown", "delivery_pending"):
 +            return True
          if getattr(result_or_exc, "retryable", None) is True:
              return False

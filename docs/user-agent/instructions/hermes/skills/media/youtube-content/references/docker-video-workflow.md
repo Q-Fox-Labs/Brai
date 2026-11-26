@@ -17,7 +17,7 @@ Verified 2026-10-08 on the active default profile. Do not copy to another machin
 - Bind `${YTDLP_DOWNLOAD_ROOT}` on host maps to `/downloads` inside container. Host `/root/...` output arguments cannot be passed to this wrapper as though they were container paths. Helper uses unique subdirectories and translates paths.
 - `${SECRETS_ROOT}/yt-dlp` maps read-only to `/secrets`. Never enumerate/read/print secret contents; authorization-required media requires explicit user direction.
 - Host `ffmpeg` and `ffprobe` resolve on PATH; container has `/usr/bin/ffmpeg` and `/usr/bin/ffprobe`. Prefer host tools for local extraction.
-- `PIL` and `faster_whisper` were not importable in the terminal interpreter at discovery. This does not prove no Hermes STT backend exists; inspect the actual Hermes runtime/provider before claiming availability.
+- Use the managed Transcription client for speech recognition as described in the [media guide](guide-media.md).
 - Helper is standard-library Python, no installation or subscription/API credentials required for extraction. Vision is a separate Hermes tool step after consent.
 
 ## Official documentation consulted

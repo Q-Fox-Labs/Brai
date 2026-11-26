@@ -33,7 +33,7 @@ def make_adapter(config, platform, peer, publish_file):
         def _send_retry_is_final(self, result):
             """Сохранить решение ingress об отправке и не создавать новый исходящий ответ."""
             return (getattr(result, 'error_kind', None) in {
-                        'delivery_pending', 'forbidden', 'topic_unavailable', 'delivery_unknown'}
+                        'delivery_pending', 'forbidden', 'topic_unavailable', 'telegram_rejected', 'delivery_unknown'}
                     or super()._send_retry_is_final(result))
 
         async def handle_message(self, event):

@@ -7,6 +7,7 @@ import importlib.util
 import asyncio
 from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
+from io import BytesIO
 import json
 import logging
 import os
@@ -1645,6 +1646,12 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         class Forbidden(Exception):
             pass
 
+        class RetryAfter(Exception):
+            pass
+
+        class InvalidToken(Exception):
+            pass
+
         class PrivateTopicRetryFailed(Exception):
             pass
 
@@ -1659,7 +1666,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             '_dm_topic_fallback', '_is_private_dm_topic_send', '_chunk_reply_routing', '_should_thread_reply',
             '_thread_kwargs_for_send', '_message_thread_id_for_send', '_direct_topic_kwargs',
             '_compute_single_send_routing', '_brai_private_topic_route', '_brai_private_topic_rejected',
-            '_brai_send_with_private_topic_retry',
+            '_brai_send_with_private_topic_retry', '_brai_definitive_send_refusal',
             '_send_chunk_with_retries', '_try_send_rich', '_is_thread_not_found_error',
         )
         scope = function('plugins/platforms/telegram/adapter.py', native_methods, {
@@ -1680,7 +1687,9 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         adapter._rich_rejected = lambda *_: self.fail('private topic rejection fell back to Markdown')
         anchor = 93
         topic = {'thread_id': '88', 'telegram_dm_topic_reply_fallback': True,
-                 'telegram_reply_to_message_id': str(anchor), 'direct_messages_topic_id': '88'}
+                 'telegram_reply_to_message_id': str(anchor), 'direct_messages_topic_id': '88',
+                 '_brai_before_topic_retry': AsyncMock()}
+        errors = module(BadRequest=BadRequest, Forbidden=Forbidden, RetryAfter=RetryAfter, InvalidToken=InvalidToken)
 
         denied = BadRequest('Message thread not found')
         delivered = SimpleNamespace(message_id=101, chat=SimpleNamespace(id=23), message_thread_id=88,
@@ -1697,8 +1706,10 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                     ((denied, denied), False, 'all', 'topic_unavailable'),
                     ((denied,), True, 'all', 'topic_unavailable'),
                     ((denied,), False, 'off', 'topic_unavailable'),
-                    ((denied, BadRequest('Message to be replied not found')), False, 'all', 'delivery_unknown'),
+                    ((denied, BadRequest('Message to be replied not found')), False, 'all', 'telegram_rejected'),
                     ((denied, OSError('connection state unknown')), False, 'all', 'delivery_unknown'),
+                    ((OSError('connection state unknown'),), False, 'all', 'delivery_unknown'),
+                    ((wrong_topic,), False, 'all', 'delivery_unknown'),
                     ((denied, {}), False, 'all', 'delivery_unknown'),
                     (({'result': []},), False, 'all', 'delivery_unknown'),
                     (({'message_id': 0, 'result': {'message_id': 101}},), False, 'all', 'delivery_unknown')):
@@ -1718,7 +1729,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                     adapter._bot = SimpleNamespace(do_api_request=lambda method, api_kwargs: send(method, api_kwargs))
                     adapter._send_chunk_markdown_or_plain = send
                     metadata = {**topic, 'telegram_dm_topic_created_for_send': created}
-                    with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                    with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}), \
+                            patch.dict(sys.modules, {'telegram': module(error=errors)}):
                         if rich:
                             actual = await adapter._try_send_rich('23', 'готовый ответ', None, metadata)
                         else:
@@ -1771,7 +1783,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         current.generation = 1
         receipt = SimpleNamespace(**vars(delivered), chat_id=23)
         ports = {'plugins.platforms.telegram.adapter': module(_BraiPrivateTopicRetryFailed=PrivateTopicRetryFailed),
-                 'telegram.error': module(BadRequest=BadRequest, Forbidden=Forbidden)}
+                 'telegram.error': errors, 'telegram': module(error=errors)}
         for outcomes, retry_error, error_kind in (
                 ((receipt,), None, None), ((denied, receipt), None, None),
                 ((denied, denied), None, 'topic_unavailable'),
@@ -1803,6 +1815,67 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(result, {'success': True, 'message_id': '101'})
         self.assertEqual(len(recorded), 2)
+
+        telegram = module(error=errors, **{name: SimpleNamespace for name in (
+            'InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument')})
+        second_receipt = SimpleNamespace(**{**vars(receipt), 'message_id': 102, 'reply_to_message': None})
+        conflicting_anchor = SimpleNamespace(**{**vars(second_receipt),
+                                                 'reply_to_message': SimpleNamespace(message_id=94)})
+        for album in (False, True):
+            delivered_media = [receipt, second_receipt] if album else receipt
+            unreliable = [receipt, wrong_topic] if album else wrong_topic
+            cases = [
+                    ((denied, delivered_media), None, 'sent'),
+                    ((denied, unreliable), None, 'delivery_unknown'),
+                    ((TimeoutError(),), None, 'delivery_unknown'),
+                    ((denied,), PermissionError('Binding changed'), 'forbidden')]
+            if album:
+                cases.extend(((denied, value), None, 'delivery_unknown') for value in (
+                    [receipt, conflicting_anchor], [receipt, receipt], [wrong_anchor, second_receipt]))
+            for outcomes, recheck_error, expected in cases:
+                with self.subTest(album=album, media_outcomes=outcomes), \
+                        patch.dict(sys.modules, {**ports, 'telegram': telegram}), \
+                        patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                    sends = []
+                    def response(options, received):
+                        index = len(sends)
+                        sends.append((options, [file.read() for file in received]))
+                        result = outcomes[index]
+                        if isinstance(result, Exception):
+                            raise result
+                        return result
+
+                    async def document(document, caption, parse_mode, **options):
+                        return response(options, [document])
+
+                    async def group(media, **options):
+                        return response(options, [item.media for item in media])
+
+                    adapter._bot = SimpleNamespace(send_document=document, send_media_group=group)
+                    items = [{'caption': '', 'presentation': 'document', 'readHandle': BytesIO(body)}
+                             for body in ([b'first', b'second'] if album else [b'first'])]
+                    before_send = AsyncMock()
+                    before_retry = AsyncMock(side_effect=recheck_error)
+                    request = native.telegram_sender(adapter, '23', topic, 'album' if album else 'single',
+                        items, False, reply_to='93', strict=True, before_send=before_send,
+                        before_retry=before_retry, topic_anchor='93')
+                    if expected == 'sent':
+                        self.assertEqual(await request, [101, 102] if album else [101])
+                    else:
+                        with self.assertRaises(PrivateTopicRetryFailed) as raised:
+                            await request
+                        from identity.telegram_runtime import _private_topic_failure
+                        self.assertEqual(_private_topic_failure(raised.exception)['error_kind'], expected)
+                    before_send.assert_awaited_once()
+                    self.assertEqual(before_retry.await_count, int(outcomes[0] is denied))
+                    self.assertEqual(len(sends), len(outcomes))
+                    initial, bodies = sends[0]
+                    self.assertEqual(initial, {'chat_id': 23, 'message_thread_id': 88,
+                                              'reply_to_message_id': 93, 'allow_sending_without_reply': False})
+                    self.assertEqual(bodies, [b'first', b'second'] if album else [b'first'])
+                    if len(sends) > 1:
+                        self.assertEqual(sends[1], ({'chat_id': 23, 'reply_to_message_id': 93,
+                                                    'allow_sending_without_reply': False}, bodies))
 
     async def test_pinned_telegram_draft_never_retries_with_raw_markup(self):
         async def deadline(value, **kwargs):
