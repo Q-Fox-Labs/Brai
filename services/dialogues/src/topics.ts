@@ -58,19 +58,23 @@ export async function recentTopics(db:PoolClient,owner:string,pinned?:string,cur
   GROUP BY t.owner_id,t.id,t.short_id,t.title,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
   ORDER BY (t.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,t.id LIMIT 220
   )
-  SELECT recent.*,fallback.text AS fallback FROM recent
+  SELECT recent.*,fallback.text AS fallback,fallback.parts AS fallback_parts FROM recent
   LEFT JOIN LATERAL (
-   SELECT string_agg(left(concat_ws(' ',ds.text,ms.text),1600),' '
-    ORDER BY GREATEST(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id) AS text
+   SELECT string_agg(left(concat_ws(' ',ms.text,ds.text),1600),' '
+    ORDER BY GREATEST(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id) AS text,
+    jsonb_agg(left(concat_ws(' ',ms.text,ds.text),1600)
+    ORDER BY GREATEST(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id) AS parts
    FROM dialogues_live.topic_members tm
    LEFT JOIN LATERAL (SELECT text,change_seq,through_order FROM dialogues_live.dialogue_summaries
     WHERE owner_id=tm.owner_id AND dialogue_id=tm.dialogue_id ORDER BY version DESC LIMIT 1) ds ON true
    LEFT JOIN LATERAL (
-    SELECT s.text,GREATEST(m.change_seq,s.change_seq) AS change_seq FROM dialogues_live.messages m
-    JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.message_summaries
+    SELECT CASE WHEN recent.includes_current AND char_length(m.text)<=100 THEN m.text ELSE s.text END AS text,
+     GREATEST(m.change_seq,s.change_seq) AS change_seq FROM dialogues_live.messages m
+    LEFT JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.message_summaries
      WHERE owner_id=m.owner_id AND dialogue_id=m.dialogue_id AND message_id=m.id ORDER BY version DESC LIMIT 1) s ON true
     WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND ${visibleMessage}
     AND m.message_order>COALESCE(ds.through_order,-1)
+    AND (s.text IS NOT NULL OR (recent.includes_current AND char_length(m.text)<=100))
     ORDER BY m.message_order DESC LIMIT 1
    ) ms ON true
    WHERE tm.owner_id=$1 AND tm.topic_id=recent.id AND COALESCE(ds.text,ms.text) IS NOT NULL

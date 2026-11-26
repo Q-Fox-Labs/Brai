@@ -46,7 +46,7 @@ export function topicCardChanges(topics:LegacyTopicCard[],previous:View){
  return {items,view};
 }
 
-type TopicCard={topic_id:string;title:string|null;extended:string|null;compact:string|null;fallback?:string|null};
+type TopicCard={topic_id:string;title:string|null;extended:string|null;compact:string|null;fallback?:string|null;fallback_parts?:string[]|null};
 
 const quote=(value:string)=>JSON.stringify(value);
 const indexInstruction='В dialogues_exchange: topic_get(T…) — свёртки бесед; dialogue_get(D…) — сообщения; read_many([M…]) — оригиналы. -T… убирает тему из списка.';
@@ -58,9 +58,13 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
  const lines:string[]=[];
  const view:View={};
  const titles=topics.map(({topic_id,title})=>topic_id+' '+quote((title??'').replace(/[\u0000-\u001f]/gu,' '))+' ');
- const summaries=topics.map(({extended,compact,fallback},index)=>{
+ const summaries=topics.map(({extended,compact,fallback,fallback_parts},index)=>{
   const expanded=index<20;
-  return (expanded?extended:compact)??(fallback?contextExcerpt(fallback,expanded?topicLimits.extended:topicLimits.compact).text:null);
+  const limit=expanded?topicLimits.extended:topicLimits.compact;
+  const parts=fallback_parts?.filter(Boolean)??[];
+  const share=parts.length?Math.max(1,Math.floor(limit/parts.length)):limit;
+  const fromParts=parts.map(part=>contextExcerpt(part,share).text).join(' ');
+  return (expanded?extended:compact)??(fallback?contextExcerpt(fromParts||fallback,limit).text:null);
  });
  const fixedChars=titles.reduce((n,title)=>n+title.length+24,0);
  const summaryChars=summaries.reduce((n,summary)=>n+(summary?quote(quote(summary)).length:0),0);
