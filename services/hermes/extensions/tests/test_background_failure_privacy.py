@@ -302,7 +302,7 @@ class BackgroundCheckpointRecoveryTest(unittest.TestCase):
                 self.assertEqual(replay.pending_watchers[0]['session_id'], 'proc_detached')
                 reg._CHECKPOINT_DEFAULTS = {name: '' for name in reg._CHECKPOINT_FIELDS}
                 def make_session(**values):
-                    return SimpleNamespace(**values, systemd_unit='', host_start_time=123, exited=False, notify_on_complete=True,
+                    return SimpleNamespace(**values, systemd_unit='', host_start_time=123, task_id='task', exited=False, notify_on_complete=True,
                                            _lock=threading.Lock(), _completion_event=threading.Event())
                 reg.ProcessSession = make_session
                 checkpoint.write_text(json.dumps([{'session_id': 'live_b', 'pid': 10, 'pid_scope': 'host',
@@ -314,10 +314,15 @@ class BackgroundCheckpointRecoveryTest(unittest.TestCase):
                 watcher = cross_profile.pending_watchers[0]
                 self.assertEqual(watcher['brai_checkpoint_key'], str(checkpoint))
                 reg._checkpoint_path = lambda: other_checkpoint
+                cross_profile._write_checkpoint()  # Общий реестр записал тот же процесс и в файл B.
+                self.assertEqual(len(json.loads(other_checkpoint.read_text())), 1)
                 cross_profile._prune_uncollected_detached(cross_profile._running['live_b'])
                 self.assertTrue(json.loads(checkpoint.read_text())[0]['brai_lost'])
+                self.assertTrue(json.loads(other_checkpoint.read_text())[0]['brai_lost'])
                 cross_profile._brai_forget_lost_checkpoint('live_b', watcher['brai_checkpoint_key'])
                 self.assertEqual(json.loads(checkpoint.read_text()), [])
+                self.assertEqual(json.loads(other_checkpoint.read_text()), [])
+                self.assertEqual(Registry('gone').recover_from_checkpoint(), 0)
                 reg._checkpoint_path = lambda: checkpoint
                 reg._CHECKPOINT_FIELDS = ()
                 reg._CHECKPOINT_DEFAULTS = {}
@@ -422,6 +427,13 @@ class BackgroundFailureWatcherTest(unittest.IsolatedAsyncioTestCase):
             _brai_forget_lost_checkpoint=lambda sid, key: missing_ack.append((sid, key)))
         with patch.dict(sys.modules, modules):
             await Runner('concise', parent='')._run_process_watcher(watcher)
+        self.assertEqual(missing_ack, [])
+        with patch.dict(sys.modules, modules):
+            await Runner('off')._run_process_watcher({**watcher, 'notify_on_complete': False})
+        self.assertEqual(missing_ack, [])
+        modules['tools.process_registry'].process_registry.is_completion_consumed = lambda sid: True
+        with patch.dict(sys.modules, modules):
+            await Runner('concise')._run_process_watcher(watcher)
         self.assertEqual(missing_ack, [])
 
         class NoIdentity(Runner):

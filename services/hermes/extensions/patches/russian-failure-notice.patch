@@ -9560,7 +9560,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          agent_notify = watcher.get("notify_on_complete", False)
          # The mode belongs to the profile that started the process; recovered watchers run in the
          # root context, so resolve it under the owning profile's scope (no-op for the default).
-@@ -2049,69 +2025,71 @@
+@@ -2049,69 +2025,74 @@
          logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                        session_id, interval, notify_mode, agent_notify)
          silent = notify_mode == "off" and not agent_notify
@@ -9581,6 +9581,9 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 +                # Результат утрачен, но исходный адресат всё ещё проходит обычную проверку поколения.
 +                from types import SimpleNamespace
 +                session = SimpleNamespace(exited=True, exit_code=None, completion_reason="lost")
++            if (missing or (getattr(session, "detached", False) and session.exit_code is None)) and not (
++                    watcher.get("parent_session_id") or getattr(session, "parent_session_id", None)):
++                retain_unroutable = True
 +            failed = (session.exit_code != 0 or getattr(session, "completion_reason", "")
 +                      in {"lost", "failed_start", "rejected", "killed"})
 +            if session.exited and failed and not completion_logged:
@@ -9851,7 +9854,7 @@ diff --git a/tools/process_registry_notifications.py b/tools/process_registry_no
 diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_checkpoint.py
 --- a/tools/process_registry_checkpoint.py
 +++ b/tools/process_registry_checkpoint.py
-@@ -17,35 +17,101 @@
+@@ -17,35 +17,115 @@
  
      # ----- Checkpoint (crash recovery) -----
  
@@ -9905,6 +9908,8 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
 +                        entry["command"] = redact_sensitive_text(s.command, code_file=True)
 +                        entry["owner_task_id"] = s.owner_task_id or s.task_id
 +                        entries.append(entry)
++                        keys = getattr(s, "_brai_checkpoint_keys", set())
++                        s._brai_checkpoint_keys = {*keys, str(target)}
 +                    # Неразрешённый исход остаётся в исходном профиле до подтверждения приёма уведомления.
 +                    pending = getattr(self, "_brai_lost_checkpoints", {}).get(str(target), {})
                      tracked_ids = {item.get("session_id") for item in entries}
@@ -9926,29 +9931,41 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
 +        from pathlib import Path
 +        from tools.process_registry import _checkpoint_path
 +        key = checkpoint_key or str(_checkpoint_path())
++        identity_fields = ("session_id", "started_at", "parent_session_id", "session_key",
++                           "watcher_platform", "watcher_chat_id", "watcher_thread_id", "watcher_user_id")
 +        with self._lock:
 +            all_pending = getattr(self, "_brai_lost_checkpoints", {})
-+            if key not in all_pending:
++            source = all_pending.get(key, {}).get(session_id)
++            if source is None:
 +                return
-+            pending = all_pending[key]
-+            entry = pending.get(session_id)
-+            if entry and entry.get("brai_scope_pending"):
-+                # Ошибка закрытия scope должна пережить уведомление и повториться при перезапуске.
-+                pending[session_id] = {**entry, "brai_lost_notified": True}
-+            else:
-+                pending.pop(session_id, None)
-+        self._write_checkpoint(_brai_path=Path(key))
++            identity = tuple(source.get(field) for field in identity_fields)
++            changed = []
++            for path, pending in all_pending.items():
++                entry = pending.get(session_id)
++                if entry is None or tuple(entry.get(field) for field in identity_fields) != identity:
++                    continue
++                if entry.get("brai_scope_pending"):
++                    pending[session_id] = {**entry, "brai_lost_notified": True}
++                else:
++                    pending.pop(session_id, None)
++                changed.append(path)
++        for path in changed:
++            self._write_checkpoint(_brai_path=Path(path))
 +
 +    def _brai_retain_uncollected_session(self, session, *, scope_pending=False):
-+        from tools.process_registry import _CHECKPOINT_FIELDS
++        from pathlib import Path
++        from tools.process_registry import _CHECKPOINT_FIELDS, _checkpoint_path
 +        if session.watcher_interval <= 0:
-+            return
++            return ()
 +        entry = {"session_id": session.id, **{f: getattr(session, f) for f in _CHECKPOINT_FIELDS}}
 +        entry["command"] = redact_sensitive_text(session.command, code_file=True)
 +        entry["brai_scope_pending"] = scope_pending
-+        from pathlib import Path
-+        source = getattr(session, "_brai_checkpoint_key", None)
-+        self._brai_retain_lost_checkpoint(entry, Path(source) if source else None)
++        keys = set(getattr(session, "_brai_checkpoint_keys", ()))
++        if not keys:
++            keys.add(getattr(session, "_brai_checkpoint_key", None) or str(_checkpoint_path()))
++        for key in keys:
++            self._brai_retain_lost_checkpoint(entry, Path(key))
++        return tuple(keys)
 +
 +    def _brai_retain_lost_checkpoint(self, entry, checkpoint_path=None, *, enqueue=False):
 +        from tools.process_registry import _checkpoint_path, _WATCHER_ROUTE_KEYS
@@ -9978,7 +9995,7 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
  
      def recover_from_checkpoint(self) -> int:
          """On gateway startup, probe PIDs from the checkpoint file; returns how many
-@@ -64,9 +130,26 @@
+@@ -64,9 +144,26 @@
              return 0
          recovered = 0
          unresolved_scope_entries: list[dict[str, Any]] = []
@@ -10005,7 +10022,7 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
                  continue
              # The registry is process-global, so every profile's checkpoint carries every live
              # process; a multiplexer recovering several homes must adopt each session once.
-@@ -78,6 +161,7 @@
+@@ -78,6 +175,7 @@
                  logger.info(
                      "Skipping recovery for non-host process: %s (pid=%s, scope=%s)",
                      entry.get("command", "unknown")[:60], pid, pid_scope)
@@ -10013,7 +10030,7 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
                  continue
              # Alive and still ours: re-attach. A start-time probe that cannot
              # be read is not proof the PID was reused — dropping it would leave
-@@ -91,6 +175,7 @@
+@@ -91,6 +189,7 @@
                      "start time no longer matches — PID was recycled onto "
                      "an unrelated process; refusing to adopt or signal it.",
                      entry.get("session_id", "?"), pid)
@@ -10021,7 +10038,7 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
                  continue
              if fate != "running":
                  systemd_unit = entry.get("systemd_unit", "")
-@@ -99,7 +184,11 @@
+@@ -99,7 +198,11 @@
                          "Could not reap persisted scope %s for dead wrapper pid %s; "
                          "retaining checkpoint entry for the next startup",
                          systemd_unit, pid)
@@ -10033,15 +10050,16 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
                  continue
              fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
              fields.update(
-@@ -108,6 +197,7 @@
+@@ -108,6 +211,8 @@
                  started_at=entry.get("started_at", time.time()))
              # detached: can't read output, but can report status + kill
              session = ProcessSession(id=entry["session_id"], detached=True, **fields)
 +            session._brai_checkpoint_key = str(checkpoint_path)
++            session._brai_checkpoint_keys = {str(checkpoint_path)}
              with self._lock:
                  self._running[session.id] = session
              recovered += 1
-@@ -121,6 +211,7 @@
+@@ -121,6 +226,7 @@
                      **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
                      "notify_on_complete": session.notify_on_complete,
                      "parent_session_id": session.parent_session_id,
@@ -10052,28 +10070,32 @@ diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_check
 diff --git a/tools/process_registry.py b/tools/process_registry.py
 --- a/tools/process_registry.py
 +++ b/tools/process_registry.py
-@@ -1049,7 +1049,10 @@
+@@ -1049,7 +1049,12 @@
                  session.exited_at = time.time()
                  self._running.pop(session.id, None)
              self._finished[session.id] = session
 -        self._write_checkpoint()
-+        self._brai_retain_uncollected_session(session)
 +        from pathlib import Path
-+        source = getattr(session, "_brai_checkpoint_key", None)
-+        self._write_checkpoint(_brai_path=Path(source) if source else None)
++        paths = self._brai_retain_uncollected_session(session)
++        for path in paths:
++            self._write_checkpoint(_brai_path=Path(path))
++        if not paths:
++            self._write_checkpoint()
          session._completion_event.set()
  
      def _prune_uncollected_detached(self, session: ProcessSession) -> Optional[ProcessSession]:
-@@ -1066,7 +1069,11 @@
+@@ -1066,7 +1071,13 @@
                  self._finished[session.id] = session
              else:
                  self._finished.pop(session.id, None)
 -        self._write_checkpoint()
 +        # Не удаляем исход восстановленной задачи до приёма уведомления владельцу.
-+        self._brai_retain_uncollected_session(session, scope_pending=bool(session.systemd_unit))
 +        from pathlib import Path
-+        source = getattr(session, "_brai_checkpoint_key", None)
-+        self._write_checkpoint(_brai_path=Path(source) if source else None)
++        paths = self._brai_retain_uncollected_session(session, scope_pending=bool(session.systemd_unit))
++        for path in paths:
++            self._write_checkpoint(_brai_path=Path(path))
++        if not paths:
++            self._write_checkpoint()
          session._completion_event.set()
          return session if session.systemd_unit else None
  
