@@ -43,7 +43,7 @@ async function resolveTopic(db:PoolClient,owner:string,id:string):Promise<string
 
 /** Выбирает недавние карточки; для старых тем остаётся только доступ по ID и поиск. */
 export async function recentTopics(db:PoolClient,owner:string,pinned?:string,currentDialogue?:string,legacy=false){
- return (await db.query(`SELECT CASE WHEN $4::boolean THEN t.id ELSE 'T'||t.short_id END AS topic_id,left(t.title,128) AS title,
+ return (await db.query(`WITH recent AS (SELECT t.id,CASE WHEN $4::boolean THEN t.id ELSE 'T'||t.short_id END AS topic_id,left(t.title,128) AS title,
   max(COALESCE(m.occurred_at,m.recorded_at)) AS last_activity,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
   FROM dialogues_live.topics t JOIN dialogues_live.topic_members tm ON tm.owner_id=t.owner_id AND tm.topic_id=t.id
   JOIN LATERAL (SELECT occurred_at,recorded_at FROM dialogues_live.messages m
@@ -54,7 +54,19 @@ export async function recentTopics(db:PoolClient,owner:string,pinned?:string,cur
    WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
   WHERE t.owner_id=$1 AND t.merged_into IS NULL
   GROUP BY t.id,t.short_id,t.title,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
-  ORDER BY (t.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,t.id LIMIT 220`,[owner,pinned??null,currentDialogue??null,legacy])).rows;
+  ORDER BY (t.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,t.id LIMIT 220
+  )
+  SELECT recent.*,fallback.text AS fallback FROM recent
+  LEFT JOIN LATERAL (
+   SELECT left(ds.text,1600) AS text
+   FROM dialogues_live.topic_members tm
+   JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.dialogue_summaries
+    WHERE owner_id=tm.owner_id AND dialogue_id=tm.dialogue_id ORDER BY version DESC LIMIT 1) ds ON true
+   WHERE tm.owner_id=$1 AND tm.topic_id=recent.id
+    AND ($3::text IS NULL OR tm.dialogue_id<>$3)
+   ORDER BY ds.change_seq DESC,tm.dialogue_id LIMIT 1
+  ) fallback ON recent.version IS NULL AND NOT $4::boolean
+  ORDER BY (recent.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,recent.id`,[owner,pinned??null,currentDialogue??null,legacy])).rows;
 }
 
 /** Выдаёт компактные совпадения без передачи целых сообщений поисковому клиенту. */

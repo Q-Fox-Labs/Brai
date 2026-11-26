@@ -7,7 +7,7 @@ import { createStore } from "./store.js";
 import { startMcp } from "./mcp.js";
 import {createLuna} from "./luna.js";
 import {createJobs} from "./jobs.js";
-import {createTopicJobs} from "./topic-jobs.js";
+import {createTopicJobs,seedTopicIndex} from "./topic-jobs.js";
 import {DialoguesFault} from "./domain.js";
 import {verifyOwnerConnection} from "./isolation.js";
 import {connectAuthAccess} from './auth-access.js';
@@ -48,11 +48,12 @@ try {
   if((await pool.query("SELECT 1 FROM dialogues_live.messages m WHERE m.owner_id=$1 AND char_length(m.text)>100 AND NOT EXISTS(SELECT 1 FROM dialogues_live.message_summaries s WHERE s.owner_id=m.owner_id AND s.dialogue_id=m.dialogue_id AND s.message_id=m.id) LIMIT 1",[owner])).rowCount)throw new Error("BACKFILL_REQUIRED");
   if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"&&!personal)
     luna=createLuna(required("DIALOGUES_CODEX_SOCKET_URL"),required("DIALOGUES_SUMMARY_CWD"));
+  const generator=luna;
+  const topicJobs=generator&&'structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
+  if(topicJobs)await topicJobs.seed();
+  else await seedTopicIndex(pool,owner);
   mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal});
-  if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"){
-    const generator=luna!;
-    // AIDEV-NOTE: Подписочный исполнитель DEV предоставляет структурированные ответы.
-    const topicJobs='structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
+  if(generator){
     jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
       try{return await topicJobs.tick();}
       catch(error){

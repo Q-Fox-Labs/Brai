@@ -125,30 +125,35 @@ async function recordChange(db:PoolClient,owner:string,operation:string,seq:stri
  [owner,operation+':'+seq,operation,digest(result),result,seq]);
 }
 
+/** Индексирует старые беседы без вызова модели. */
+export async function seedTopicIndex(pool:Pool,owner:string){
+ return ownerTransaction(pool,owner,async db=>{
+  await db.query(`UPDATE dialogues_live.topic_members tm SET evidence_seq=COALESCE((
+   SELECT max(m.change_seq) FROM dialogues_live.messages m
+   WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND m.kind='input'),0)
+   WHERE tm.owner_id=$1 AND tm.evidence_seq=-1`,[owner]);
+  const result=await db.query(`WITH pending AS (
+   SELECT d.owner_id,d.id,d.title,'topic-'||encode(sha256(convert_to(d.id,'UTF8')),'hex') AS topic_id,
+    min(m.change_seq) AS dirty_seq,COALESCE(max(m.change_seq) FILTER (WHERE m.kind='input'),0) AS evidence_seq
+   FROM dialogues_live.dialogues d
+   JOIN dialogues_live.messages m ON m.owner_id=d.owner_id AND m.dialogue_id=d.id AND ${visibleMessage}
+   WHERE d.owner_id=$1 AND NOT EXISTS (
+    SELECT 1 FROM dialogues_live.topic_members t WHERE t.owner_id=d.owner_id AND t.dialogue_id=d.id)
+   GROUP BY d.owner_id,d.id,d.title
+  ), inserted AS (INSERT INTO dialogues_live.topics(owner_id,id,title,home_dialogue_id,dirty_seq)
+    SELECT owner_id,topic_id,title,id,dirty_seq FROM pending ON CONFLICT DO NOTHING)
+  INSERT INTO dialogues_live.topic_members(owner_id,dialogue_id,topic_id,evidence_seq)
+   SELECT owner_id,id,topic_id,evidence_seq FROM pending ON CONFLICT DO NOTHING`,[owner]);
+  return result.rowCount??0;
+ });
+}
+
 /** Обрабатывает одну порцию фоновой работы с сохранением уже готовых версий после перезапуска. */
 export function createTopicJobs(pool:Pool,owner:string,luna:Generator,authorize?:()=>Promise<void>){
  const retryAfter=new Map<string,number>();
  let seeded=false;
  async function seed(){
-  const count=await ownerTransaction(pool,owner,async db=>{
-   await db.query(`UPDATE dialogues_live.topic_members tm SET evidence_seq=COALESCE((
-    SELECT max(m.change_seq) FROM dialogues_live.messages m
-    WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND m.kind='input'),0)
-    WHERE tm.owner_id=$1 AND tm.evidence_seq=-1`,[owner]);
-   const result=await db.query(`WITH pending AS (
-    SELECT d.owner_id,d.id,d.title,'topic-'||encode(sha256(convert_to(d.id,'UTF8')),'hex') AS topic_id,
-     min(m.change_seq) AS dirty_seq,COALESCE(max(m.change_seq) FILTER (WHERE m.kind='input'),0) AS evidence_seq
-    FROM dialogues_live.dialogues d
-    JOIN dialogues_live.messages m ON m.owner_id=d.owner_id AND m.dialogue_id=d.id AND ${visibleMessage}
-    WHERE d.owner_id=$1 AND NOT EXISTS (
-     SELECT 1 FROM dialogues_live.topic_members t WHERE t.owner_id=d.owner_id AND t.dialogue_id=d.id)
-    GROUP BY d.owner_id,d.id,d.title
-   ), inserted AS (INSERT INTO dialogues_live.topics(owner_id,id,title,home_dialogue_id,dirty_seq)
-     SELECT owner_id,topic_id,title,id,dirty_seq FROM pending ON CONFLICT DO NOTHING)
-   INSERT INTO dialogues_live.topic_members(owner_id,dialogue_id,topic_id,evidence_seq)
-    SELECT owner_id,id,topic_id,evidence_seq FROM pending ON CONFLICT DO NOTHING`,[owner]);
-   return result.rowCount??0;
-  });
+  const count=await seedTopicIndex(pool,owner);
   seeded=true;
   return count;
  }
