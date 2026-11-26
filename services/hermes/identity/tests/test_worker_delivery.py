@@ -490,6 +490,39 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                 peer.call.assert_awaited_once()
                 adapter._send_plain_fallback.assert_not_awaited()
 
+    async def test_unconfirmed_stream_final_and_normal_final_share_a_delivery(self):
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+
+        outcome = {'success': False, 'retryable': False, 'error_kind': 'delivery_unknown'}
+        peer = NS(call=AsyncMock(return_value=outcome))
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, None)
+        journal = DeliveryJournal(self.root / 'stream-final.sqlite3', 'owner')
+        adapter._brai_delivery_journal = journal
+        first = delivery_id('first input')
+        journal.begin_input(first, delivery_id('first bytes'))
+        token = input_delivery.set(first)
+        try:
+            metadata = {'thread_id': '77', 'notify': True}
+            stream = await adapter.send('123', 'Final reply', reply_to='5',
+                                        metadata={**metadata, 'reply_to_message_id': '5'})
+            fallback = await adapter.send('123', 'Final reply', reply_to='5', metadata=metadata)
+            self.assertEqual(stream.error_kind, 'delivery_unknown')
+            self.assertEqual(fallback.error_kind, 'delivery_unknown')
+            self.assertFalse(fallback.success)
+            peer.call.assert_awaited_once()
+
+            second = delivery_id('second input')
+            journal.begin_input(second, delivery_id('second bytes'))
+            next_token = input_delivery.set(second)
+            try:
+                await adapter.send('123', 'Final reply', reply_to='5', metadata=metadata)
+                self.assertEqual(peer.call.await_count, 2)
+            finally:
+                input_delivery.reset(next_token)
+        finally:
+            input_delivery.reset(token)
+
     async def test_durable_input_has_one_delivery_owner_without_disabling_legacy(self):
         from identity.scope import input_delivery
         adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)

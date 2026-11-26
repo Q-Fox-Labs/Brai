@@ -164,7 +164,16 @@ def make_adapter(config, platform, peer, publish_file):
                     boundary = journal.input_boundary()
                     state_reader = getattr(getattr(self, 'gateway_runner', None), '_brai_return_notice_state', None)
                     state = state_reader(*route) if callable(state_reader) else None
-                    signature = (boundary, canonical(state), name, canonical(wire).encode('utf-8'))
+                    signature_wire = wire
+                    anchor = payload.get('reply_to')
+                    if (name == 'send' and route[1] and anchor
+                            and str(metadata.get('reply_to_message_id') or '') == str(anchor)):
+                        # Streaming repeats the explicit reply anchor in metadata.
+                        # The normal final uses the same route without that copy.
+                        fingerprint_payload = {**payload, 'metadata': {
+                            key: item for key, item in metadata.items() if key != 'reply_to_message_id'}}
+                        signature_wire = {**wire, 'payload': fingerprint_payload}
+                    signature = (boundary, canonical(state), name, canonical(signature_wire).encode('utf-8'))
                     previous = self._brai_last_outputs.get(route)
                     if boundary is not None and previous is not None and previous[0] == signature:
                         existing = journal.output(previous[1])
