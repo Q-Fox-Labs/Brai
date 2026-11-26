@@ -9490,36 +9490,7 @@ diff --git a/gateway/run.py b/gateway/run.py
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 --- a/gateway/run_notifications.py
 +++ b/gateway/run_notifications.py
-@@ -1614,7 +1614,8 @@
-         lines = [
-             f"[IMPORTANT: {len(entries)} background processes completed for this session.",
-             "Treat these results as one completion batch and send at most one "
--            "consolidated user-facing response.",
-+            "consolidated user-facing response. Explain failures in plain language, "
-+            "without commands or raw diagnostics, and include their journal references.",
-         ]
-         shown = entries[:10]
-         for _text, evt, _future in shown:
-@@ -1627,6 +1628,9 @@
-             if len(output) > 800:
-                 output = f"[… truncated …]\n{output[-800:]}"
-             lines.append(f"\n- {session_id}: exit_code={exit_code}, reason={reason}")
-+            if "_brai_failure_reference" in evt:
-+                reference = evt["_brai_failure_reference"]
-+                lines.append(f"  Journal reference: {reference}" if reference else "  Journal reference unavailable")
-             if output:
-                 lines.append(output)
-         omitted = len(entries) - len(shown)
-@@ -1635,7 +1639,7 @@
-                 f"\n- … and {omitted} more completion(s); inspect them with "
-                 "the process tool if they affect the conclusion."
-             )
--        lines.append("If a result does not change the current conclusion, absorb it silently.]")
-+        lines.append("Successful results may be absorbed silently; report every failure and its journal reference.]")
-         return "\n".join(lines)
- 
-     def _record_coalesced_completion_siblings(self, events: list[dict]) -> None:
-@@ -1722,7 +1726,7 @@
+@@ -1722,7 +1722,7 @@
                  setattr(self, attr, default())
          if self._completion_notification_batches_stopping:
              return False
@@ -9528,11 +9499,10 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          future = asyncio.get_running_loop().create_future()
          self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
          if key not in self._completion_notification_batch_tasks:
-@@ -1991,27 +1995,19 @@
-             ),
+@@ -1992,26 +1992,12 @@
          }
  
--    def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
+     def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
 -        """Human-facing completion message. Every mode shares the one-line status header; the
 -        raw-output modes (all/result/error) append the bounded output tail under it instead of the
 -        old bracketed ``[Background process proc_… finished~ …]`` debug wrapper (#54266)."""
@@ -9546,16 +9516,9 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -                                                        duration_seconds=_dur)
 -        header = _format_concise_process_notification(session_id, command, session.exit_code, "", duration_seconds=_dur)
 -        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
-+    def _format_process_final_message(self, session_id: str, session, notify_mode: str, reference=None) -> str:
-+        """A direct chat status never contains a command or process output."""
-+        if session.exit_code not in (0, None):
-+            from tools.process_registry_notifications import background_failure_notice
-+            return background_failure_notice(reference)
-+        if session.exit_code is None:
-+            key = "gateway.background.task_unknown"
-+            value = t(key)
-+            return "The background task result is unknown." if value == key else value
-+        return t("gateway.background.task_finished")
++        if session.exit_code and logger.isEnabledFor(logging.WARNING):
++            return f"{t('gateway.background.task_failed')} · Номер в журнале: {session_id.removeprefix('proc_')}"
++        return t("gateway.background.task_finished") if session.exit_code == 0 else "⚠️ Ошибка задачи или результат неизвестен."
  
      def _format_process_running_message(self, session) -> str:
 -        from gateway.run import _redact_gateway_user_facing_secrets, _shorten_command_for_display
@@ -9567,221 +9530,27 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
  
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
-@@ -2050,11 +2046,20 @@
-                       session_id, interval, notify_mode, agent_notify)
-         silent = notify_mode == "off" and not agent_notify
-         last_output_len = 0
-+        failure_logged = False
-+        failure_reference = None
-         while True:
-             await asyncio.sleep(interval)
+@@ -2055,6 +2041,9 @@
              session = process_registry.get(session_id)
              if session is None:
                  break
-+            if session.exited and session.exit_code not in (0, None) and not failure_logged:
-+                from tools.process_registry_notifications import background_failure_reference
-+                failure_event = {"session_id": session_id, "exit_code": session.exit_code,
-+                                 "command": getattr(session, "command", ""), "output": session.output_buffer}
++            if session.exited and session.exit_code and logger.isEnabledFor(logging.WARNING):
 +                async with self._completion_event_scope(watcher):
-+                    failure_reference = await asyncio.to_thread(background_failure_reference, failure_event)
-+                failure_logged = True
++                    logger.warning("BACKGROUND_FAILURE reference=%s output=%s", session_id.removeprefix("proc_"), self._redacted_output_tail(session, 1000))
              if silent:
                  # Still wait for the process to exit so we can log it, but don't push any messages.
                  if session.exited:
-@@ -2068,9 +2073,18 @@
+@@ -2066,11 +2055,12 @@
+             if session.exited:
+                 # Agent-notify: inject a synthetic message unless the agent already consumed the result via
                  # wait/log (poll() is read-only and deliberately does NOT mark consumed).
-                 if agent_notify and not process_registry.is_completion_consumed(session_id):
+-                if agent_notify and not process_registry.is_completion_consumed(session_id):
++                if (agent_notify or (not session.exit_code and notify_mode != "error")) and not process_registry.is_completion_consumed(session_id):
                      completion_evt = self._build_process_completion_event(watcher, session, session_id)
-+                    if failure_logged:
-+                        completion_evt["_brai_failure_reference"] = failure_reference
                      synth_text = format_process_notification(completion_evt)
                      if not synth_text:
                          break
-+                    if failure_logged:
-+                        from tools.process_registry_notifications import background_failure_notice
-+                        notice = background_failure_notice(failure_reference)
-+                        synth_text += (f"\n[Сообщи об ошибке понятными словами без технических подробностей: "
-+                                       f"{notice}]")
-+                    else:
-+                        synth_text += "\n[Если в результате есть ошибка, объясни её без технических подробностей.]"
++                    synth_text += f"\n[Без сырых ошибок. Номер в журнале: {session_id.removeprefix('proc_')}]" if session.exit_code and logger.isEnabledFor(logging.WARNING) else ""
                      # Captured before injection: afterwards the key is busy either way (the injected
                      # turn itself installs the guard).
                      turn_busy = await self._launching_turn_active(platform_name, watcher)
-@@ -2086,7 +2100,7 @@
-                     if turn_busy and (notify_mode in {"concise", "all", "result"} or (
-                         notify_mode == "error" and session.exit_code not in {0, None}
-                     )):
--                        message_text = self._format_process_final_message(session_id, session, "concise")
-+                        message_text = self._format_process_final_message(session_id, session, "concise", failure_reference)
-                         await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
-                     break
-                 # Text-only notification; skip when already consumed via wait/log (the agent_notify branch
-@@ -2100,7 +2114,18 @@
-                 if notify_mode in {"concise", "all", "result"} or (
-                     notify_mode == "error" and session.exit_code not in {0, None}
-                 ):
--                    message_text = self._format_process_final_message(session_id, session, notify_mode)
-+                    if session.exit_code in (0, None):
-+                        # Text-only legacy watchers still hand the available result to the agent.
-+                        completion_evt = self._build_process_completion_event(watcher, session, session_id)
-+                        synth_text = format_process_notification(completion_evt)
-+                        if synth_text:
-+                            synth_text += "\n[Передай результат понятными словами, не цитируя сырые ошибки.]"
-+                            delivered = await self._enqueue_process_completion_notification(synth_text, completion_evt)
-+                            if delivered is False:
-+                                continue
-+                            if delivered is True:
-+                                break
-+                    message_text = self._format_process_final_message(session_id, session, notify_mode, failure_reference)
-                     from gateway.warning_notifications import present_notification
-                     async with self._completion_event_scope(watcher):
-                         # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
-diff --git a/tools/process_registry_notifications.py b/tools/process_registry_notifications.py
---- a/tools/process_registry_notifications.py
-+++ b/tools/process_registry_notifications.py
-@@ -4,9 +4,58 @@
- TUI inject into the agent conversation."""
- 
- import time
-+import json
-+import logging
-+import secrets
-+import threading
- from dataclasses import dataclass
- from contextlib import suppress
- 
-+_failure_log_lock = threading.Lock()
-+
-+
-+def background_failure_reference(evt: dict) -> "str | None":
-+    """Write one numbered diagnostic using the existing Hermes error logger."""
-+    with _failure_log_lock:
-+        if "_brai_failure_reference" in evt:
-+            return evt["_brai_failure_reference"]
-+        logger = logging.getLogger("gateway.run")
-+        reference = None
-+        try:
-+            if logger.isEnabledFor(logging.WARNING):
-+                from agent.redact import redact_sensitive_text, redact_terminal_output
-+                from tools.ansi_strip import strip_ansi
-+                command = str(evt.get("command") or "")
-+                output = strip_ansi(str(evt.get("output") or ""))
-+                diagnostic = redact_sensitive_text(redact_terminal_output(output, command, force=True),
-+                                                   force=True, redact_url_credentials=True)
-+                reference = secrets.token_hex(8)
-+                logger.warning("BACKGROUND_PROCESS_FAILURE reference=%s session=%s exit=%s data=%s",
-+                               reference, evt.get("session_id"), evt.get("exit_code"),
-+                               json.dumps({"output": diagnostic[-2000:]}, ensure_ascii=False))
-+        except Exception:
-+            reference = None
-+        evt["_brai_failure_reference"] = reference
-+        return reference
-+
-+
-+def background_failure_notice(reference) -> str:
-+    from agent.i18n import t
-+    key = "gateway.background.task_failed_ref" if reference else "gateway.background.task_failed_unlogged"
-+    result = t(key, reference=reference) if reference else t(key)
-+    if result == key:
-+        return (f"A background task failed. Journal reference: {reference}." if reference
-+                else "A background task failed. The journal reference is unavailable.")
-+    return result
-+
-+
-+def process_progress_display_text() -> str:
-+    from agent.i18n import t
-+    key = "gateway.background.task_progress"
-+    result = t(key)
-+    return "Background task update." if result == key else result
-+
-+
- _DONE = ("completed", "success")
- _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
- 
-@@ -333,20 +382,19 @@
- 
- 
- def process_completion_display_text(events: list) -> str:
--    """Compact UI title for one or more process completions; the model text keeps the full output."""
--    if len(events) != 1:
--        return f"{len(events)} Background Processes Finished"
--    evt = events[0]
--    reason, exit_code = evt.get("completion_reason") or "exited", evt.get("exit_code", "?")
--    if reason == "killed":
--        outcome = "Terminated"
--    elif reason in _REASON_STATUS:
--        outcome = "Lost" if reason == "lost" else "Failed to Start"
--    else:
--        outcome = "Finished" if exit_code == 0 else "Failed"
--    cmd = _short_command(evt.get("command"))
--    detail = f" (exit {exit_code})" if reason not in ("killed", *_REASON_STATUS) and exit_code != 0 else ""
--    return f"Background Process {outcome}{detail}: {cmd}" if cmd else f"Background Process {outcome}{detail}"
-+    """Safe status for the interface; the agent still receives the process output."""
-+    from agent.i18n import t
-+    failures = [background_failure_notice(background_failure_reference(event)) for event in events
-+                if event.get("exit_code") not in (0, None) or event.get("completion_reason") in ("failed_start", "rejected", "killed")]
-+    if failures:
-+        return "\n".join(failures)
-+    if len(events) == 1:
-+        if events[0].get("exit_code") is None or events[0].get("completion_reason") == "lost":
-+            key = "gateway.background.task_unknown"
-+            value = t(key)
-+            return "The background task result is unknown." if value == key else value
-+        return t("gateway.background.task_finished")
-+    return f"{len(events)} Background Processes Finished"
- 
- 
- HEARTBEAT_DISPLAY_KIND = "hidden"  # a wake, not a message: no surface paints the row
-diff --git a/hermes_cli/cli_process_notifications.py b/hermes_cli/cli_process_notifications.py
---- a/hermes_cli/cli_process_notifications.py
-+++ b/hermes_cli/cli_process_notifications.py
-@@ -38,7 +38,7 @@
-         from tools.async_delegation import claim_event_delivery, complete_event_delivery
-         from tools.process_registry_notifications import (
-             HEARTBEAT_DISPLAY_KIND, ProcessNotificationBatch, TimelineNotification, group_process_notifications,
--            heartbeat_display_text)
-+            process_progress_display_text)
- 
-         claimed = []
-         for event, text in process_registry.drain_notifications(
-@@ -58,7 +58,9 @@
-             if evt_type == "completion":
-                 pending = ProcessNotificationBatch(notifications)
-             elif evt_type == "heartbeat":
--                pending = TimelineNotification(text, heartbeat_display_text(event), HEARTBEAT_DISPLAY_KIND)
-+                pending = TimelineNotification(text, process_progress_display_text(), HEARTBEAT_DISPLAY_KIND)
-+            elif evt_type == "watch_match":
-+                pending = TimelineNotification(text, process_progress_display_text(), "internal_notification")
-             else:
-                 pending = TimelineNotification.for_delegation(text, event) if evt_type == "async_delegation" else text
-                 from agent.notification_presentation import diagnostic_process_event
-diff --git a/tui_gateway/session_notifications.py b/tui_gateway/session_notifications.py
---- a/tui_gateway/session_notifications.py
-+++ b/tui_gateway/session_notifications.py
-@@ -543,9 +543,10 @@
-     # while distinct watch_match events from one process must stay visible.
-     dedup_key = _notification_event_dedup_key(evt)
-     if dedup_key not in emitted:
--        from tools.process_registry_notifications import async_delegation_display_text, process_completion_display_text
-+        from tools.process_registry_notifications import async_delegation_display_text, process_completion_display_text, process_progress_display_text
-         display_text = (async_delegation_display_text(evt) if is_delegation
--                        else process_completion_display_text([evt]) if evt_type == "completion" else text)
-+                        else process_completion_display_text([evt]) if evt_type == "completion"
-+                        else process_progress_display_text() if evt_type in ("watch_match", "heartbeat") else text)
-         from agent.notification_presentation import diagnostic_process_event
-         from gateway.warning_notifications import render_notification
-         render_notification(lambda: _emit("status.update", sid, {"kind": "process", "text": display_text}),
-diff --git a/locales/ru.yaml b/locales/ru.yaml
---- a/locales/ru.yaml
-+++ b/locales/ru.yaml
-@@ -103,6 +103,10 @@
-     usage: "Использование: /bg <запрос>\nПример: /bg Сделай сводку лучших историй с HN сегодня\n\nЗапускает запрос в отдельном сеансе. Можно продолжить общение — результат появится здесь по завершении."
-     started: "🔄 Фоновая задача запущена: «{preview}»\nID задачи: {task_id}\nМожно продолжить общение — результаты появятся здесь по завершении."
-     task_finished: "✅ Фоновая задача завершена"
-+    task_unknown: "⚠️ Результат фоновой задачи неизвестен."
-+    task_failed_ref: "❌ Фоновая задача завершилась с ошибкой. Номер в журнале: {reference}."
-+    task_failed_unlogged: "❌ Фоновая задача завершилась с ошибкой. Номер журнала недоступен."
-+    task_progress: "Обновление фоновой задачи."
-     task_failed: "❌ Фоновая задача завершилась с ошибкой"
-     exit_code: "код выхода {code}"
-     last_output: ". Последний вывод:\n```\n{tail}\n```"

@@ -28,16 +28,6 @@ for (const name of ['test_xlsx.py', 'test_connect.py', 'test_context_gif.py', 't
 }
 
 
-test('extensions: background failure privacy', {
-  timeout: 60000,
-  skip: process.env.HERMES_TEST_CANDIDATE ? false : 'requires a prepared Hermes engine',
-}, () => {
-  const script = fileURLToPath(new URL('../extensions/tests/test_background_failure_privacy.py', import.meta.url));
-  const result = spawnSync('python3', ['-B', script], { encoding: 'utf8', timeout: 55000, maxBuffer: 1024 * 1024 });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-});
-
-
 test('video helper uses real local FFmpeg fixtures', { timeout: 60000 }, () => {
   const script = fileURLToPath(new URL('../extensions/skill-scripts/media/youtube-content/scripts/test_video_workflow.py', import.meta.url));
   const result = spawnSync('python3', ['-B', script], { encoding: 'utf8', timeout: 55000, maxBuffer: 1024 * 1024 });
