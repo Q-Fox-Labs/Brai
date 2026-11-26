@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.profiles import stt_config
 from identity.audio_parts import PREPARE_TIMEOUT, RATE, audio_info, audio_parts
-from identity.transcribe import PART_TIMEOUT, transcribe_audio, transcribe_file
+from identity.transcribe import PART_TIMEOUT, main, transcribe_audio, transcribe_file
 
 MODEL = {'modelId': 'selected-model', 'revision': 'selected-revision', 'profileId': 'selected-profile'}
 AID = '11111111-1111-4111-8111-111111111111'
@@ -40,6 +40,22 @@ def recognized(text):
 
 class TranscriptionTests(unittest.TestCase):
     """Проверить результат command provider и его границы."""
+
+    def test_manual_command_can_invoke_the_default_without_a_selector(self):
+        argv = ['transcribe', '--input', '/workspace/video.mp4', '--output', '/workspace/result.txt']
+        with patch.object(sys, 'argv', argv), patch('identity.transcribe.transcribe_audio') as transcribe:
+            self.assertEqual(main(), 0)
+        transcribe.assert_called_once_with('/workspace/video.mp4', '/workspace/result.txt', None, operation_id=None)
+
+    def test_command_keeps_the_native_selector(self):
+        argv = ['transcribe', '--input', '/workspace/voice.ogg', '--output', '/workspace/result.txt']
+        native_args = argv + ['--model-id', MODEL['modelId'], '--revision', MODEL['revision'],
+                              '--profile-id', MODEL['profileId'], '--operation-id', 'a' * 64]
+        with patch('identity.transcribe.transcribe_audio') as transcribe, patch('identity.transcribe.broker_call') as call:
+            with patch.object(sys, 'argv', native_args):
+                self.assertEqual(main(), 0)
+            call.assert_not_called()
+            transcribe.assert_called_once_with('/workspace/voice.ogg', '/workspace/result.txt', MODEL, operation_id='a' * 64)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -265,6 +281,49 @@ class AudioPartTests(unittest.TestCase):
             workspace = self.home / 'workspace'
             self.assertEqual(list(workspace.glob('.stt-*')), [workspace / '.stt-progress'])
             self.assertEqual(len(list((workspace / '.stt-progress').glob('*.sqlite3'))), int(failed))
+
+    def test_manual_default_pins_the_selector_and_resumes_a_short_file(self):
+        source = self.make_audio('short-manual.ogg', 1)
+        events = []
+        current_model = MODEL
+        submissions = []
+
+        def call(method, params, **kwargs):
+            if method == 'files.publish':
+                events.append(method)
+                return {'artifactId': AID, 'mimeType': 'audio/ogg'}
+            action, args = params['name'], params['args']
+            events.append(action)
+            if action == 'transcription_settings_get':
+                self.assertEqual(args, {})
+                return {'settings': {'defaultLocalModel': current_model}}
+            if action == 'transcription_request_submit':
+                submissions.append(args)
+                if len(submissions) == 1:
+                    raise ConnectionError('Lost acceptance receipt')
+                return submitted(args)
+            self.assertEqual(action, 'transcription_result_get')
+            return recognized('Сохранённый текст')
+
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.home)}):
+            with self.assertRaisesRegex(ConnectionError, 'Lost acceptance receipt'):
+                transcribe_audio(source, self.output, None, call=call)
+            current_model = None
+            self.assertFalse(self.output.exists())
+            transcribe_audio(source, self.output, None, call=call)
+        self.assertEqual(self.output.read_text(), 'Сохранённый текст')
+        self.assertEqual(submissions[0], submissions[1])
+        self.assertEqual(events.count('files.publish'), 1)
+        self.assertEqual(events.count('transcription_settings_get'), 1)
+
+    def test_manual_command_stops_when_transcription_has_no_default(self):
+        source = self.make_audio('no-default.ogg', 1)
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.home)}), \
+                patch('identity.transcribe.broker_call', return_value={'settings': {'defaultLocalModel': None}}) as call:
+            with self.assertRaisesRegex(ValueError, 'MODEL_UNAVAILABLE'):
+                transcribe_audio(source, self.output, None, call=call)
+        call.assert_called_once_with('tools.call', {'name': 'transcription_settings_get', 'args': {}})
+        self.assertFalse(self.output.exists())
 
     def test_long_audio_resumes_confirmed_parts_and_reconciles_the_same_request(self):
         source = self.make_audio('resume.ogg', 181)

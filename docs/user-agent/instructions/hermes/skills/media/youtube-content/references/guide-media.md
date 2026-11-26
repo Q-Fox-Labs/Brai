@@ -1,7 +1,14 @@
 ### Audio, subtitles, screenshots and clips
 
 - First discover subtitle languages through `info`. `fetch 'URL' --kind subs` downloads subtitles; select language with `--languages 'ru.*,en.*'` (default `en.*,ru.*`), consulting `fetch --help` for exact options. Human subtitles and automatic captions are different sources; state which was used. Audio transcription is not identical to obtaining YouTube captions.
-- For requested audio, `fetch 'URL' --kind audio` downloads the native stream (for example Opus/WebM or M4A). Verify the actual format before naming it. For speech recognition, use `audio 'LOCAL_MEDIA' --out 'NEW_JOB/audio.wav'` to prepare mono WAV at 16 kHz from the downloaded media, including audio-only streams. Publish the WAV as a personal artifact, use `transcription_request_submit` with its ID, retain the request ID, then read status and retrieve the result. If the service is unavailable, report that state without proposing a local model installation. If captions were requested, get them separately and identify them as captions.
+- For requested audio, `fetch 'URL' --kind audio` downloads the native stream (for example Opus/WebM or M4A). Verify its format before naming it. For speech recognition of downloaded or local media, run the existing Transcription client in the personal profile. Give it the original media file and a new `.txt` output path in the profile workspace. It uses the owner's Transcription model and handles decoding, segmentation and resumption. To resume a failed attempt, keep the original file and reuse the same output path. For long media, run the terminal command in the background and wait for a successful exit before reading the output. Publish the checked final transcript to Artifacts if the user requested a file. If the service is unavailable, report that state. Fetch and identify captions separately when requested.
+
+  ```bash
+  HERMES_HOME="${HERMES_HOME:-$HOME}" BRAI_IDENTITY_BROKER=/run/brai-profile/control.sock \
+    PYTHONPATH=/opt/brai-profile/runtime/services/hermes \
+    /opt/brai-profile/python/bin/python3 -s -P -B -m identity.transcribe \
+    --input '/absolute/path/to/local-media' --output '/absolute/path/to/new-transcript.txt'
+  ```
 - Summaries, chapters, posts and quotations use the actual transcript, with timestamp provenance; the legacy helper below remains a fallback when prepared. With a bare link, its old default-summary rule does NOT apply.
 - `screenshot 'LOCAL_VIDEO' --at 83 --out 'NEW_JOB/frame-83.jpg'` produces one frame. Ask which second if unspecified; a single screenshot does not justify analyzing the full video.
 - `clip 'LOCAL_VIDEO' --start 80 --end 95 --out 'NEW_JOB/clip.mp4'` produces a short excerpt. Standard clip cap is 120 seconds; no full re-encode by default.
