@@ -4,6 +4,8 @@ import type { Pool, PoolClient } from "pg";
 import {createTurns} from "./turns.js";
 import {createContext,contextPages,ownerTransaction} from "./context.js";
 import {enqueueDialogue} from "./jobs.js";
+import {createArchiveReader} from './archive.js';
+import {createTopics,ensureTopic} from "./topics.js";
 import { createHash } from "node:crypto";
 import { appendInput, summaryInput, canonical, digest, decodeCursor, encodeCursor, fail, id, integer, object, limits, type Cursor, DialoguesFault } from "./domain.js";
 
@@ -13,6 +15,16 @@ const cleanFault=(e:any)=> e instanceof DialoguesFault ? e : new DialoguesFault(
 type DB=Pick<Pool,"connect">;
 /** Соединяет предметные правила с приватной live-схемой, без доступа к архиву. */
 export function createStore(pool:DB,key:string) {
+  const archive=createArchiveReader(pool,key);
+  const activeThreads=new Map<string,Promise<void>>();
+  /** Сохраняет порядок записи и выдачи одновременных запросов одного треда. */
+  async function inThread<T>(owner:string,dialogue:string,operation:()=>Promise<T>){
+    const scope=JSON.stringify([owner,dialogue]);
+    const result=(activeThreads.get(scope)??Promise.resolve()).then(operation);
+    const tail=result.then(()=>{},()=>{});
+    activeThreads.set(scope,tail);
+    try{return await result;}finally{if(activeThreads.get(scope)===tail)activeThreads.delete(scope);}
+  }
   async function mutation(owner:string,requestId:string,operation:string,input:unknown,write:(db:PoolClient,seq:string)=>Promise<any>) {
     const db=await pool.connect();
     try {
@@ -42,6 +54,7 @@ export function createStore(pool:DB,key:string) {
       const existing=(await db.query("SELECT channel FROM dialogues_live.dialogues WHERE owner_id=$1 AND id=$2",[owner,d.id])).rows[0];
       if(existing&&existing.channel!==d.channel)fail("DIALOGUE_CONFLICT");
       await db.query("INSERT INTO dialogues_live.dialogues(owner_id,id,channel,title) VALUES($1,$2,$3,$4) ON CONFLICT(owner_id,id) DO NOTHING",[owner,d.id,d.channel,d.title??d.id]);
+      await ensureTopic(db,owner,d.id);
       if(d.title!==undefined)await db.query("UPDATE dialogues_live.dialogues SET title=$3 WHERE owner_id=$1 AND id=$2",[owner,d.id,d.title]);
       const saved=[];let enqueue=false;
       for(const m of arg.messages) {
@@ -259,5 +272,5 @@ export function createStore(pool:DB,key:string) {
     await ownerTransaction(pool,owner,async db=>{await db.query('INSERT INTO dialogues_live.exchange_events(owner_id,event_id,event_type,dialogue_id,turn_id,result_ids) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',[owner,eventId,action,dialogue,turn,JSON.stringify(resultIds)]);});
   }
   const contextApi=createContext(pool,key);
-  return {append,summary,context,message,history,logExchange,...contextApi,...createTurns(pool,key,mutation,contextApi)};
+  return {append,summary,context,message,history,inThread,dialogueGet:archive.history,readMany:archive.readMany,logExchange,topics:createTopics(pool),...contextApi,...createTurns(pool,key,mutation,contextApi)};
 }

@@ -1316,6 +1316,38 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(agent.steer('После фиксации финала'))
         native.clear_steer_turn(turn)
 
+    @patch.dict(sys.modules, {'brai_files':native})
+    def test_dialogues_finish_fences_steer_until_the_receipt(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        _runner,agent,turn,_ctx=self.steering_runner(source)
+        def complete():
+            self.assertFalse(agent.steer('После начала finish'))
+            return 'completed'
+        self.assertTrue(agent.steer('До начала finish'))
+        self.assertIn('STEER_PENDING',native.dialogues_finish(agent,complete,lambda _result:False))
+        agent._pending_steer=None
+        self.assertEqual(native.dialogues_finish(agent,lambda:'rejected',lambda _result:True),'rejected')
+        self.assertTrue(agent.steer('После отказа finish'))
+        agent._pending_steer=None
+        self.assertEqual(native.dialogues_finish(agent,lambda:'timeout',lambda _result:False),'timeout')
+        self.assertFalse(agent.steer('После неясного исхода'))
+        self.assertEqual(native.dialogues_finish(agent,complete,lambda _result:False),'completed')
+        self.assertFalse(agent.steer('После квитанции'))
+        native.clear_steer_turn(turn)
+
+    async def test_two_dialogues_steers_keep_original_text_and_individual_ids(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,_ctx=self.steering_runner(source)
+        runner._steer_text_with_origin=lambda text,event: 'Origin\n'+json.dumps({'message_id':event.message_id})+'\n\n'+text
+        with patch.dict(sys.modules, {'brai_files':native}), patch.dict(os.environ, BRAI_DIALOGUES_REQUIRED='1'):
+            for ident,text in [('one','  Первое\n'),('two','\nВторое  ')]:
+                event=SimpleNamespace(source=source,message_id=ident,text=text+' (https://example.org)',
+                                      _brai_original_text=text,media_urls=[],media_types=[],metadata={})
+                self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        payloads=[json.loads(line) for line in agent._pending_steer.splitlines() if line.startswith('{"id":')]
+        self.assertEqual(payloads,[{'id':'one','text':'  Первое\n'},{'id':'two','text':'\nВторое  '}])
+        native.clear_steer_turn(turn)
+
     def test_edits_belong_to_exact_active_turn_and_sender(self):
         source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
         runner,agent,turn,ctx=self.steering_runner(source)

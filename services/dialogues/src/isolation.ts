@@ -4,7 +4,7 @@ import type {Pool,PoolClient} from 'pg';
 import {readFileSync} from 'node:fs';
 
 export const ownerTables=['dialogues','turns','messages','message_summaries','dialogue_summaries','requests',
- 'context_consumers','context_deliveries','summary_jobs','turn_results','exchange_events','message_backfill'] as const;
+ 'context_consumers','context_deliveries','summary_jobs','turn_results','exchange_events','message_backfill','topics','topic_members','topic_separations','topic_summaries','message_compact_summaries'] as const;
 export type OwnerBinding={userId:string;ownerId:string;profileId:string};
 const quote=(value:string)=>'"'+value.replaceAll('"','""')+'"';
 const valid=(value:unknown):value is string=>typeof value==='string'&&value.length>0&&value.length<=256&&!value.includes('\0');
@@ -29,6 +29,9 @@ export async function migrateIsolation(pool:Pool,owner:string){
   const foreign=(await db.query("SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('dialogues_live','dialogues_access') AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)<>$1 LIMIT 1",[owner])).rowCount;
   if(foreign)throw new Error('TABLE_OWNER_CONFLICT');
   await db.query(readFileSync(new URL('../migrations/006_owner_isolation.sql',import.meta.url),'utf8'));
+  await db.query(readFileSync(new URL('../migrations/007_topics.sql',import.meta.url),'utf8'));
+  await db.query(readFileSync(new URL('../migrations/008_topic_work.sql',import.meta.url),'utf8'));
+  await db.query(readFileSync(new URL('../migrations/009_archive_numbers.sql',import.meta.url),'utf8'));
   await db.query('COMMIT');
  }catch(error){await db.query('ROLLBACK');throw error;}finally{db.release();}
 }
@@ -57,8 +60,8 @@ export async function bindOwner(pool:Pool,owner:string,login:string,binding:Owne
   await db.query('GRANT EXECUTE ON FUNCTION dialogues_access.current_binding() TO '+name);
   await db.query('REVOKE ALL ON ALL TABLES IN SCHEMA dialogues_live FROM '+name);
   await db.query('GRANT SELECT ON dialogues_live.migrations TO '+name);
-  await db.query('GRANT SELECT,INSERT,UPDATE ON dialogues_live.dialogues,dialogues_live.turns,dialogues_live.context_consumers,dialogues_live.context_deliveries,dialogues_live.summary_jobs,dialogues_live.turn_results,dialogues_live.message_backfill TO '+name);
-  await db.query('GRANT SELECT,INSERT ON dialogues_live.messages,dialogues_live.message_summaries,dialogues_live.dialogue_summaries,dialogues_live.requests,dialogues_live.exchange_events TO '+name);
+  await db.query('GRANT SELECT,INSERT,UPDATE ON dialogues_live.dialogues,dialogues_live.turns,dialogues_live.context_consumers,dialogues_live.context_deliveries,dialogues_live.summary_jobs,dialogues_live.turn_results,dialogues_live.message_backfill,dialogues_live.topics,dialogues_live.topic_members TO '+name);
+  await db.query('GRANT SELECT,INSERT ON dialogues_live.messages,dialogues_live.message_summaries,dialogues_live.dialogue_summaries,dialogues_live.requests,dialogues_live.exchange_events,dialogues_live.topic_separations,dialogues_live.topic_summaries,dialogues_live.message_compact_summaries TO '+name);
   await db.query('GRANT USAGE,SELECT ON SEQUENCE dialogues_live.change_seq TO '+name);
   await db.query('COMMIT');
  }catch(error){await db.query('ROLLBACK');throw error;}finally{db.release();}

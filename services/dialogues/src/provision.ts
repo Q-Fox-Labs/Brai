@@ -39,7 +39,10 @@ try{
   if(!role)await admin.query('CREATE ROLE '+quote(state.login)+" LOGIN PASSWORD '"+state.password.replaceAll("'","''")+"' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION");
   const database=new URL(op.dialoguesOwnerDatabaseURL).pathname.slice(1);
   await admin.query('GRANT CONNECT ON DATABASE '+quote(database)+' TO '+quote(state.login));
-  if(!previous){await migrate(owner,op.dialoguesOwnerRole,state.login);await migrateIsolation(owner,op.dialoguesOwnerRole);}
+  if(!previous)await migrate(owner,op.dialoguesOwnerRole,state.login);
+  // AIDEV-NOTE: Старые привязки тоже получают добавочные таблицы и права до запуска нового runtime.
+  if(!previous||!(await owner.query('SELECT 1 FROM dialogues_live.migrations WHERE version=9')).rowCount)
+   await migrateIsolation(owner,op.dialoguesOwnerRole);
   await bindOwner(owner,op.dialoguesOwnerRole,state.login,{userId:state.userId,profileId:state.profileId,ownerId:state.ownerId});
   const databaseURL=new URL(op.dialoguesRuntimeDatabaseURL??op.dialoguesOwnerDatabaseURL);databaseURL.username=state.login;databaseURL.password=state.password;
   const check=new Pool({connectionString:databaseURL.href,max:1});try{await check.query('SELECT 1');}finally{await check.end();}

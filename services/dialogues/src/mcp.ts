@@ -1,6 +1,7 @@
 // ABOUTME: Предоставляет закрытый owner-bound MCP по Streamable HTTP.
 // ABOUTME: Ограничивает тело и сессии; не принимает владельца от клиента.
 import { createServer } from "node:http";
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID,timingSafeEqual } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -17,8 +18,10 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   if(cfg.personal?.operatorToken!==undefined&&(!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.personal.operatorToken)||cfg.personal.operatorToken===cfg.token))throw new Error('INVALID_OPERATOR_TOKEN');
   const sessions=new Map<string,Session>(),pending=new Set<Session>();
   const safeId=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9_.:/-]{1,256}$/.test(v)?v:undefined;
+  const httpDelivery=new AsyncLocalStorage<{closed:boolean;finish?:()=>void;cancel?:()=>void}>();
+  const deliveries=new Map<string,Promise<void>>();
   function rejected(name:string,raw:any,diagnostic:Record<string,any>,started:number){
-    const action=['input','update','finish','poll','page','read','history','snapshot','import','summary','repair'].includes(raw?.action)?raw.action:undefined;
+    const action=['input','update','finish','poll','page','read','history','snapshot','import','summary','repair','topic_get','dialogue_get','read_many','search','topic_move'].includes(raw?.action)?raw.action:undefined;
     try{log({service:'dialogues',event:'request_rejected',tool:['dialogues_exchange','dialogues_context_ack'].includes(name)?name:'unknown',
       action,request_id:safeId(raw?.arguments?.request_id??raw?.request_id),code:diagnostic.code,
       field:diagnostic.unknown_property?(diagnostic.parent_field?diagnostic.parent_field+'.':'')+'<unknown>':diagnostic.field,applied:diagnostic.applied,duration_ms:Date.now()-started});}catch{/* Журнал не меняет исход операции. */}
@@ -33,12 +36,40 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
       const started=Date.now();
       try {
         await cfg.personal?.authorize();
-        const result=await invoke(store,cfg.owner,req.params.name,req.params.arguments??{});
+        const raw=req.params.arguments as any;
+        const response=httpDelivery.getStore();
+        const thread=req.params.name==='dialogues_exchange'&&raw?.context===undefined&&['input','poll'].includes(raw?.action)
+          ?safeId(raw.arguments?.dialogue_id??raw.arguments?.dialogue?.id):undefined;
+        const clientDelivery=req.params._meta?.brai_dialogues_delivery;
+        const clientConfirms=clientDelivery==='start'||typeof clientDelivery==='string'&&/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/.test(clientDelivery);
+        let confirm:(()=>Promise<unknown>)|undefined;
+        let deliveredId:string|undefined;
+        let deliver=false;
+        if(thread&&response){
+          const previous=deliveries.get(thread);
+          let done!:()=>void;
+          const complete=new Promise<void>(resolve=>{done=resolve;});
+          const ordered=Promise.resolve(previous).then(()=>complete);
+          deliveries.set(thread,ordered);
+          const release=()=>{done();if(deliveries.get(thread)===ordered)deliveries.delete(thread);};
+          response.finish=()=>{
+            if(!deliver||!confirm||clientConfirms){release();return;}
+            void confirm().catch(()=>{
+              try{log({service:'dialogues',event:'context_confirmation_failed',request_id:safeId(raw.arguments?.request_id)});}catch{/* Следующий вызов повторно получит дельту. */}
+            }).finally(release);
+          };
+          response.cancel=()=>{void Promise.resolve(previous).then(release);};
+          await previous;
+          if(response.closed){release();throw new DialoguesFault('CANCELLED');}
+          if(clientConfirms&&clientDelivery!=='start')await store.confirmThread(cfg.owner,thread,clientDelivery);
+        }
+        const result=await invoke(store,cfg.owner,req.params.name,raw??{},thread&&response?(commit,id)=>{confirm=commit;deliveredId=id;}:undefined);
         // AIDEV-NOTE: Поздний отказ может следовать за commit: исход не объявляется неприменённым.
         await cfg.personal?.authorize();
-        if(Buffer.byteLength(JSON.stringify(result))>65_024)throw new DialoguesFault("RESPONSE_TOO_LARGE");
+        if(Buffer.byteLength(JSON.stringify(result))>(typeof result.context==='string'?limits.requestBytes:limits.responseBytes))throw new DialoguesFault("RESPONSE_TOO_LARGE");
         if(result.status==='rejected')rejected(req.params.name,req.params.arguments,{code:result.code,applied:false},started);
-        return {content:[],structuredContent:result};
+        deliver=true;
+        return {content:[],structuredContent:result,...(clientConfirms&&deliveredId?{_meta:{brai_dialogues_delivery:deliveredId}}:{})};
       } catch(error) {
         const code=error instanceof DialoguesFault?error.code:"INTERNAL";
         const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте field по expected и allowed; сразу повторите с новым request_id, сохранив ID сообщения и исходный текст":"Проверьте данные и состояние перед повтором";
@@ -83,7 +114,11 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         return;
       }
       if(!s){res.writeHead(404).end();return;}
-      s.touched=Date.now();await s.transport.handleRequest(req,res,body);
+      s.touched=Date.now();
+      const delivery:{closed:boolean;finish?:()=>void;cancel?:()=>void}={closed:false};
+      res.once('finish',()=>{if(res.statusCode===200)delivery.finish?.();else delivery.cancel?.();});
+      res.once('close',()=>{delivery.closed=true;if(!res.writableFinished)delivery.cancel?.();});
+      await httpDelivery.run(delivery,()=>s!.transport.handleRequest(req,res,body));
     } catch {if(!res.headersSent)res.writeHead(500);res.end();}
   });
   await new Promise<void>((resolve,reject)=>{http.once("error",reject);http.listen(cfg.port,cfg.host,resolve);});

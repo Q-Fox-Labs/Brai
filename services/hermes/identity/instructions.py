@@ -10,15 +10,35 @@ import stat
 ROOT = Path('/opt/brai-profile/system-instructions')
 FILES = ('context.md', 'INDEX.md', 'BASE.md', 'BUG_HUNT.md')
 SKILL = 'creative/context-gifs/SKILL.md'
+DIALOGUES = 'policies/DIALOGUES.md'
+LEGACY_DIALOGUES_START = ' Диалоги обязательны на каждом публичном ходе. До разбора поручения вызови '
+LEGACY_DIALOGUES_END = 'Полный протокол находится в /opt/brai-profile/instructions/policies/DIALOGUES.md.'
+
+
+def context_paths(root, skills_root):
+    paths = [root / relative for relative in FILES]
+    if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
+        paths.append(root / DIALOGUES)
+    if skills_root is not None:
+        paths.append(skills_root / SKILL)
+    return paths
+
+
+def without_legacy_dialogues(prompt):
+    """Убрать прежний встроенный протокол из памяти процесса при загрузке новой политики."""
+    if not prompt or os.environ.get('BRAI_DIALOGUES_REQUIRED') != '1':
+        return prompt
+    base, start, tail = prompt.partition(LEGACY_DIALOGUES_START)
+    old, end, suffix = tail.partition(LEGACY_DIALOGUES_END)
+    if start and end and 'mcp__brai__dialogues_context_ack' in old:
+        return base + suffix
+    return prompt
 
 
 def read_context(root, skills_root=None):
     """Собрать обязательные тексты; отсутствующий или пустой файл останавливает ход."""
     texts = []
-    paths = [root / relative for relative in FILES]
-    if skills_root is not None:
-        paths.append(skills_root / SKILL)
-    for path in paths:
+    for path in context_paths(root, skills_root):
         raw = path.read_bytes()
         if not raw or len(raw) > 262144:
             raise ValueError('SYSTEM_INSTRUCTIONS_INVALID')
@@ -57,7 +77,7 @@ def system_context():
     """Прочитать одно неизменяемое поколение и текущие личные настройки."""
     generation = selected_generation()
     skills_root = generation / 'skills'
-    for path in [generation / relative for relative in FILES] + [skills_root / SKILL]:
+    for path in context_paths(generation, skills_root):
         for item in (path, *path.parents):
             info = item.lstat()
             if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):

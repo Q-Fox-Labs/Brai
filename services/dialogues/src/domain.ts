@@ -27,6 +27,12 @@ export function id(value:unknown):string {
   if(typeof value!=="string" || !/^[A-Za-z0-9_.:/-]{1,256}$/.test(value))fail("INVALID_ARGUMENT");
   return value;
 }
+/** Читает префикс короткой ссылки, сохраняя точность bigint в PostgreSQL. */
+export function shortNumber(value:string,prefix:'T'|'D'|'M'):string|null {
+  if(value[0]!==prefix||!/^\d{1,19}$/.test(value.slice(1))||value[1]==='0')return null;
+  const number=value.slice(1);
+  return BigInt(number)<=9223372036854775807n?number:null;
+}
 export function text(value:unknown, maximum:number, empty=false):string {
   if(typeof value!=="string" || (!empty&&!value.trim()) || bytes(value)>maximum || value.includes("\u0000"))fail("INVALID_ARGUMENT");
   return value;
@@ -90,7 +96,7 @@ export function summaryInput(raw:unknown):SummaryInput {
   else {id(a.through_message_id);if(a.message_id!==undefined)fail("INVALID_ARGUMENT");}
   return a as SummaryInput;
 }
-export type Cursor={v:1;owner:string;mode:"bootstrap"|"delta"|"history"|"checkpoint";scope:string|null;from:string;through:string;offset:number};
+export type Cursor={v:1;owner:string;mode:"bootstrap"|"delta"|"history"|"dialogue"|"checkpoint"|"originals";scope:string|null;from:string;through:string;offset:number};
 /** Подписывает stateless cursor; он не является разрешением на чужое чтение. */
 export function encodeCursor(cursor:Cursor,key:string):string {
   const data=Buffer.from(JSON.stringify(cursor)).toString("base64url");
@@ -106,7 +112,7 @@ export function decodeCursor(raw:string,key:string,owner:string):Cursor {
     if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected))fail("INVALID_CURSOR");
     const c=JSON.parse(Buffer.from(data,"base64url").toString("utf8"));
     object(c,["v","owner","mode","scope","from","through","offset"]);
-    if(c.v!==1||c.owner!==owner||!["bootstrap","delta","history","checkpoint"].includes(c.mode)||!/^\d+$/.test(c.from)||!/^\d+$/.test(c.through)||BigInt(c.from)>BigInt(c.through))fail("INVALID_CURSOR");
+    if(c.v!==1||c.owner!==owner||!["bootstrap","delta","history","dialogue","checkpoint","originals"].includes(c.mode)||!/^\d+$/.test(c.from)||!/^\d+$/.test(c.through)||BigInt(c.from)>BigInt(c.through))fail("INVALID_CURSOR");
     integer(c.offset);
     if(c.scope!==null)id(c.scope);
     return c;

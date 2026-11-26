@@ -20,7 +20,8 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
  return true;
 }
 /** Работает только с защищённым owner; внешний исполнитель заменяем в тестах. */
-export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof createLuna>['run'];probe:(state?:Execution,save?:(state:Execution)=>Promise<void>)=>Promise<unknown>},authorize?:()=>Promise<void>){
+export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof createLuna>['run'];probe:(state?:Execution,save?:(state:Execution)=>Promise<void>)=>Promise<unknown>},authorize?:()=>Promise<void>,maintainTopics?:()=>Promise<boolean>){
+ let preferTopics=true;
  let running=false,stopping=false,timer:NodeJS.Timeout|undefined,active:Promise<void>|undefined,verified=false;
  async function schedule(){
   return ownerTransaction(pool,owner,async db=>{
@@ -110,7 +111,12 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
  /** Один шаг позволяет проверить очередь без таймеров и реальной модели. */
  async function tick(){
   if(running||stopping)return;running=true;
-  try{await authorize?.();await schedule();const job=await claim();if(!job)return;if(!verified){try{await luna.probe(job.progress.probe_execution??{},async execution=>{job.progress={...job.progress,probe_execution:execution};await save(job,job.progress);});verified=true;}catch(e){if(e instanceof DialoguesFault&&e.code==='LUNA_BUSY'){await pool.query("UPDATE dialogues_live.summary_jobs SET state='queued',attempts=GREATEST(attempts-1,0),available_at=now()+interval '15 seconds',lease_id=NULL,lease_until=NULL,error_code=NULL WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'",[owner,job.id,job.lease_id]);return;}await pool.query("UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4 WHERE owner_id=$1 AND id=$2 AND lease_id=$3",[owner,job.id,job.lease_id,e instanceof DialoguesFault?e.code:'LUNA_PROBE_FAILED']);return;}}await execute(job);}
+  try{
+   await authorize?.();
+   const tryTopics=preferTopics;preferTopics=!preferTopics;
+   if(tryTopics&&await maintainTopics?.())return;
+   await schedule();const job=await claim();
+   if(!job){if(!tryTopics)await maintainTopics?.();return;}if(!verified){try{await luna.probe(job.progress.probe_execution??{},async execution=>{job.progress={...job.progress,probe_execution:execution};await save(job,job.progress);});verified=true;}catch(e){if(e instanceof DialoguesFault&&e.code==='LUNA_BUSY'){await pool.query("UPDATE dialogues_live.summary_jobs SET state='queued',attempts=GREATEST(attempts-1,0),available_at=now()+interval '15 seconds',lease_id=NULL,lease_until=NULL,error_code=NULL WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'",[owner,job.id,job.lease_id]);return;}await pool.query("UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4 WHERE owner_id=$1 AND id=$2 AND lease_id=$3",[owner,job.id,job.lease_id,e instanceof DialoguesFault?e.code:'LUNA_PROBE_FAILED']);return;}}await execute(job);}
   finally{running=false;}
  }
  /** Старт и минута тишины проверяются в том же процессе, без нового сервиса. */

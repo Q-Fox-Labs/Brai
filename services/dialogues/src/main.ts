@@ -7,6 +7,8 @@ import { createStore } from "./store.js";
 import { startMcp } from "./mcp.js";
 import {createLuna} from "./luna.js";
 import {createJobs} from "./jobs.js";
+import {createTopicJobs} from "./topic-jobs.js";
+import {DialoguesFault} from "./domain.js";
 import {verifyOwnerConnection} from "./isolation.js";
 import {connectAuthAccess} from './auth-access.js';
 import {createPersonalAuthorizer} from "./personal-auth.js";
@@ -20,7 +22,7 @@ let jobs:ReturnType<typeof createJobs>|undefined,luna:ReturnType<typeof createLu
 let authAccess:Awaited<ReturnType<typeof connectAuthAccess>>|undefined;
 let mcp:Awaited<ReturnType<typeof startMcp>>;
 try {
-  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=5")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
+  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=9")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
   const owner=required("DIALOGUES_MCP_OWNER_ID");
   const isolated=Boolean((await pool.query('SELECT 1 FROM dialogues_live.migrations WHERE version=6')).rowCount);
   let personal:Parameters<typeof startMcp>[1]['personal'];
@@ -48,7 +50,16 @@ try {
     luna=createLuna(required("DIALOGUES_CODEX_SOCKET_URL"),required("DIALOGUES_SUMMARY_CWD"));
   mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal});
   if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"){
-    jobs=createJobs(pool,owner,luna!,personal?.authorize);jobs.start();
+    const generator=luna!;
+    // AIDEV-NOTE: Подписочный исполнитель DEV предоставляет структурированные ответы.
+    const topicJobs='structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
+    jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
+      try{return await topicJobs.tick();}
+      catch(error){
+        console.error(JSON.stringify({service:'dialogues',event:'topic_job_failed',code:error instanceof DialoguesFault?error.code:'INTERNAL'}));
+        return false;
+      }
+    }));jobs.start();
   }
 } catch(error) {await luna?.close();await authAccess?.close();await pool.end();const code=error instanceof Error&&error.message==='BACKFILL_REQUIRED'?'BACKFILL_REQUIRED':'STARTUP_FAILED';console.error(JSON.stringify({service:'dialogues',code}));process.exit(1);}
 let stopping=false;

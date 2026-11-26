@@ -178,6 +178,10 @@ test('provisioning and active profiles retain Dialogues metadata while data call
   const failure=await active.callTool('dialogues_context_ack',{request_id:'r',consumer_id:'c',context_instance_id:'i',delivery_id:'d'});
   assert.equal(failure.isError,true);
   assert.equal(called.length,1);
+  const receipt='1199b52d-0320-4378-b12c-229bde707153';
+  const next={action:'poll',arguments:{request_id:'next',dialogue_id:'thread'}};
+  await active.callTool('dialogues_exchange',{...next,_brai_context_receipt:receipt});
+  assert.deepEqual(called.at(-1),['dialogues','dialogues_exchange',next,undefined,receipt]);
   assert.equal(closed.length,1);
  }finally{await adapters.close();await f.adapters.close();}
 });

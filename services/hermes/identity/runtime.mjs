@@ -132,10 +132,10 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
        if(name==='transcription'&&transcription)return transcription.list();
        return ports.list(name);
       },
-      async mcp(endpoint,name,args,signal){
+      async mcp(endpoint,name,args,signal,contextReceipt){
        if(endpoint==='history')return history.call(name,args,signal);
        if(endpoint==='transcription'&&transcription)return transcription.call(name,args,signal);
-       return ports.mcp(endpoint,name,args,signal);
+       return ports.mcp(endpoint,name,args,signal,contextReceipt);
       },
      });
     }catch(error){await ports.close();throw error;}
