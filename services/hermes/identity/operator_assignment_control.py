@@ -247,11 +247,11 @@ class OperatorAssignmentControl:
         if not self.resolver.ledger.owns(profile, route, request['anchor'], outgoing=False):
             raise PermissionError('Operator assignment route unavailable')
 
-    async def check_delivery(self, body, route):
+    async def check_delivery(self, body, route, *, expected_state='approved'):
         ident, profile, payload = body['operatorAssignmentId'], body['profile'], body['payload']
         owner = self.resolver.ledger.owner(profile)
         value = self.store.read(ident, owner)
-        if value is None or value['state'] != 'approved':
+        if value is None or value['state'] != expected_state:
             raise PermissionError('Operator assignment is not approved for delivery')
         request = value['request']
         if ((request['chat'], request['thread']) != route or payload.get('reply_to') != request['anchor']

@@ -1642,6 +1642,9 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         class BadRequest(OSError):
             pass
 
+        class Forbidden(Exception):
+            pass
+
         class PrivateTopicRetryFailed(Exception):
             pass
 
@@ -1739,21 +1742,25 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         current.generation = 1
         receipt = SimpleNamespace(chat_id=23, message_thread_id=88, message_id=101)
         ports = {'plugins.platforms.telegram.adapter': module(_BraiPrivateTopicRetryFailed=PrivateTopicRetryFailed),
-                 'telegram.error': module(BadRequest=BadRequest, Forbidden=PermissionError)}
-        for outcomes, error_kind in (
-                ((receipt,), None), ((denied, receipt), None),
-                ((denied, denied), 'topic_unavailable'),
-                ((denied, BadRequest('Message to be replied not found')), 'telegram_rejected'),
-                ((denied, TimeoutError()), 'delivery_unknown')):
+                 'telegram.error': module(BadRequest=BadRequest, Forbidden=Forbidden)}
+        for outcomes, retry_error, error_kind in (
+                ((receipt,), None, None), ((denied, receipt), None, None),
+                ((denied, denied), None, 'topic_unavailable'),
+                ((denied, BadRequest('Message to be replied not found')), None, 'telegram_rejected'),
+                ((denied, Forbidden()), None, 'telegram_rejected'),
+                ((denied, TimeoutError()), None, 'delivery_unknown'),
+                ((denied,), PermissionError('Conversation generation changed'), 'forbidden')):
             with self.subTest(operator_outcomes=outcomes), patch.dict(sys.modules, ports), \
                     patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
                 admitted = AsyncMock()
+                retry_admitted = AsyncMock(side_effect=retry_error)
                 wire = AsyncMock(side_effect=outcomes)
                 adapter._send_chunk_markdown_or_plain = wire
                 result = await resolver._deliver_route({'uid': 1}, 'send',
                     {'chat_id': '23', 'reply_to': str(anchor), 'content': 'готовый ответ'}, ('23', '88'),
-                    topic, None, current, before_send=admitted)
+                    topic, None, current, before_send=admitted, before_retry=retry_admitted)
                 admitted.assert_awaited_once()
+                self.assertEqual(retry_admitted.await_count, int(outcomes[0] is denied))
                 self.assertEqual(wire.await_count, len(outcomes))
                 for attempt in wire.await_args_list:
                     self.assertEqual(attempt.args, ('готовый ответ', {
