@@ -100,3 +100,21 @@ test('прежний обмен сохраняет экземпляр конте
   ['codex:chat-1','default',false],['codex:chat-1','default',false],['codex:chat-1','default',true],['codex:chat-1','other',false]
  ]);
 });
+
+test('контекст без указанного формата использует компактный режим своего треда',async()=>{
+ const calls=[];
+ const store={
+  async turnInput(owner,args){return {dialogue_id:args.dialogue.id};},
+  async inThread(owner,dialogue,operation){return operation();},
+  async pullThread(owner,dialogue,request,inputs,afterResponse,reset){
+   calls.push({owner,dialogue,inputs,reset});
+   return 'Компактный индекс';
+  }
+ };
+ const {invoke}=await import('../dist/api.js');
+ const packet=structuredClone(inputExample);
+ packet.context={consumer_id:'previous-client',context_instance_id:'old-instance',reset:true};
+ const result=await invoke(store,'synthetic','dialogues_exchange',packet);
+ assert.equal(result.context,'Компактный индекс');
+ assert.deepEqual(calls,[{owner:'synthetic',dialogue:'chat-1',inputs:['user-1'],reset:true}]);
+});

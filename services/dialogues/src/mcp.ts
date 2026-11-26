@@ -7,6 +7,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema,ListToolsRequestSchema,type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { agentInstructions,toolDefinitions,invoke } from "./api.js";
+import {automaticContext} from './exchange.js';
 import { DialoguesFault,limits } from "./domain.js";
 import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
@@ -40,7 +41,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         await cfg.personal?.authorize();
         const raw=req.params.arguments as any;
         const response=httpDelivery.getStore();
-        const thread=req.params.name==='dialogues_exchange'&&raw?.context===undefined&&['input','poll'].includes(raw?.action)
+        const thread=req.params.name==='dialogues_exchange'&&automaticContext(raw?.action,raw?.context)
           ?safeId(raw.arguments?.dialogue_id??raw.arguments?.dialogue?.id):undefined;
         const clientDelivery=req.params._meta?.brai_dialogues_delivery;
         const clientConfirms=clientDelivery==='start'||typeof clientDelivery==='string'&&/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/.test(clientDelivery);
