@@ -415,6 +415,14 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [('head', 7), ('tail', 7)])
         self.assertEqual(bot.create_forum_topic.await_count, 3)
 
+    def test_stream_final_does_not_reclassify_unknown_delivery_as_rejected(self):
+        ambiguous = self.function('gateway/stream_consumer_fallback.py',
+                                  '_send_failure_may_have_delivered', {})
+        self.assertTrue(ambiguous(NS(error_kind='delivery_unknown', retryable=False,
+                                     error='Telegram private topic delivery failed')))
+        self.assertFalse(ambiguous(NS(error_kind='topic_unavailable', retryable=False,
+                                      error='Telegram private topic delivery failed')))
+
     def test_native_home_and_cron_ignore_stale_thread_without_network(self):
         from enum import Enum
         class Platform(Enum):

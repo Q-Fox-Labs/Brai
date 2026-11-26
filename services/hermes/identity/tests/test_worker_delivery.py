@@ -466,6 +466,30 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(adapter._send_retry_is_final(NS(error_kind='forbidden')))
         self.assertFalse(adapter._send_retry_is_final(NS(error_kind='formatting')))
 
+    @unittest.skipUnless(os.environ.get('HERMES_TEST_ENGINE'), 'Pinned native engine required')
+    async def test_terminal_topic_failure_cannot_trigger_a_native_resend(self):
+        send = self.native_function('gateway/platforms/base.py', 'BasePlatformAdapter', '_send_with_retry',
+                                    {'logger': Mock(), 'records_delivery': lambda method: method})
+        for kind in ('topic_unavailable', 'delivery_unknown'):
+            with self.subTest(kind=kind):
+                peer = NS(call=AsyncMock(return_value={
+                    'success': False, 'retryable': False, 'retry_after': None,
+                    'error': 'Telegram private topic delivery failed', 'error_kind': kind}))
+                adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, None)
+                adapter._is_rate_limited_error = lambda _: False
+                adapter._is_retryable_error = lambda _: False
+                adapter._is_timeout_error = lambda _: False
+                adapter._is_partial_delivery = lambda _: False
+                fallback = self.native_function('gateway/platforms/base.py', 'BasePlatformAdapter',
+                    '_send_plain_fallback', {'t': lambda key, content: f'Fallback: {content}'})
+                adapter.warning_text = lambda text, *_args, **_kwargs: text
+                adapter.name = 'telegram'
+                adapter._send_plain_fallback = AsyncMock(side_effect=fallback.__get__(adapter))
+                result = await send(adapter, '123', '**Final reply**', metadata={'thread_id': '77'})
+                self.assertEqual(result.error_kind, kind)
+                peer.call.assert_awaited_once()
+                adapter._send_plain_fallback.assert_not_awaited()
+
     async def test_durable_input_has_one_delivery_owner_without_disabling_legacy(self):
         from identity.scope import input_delivery
         adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)

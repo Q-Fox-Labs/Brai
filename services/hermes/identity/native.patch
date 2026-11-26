@@ -1119,7 +1119,19 @@ diff --git a/agent/redact.py b/agent/redact.py
          return stream_consumer, stream_delta_cb, interim_assistant_cb, want_interim_messages
 --- a/gateway/stream_consumer_fallback.py
 +++ b/gateway/stream_consumer_fallback.py
-@@ -353,6 +353,8 @@
+@@ -283,8 +283,10 @@
+     @staticmethod
+     def _send_failure_may_have_delivered(result_or_exc: Any) -> bool:
+-        """Return True for timeout failures where retrying may duplicate."""
++        """Recognize unconfirmed sends that could be duplicated by a new send."""
++        if getattr(result_or_exc, "error_kind", None) == "delivery_unknown":
++            return True
+         if getattr(result_or_exc, "retryable", None) is True:
+             return False
+         error = str(getattr(result_or_exc, "error", None) or result_or_exc).lower()
+         name = result_or_exc.__class__.__name__.lower()
+         return "timeout" in error or "timed out" in error or "timeout" in name
+@@ -353,6 +355,8 @@
              # with interim text and orphan the true final.
              _md = self._metadata_for_send(final=False) or {}
              _md["_interim_send"] = True
@@ -1128,7 +1140,7 @@ diff --git a/agent/redact.py b/agent/redact.py
              # reply_to only for reply-anchored threading; Discord/Telegram use
              # thread_id metadata and reply_to on every commentary is spam.
              _plat = getattr(getattr(self.adapter, "platform", None), "value", None)
-@@ -367,7 +369,5 @@
+@@ -367,7 +371,5 @@
                  self._notify_new_message()
 -                # Lets run.py confirm whether an interim send carried the final.
 -                # Record the exact delivered text so run.py can confirm whether an interim "preview"

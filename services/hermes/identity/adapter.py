@@ -31,8 +31,9 @@ def make_adapter(config, platform, peer, publish_file):
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
         def _send_retry_is_final(self, result):
-            """Outbox владеет повтором сохранённого ответа; запрет прав не лечится fallback."""
-            return (getattr(result, 'error_kind', None) in {'delivery_pending', 'forbidden'}
+            """Сохранить решение ingress об отправке и не создавать новый исходящий ответ."""
+            return (getattr(result, 'error_kind', None) in {
+                        'delivery_pending', 'forbidden', 'topic_unavailable', 'delivery_unknown'}
                     or super()._send_retry_is_final(result))
 
         async def handle_message(self, event):
