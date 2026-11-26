@@ -168,7 +168,7 @@ def _source_stamp(info):
 
 
 @contextmanager
-def _audio_progress(home, source, output, model, operation_id):
+def _audio_progress(home, source, output, model, operation_id, call):
     """Pin one invocation and its completed segments across process and service restarts."""
     with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
         original = _source_stamp(os.fstat(stream.fileno()))
@@ -176,8 +176,6 @@ def _audio_progress(home, source, output, model, operation_id):
         if original != _source_stamp(os.fstat(stream.fileno())):
             raise ValueError('TRANSCRIPTION_SOURCE_CHANGED')
     path_binding = None if operation_id is not None else str(source.resolve())
-    binding = json.dumps([path_binding, content, model], sort_keys=True).encode()
-    fingerprint = hashlib.sha256(binding).hexdigest()
     folder = home / 'workspace' / '.stt-progress'
     folder.mkdir(mode=0o700, exist_ok=True)
     meta = folder.lstat()
@@ -194,16 +192,34 @@ def _audio_progress(home, source, output, model, operation_id):
         with closing(sqlite3.connect(path, isolation_level=None)) as db:
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA synchronous=FULL')
-            db.execute('CREATE TABLE IF NOT EXISTS job (fingerprint TEXT NOT NULL, result TEXT)')
-            job = db.execute('SELECT fingerprint FROM job').fetchone()
+            db.execute('CREATE TABLE IF NOT EXISTS job (fingerprint TEXT NOT NULL, result TEXT, model TEXT)')
+            use_default = model is None
+            if use_default and 'model' not in {column['name'] for column in db.execute('PRAGMA table_info(job)')}:
+                db.execute('ALTER TABLE job ADD COLUMN model TEXT')
+            job = db.execute('SELECT * FROM job').fetchone()
+            if use_default:
+                if job is not None and job['model'] is not None:
+                    model = json.loads(job['model'])
+                else:
+                    response = call('tools.call', {'name': 'transcription_settings_get', 'args': {}})
+                    model = response['settings']['defaultLocalModel']
+                    if model is None:
+                        raise ValueError('MODEL_UNAVAILABLE')
+            binding = json.dumps([path_binding, content, model], sort_keys=True).encode()
+            fingerprint = hashlib.sha256(binding).hexdigest()
             if job is None:
-                db.execute('INSERT INTO job (fingerprint) VALUES(?)', (fingerprint,))
+                if use_default:
+                    db.execute('INSERT INTO job (fingerprint,model) VALUES(?,?)', (fingerprint, json.dumps(model)))
+                else:
+                    db.execute('INSERT INTO job (fingerprint) VALUES(?)', (fingerprint,))
             elif job['fingerprint'] != fingerprint:
                 raise ValueError('TRANSCRIPTION_OUTPUT_BOUND_TO_ANOTHER_INPUT')
+            elif use_default and job['model'] is None:
+                db.execute('UPDATE job SET model=?', (json.dumps(model),))
             db.execute('''CREATE TABLE IF NOT EXISTS parts (
                 part INTEGER PRIMARY KEY, key TEXT NOT NULL, deadline TEXT NOT NULL,
                 artifact TEXT, request TEXT, text TEXT)''')
-            yield db, path, original
+            yield db, path, original, model
     finally:
         os.close(fd)
 
@@ -270,13 +286,13 @@ def transcribe_audio(input_path, output_path, model, *, call=broker_call, operat
         raise ValueError('INVALID_TRANSCRIPTION_OPERATION')
     duration, directly_supported = audio_info(source)
     short = directly_supported and duration <= PART_SECONDS
-    if short and operation_id is None:
+    if short and operation_id is None and model is not None:
         transcribe_file(source, output, model, call=call)
         return
     home = Path(os.environ['HERMES_HOME'])
     if not home.is_absolute():
         raise ValueError('INVALID_ARGUMENT')
-    with _audio_progress(home, source, output, model, operation_id) as (progress, checkpoint, original):
+    with _audio_progress(home, source, output, model, operation_id, call) as (progress, checkpoint, original, model):
         _checked_output(output)
         text = progress.execute('SELECT result FROM job').fetchone()['result']
         if text is None:
@@ -296,16 +312,20 @@ def transcribe_audio(input_path, output_path, model, *, call=broker_call, operat
 
 
 def main():
-    """Принять пути и явный selector модели; stdout не содержит транскрипцию."""
+    """Use the admitted selector or the owner’s Transcription default."""
     parser = argparse.ArgumentParser()
-    for name in ('input', 'output', 'model-id', 'revision', 'profile-id'):
+    for name in ('input', 'output'):
         parser.add_argument('--' + name, required=True)
+    for name in ('model-id', 'revision', 'profile-id'):
+        parser.add_argument('--' + name)
     parser.add_argument('--operation-id')
     args = parser.parse_args()
+    supplied = args.model_id, args.revision, args.profile_id
+    if any(value is not None for value in supplied) and not all(supplied):
+        parser.error('--model-id, --revision and --profile-id must be provided together')
     try:
-        transcribe_audio(args.input, args.output, {
-            'modelId': args.model_id, 'revision': args.revision, 'profileId': args.profile_id},
-            operation_id=args.operation_id)
+        model = dict(zip(('modelId', 'revision', 'profileId'), supplied)) if args.model_id is not None else None
+        transcribe_audio(args.input, args.output, model, operation_id=args.operation_id)
     except Exception:
         print('HERMES_IDENTITY_TRANSCRIPTION_FAILED', file=sys.stderr)
         return 1
