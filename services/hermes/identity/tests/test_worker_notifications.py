@@ -433,7 +433,8 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, **values):
                 super().__init__(**{'raw_response': None, **values})
         scope = {'os': os, 'SendResult': Result, 'logger': logging.getLogger(__name__)}
-        chunk = self.function('plugins/platforms/telegram/adapter.py', '_send_chunk_with_retries', scope)
+        telegram_source = 'plugins/platforms/telegram/adapter.py'
+        chunk = self.function(telegram_source, '_send_chunk_with_retries', scope)
         chunks = self.function('plugins/platforms/telegram/adapter.py', '_send_chunks', scope)
         partial = self.function('plugins/platforms/telegram/adapter.py', '_with_partial_send', scope)
         calls = []
@@ -451,6 +452,16 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
             _metadata_thread_id=lambda m: m['thread_id'], _message_thread_id_for_send=lambda t: int(t),
             _retrigger_typing=AsyncMock(), _with_partial_send=partial,
             _send_chunk_markdown_or_plain=send)
+        if '_brai_send_with_private_topic_retry' in chunk.__code__.co_names:
+            class PrivateTopicRetryFailed(Exception):
+                pass
+
+            scope['_BraiPrivateTopicRetryFailed'] = PrivateTopicRetryFailed
+            adapter._dm_topic_fallback = lambda metadata: bool(metadata.get('telegram_dm_topic_reply_fallback'))
+            adapter._telegram_error_types = lambda: (Exception, BadRequest, TimeoutError)
+            for method in ('_brai_private_topic_route', '_brai_private_topic_rejected',
+                           '_brai_send_with_private_topic_retry'):
+                setattr(adapter, method, MethodType(self.function(telegram_source, method, scope), adapter))
         adapter._send_chunk_with_retries = MethodType(chunk, adapter)
         scope['normalize_telegram_chat_id'] = int
         async def operation(route, metadata):
@@ -472,6 +483,64 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['raw_response']['partial_overflow'])
         self.assertEqual(calls, [('head', 7), ('tail', 7)])
         self.assertEqual(bot.create_forum_topic.await_count, 3)
+
+    def test_stream_final_does_not_reclassify_unconfirmed_delivery_as_rejected(self):
+        ambiguous = self.function('gateway/stream_consumer_fallback.py',
+                                  '_send_failure_may_have_delivered', {})
+        for kind in ('delivery_unknown', 'delivery_pending'):
+            self.assertTrue(ambiguous(NS(error_kind=kind, retryable=False)))
+        self.assertFalse(ambiguous(NS(error_kind='topic_unavailable', retryable=False)))
+
+    async def test_native_silence_only_skips_output_while_waiting_for_incoming_files(self):
+        import logging
+        import time
+
+        response_filters = 'gateway/response_filters.py'
+        is_machinery = self.function(response_filters, 'is_machinery_display_kind', {'MACHINERY_DISPLAY_KINDS': set()})
+        allowed = self.function(response_filters, 'silence_allowed', {'is_machinery_display_kind': is_machinery})
+        warning = 'Не удалось получить ответ'
+        shape = self.function('gateway/run_turn.py', '_hmwa_shape_agent_response',
+            {'is_machinery_display_kind': is_machinery, 'silence_allowed': allowed,
+             'logger': logging.getLogger('fixture.waiting'), 'time': time,
+             '_unexpected_silence_reply': lambda: warning})
+        run = ModuleType('gateway.run')
+        run._is_gateway_hidden_reasoning_incomplete_turn = lambda result: False
+        run._normalize_empty_agent_response = lambda result, response, **options: response or warning
+        run._sanitize_gateway_final_response = lambda platform, response: response
+        run._should_clear_resume_pending_after_turn = lambda result: False
+        runner = NS(_is_intentional_silence=lambda result, response: response == '[SILENT]' and not result.get('failed'))
+        source = NS(chat_id='123', thread_id='77', chat_type='dm', platform='telegram')
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        frames = [
+            ('Заполни таблицу по двум протоколам', None, 'Жду файлы', False),
+            ('Таблица', 'table.xlsx', 'Таблица получена', False),
+            ('Это таблица, жди', None, '[SILENT]', True),
+            ('Сейчас будут два протокола', None, '[SILENT]', True),
+            ('Первый протокол', 'first.docx', 'Жду второй протокол', False),
+            ('Второй протокол', 'second.docx', 'Готово MEDIA:result.xlsx', False),
+            ('Проверь итог', None, '[SILENT]', False),
+        ]
+        reports, files = [], []
+        with patch.dict(sys.modules, {'gateway.run': run}), \
+                patch.object(runtime, 'broker_call', new_callable=AsyncMock) as broker:
+            broker.side_effect = lambda method, data, **options: {'paths': data.get('paths', [])}
+            for index, (text, file, result, waiting) in enumerate(frames, start=150):
+                path = '/ingress/' + file if file else None
+                event = NS(source=source, text=text, message_id=str(index), reply_expected=True,
+                           message_type='document' if path else 'text', media_urls=[path] if path else [],
+                           _brai_identity_inputs=[{'path': path, 'itemId': str(index)}] if path else [])
+                prepared = await resolver.prepare(profile(), event)
+                display, silent, _ = await shape(runner, {'final_response': result}, source, [],
+                    NS(session_id='session'), 'same-topic', None, 1, 'session', 'telegram', time.time(),
+                    persist_user_display_kind='human', reply_expected=prepared['reply_expected'])
+                self.assertIs(silent, waiting)
+                if not silent:
+                    reports.append(display)
+                files.extend(Path(media).name for media in prepared.get('media_urls', []))
+        self.assertEqual(files, ['table.xlsx', 'first.docx', 'second.docx'])
+        self.assertEqual(reports, ['Жду файлы', 'Таблица получена', 'Жду второй протокол',
+                                   'Готово MEDIA:result.xlsx', warning])
 
     def test_native_home_and_cron_ignore_stale_thread_without_network(self):
         from enum import Enum

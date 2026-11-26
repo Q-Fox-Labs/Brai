@@ -73,3 +73,26 @@ test('topic endpoint authenticates the profile and never returns a revoked propo
   assert.equal(requests.length,3);
  }finally{await listener.close();}
 });
+
+test('удержание RELEASE закрывает и существующий MCP сеанс до публикации',async()=>{
+ let held=false;
+ const cfg={host:'127.0.0.1',port:0,owner:'archive',hosts:['initial'],origins:['http://initial'],
+  token:'standard-token-012345678901234567890123456789',
+  hold:{active:()=>held,token:'private-probe-012345678901234567890123456789'},
+  personal:{userId:'account',profileId:'profile',authorize:async()=>{}}};
+ const listener=await startMcp({},cfg),url=new URL(listener.url);cfg.hosts.push(url.host);cfg.origins.push(url.origin);
+ const headers={Authorization:'Bearer '+cfg.token,'x-brai-user-id':'account','x-brai-profile-id':'profile'};
+ const client=new Client({name:'ordinary',version:'1'});
+ const probe=new Client({name:'release-probe',version:'1'});
+ try{
+  await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers}}));
+  held=true;
+  await assert.rejects(client.listTools(),{code:503});
+  assert.equal((await fetch(url,{method:'POST',headers})).status,503);
+  await probe.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{...headers,'x-brai-release-probe':cfg.hold.token}}}));
+  assert.equal((await probe.listTools()).tools.length,2);
+  assert.equal((await fetch(url,{method:'POST',headers:{...headers,'x-brai-release-probe':cfg.hold.token,'x-brai-user-id':'foreign'}})).status,403);
+  held=false;
+  assert.equal((await client.listTools()).tools.length,2);
+ }finally{await Promise.allSettled([client.close(),probe.close()]);await listener.close();}
+});

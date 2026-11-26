@@ -315,7 +315,7 @@ class Bridge:
 _authorized_telegram = ContextVar('brai_identity_authorized_telegram', default=None)
 
 
-async def serve_chat_control(path, handler, release=None):
+async def serve_chat_control(path, handler, release=None, operator_assignment=None):
     """Открыть private UDS существующего ingress только для root Control."""
     target = Path(path)
     if not target.is_absolute() or not target.parent.is_dir():
@@ -365,6 +365,8 @@ async def serve_chat_control(path, handler, release=None):
         clients.add(task)
         try:
             methods = {'chats.control': handler}
+            if operator_assignment is not None:
+                methods['operator.assignment'] = operator_assignment
             if release is not None:
                 methods.update({'release.begin': release.begin, 'release.status': release.status,
                                 'release.resume': release.resume, 'release.commit': release.commit,

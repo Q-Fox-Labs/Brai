@@ -1,14 +1,14 @@
 // ABOUTME: Собирает PostgreSQL и MCP независимого live-сервиса Диалогов.
 // ABOUTME: Миграции и подготовка входных данных выполняются отдельной owner-операцией.
 import {createSubscriptionLuna} from './subscription-luna.js';
-import { readFileSync } from "node:fs";
+import { readFileSync,statSync } from "node:fs";
 import { Pool } from "pg";
 import { createStore } from "./store.js";
 import { startMcp } from "./mcp.js";
 import {createLuna} from "./luna.js";
 import {startTopicSocket,suggestTopic} from './topic-socket.js';
 import {createJobs} from "./jobs.js";
-import {createTopicJobs} from "./topic-jobs.js";
+import {createTopicJobs,seedTopicIndex} from "./topic-jobs.js";
 import {DialoguesFault} from "./domain.js";
 import {verifyOwnerConnection} from "./isolation.js";
 import {connectAuthAccess} from './auth-access.js';
@@ -68,11 +68,15 @@ try {
     closeTopics=await startTopicSocket(required('DIALOGUES_TELEGRAM_TOPIC_SOCKET'),
       required('DIALOGUES_CODEX_SOCKET_URL'),required('DIALOGUES_SUMMARY_CWD'));
   }
-  mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal});
-  if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"){
-    const generator=luna!;
-    // AIDEV-NOTE: Подписочный исполнитель DEV предоставляет структурированные ответы.
-    const topicJobs='structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
+  const generator=luna;
+  const topicJobs=generator&&'structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
+  if(topicJobs)await topicJobs.seed();
+  else await seedTopicIndex(pool,owner);
+  const marker=process.env.DIALOGUES_MCP_HOLD_FILE;
+  const hold=marker?{active:()=>statSync(marker,{throwIfNoEntry:false})!==undefined,
+    token:readFileSync(required('DIALOGUES_MCP_HOLD_TOKEN_FILE'),'utf8').trim()}:undefined;
+  mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal,hold});
+  if(generator){
     jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
       try{return await topicJobs.tick();}
       catch(error){

@@ -167,6 +167,14 @@ async def accept_event(event, admit=True):
     event.metadata = dict(getattr(event, 'metadata', None) or {})
     refs = event.metadata.get('_brai_artifacts')
     inputs = getattr(event, '_brai_identity_inputs', None)
+    source = source_of(event)
+    media_types = getattr(event, 'media_types', []) or []
+    generation = getattr(event, '_brai_chat_generation', None)
+
+    def audio_mime(index):
+        mime = media_types[index] if index < len(media_types) else ''
+        return mime if mime.startswith('audio/') else ''
+
     if refs is None and inputs:
         # AIDEV-NOTE: Ingress сохранил исходные message/attachment IDs до native album merge.
         # Прежние fixed-owner aliases и artifact metadata через эту границу не принимаются.
@@ -175,20 +183,21 @@ async def accept_event(event, admit=True):
                        or not isinstance(item.get('itemId'), str) or not item['itemId']
                        for item, path in zip(inputs, paths))):
             raise FileError('INVALID_SOURCE')
-        source, refs = source_of(event), []
+        refs = []
         for position, item in enumerate(inputs):
             message_id, _, attachment_id = item['itemId'].rpartition(':')
             if message_id.isdecimal() and attachment_id.isdecimal():
                 position = int(message_id) * 1000 + int(attachment_id)
             refs.append(await asyncio.to_thread(files.ingest, source, item['itemId'], item['path'],
-                position, item.get('caption') or '', item.get('groupId') or str(event.message_id)))
+                position, item.get('caption') or '', item.get('groupId') or str(event.message_id),
+                audio_mime=audio_mime(len(refs)), chat_generation=generation))
         event.metadata['_brai_artifacts'] = refs
         with files.db() as db:
             route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
             for gid in {item['groupId'] for item in refs}:
                 db.execute('INSERT OR REPLACE INTO routes VALUES (?,?)', (gid, canonical(route)))
     if refs is None:
-        source, msg = source_of(event), str(event.message_id or '')
+        msg = str(event.message_id or '')
         if not msg:
             raise FileError('SOURCE_MESSAGE_REQUIRED')
         group = str(getattr(getattr(event, 'raw_message', None), 'media_group_id', None) or event.metadata.get('_brai_photo_group') or msg)
@@ -221,7 +230,8 @@ async def accept_event(event, admit=True):
                         with files.db() as db:
                             db.execute('UPDATE items SET path=? WHERE identity=? AND artifact IS NULL', (str(path), item_key))
                 refs.append(await asyncio.to_thread(files.ingest, source, msg + ':' + str(index), path,
-                            position * 1000 + index, event.text or '', item_groups[index]))
+                            position * 1000 + index, event.text or '', item_groups[index],
+                            audio_mime=audio_mime(index)))
             except Exception as error:
                 failures.append(error)
         if failures:
@@ -234,7 +244,13 @@ async def accept_event(event, admit=True):
             route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
             for gid in {item['groupId'] for item in refs}:
                 db.execute('INSERT OR REPLACE INTO routes VALUES (?,?)', (gid, canonical(route)))
+    retry = getattr(event, '_brai_input_delivery_id', None) if getattr(event, '_brai_voice_retry', False) else None
+    prefix = ['voice-retry', retry] if retry else ['voice-file']
+    event._brai_voice_operations = {item['localPath']: key([*prefix, item['itemId'], item['file']['artifactId']])
+                                    for item in refs}
     event.media_urls = [item['localPath'] for item in refs]
+    event._brai_audio_paths = {item['localPath'] for index, item in enumerate(refs)
+                              if audio_mime(index) or item['file']['mimeType'].startswith('audio/')}
     if not admit:
         return True
     groups = list(dict.fromkeys(item['groupId'] for item in refs))
@@ -248,20 +264,26 @@ async def accept_event(event, admit=True):
             raise FileError('INVALID_VOICE_RETRY')
         # AIDEV-NOTE: Только доверенный ingress разрешает новую обработку
         # уже принятого voice. Публикация и запись прежнего набора сохраняются.
-        items = [{'file': refs[0]['file'], 'caption': inputs[0].get('caption') or ''}]
+        items = [{'file': refs[0]['file'], 'caption': inputs[0].get('caption') or '',
+                  'source': {**source, 'itemId': inputs[0]['itemId'], 'audioMime': audio_mime(0)}}]
         event._brai_voice_retry = False
     else:
         items = [item for value in accepted for item in value['items']]
     lease = files.materialize([item['file'] for item in items], ['inbound', groups, str(uuid.uuid4())])
     copies = await asyncio.to_thread(lease.__enter__)
+    previous_lease = getattr(event, '_brai_file_lease', None)
     event._brai_file_lease = lease
-    if inputs:
-        # AIDEV-NOTE: Artifacts определяет MIME для выдачи файла. Для STT
-        # сохраняем входную аудиометку для того же проверенного вложения.
-        audio_items = {ref['file']['artifactId'] for ref, mime in zip(refs, getattr(event, 'media_types', []) or [])
-                       if mime.startswith('audio/')}
-        event._brai_audio_paths = {value['localPath'] for value in copies
-                                   if value['artifactId'] in audio_items}
+    if previous_lease is not None:
+        previous_lease.__exit__(None, None, None)
+    event._brai_voice_operations = {}
+    for item, value in zip(items, copies):
+        origin = item['source']
+        identity = key([files.owner, {name: origin[name] for name in source}, origin['itemId']])
+        event._brai_voice_operations[value['localPath']] = key([*prefix, identity, value['artifactId']])
+    # Artifacts keeps its own detected MIME. A verified incoming audio label
+    # survives FileStore recovery, including when the detected MIME is opaque.
+    event._brai_audio_paths = {value['localPath'] for item, value in zip(items, copies)
+                               if item['source'].get('audioMime') or value['mimeType'].startswith('audio/')}
     event.media_urls = [value['localPath'] for value in copies]
     event.media_types = [value['mimeType'] for value in copies]
     ticket = (_VOICE_RETRY_ADMISSION if repeat_admission
@@ -513,6 +535,35 @@ def clear_steer_turn(turn):
         turn._brai_adapter_event = None
 
 
+_voice_transcription = ContextVar('brai_voice_transcription', default=None)
+
+
+def is_managed_voice_provider(provider):
+    return provider == 'brai_local_ai' and os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
+
+
+def voice_transcription_operation():
+    return _voice_transcription.get()
+
+
+async def transcribe_voice_once(event, path, transcribe, *providers):
+    """Share one transcription of a clip throughout the life of its inbound event."""
+    if event is None:
+        return await transcribe(path, *providers)
+    cache = getattr(event, '_brai_voice_transcription_tasks', None)
+    if cache is None:
+        cache = event._brai_voice_transcription_tasks = {}
+    task = cache.get(path)
+    if task is None:
+        operation = getattr(event, '_brai_voice_operations', {}).get(path)
+        token = _voice_transcription.set(operation)
+        try:
+            task = cache[path] = asyncio.create_task(transcribe(path, *providers))
+        finally:
+            _voice_transcription.reset(token)
+    return await asyncio.shield(task)
+
+
 async def steer_active_input(runner, event, session_key):
     """Передать авторизованный Telegram-вход текущему ходу вместо FIFO новых задач."""
     platform = str(getattr(event.source.platform, 'value', event.source.platform))
@@ -530,7 +581,9 @@ async def steer_active_input(runner, event, session_key):
         return False
     with _steer_lock(turn):
         generation = turn._brai_steer_generation
+        previous_agent = getattr(turn, '_brai_steer_agent', None)
     if reserved is not None and (reserved[0] is not turn or reserved[1] is not generation):
+        reserved[2].set()
         release_event(event)
         return True  # Завершённый/остановленный ход не передаёт свой отложенный вход новому.
     identity, revision = _steer_identity(event.source, event.message_id), _steer_revision(event)
@@ -556,6 +609,7 @@ async def steer_active_input(runner, event, session_key):
             reserved[2].set()
         return True  # Повтор уже принятого набора не становится новым поручением.
     text = event.text or ''
+    original = getattr(event, '_brai_original_text', text)
     audio_paths = getattr(runner, '_pending_event_audio_paths', lambda _: [])(event)
     if audio_paths:
         text = await runner._prepare_busy_steer_text(event)
@@ -574,7 +628,6 @@ async def steer_active_input(runner, event, session_key):
     if getattr(getattr(event, 'raw_message', None), 'edit_date', None):
         text = '[Правка сообщения ' + str(event.message_id) + ': новая редакция заменяет прежнюю.]\n' + text
     origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
-    original = event._brai_original_text
     if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and event.message_id is not None:
         header, separator, _ = origin.partition('\n\n')
         try:
@@ -589,6 +642,16 @@ async def steer_active_input(runner, event, session_key):
     with _steer_lock(turn):
         current = runner._peek_session_state(session_key)
         if current is None or current.turn is not turn or turn._brai_steer_generation is not generation:
+            if audio_paths:
+                finish_steer_preparation(event)
+                event._brai_preparation = None
+                route_current = getattr(runner, '_brai_consent_route_current', None)
+                if not getattr(previous_agent, '_interrupt_requested', False) and (
+                        route_current is None or route_current(event)):
+                    # AIDEV-NOTE: Обычный финал прежнего хода передаёт тот же
+                    # объект дальше. Native queue сохранит STT и lease входа.
+                    return False
+                event._gateway_accepted = True
             release_event(event)
             if reserved is not None:
                 reserved[2].set()
@@ -596,6 +659,8 @@ async def steer_active_input(runner, event, session_key):
         agent = getattr(turn, '_brai_steer_agent', None)
         if agent is not None:
             if not agent.steer(payload):
+                finish_steer_preparation(event)
+                event._brai_preparation = None
                 return False  # Финал уже зафиксирован; это следующий пользовательский ход.
         else:
             pending = getattr(turn, '_brai_pending_steers', [])
@@ -734,6 +799,8 @@ def merge_events(existing, event):
     old = list((existing.metadata or {}).get('_brai_artifacts', []))
     new = list((event.metadata or {}).get('_brai_artifacts', []))
     existing.metadata = {**(existing.metadata or {}), '_brai_artifacts': old + new}
+    existing._brai_voice_operations = {**getattr(event, '_brai_voice_operations', {}),
+                                        **getattr(existing, '_brai_voice_operations', {})}
     existing._brai_capture_leases = (getattr(existing, '_brai_capture_leases', [])
                                     + getattr(event, '_brai_capture_leases', []))
     event._brai_capture_leases = []
@@ -896,9 +963,22 @@ def conversation(agent, user_message, task_id=None):
                 db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
 
 
+def operator_assignment_requires_foreground():
+    """Check the personal Hermes turn context at the tool execution boundary."""
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+        from identity.scope import operator_assignment
+        return operator_assignment.get() is not None
+    return False
+
+
 def before_tool(name, args, **ids):
     """Проверить чтения и направить изменения и terminal во временный cwd."""
     args = dict(args)
+    if operator_assignment_requires_foreground() and (
+            name in {'cronjob_manage', 'delegate_task', 'process_manage', 'send_message'}
+            or name == 'terminal' and any(args.get(key) for key in
+                ('background', 'notify_on_complete', 'watch_patterns', 'heartbeat', 'persist_on_release'))):
+        raise FileError('OPERATOR_ASSIGNMENT_REQUIRES_FOREGROUND_TOOLS')
     operation = operation_for(ids)
     workspace = store().workspace(operation)
     # Native skill resolvers own their package-relative paths and their write policy.
@@ -1233,11 +1313,8 @@ def telegram_format(adapter, text):
     return formatter(text)
 
 
-async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None):
-    """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
-    from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
-    from contextlib import ExitStack
-    bot, target = adapter._bot, {'chat_id': int(chat_id)}
+def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False):
+    target = {'chat_id': int(chat_id)}
     routing = getattr(adapter, '_media_send_kwargs', None)
     if callable(routing):
         _, target = routing(chat_id, reply_to, metadata)
@@ -1247,13 +1324,61 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             target['message_thread_id'] = int(thread)
         if reply_to:
             target['reply_to_message_id'] = int(reply_to)
+    if exact:
+        expected = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id') or (metadata or {}).get('direct_messages_topic_id')
+        actual = target.get('message_thread_id') or target.get('direct_messages_topic_id')
+        if (str(target['chat_id']) != str(chat_id) or str(actual or '') != str(expected or '')
+                or not reply_to or str(target.get('reply_to_message_id')) != str(reply_to)):
+            raise PermissionError('Operator assignment Telegram route changed')
+        target['allow_sending_without_reply'] = False
+    return target
+
+
+def verify_telegram_target(message, target):
+    """Require the Bot API receipt to name the same chat and explicit topic."""
+    chat_id = getattr(message, 'chat_id', None)
+    topic = target.get('message_thread_id') or target.get('direct_messages_topic_id')
+    actual = (getattr(message, 'message_thread_id', None)
+              or getattr(getattr(message, 'direct_messages_topic', None), 'topic_id', None))
+    if topic is None and actual == 1:
+        actual = None
+    if chat_id != target['chat_id'] or actual != topic:
+        raise FileError('DELIVERY_ROUTE_UNCONFIRMED')
+
+
+async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict=False,
+                          before_send=None, before_retry=None, topic_anchor=None):
+    """Deliver media once, with an anchored retry after a confirmed topic refusal."""
+    from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
+    from contextlib import ExitStack
+    bot = adapter._bot
+    target = telegram_target(adapter, chat_id, reply_to, metadata, exact=strict)
+    retry = getattr(adapter, '_brai_send_with_private_topic_retry', None)
+    private_topic = callable(retry) and adapter._brai_private_topic_route(metadata, target)
+    anchored = (private_topic and before_retry is not None and topic_anchor is not None
+                and str(target.get('reply_to_message_id') or '') == str(topic_anchor))
+
+    async def send(wire, *, batch=False):
+        if not private_topic:
+            return await wire(target)
+        if not anchored:
+            return await retry(wire, metadata, target, None, batch=batch)
+        trusted = {**metadata, 'telegram_reply_to_message_id': topic_anchor}
+        return await retry(wire, trusted, target, topic_anchor, batch=batch, before_retry=before_retry)
+
     captions = []
     for item in items:
         caption = item.get('caption', '')
         formatted = telegram_format(adapter, caption) if caption else ''
         if text_units(formatted) > 1024:
+            if strict:
+                # The approval accompanies the attachment in the same API call.
+                raise FileError('TELEGRAM_CAPTION_TOO_LONG')
             if text_units(formatted) <= 3500:
-                notice = await bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
+                async def send_caption(options):
+                    return await bot.send_message(**options, text=formatted, parse_mode='MarkdownV2')
+
+                notice = await send(send_caption)
                 message_id = getattr(notice, 'message_id', None)
             else:
                 formatter = getattr(adapter, '_rich_message_payload', None)
@@ -1271,7 +1396,17 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
                                            'caption:' + key([str(chat_id), target, caption]))
                     message_id = receipt.get('message_id') if isinstance(receipt, dict) else None
                 else:
-                    response = await bot.do_api_request('sendRichMessage', api_kwargs={**target, 'rich_message': rich})
+                    async def send_rich_caption(options):
+                        values = {**options, 'rich_message': rich}
+                        anchor = values.pop('reply_to_message_id', None)
+                        allow_missing = values.pop('allow_sending_without_reply', None)
+                        if anchor is not None:
+                            values['reply_parameters'] = {'message_id': anchor}
+                            if allow_missing is not None:
+                                values['reply_parameters']['allow_sending_without_reply'] = allow_missing
+                        return await bot.do_api_request('sendRichMessage', api_kwargs=values)
+
+                    response = await send(send_rich_caption)
                     message_id = (response.get('message_id') or (response.get('result') or {}).get('message_id')) if isinstance(response, dict) else getattr(response, 'message_id', None)
             if not message_id:
                 raise FileError('DELIVERY_UNKNOWN')
@@ -1280,21 +1415,42 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             captions.append(formatted or None)
     classes = {'photo': InputMediaPhoto, 'video': InputMediaVideo, 'audio': InputMediaAudio, 'document': InputMediaDocument}
     with ExitStack() as stack:
-        media = []
-        for item, caption in zip(items, captions):
+        sources = []
+        for item in items:
             file = item.get('readHandle')
             if file is None:
                 file = stack.enter_context(open(item['localPath'], 'rb'))
-            if item['presentation'] in classes:
-                media.append(classes[item['presentation']](media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
-            else:
-                from types import SimpleNamespace
-                media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
-        if kind == 'album':
-            result = await bot.send_media_group(**target, media=media)
-        else:
+            sources.append(file)
+        positions = [file.tell() for file in sources] if anchored else []
+        album = kind == 'album'
+
+        async def send_media(options):
+            if options is not target:
+                for file, position in zip(sources, positions):
+                    file.seek(position)
+            media = []
+            for item, file, caption in zip(items, sources, captions):
+                view = item['presentation']
+                if view in classes:
+                    media.append(classes[view](media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
+                else:
+                    from types import SimpleNamespace
+                    media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
+            if options is target and before_send is not None:
+                await before_send()
+            if album:
+                return await bot.send_media_group(**options, media=media)
             field = items[0]['presentation']
-            result = [await getattr(bot, 'send_' + field)(**target, **{field: media[0].media}, caption=media[0].caption, parse_mode='MarkdownV2' if media[0].caption else None)]
+            return await getattr(bot, 'send_' + field)(**options, **{field: media[0].media},
+                                                      caption=media[0].caption,
+                                                      parse_mode='MarkdownV2' if media[0].caption else None)
+
+        result = await send(send_media, batch=album)
+        if not album:
+            result = [result]
+    if strict:
+        for message in result:
+            verify_telegram_target(message, target)
     return [getattr(message, 'message_id', None) for message in result]
 
 
@@ -1577,9 +1733,14 @@ async def recover(adapter):
                 rows = db.execute('SELECT * FROM items WHERE group_key=? ORDER BY position,identity', (group['identity'],)).fetchall()
                 rows = [row for row in rows if not db.execute('SELECT 1 FROM legacy_recovery_review WHERE identity=?', (row['identity'],)).fetchone()]
             previous = json.loads(group['admitted']) if group['admitted'] else []
-            if not rows or all(row['identity'] in previous for row in rows) or any(not row['artifact'] for row in rows):
+            pending = [row for row in rows if row['identity'] not in previous]
+            if not pending or any(not row['artifact'] for row in rows):
                 continue
-            origin = json.loads(rows[0]['source'])
+            origins = [json.loads(row['source']) for row in pending]
+            generation = origins[0].get('chatGeneration', 0)
+            if any(item.get('chatGeneration', 0) != generation for item in origins):
+                continue
+            origin = origins[0]
             if origin['platform'] != str(getattr(adapter.platform, 'value', adapter.platform)):
                 continue
             route = json.loads(group['route']) if group['route'] else {}
@@ -1591,10 +1752,13 @@ async def recover(adapter):
                 value = await asyncio.to_thread(files.fetch, row['artifact'])
                 refs.append({'groupId': group['identity'], 'itemId': row['identity'],
                              'file': json.loads(row['ref']), 'localPath': value['localPath']})
-            event = MessageEvent(text=rows[0]['caption'], message_type=MessageType.DOCUMENT, source=source,
+            event = MessageEvent(text=pending[0]['caption'], message_type=MessageType.DOCUMENT, source=source,
                                  message_id=origin['itemId'].rsplit(':', 1)[0],
                                  media_urls=[item['localPath'] for item in refs],
+                                 media_types=[json.loads(row['source']).get('audioMime') or item['file']['mimeType']
+                                              for row, item in zip(rows, refs)],
                                  metadata={'_brai_artifacts': refs, 'recovered': True})
+            event._brai_chat_generation = generation
             await adapter.handle_message(event)
     except Exception:
         logging.getLogger(__name__).warning('BRAI_FILES_RECOVERY_INCOMPLETE')
@@ -1754,6 +1918,11 @@ async def capture_authorized(adapter, event):
     if runner is None or not runner._is_user_authorized_for_source(event.source):
         finish_steer_preparation(event)
         return False
+    if (getattr(event, 'metadata', None) or {}).get('recovered'):
+        recovery_allowed = getattr(runner, '_brai_identity_recovery_allowed', None)
+        generation_current = getattr(runner, '_brai_consent_route_current', None)
+        return ((recovery_allowed is None or recovery_allowed(event.source))
+                and (generation_current is None or generation_current(event)))
     if str(getattr(event.source.platform, 'value', event.source.platform)) == 'telegram':
         admit = getattr(runner, '_admit_bot_message_for_source', None)
         if callable(admit) and not getattr(event, '_bot_loop_admitted', False):

@@ -33,7 +33,7 @@ export async function exchange(store:Store,owner:string,raw:unknown,afterRespons
   id(args.request_id);if(args.topic_id!==undefined)id(args.topic_id);
   return store.topics.search(owner,args.query,args.topic_id);
  }
- const archive=args.archive_only===true&&['read','history','snapshot'].includes(a.action);
+ const archive=['read','history','snapshot'].includes(a.action)&&(!context||args.archive_only===true);
  const automatic=['input','poll'].includes(a.action)&&!context;
  if(!context&&!archive&&!automatic&&!['update','finish'].includes(a.action))throw new DialoguesFault('INVALID_ARGUMENT',{field:'context',expected:'стабильный идентификатор потребителя'});
  if(!['input','update','finish','import','summary','repair','read','snapshot','history','poll'].includes(a.action))return fail('UNKNOWN_OPERATION');

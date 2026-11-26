@@ -38,7 +38,7 @@ test('Hermes Telegram ingress', () => {
   assert.equal(result.status, 0, result.stderr || result.error?.message || 'Telegram tests failed');
 });
 
-for (const pattern of ['test_chat_journal.py', 'test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py', 'test_transcribe.py']) {
+for (const pattern of ['test_chat_journal.py', 'test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py', 'test_transcribe.py', 'test_operator_assignments.py']) {
   test('Hermes owner boundary: ' + pattern, () => {
     if (pattern === 'test_chat_journal.py') mkdirSync(join(here, '../../../../tmp'), { recursive: true });
     const result = spawnSync(process.env.PYTHON || 'python3',
