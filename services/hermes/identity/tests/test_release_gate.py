@@ -1,9 +1,10 @@
 # ABOUTME: Проверяет остановку Telegram polling на границе обновления версии.
 # ABOUTME: Не обращается к Telegram и не запускает личные процессы.
 import asyncio
+import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from identity.ipc import RpcError
 from identity.native_ingress import ReleaseGate
@@ -432,6 +433,23 @@ class PinnedPollingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.calls[1]['offset'], 0)
         await updater.stop()
         await updater.shutdown()
+
+    async def test_confirmed_startup_resume_clears_the_bootstrap_for_a_reconnection(self):
+        app = SimpleNamespace(update_queue=asyncio.Queue())
+        gate = ReleaseGate(app)
+        gate.resolver = SimpleNamespace(release_resume=AsyncMock(side_effect=[False, True]))
+        bootstrap = {'BRAI_IDENTITY_RELEASE_HOLD_OPERATION': 'operation',
+                     'BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256': 'a' * 64}
+        with patch.dict(os.environ, bootstrap):
+            gate.hold('operation')
+            self.assertEqual((await gate.resume('operation'))['state'], 'blocked')
+            self.assertEqual({key: os.environ[key] for key in bootstrap}, bootstrap)
+            self.assertEqual((await gate.resume('operation'))['state'], 'resumed')
+            self.assertTrue(gate.unlocked.is_set())
+            self.assertTrue(all(key not in os.environ for key in bootstrap))
+            reconnect = ReleaseGate(app)
+            reconnect.hold('next-operation')
+            self.assertEqual((await reconnect.resume('next-operation'))['state'], 'resumed')
 
     async def test_release_startup_transport_failure_keeps_gate_closed(self):
         class FailedBot:
