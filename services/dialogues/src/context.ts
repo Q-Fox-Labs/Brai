@@ -173,9 +173,9 @@ export function createContext(pool:DB,key:string){
  const seq=(await db.query("SELECT nextval('dialogues_live.change_seq')::text AS seq")).rows[0].seq;
  await db.query("INSERT INTO dialogues_live.requests(owner_id,id,operation,hash,result,change_seq) VALUES($1,$2,'context_ack',$3,$4,$5)",[owner,a.request_id,digest(a),receipt,seq]);return receipt;
  }
- async function pullThread(owner:string,dialogue:string,request_id:string,input_ids:string[],afterResponse?:DeliveryCommit){
+ async function pullThread(owner:string,dialogue:string,request_id:string,input_ids:string[],afterResponse?:DeliveryCommit,reset=false){
   const consumer_id='thread-'+createHash('sha256').update(dialogue).digest('hex');
-  const delivered=await pull(owner,{request_id,consumer_id,context_instance_id:'default',dialogue_id:dialogue,format:'index',input_ids},true,afterResponse);
+  const delivered=await pull(owner,{request_id,consumer_id,context_instance_id:'default',dialogue_id:dialogue,format:'index',input_ids,reset},true,afterResponse);
   return delivered.items[0]?.text??null;
  }
  async function confirmThread(owner:string,dialogue:string,delivery_id:string){

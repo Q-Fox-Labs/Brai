@@ -3,6 +3,60 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export const limits = { messageBytes:1_048_576, requestBytes:2_097_152, responseBytes:65_024, metadataBytes:8_192 };
+const artifactIdPattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+const artifactIdRegex=new RegExp(artifactIdPattern,'i');
+const attachmentMetadataKeys=['artifactId','path','reference','name','filename','description','thread_id','message_id','type','kind','mimeType','mime_type'];
+/** Распознаёт исходные ссылки старых записей без изменения или проверки файлов. */
+export function sourceAttachments(value:unknown):unknown[]{
+  if(!value||typeof value!=='object'||Array.isArray(value))return [];
+  const source=value as Record<string,unknown>;
+  const attachments:Record<string,unknown>[]=[];
+  const hasMetadata=(item:Record<string,unknown>)=>attachmentMetadataKeys.some(key=>{
+    const field=item[key];
+    return typeof field==='string'&&field.replace(/^ +| +$/g,'').length>0;
+  });
+  const add=(item:Record<string,unknown>)=>{
+    let merged={...item},position=attachments.length;
+    const id=(value:unknown)=>typeof value==='string'&&artifactIdRegex.test(value)?value.toLowerCase():null;
+    for(let index=0;index<attachments.length;){
+      const existing=attachments[index],sameId=id(existing.artifactId)&&id(existing.artifactId)===id(merged.artifactId);
+      const samePath=typeof existing.path==='string'&&existing.path!==''&&existing.path===merged.path;
+      const same=canonical(existing)===canonical(merged);
+      const compatible=Object.keys(existing).every(key=>!(key in merged)||
+        key==='artifactId'&&id(existing[key])!==null&&id(existing[key])===id(merged[key])||canonical(existing[key])===canonical(merged[key]));
+      if((sameId||samePath||same)&&compatible){
+        merged={...existing,...merged};position=Math.min(position,index);attachments.splice(index,1);index=0;
+      }else index++;
+    }
+    if(hasMetadata(merged))attachments.splice(position,0,merged);
+  };
+  const pathOk=(path:unknown):path is string=>typeof path==='string'&&path.startsWith('/')&&Array.from(path).length<=4096;
+  for(const item of Array.isArray(source.attachments)?source.attachments:[]){
+    if(item&&typeof item==='object'&&!Array.isArray(item)&&hasMetadata(item as Record<string,unknown>))add(item as Record<string,unknown>);
+    else if(typeof item==='string'&&artifactIdRegex.test(item))add({artifactId:item.toLowerCase()});
+    else if(pathOk(item))add({path:item});
+  }
+  const ids=[source.artifactId,...(Array.isArray(source.artifact_ids)?source.artifact_ids:[]),
+    ...(Array.isArray(source.artifacts)?source.artifacts:[])].filter((id):id is string=>
+      typeof id==='string'&&artifactIdRegex.test(id));
+  for(const id of ids)add({artifactId:id.toLowerCase()});
+  if(pathOk(source.attachment_path))add({path:source.attachment_path});
+  return attachments;
+}
+/** То же обнаружение для компактного списка, без загрузки metadata в контекст. */
+export function hasAttachmentsSql(column:string){
+  const array=(key:string)=>`CASE WHEN jsonb_typeof(${column}->'${key}')='array' THEN
+    EXISTS(SELECT 1 FROM jsonb_array_elements(${column}->'${key}') v WHERE jsonb_typeof(v)='string' AND (v #>> '{}') ~* '${artifactIdPattern}') ELSE false END`;
+  return `(CASE WHEN jsonb_typeof(${column}->'attachments')='array' THEN EXISTS(
+      SELECT 1 FROM jsonb_array_elements(${column}->'attachments') v WHERE
+      (jsonb_typeof(v)='object' AND EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(v)='object' THEN v ELSE '{}'::jsonb END) field
+       WHERE field.key=ANY(ARRAY['artifactId','path','reference','name','filename','description','thread_id','message_id','type','kind','mimeType','mime_type'])
+       AND jsonb_typeof(field.value)='string' AND btrim(field.value #>> '{}')<>'')) OR (jsonb_typeof(v)='string' AND
+       ((v #>> '{}') ~* '${artifactIdPattern}' OR (left(v #>> '{}',1)='/' AND char_length(v #>> '{}')<=4096)))) ELSE false END
+    OR (jsonb_typeof(${column}->'artifactId')='string' AND (${column}->>'artifactId') ~* '${artifactIdPattern}')
+    OR ${array('artifact_ids')} OR ${array('artifacts')}
+    OR (jsonb_typeof(${column}->'attachment_path')='string' AND left(${column}->>'attachment_path',1)='/' AND char_length(${column}->>'attachment_path')<=4096))`;
+}
 /** Содержит безопасный код предметной ошибки и необязательные диагностические поля. */
 export class DialoguesFault extends Error {
   constructor(public code:string, public details?:Record<string,unknown>) {super(code);}

@@ -28,6 +28,7 @@ _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _conversation_source = ContextVar('brai_file_conversation_source', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
+_inbound_attachments = ContextVar('brai_file_inbound_attachments', default=())
 _VOICE_RETRY_ADMISSION = object()
 _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
@@ -288,7 +289,8 @@ async def accept_event(event, admit=True):
     event.media_types = [value['mimeType'] for value in copies]
     ticket = (_VOICE_RETRY_ADMISSION if repeat_admission
               else files.prepare_admission(source_of(event), str(event.message_id), accepted))
-    _prepared_inbound.set((source_of(event), str(event.message_id), ticket))
+    attachments = [{'artifactId': item['file']['artifactId']} for item in items]
+    _prepared_inbound.set((source_of(event), str(event.message_id), ticket, attachments))
     event.metadata['fileSets'] = [{key: value for key, value in item.items() if not key.startswith('_')} for item in accepted]
     if any(value.get('supplement') for value in accepted):
         event.text = '[Дополнение к прежнему набору; ранее обработанные элементы не повторяются.]\n' + (event.text or '')
@@ -397,8 +399,12 @@ def _steer_identity(source, message_id):
             str(source.thread_id or ''), str(source.user_id or ''), str(message_id))
 
 
-def dialogues_input_text(ident, original):
-    return 'Точное сообщение для записи в Диалоги (JSON):\n' + json.dumps({'id': ident, 'text': original}, ensure_ascii=False)
+def dialogues_input_text(ident, original, attachments=()):
+    """Передать оригинал и подтверждённые ссылки для сохранения в Диалогах."""
+    message = {'id': ident, 'text': original}
+    if attachments:
+        message['source'] = {'kind': 'telegram', 'attachments': list(attachments)}
+    return 'Точное сообщение для записи в Диалоги (JSON):\n' + json.dumps(message, ensure_ascii=False)
 
 
 def _steer_revision(event):
@@ -634,7 +640,10 @@ async def steer_active_input(runner, event, session_key):
             message_id = json.loads(header.split('\n', 2)[1])['message_id']
         except (IndexError, KeyError, TypeError, ValueError):
             message_id = event.message_id
-        envelope = dialogues_input_text(str(message_id), original)
+        prepared = _prepared_inbound.get()
+        attachments = (prepared[3] if prepared and prepared[:2] == (source_of(event), str(event.message_id))
+                       and len(prepared)>3 else ())
+        envelope = dialogues_input_text(str(message_id), original, attachments)
         origin = header + separator + envelope + ('\n\n' + text if text != original else '')
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(event), str(event.message_id)) else None
@@ -744,12 +753,14 @@ def inbound_handoff(source, message_id, *, inline_images=()):
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(holder), str(message_id)) else None
     token = _inbound.set((source, message_id, ticket))
+    attachments_token = _inbound_attachments.set(prepared[3] if ticket and len(prepared)>3 else ())
     # Только внутреннее кодирование уже принятого набора; API не задаёт это разрешение.
     images_token = _inline_images.set(frozenset(inline_images) if ticket else frozenset())
     try:
         yield
     finally:
         _inline_images.reset(images_token)
+        _inbound_attachments.reset(attachments_token)
         _inbound.reset(token)
 
 
@@ -925,7 +936,7 @@ def conversation(agent, user_message, task_id=None):
         archive_input = getattr(source, '_brai_dialogues_input', None) if inbound is not None else None
         if archive_input is not None and os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
             ident, original = archive_input
-            marker = dialogues_input_text(ident, original)
+            marker = dialogues_input_text(ident, original, _inbound_attachments.get())
             if isinstance(prepared, str):
                 prepared = marker + ('\n\n' + prepared if prepared != original else '')
             elif isinstance(prepared, list):

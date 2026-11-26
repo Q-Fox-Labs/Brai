@@ -9,11 +9,17 @@ import {invoke} from '../dist/api.js';
 
 test('свёртка перерабатывает превышение 50 токенов и оставляет исходный ID',async()=>{
  let calls=0;
- const card=await summarizeTopic({async structured(){
+ const card=await summarizeTopic({async structured(raw){
   calls++;
-  return JSON.stringify({extended:'Выпуск подтверждён. Следующий шаг — замер.',compact:calls===1?'лишнее '.repeat(60):'Выпуск подтверждён, остался замер.',source_indexes:[0]});
+  if(calls===2){
+   const previous=JSON.parse(raw).previous_attempt;
+   assert.equal(previous.compact,'лишнее '.repeat(60).trim());
+   assert.ok(previous.tokens.compact>50);
+  }
+  return JSON.stringify({extended:calls===1?'Выпуск подтверждён. Следующий шаг — замер.':'Другая свёртка',compact:calls===1?'лишнее '.repeat(60):'Выпуск подтверждён, остался замер.',source_indexes:[0]});
  }},[{dialogue_id:'dialogue',message_id:'message',text:'Исходная переписка.'}]);
  assert.equal(calls,2);
+ assert.equal(card.extended,'Выпуск подтверждён. Следующий шаг — замер.');
  assert.ok(countContextTokens(card.compact)<=50);
  assert.deepEqual(card.source_refs,[{dialogue_id:'dialogue',message_id:'message'}]);
  await assert.rejects(summarizeTopic({async structured(){
