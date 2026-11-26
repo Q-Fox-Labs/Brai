@@ -291,6 +291,20 @@ class Worker:
         if not callable(original):
             return
 
+        system_prompt = getattr(runner, '_get_system_prompt_for_channel', None)
+        if callable(system_prompt):
+            def assignment_prompt(platform, chat_id, *, thread_id=None, parent_id=None):
+                from .scope import operator_assignment
+                prompt = system_prompt(platform, chat_id, thread_id=thread_id, parent_id=parent_id)
+                assignment = operator_assignment.get()
+                if (assignment is not None and getattr(assignment, 'public_facts', None)
+                        and getattr(platform, 'value', platform) == 'telegram'
+                        and self._chat_route(SimpleNamespace(chat_id=chat_id, thread_id=thread_id)) == assignment.route):
+                    prompt = (prompt + '\n\nVerified public service facts from the deployment operator for this assignment:\n'
+                              + assignment.public_facts).strip()
+                return prompt
+            runner._get_system_prompt_for_channel = assignment_prompt
+
         async def remember(source, session_key):
             if session_key and self.route_allowed(source, recovery=True):
                 from .scope import input_delivery
@@ -402,7 +416,7 @@ class Worker:
         return entry is not None and entry.session_id == session_id
 
     async def run_operator_assignment(self, owner, operationId, sessionKey, sessionId, chat, thread,
-                                      chatGeneration, instructions, checkOnly=False):
+                                      chatGeneration, instructions, checkOnly=False, publicFacts=None):
         """Run the same authorized native injection and keep the final answer private."""
         if (owner != self.user_id or not isinstance(operationId, str)
                 or str(uuid.UUID(operationId)) != operationId
@@ -413,7 +427,8 @@ class Worker:
                 or type(checkOnly) is not bool
                 or type(chatGeneration) is not int or chatGeneration < 0
                 or not isinstance(instructions, str) or not instructions.strip()
-                or not 1 <= len(instructions.encode()) <= 48000):
+                or publicFacts is not None and (not isinstance(publicFacts, str) or not publicFacts.strip())
+                or len(instructions.encode()) + len((publicFacts or '').encode()) > 48000):
             raise RpcError(-32602, 'Invalid operator assignment')
         if self.operator_lock.locked():
             return {'state': 'busy'}
@@ -428,12 +443,12 @@ class Worker:
                 self.operator_run = operationId, asyncio.current_task()
             try:
                 return await self._run_operator_session(operationId, sessionKey, sessionId, route,
-                                                        chatGeneration, instructions, checkOnly)
+                                                        chatGeneration, instructions, checkOnly, publicFacts)
             finally:
                 self.operator_run = None
                 self.operator_route = None
 
-    async def _run_operator_session(self, ident, key, session_id, route, generation, instructions, check_only):
+    async def _run_operator_session(self, ident, key, session_id, route, generation, instructions, check_only, public_facts):
         from .scope import delivery_scope, input_delivery, operator_assignment
         runner, adapter = self.runner, self.adapter
         entry = await runner.async_session_store.lookup_by_session_key(key)
@@ -463,7 +478,7 @@ class Worker:
         self._enable_delivery()
         self.delivery_journal.hold_operator_turn(key, session_id, ident)
         assignment = SimpleNamespace(session_key=key, session_id=session_id, can_start=can_start,
-                                     completed=False, result=None)
+                                     route=route, public_facts=public_facts, completed=False, result=None)
         assignment_token = operator_assignment.set(assignment)
         scope_token = delivery_scope.set('operator-assignment:' + ident)
         source_token = input_delivery.set(None)

@@ -56,7 +56,8 @@ class OperatorAssignmentControl:
         return profile, route, metadata
 
     async def __call__(self, action, operationId, userId, profileId, chat, thread, anchor,
-                       sessionKey=None, sessionId=None, instructions=None, requiredMimeTypes=None, resultDigest=None):
+                       sessionKey=None, sessionId=None, instructions=None, requiredMimeTypes=None, resultDigest=None,
+                       publicFacts=None):
         if str(uuid.UUID(operationId)) != operationId:
             raise RpcError(-32602, 'Invalid operator assignment ID')
         profile, route, metadata = await self.target(userId, profileId, chat, thread, anchor)
@@ -65,7 +66,8 @@ class OperatorAssignmentControl:
             if (not isinstance(sessionKey, str) or not sessionKey.strip() or len(sessionKey) > 512
                     or not isinstance(sessionId, str) or not sessionId.strip() or len(sessionId) > 256
                     or not isinstance(instructions, str) or not instructions.strip()
-                    or not 1 <= len(instructions.encode()) <= 48000
+                    or publicFacts is not None and (not isinstance(publicFacts, str) or not publicFacts.strip())
+                    or len(instructions.encode()) + len((publicFacts or '').encode()) > 48000
                     or not isinstance(requiredMimeTypes, list) or len(requiredMimeTypes) > 10
                     or any(not isinstance(item, str) or not re.fullmatch(r'[a-z0-9.+-]+/[a-z0-9.+-]+', item)
                            for item in requiredMimeTypes)):
@@ -75,6 +77,8 @@ class OperatorAssignmentControl:
                        'sessionKey': sessionKey, 'sessionId': sessionId, 'instructions': instructions,
                        'requiredMimeTypes': requiredMimeTypes, 'chatGeneration': generation,
                        'role': profile.get('role'), 'authGeneration': profile.get('generation')}
+            if publicFacts is not None:
+                request['publicFacts'] = publicFacts
             self.store.create(operationId, owner, request)
             if self.resolver._startup_held() or getattr(self.resolver.release_gate, 'operation', None) is not None:
                 return {'state': 'prepared'}
@@ -107,8 +111,11 @@ class OperatorAssignmentControl:
 
     @staticmethod
     def worker_params(ident, user, request):
-        return {'operationId': ident, 'owner': user, **{key: request[key] for key in
+        params = {'operationId': ident, 'owner': user, **{key: request[key] for key in
             ('chat', 'thread', 'sessionKey', 'sessionId', 'chatGeneration', 'instructions')}}
+        if 'publicFacts' in request:
+            params['publicFacts'] = request['publicFacts']
+        return params
 
     async def run(self, peer, ident, owner, user, request):
         if self.store.read(ident, owner)['state'] != 'running':

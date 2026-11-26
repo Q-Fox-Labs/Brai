@@ -315,6 +315,7 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
             original_resume = AsyncMock()
             runner = SimpleNamespace(async_session_store=auth, _restored_source=lambda value: source,
                 _peek_session_state=lambda key: None, _run_startup_resume_event=original_resume,
+                _get_system_prompt_for_channel=lambda *_args, **_kwargs: 'Настройки профиля',
                 _hmwa_shape_agent_response=AsyncMock(return_value=('Готовый ответ.', False, [])),
                 _hmwa_deliver_turn_response=AsyncMock(), _hmwa_agent_error_reply=AsyncMock(),
                 _mark_durable_active_turn=AsyncMock(return_value=True))
@@ -324,6 +325,8 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
 
                 async def turn():
                     self.assertIsNotNone(operator_assignment.get())
+                    self.assertIn('Обновление завершено.', runner._get_system_prompt_for_channel('telegram', 123, thread_id=88))
+                    self.assertEqual(runner._get_system_prompt_for_channel('telegram', 123, thread_id=89), 'Настройки профиля')
                     self.assertFalse(await runner._mark_durable_active_turn(None, session_key))
                     with self.assertRaises(PermissionError):
                         await proxy.send_message(chat_id=123, text='private progress')
@@ -339,10 +342,12 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
             worker._install_failure_recovery(runner)
             ident = str(uuid.uuid4())
             value = await worker.run_operator_assignment('owner', ident, 'session', 'existing',
-                                                         '123', '88', 0, 'Выполни поручение.')
+                                                         '123', '88', 0, 'Выполни поручение.',
+                                                         publicFacts='Обновление завершено.')
             self.assertEqual(value, {'state': 'ready', 'result': {'text': 'Готовый ответ.', 'artifactIds': []}})
             network.assert_not_awaited()
             self.assertIsNone(operator_assignment.get())
+            self.assertEqual(runner._get_system_prompt_for_channel('telegram', 123, thread_id=88), 'Настройки профиля')
             worker.delivery_journal = DeliveryJournal(journal_path, 'owner')
             fake_gateway = ModuleType('gateway.run')
             fake_gateway._AGENT_PENDING_SENTINEL = object()
