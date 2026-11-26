@@ -3,7 +3,7 @@
 import type {PoolClient} from 'pg';
 import {Tiktoken} from 'js-tiktoken/lite';
 import o200k from 'js-tiktoken/ranks/o200k_base';
-import {bytes,digest,limits} from './domain.js';
+import {bytes,digest,hasAttachmentsSql,limits} from './domain.js';
 import {recentTopics,visibleMessage} from './topics.js';
 import {linkedDialogueIds,matchesTopicReference} from './topic-references.js';
 
@@ -46,7 +46,7 @@ export function topicCardChanges(topics:LegacyTopicCard[],previous:View){
  return {items,view};
 }
 
-type TopicCard={topic_id:string;title:string|null;extended:string|null;compact:string|null;fallback?:string|null};
+type TopicCard={topic_id:string;title:string|null;extended:string|null;compact:string|null;fallback?:string|null;fallback_parts?:string[]|null};
 
 const quote=(value:string)=>JSON.stringify(value);
 const indexInstruction='В dialogues_exchange: topic_get(T…) — свёртки бесед; dialogue_get(D…) — сообщения; read_many([M…]) — оригиналы. -T… убирает тему из списка.';
@@ -58,9 +58,14 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
  const lines:string[]=[];
  const view:View={};
  const titles=topics.map(({topic_id,title})=>topic_id+' '+quote((title??'').replace(/[\u0000-\u001f]/gu,' '))+' ');
- const summaries=topics.map(({extended,compact,fallback},index)=>{
+ const summaries=topics.map(({extended,compact,fallback,fallback_parts},index)=>{
   const expanded=index<20;
-  return (expanded?extended:compact)??(fallback?contextExcerpt(fallback,expanded?topicLimits.extended:topicLimits.compact).text:null);
+  const limit=expanded?topicLimits.extended:topicLimits.compact;
+  const parts=fallback_parts?.filter(Boolean)??[];
+  const share=parts.length?Math.max(1,Math.floor(limit/parts.length)):limit;
+  const excerpts=parts.map(part=>contextExcerpt(part,share));
+  const fromParts=(excerpts.some(part=>part.truncated)?'[неполно: открой тему] ':'')+excerpts.map(part=>part.text).join(' ');
+  return (expanded?extended:compact)??(fallback?contextExcerpt(fromParts||fallback,limit).text:null);
  });
  const fixedChars=titles.reduce((n,title)=>n+title.length+24,0);
  const summaryChars=summaries.reduce((n,summary)=>n+(summary?quote(quote(summary)).length:0),0);
@@ -116,11 +121,13 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
 }){
  const {boundary,checkpoint,bootstrap,dialogue,inputIds,automatic,previous}=options;
  const pinned=await referencedTopic(db,owner,dialogue);
- const topics=await recentTopics(db,owner,pinned,automatic?dialogue:undefined);
+ const topics=(await recentTopics(db,owner,pinned,automatic?dialogue:undefined)).map(topic=>
+  topic.includes_current?{...topic,extended:null,compact:null}:topic);
  const {lines,view}=topicIndexChanges(topics,previous);
  const selected=(await db.query(`SELECT 'M'||m.short_id AS message_id,m.role,
   GREATEST(m.change_seq,c.change_seq,s.change_seq,CASE WHEN m.kind='final' THEN t.completion_seq END)::text AS revision,
   char_length(m.text)<=100 AS exact,
+  ${hasAttachmentsSql('m.source')} AS attachments,
   CASE WHEN char_length(m.text)<=100 THEN m.text ELSE COALESCE(c.text,s.text) END AS text
  FROM dialogues_live.messages m
  JOIN dialogues_live.turns t ON t.owner_id=m.owner_id AND t.dialogue_id=m.dialogue_id AND t.id=m.turn_id
@@ -135,11 +142,12 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
  ORDER BY COALESCE(m.occurred_at,m.recorded_at) DESC,m.change_seq DESC,m.dialogue_id,m.id
  LIMIT (CASE WHEN $5::boolean THEN 20 ELSE NULL END)`,
  [owner,boundary,dialogue??null,inputIds,bootstrap,checkpoint,Boolean(automatic&&!bootstrap)])).rows.reverse();
- const messageLine=({text,message_id,role,exact}:any)=>{
+ const messageLine=({text,message_id,role,exact,attachments}:any)=>{
   const speaker=role==='user'?'Пользователь':'Агент';
-  if(text===null)return message_id+' '+speaker+' [оригинал по запросу]';
+  const files=attachments?' [вложения]':'';
+  if(text===null)return message_id+' '+speaker+files+' [оригинал по запросу]';
   const label=exact?' ':' [свёртка] ';
-  return message_id+' '+speaker+label+quote(exact?text:contextExcerpt(text,topicLimits.message).text);
+  return message_id+' '+speaker+files+label+quote(exact?text:contextExcerpt(text,topicLimits.message).text);
  };
  const active=(await db.query(`SELECT t.dialogue_id,'D'||d.short_id AS dialogue_ref,t.id AS turn_id,t.version,t.status,t.purpose,t.constraints_text,t.change_seq::text AS revision,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'formulation',r.formulation) ORDER BY r.id)

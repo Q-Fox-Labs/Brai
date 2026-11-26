@@ -144,24 +144,35 @@ test('closes NATS if the HTTP listener cannot bind its port', async (t) => {
     closed: () => new Promise(() => {}),
     close: async () => { closed = true; },
   };
-  const local = { ...config, embedding: { ...config.embedding, port: occupied.address().port } };
+  const local = { ...config, ownerId: 'release-memos', nats: {
+    servers: ['nats://brai-release-nats:4222'], user: 'release_embeddings', password: 'synthetic',
+  }, embedding: { ...config.embedding, port: occupied.address().port } };
   await assert.rejects(startEmbeddingAdapter(local, async () => nc), { code: 'EADDRINUSE' });
   assert.equal(closed, true);
 });
 
 test('loopback configurations retain existing NATS connection defaults', async () => {
-  let options;
-  let closed;
-  const nc = {
-    isClosed: () => false, isDraining: () => false,
-    closed: () => new Promise((resolve) => { closed = resolve; }),
-    drain: async () => { closed?.(); },
-  };
-  const result = await startEmbeddingAdapter({ ...config, embedding: { ...config.embedding, port: 0 } },
-    async (value) => { options = value; return nc; });
-  assert.equal(options.reconnect, undefined);
-  assert.equal(options.ignoreClusterUpdates, undefined);
-  await result.close();
+  for (const value of [
+    config,
+    { ...config, nats: { servers: ['nats://127.0.0.1:4222'] } },
+    { ...config, ownerId: 'release-memos', nats: {
+      servers: ['nats://127.0.0.1:4222'], user: 'hermes', password: 'synthetic',
+    } },
+    { ...config, ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4223'] } },
+    { ...config, ownerId: 'release-memos', nats: { servers: ['nats://127.0.0.1:4222', 'nats://127.0.0.1:4223'] } },
+  ]) {
+    const priorInt = new Set(process.listeners('SIGINT'));
+    const priorTerm = new Set(process.listeners('SIGTERM'));
+    let options;
+    const nc = { isClosed: () => false, isDraining: () => false, drain: async () => {} };
+    const result = await startEmbeddingAdapter({ ...value, embedding: { ...config.embedding, port: 0 } },
+      async (item) => { options = item; return nc; });
+    assert.equal(options.reconnect, undefined);
+    assert.equal(options.ignoreClusterUpdates, undefined);
+    await result.close();
+    for (const listener of process.listeners('SIGINT')) if (!priorInt.has(listener)) process.removeListener('SIGINT', listener);
+    for (const listener of process.listeners('SIGTERM')) if (!priorTerm.has(listener)) process.removeListener('SIGTERM', listener);
+  }
 });
 
 test('rejects malformed input and a request for another model before invoking NATS', async () => {

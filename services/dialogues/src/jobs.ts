@@ -5,6 +5,23 @@ import {randomUUID} from 'node:crypto';
 import {ownerTransaction} from './context.js';
 import {digest,fail,summaryText,DialoguesFault} from './domain.js';
 import type {Execution,createLuna} from './luna.js';
+/** Возвращает только агрегаты очереди владельца без ID и текстов переписки. */
+export async function summaryQueueStatus(pool:Pool,owner:string){
+ const row=(await pool.query(`WITH jobs AS MATERIALIZED (
+  SELECT state,created_at,CASE WHEN error_code ~ '^[A-Z0-9_]{1,80}$' THEN error_code ELSE 'UNKNOWN' END AS code
+  FROM dialogues_live.summary_jobs WHERE owner_id=$1
+ ), failures AS (SELECT code,count(*)::integer AS count FROM jobs WHERE state='failed' GROUP BY code)
+ SELECT count(*) FILTER (WHERE state='queued')::integer AS queued,
+  count(*) FILTER (WHERE state='running')::integer AS running,
+  count(*) FILTER (WHERE state='failed')::integer AS failed,
+  count(*) FILTER (WHERE state='succeeded')::integer AS published,
+  count(*) FILTER (WHERE state='stale')::integer AS stale,
+  CASE WHEN count(*) FILTER (WHERE state IN('queued','running'))=0 THEN NULL
+   ELSE GREATEST(0,floor(extract(epoch FROM now()-min(created_at) FILTER (WHERE state IN('queued','running')))))::bigint END AS oldest_pending_seconds,
+  (SELECT COALESCE(jsonb_agg(jsonb_build_object('code',code,'count',count) ORDER BY code),'[]'::jsonb) FROM failures) AS failed_codes
+ FROM jobs`,[owner])).rows[0];
+ return {...row,oldest_pending_seconds:row.oldest_pending_seconds===null?null:Number(row.oldest_pending_seconds)};
+}
 /** Под owner lock фиксирует точный префикс, не дублируя активное задание. */
 export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string,boundary:string,idle:boolean){
  const previous=(await db.query('SELECT version,through_order,text FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 AND dialogue_id=$2 ORDER BY version DESC LIMIT 1',[owner,dialogue])).rows[0];
@@ -12,7 +29,7 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
  const tail=(await db.query(`SELECT count(*)::integer AS count,max(message_order)::text AS through_order,max(recorded_at) AS last_at
  FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND message_order>=$3 AND change_seq<=$4 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND (z.final_message_id IS DISTINCT FROM dialogues_live.messages.id OR z.completion_seq>$4))`,[owner,dialogue,from,boundary])).rows[0];
  if(!tail.count||tail.count<10&&(!idle||Date.now()-Date.parse(tail.last_at)<6*3600000))return false;
- const blocked=(await db.query("SELECT 1 FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND dialogue_id=$2 AND (state IN('queued','running') OR (state='failed' AND through_order>=$3)) LIMIT 1",[owner,dialogue,tail.through_order])).rowCount;
+ const blocked=(await db.query("SELECT 1 FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND dialogue_id=$2 AND (state IN('queued','running') OR (state='failed' AND through_order>=$3 AND previous_version IS NOT DISTINCT FROM $4::bigint)) LIMIT 1",[owner,dialogue,tail.through_order,previous?.version??null])).rowCount;
  if(blocked)return false;
  const last=(await db.query('SELECT id FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND message_order=$3',[owner,dialogue,tail.through_order])).rows[0];
  await db.query(`INSERT INTO dialogues_live.summary_jobs(owner_id,id,dialogue_id,previous_version,from_order,through_order,through_message_id,boundary_seq,state,progress)
@@ -23,12 +40,44 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
 export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof createLuna>['run'];probe:(state?:Execution,save?:(state:Execution)=>Promise<void>)=>Promise<unknown>},authorize?:()=>Promise<void>,maintainTopics?:()=>Promise<boolean>){
  let preferTopics=true;
  let running=false,stopping=false,timer:NodeJS.Timeout|undefined,active:Promise<void>|undefined,verified=false;
+ const recoverable=['LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE',
+  'LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','LUNA_CLI_UNAVAILABLE','LUNA_RPC_REJECTED',
+  'LUNA_EXECUTION_TIMEOUT','LUNA_EXECUTION_FAILED','NATIVE_OUTCOME_UNKNOWN','ATTEMPTS_EXHAUSTED'];
  async function schedule(){
   return ownerTransaction(pool,owner,async db=>{
    const boundary=(await db.query('SELECT COALESCE(max(change_seq),0)::text AS seq FROM dialogues_live.requests WHERE owner_id=$1',[owner])).rows[0].seq;
    const ds=(await db.query('SELECT id FROM dialogues_live.dialogues WHERE owner_id=$1',[owner])).rows;
    for(const d of ds)await enqueueDialogue(db,owner,d.id,boundary,true);
   });
+ }
+ /** Возобновляет только актуальные диапазоны после подтверждённого восстановления Luna. */
+ async function recoverFailed(){
+  const due=await pool.query(`SELECT 1 FROM dialogues_live.summary_jobs j
+   WHERE j.owner_id=$1 AND j.state='failed' AND j.available_at<=now()
+    AND j.error_code=ANY($2::text[])
+    AND NOT EXISTS(SELECT 1 FROM dialogues_live.summary_jobs active
+     WHERE active.owner_id=j.owner_id AND active.dialogue_id=j.dialogue_id AND active.state IN('queued','running'))
+    AND j.previous_version IS NOT DISTINCT FROM (SELECT s.version FROM dialogues_live.dialogue_summaries s
+     WHERE s.owner_id=j.owner_id AND s.dialogue_id=j.dialogue_id ORDER BY s.version DESC LIMIT 1)
+   LIMIT 1`,[owner,recoverable]);
+  if(!due.rowCount)return;
+  try{await luna.probe({},async()=>{});}catch{return;}
+  await authorize?.();
+  await ownerTransaction(pool,owner,async db=>{
+   await db.query(`WITH candidates AS (
+    SELECT DISTINCT ON(j.dialogue_id) j.id FROM dialogues_live.summary_jobs j
+    WHERE j.owner_id=$1 AND j.state='failed' AND j.available_at<=now()
+     AND j.error_code=ANY($2::text[])
+     AND NOT EXISTS(SELECT 1 FROM dialogues_live.summary_jobs active
+      WHERE active.owner_id=j.owner_id AND active.dialogue_id=j.dialogue_id AND active.state IN('queued','running'))
+     AND j.previous_version IS NOT DISTINCT FROM (SELECT s.version FROM dialogues_live.dialogue_summaries s
+      WHERE s.owner_id=j.owner_id AND s.dialogue_id=j.dialogue_id ORDER BY s.version DESC LIMIT 1)
+    ORDER BY j.dialogue_id,j.through_order DESC,j.created_at DESC,j.id DESC
+   )
+   UPDATE dialogues_live.summary_jobs j SET state='queued',attempts=0,available_at=now(),error_code=NULL
+   FROM candidates c WHERE j.owner_id=$1 AND j.id=c.id AND j.state='failed'`,[owner,recoverable]);
+  });
+  verified=true;
  }
  async function claim(){
   return ownerTransaction(pool,owner,async db=>{
@@ -115,7 +164,7 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
    await authorize?.();
    const tryTopics=preferTopics;preferTopics=!preferTopics;
    if(tryTopics&&await maintainTopics?.())return;
-   await schedule();const job=await claim();
+   await recoverFailed();await schedule();const job=await claim();
    if(!job){if(!tryTopics)await maintainTopics?.();return;}if(!verified){try{await luna.probe(job.progress.probe_execution??{},async execution=>{job.progress={...job.progress,probe_execution:execution};await save(job,job.progress);});verified=true;}catch(e){if(e instanceof DialoguesFault&&e.code==='LUNA_BUSY'){await pool.query("UPDATE dialogues_live.summary_jobs SET state='queued',attempts=GREATEST(attempts-1,0),available_at=now()+interval '15 seconds',lease_id=NULL,lease_until=NULL,error_code=NULL WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'",[owner,job.id,job.lease_id]);return;}await pool.query("UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4 WHERE owner_id=$1 AND id=$2 AND lease_id=$3",[owner,job.id,job.lease_id,e instanceof DialoguesFault?e.code:'LUNA_PROBE_FAILED']);return;}}await execute(job);}
   finally{running=false;}
  }

@@ -230,11 +230,8 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     // AIDEV-NOTE: При разрыве supervisor запускает процесс заново; просроченные запросы не буферизуются.
     ...(privateRelease ? { reconnect: false, ignoreClusterUpdates: true } : {}),
   });
-  let closing;
-  let terminal = false;
-  let drainingNats = false;
   const server = createEmbeddingServer(config, async (invocation) => {
-    if (nc.isClosed() || nc.isDraining()) throw new Error('NATS unavailable');
+    if (privateRelease && (nc.isClosed() || nc.isDraining())) throw new Error('NATS unavailable');
     const message = await nc.request(SUBJECT, Buffer.from(JSON.stringify(invocation)), { timeout: config.embedding.timeoutMs });
     const status = message.headers?.get('Nats-Service-Error-Code');
     if (status) {
@@ -244,6 +241,23 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     }
     return JSON.parse(new TextDecoder().decode(message.data));
   }, () => !nc.isClosed() && !nc.isDraining());
+  if (!privateRelease) {
+    // Сохранить исходный lifecycle остальных конфигураций.
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(config.embedding.port, config.embedding.host, resolve);
+    });
+    const close = async () => {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await nc.drain();
+    };
+    process.once('SIGINT', () => void close());
+    process.once('SIGTERM', () => void close());
+    return { close, server, nc };
+  }
+  let closing;
+  let terminal = false;
+  let drainingNats = false;
   const onSignal = () => { void close().catch(() => { onTerminal(); }); };
   const close = (failed = false) => {
     if (failed && !terminal) {
@@ -267,15 +281,13 @@ export async function startEmbeddingAdapter(config, connectNats = connect, onTer
     })();
     return closing;
   };
-  if (privateRelease) {
-    // AIDEV-NOTE: closed() сохраняет факт отказа даже если событие случилось до подписки.
-    void nc.closed().then(() => {
-      if (!drainingNats && (server.listening || closing)) {
-        process.stderr.write('MemOS embedding adapter: NATS connection closed\n');
-        void close(true).catch(() => { onTerminal(); });
-      }
-    });
-  }
+  // AIDEV-NOTE: closed() сохраняет факт отказа даже если событие случилось до подписки.
+  void nc.closed().then(() => {
+    if (!drainingNats && (server.listening || closing)) {
+      process.stderr.write('MemOS embedding adapter: NATS connection closed\n');
+      void close(true).catch(() => { onTerminal(); });
+    }
+  });
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject);

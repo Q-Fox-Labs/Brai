@@ -1350,6 +1350,48 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payloads,[{'id':'one','text':'  Первое\n'},{'id':'two','text':'\nВторое  '}])
         native.clear_steer_turn(turn)
 
+    async def test_dialogues_file_only_steer_keeps_original_and_artifact(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,_ctx=self.steering_runner(source)
+        runner._steer_text_with_origin=lambda text,event: 'Origin\n'+json.dumps({'message_id':event.message_id})+'\n\n'+text
+        event=SimpleNamespace(source=source,message_id='file',text='',raw_message=SimpleNamespace(media_group_id=None),
+                              media_urls=[str(self.input_file())],media_types=['text/plain'],metadata={})
+        token=native._prepared_inbound.set(None)
+        try:
+            with patch.dict(sys.modules,{'brai_files':native}), patch.dict(os.environ,BRAI_DIALOGUES_REQUIRED='1'):
+                self.assertTrue(await native.steer_active_input(runner,event,'session'))
+                original=agent._pending_steer
+                self.assertTrue(await native.steer_active_input(runner,event,'session'))
+                self.assertIs(agent._pending_steer,original)
+            payload=next(json.loads(line) for line in agent._pending_steer.splitlines() if line.startswith('{"id":'))
+            artifact=next(iter(self.backend.remote))
+            self.assertEqual(payload,{'id':'file','text':'','source':{'kind':'telegram','attachments':[{'artifactId':artifact}]}})
+            with native.inbound_handoff(source,'file'):
+                self.assertEqual(native._inbound_attachments.get(),[{'artifactId':artifact}])
+        finally:
+            native.release_steer_inputs(agent)
+            native.release_event(event)
+            native._prepared_inbound.reset(token)
+            native.clear_steer_turn(turn)
+
+    async def test_dialogues_file_only_new_turn_keeps_original_and_artifact(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2',
+                               _brai_dialogues_input=('file',''))
+        event=SimpleNamespace(source=source,message_id='file',text='',raw_message=SimpleNamespace(media_group_id=None),
+                              media_urls=[str(self.input_file())],media_types=['text/plain'],metadata={})
+        agent=SimpleNamespace(session_id='file-test')
+        token=native._prepared_inbound.set(None)
+        try:
+            self.assertTrue(await native.accept_event(event))
+            artifact=next(iter(self.backend.remote))
+            with patch.dict(os.environ,BRAI_DIALOGUES_REQUIRED='1'), native.inbound_handoff(source,'file'):
+                with native.conversation(agent,event.text) as prepared:
+                    payload=next(json.loads(line) for line in prepared.splitlines() if line.startswith('{"id":'))
+                    self.assertEqual(payload,{'id':'file','text':'','source':{'kind':'telegram','attachments':[{'artifactId':artifact}]}})
+        finally:
+            native.release_event(event)
+            native._prepared_inbound.reset(token)
+
     def test_edits_belong_to_exact_active_turn_and_sender(self):
         source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
         runner,agent,turn,ctx=self.steering_runner(source)
