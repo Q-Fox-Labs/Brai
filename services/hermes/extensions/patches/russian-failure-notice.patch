@@ -9490,158 +9490,45 @@ diff --git a/gateway/run.py b/gateway/run.py
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 --- a/gateway/run_notifications.py
 +++ b/gateway/run_notifications.py
-@@ -1269,10 +1269,10 @@
-                 )
-                 return False
-             logger.warning(
--                "Dropping watch notification with no routing metadata for process %s",
-+                "Watch notification has no routing metadata for process %s",
-                 evt.get("session_id", "unknown"),
+@@ -1614,7 +1614,8 @@
+         lines = [
+             f"[IMPORTANT: {len(entries)} background processes completed for this session.",
+             "Treat these results as one completion batch and send at most one "
+-            "consolidated user-facing response.",
++            "consolidated user-facing response. Explain failures in plain language, "
++            "without commands or raw diagnostics, and include their journal references.",
+         ]
+         shown = entries[:10]
+         for _text, evt, _future in shown:
+@@ -1627,6 +1628,9 @@
+             if len(output) > 800:
+                 output = f"[… truncated …]\n{output[-800:]}"
+             lines.append(f"\n- {session_id}: exit_code={exit_code}, reason={reason}")
++            if "_brai_failure_reference" in evt:
++                reference = evt["_brai_failure_reference"]
++                lines.append(f"  Journal reference: {reference}" if reference else "  Journal reference unavailable")
+             if output:
+                 lines.append(output)
+         omitted = len(entries) - len(shown)
+@@ -1635,7 +1639,7 @@
+                 f"\n- … and {omitted} more completion(s); inspect them with "
+                 "the process tool if they affect the conclusion."
              )
--            return None
-+            return False if evt.get("brai_require_delivery") else None
-         platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-         adapter = self._resolve_injection_adapter(platform_name, source)
-         if not adapter and platform_name == Platform.API_SERVER.value and getattr(source, "profile", None):
-@@ -1362,6 +1362,8 @@
-             started_at = evt.get("started_at")
-             if producer_id and started_at is not None:
-                 return (evt_type, producer_id, started_at)
-+            if producer_id and evt.get("brai_legacy_identity") and evt.get("parent_session_id"):
-+                return (evt_type, producer_id, "legacy:" + str(evt["parent_session_id"]))
-         return None
+-        lines.append("If a result does not change the current conclusion, absorb it silently.]")
++        lines.append("Successful results may be absorbed silently; report every failure and its journal reference.]")
+         return "\n".join(lines)
  
-     def _mark_completions_delivered_locked(self, identities) -> None:
-@@ -1502,6 +1504,17 @@
-         # acknowledge the durable row as delivered. Verify the target here, before acceptance, and give
-         # drops an honest durable disposition.
-         verdict = await self._classify_completion_target(parent_session_id)
-+        if verdict == "terminal" and evt_type == "completion" and evt.get("brai_retry_profile") and getattr(getattr(self, "config", None), "multiplex_profiles", False):
-+            # An unreadable secondary store is not proof that an unstamped owner is gone.
-+            source = await asyncio.to_thread(self._build_process_event_source, evt)
-+            if not getattr(source, "profile", None):
-+                try:
-+                    parent = await self._session_db.get_session(parent_session_id)
-+                except Exception:
-+                    parent = None
-+                if parent is None:
-+                    claim.proceed, claim.early_result = False, False
-+                    return claim
-         if verdict == "terminal":
-             if evt_type == "async_delegation":
-                 logger.warning(
-@@ -1527,27 +1540,70 @@
-         return claim
- 
-     def _completion_event_scope(self, evt: dict):
--        """Profile runtime scope of the session a completion event targets (a no-op context when the
--        event is the default profile's or the scope is already installed).
--
--        The pre-flight (``_classify_completion_target`` → ``_session_db``) and every durable-ledger op
--        (``tools.async_delegation`` → ``get_hermes_home()/state.db``) resolve from the ambient scope.
--        The supervised ``_async_delegation_watcher`` and startup-recovered process watchers run under
--        the ROOT scope, so a secondary profile's completion was looked up in the DEFAULT profile's
--        state.db — classified ``terminal`` and dropped, its ledger row stranded ``pending`` forever."""
--        from gateway.run import _async_profile_runtime_scope
--        from hermes_constants import get_hermes_home_override
--        source = self._build_process_event_source(evt)
--        if source is None or not getattr(source, "profile", None):
--            # No routed profile: the launch profile's own completion. Bind ITS scope once the
--            # process multiplexes — unscoped, a fail-closed ledger read raises on a legitimate
--            # launch-profile event (no-op while single-profile).
--            from tui_gateway.launch_profile_policy import async_launch_profile_scope_if_multiplexed
--            return async_launch_profile_scope_if_multiplexed()
--        profile_home = self._resolve_profile_home_for_source(source)
--        if get_hermes_home_override() == str(profile_home):
--            return contextlib.nullcontext()  # already inside this profile's scope
--        return _async_profile_runtime_scope(profile_home)
-+        """Resolve the owning profile before checking or delivering a completion."""
-+        @contextlib.asynccontextmanager
-+        async def scope():
-+            from gateway.run import _async_profile_runtime_scope, _multiplex_profile_homes
-+            from hermes_constants import get_hermes_home_override
-+            source = await asyncio.to_thread(self._build_process_event_source, evt)
-+            if (evt.get("brai_retry_profile") and not getattr(source, "profile", None)
-+                    and getattr(getattr(self, "config", None), "multiplex_profiles", False)):
-+                # The global process registry copies checkpoints across profiles; only the
-+                # conversation stores can prove ownership, and every store must be readable.
-+                parent = str(evt.get("parent_session_id") or "").strip()
-+                if parent:
-+                    from hermes_state import SessionDB
-+                    primary = getattr(self, "_primary_profile_name", None) or "default"
-+                    def owners():
-+                        matches = []
-+                        try:
-+                            homes = _multiplex_profile_homes(self.config)
-+                        except Exception as exc:
-+                            raise LookupError("Conversation owner list unavailable") from exc
-+                        for name, home in homes:
-+                            path = Path(home) / "state.db"
-+                            try:
-+                                path.stat()
-+                            except OSError as exc:
-+                                # Missing is not proof of absence: a profile store may be unavailable.
-+                                raise LookupError("Conversation owner store unavailable") from exc
-+                            db = None
-+                            try:
-+                                db = SessionDB(path, read_only=True)
-+                                row = db.get_session(parent)
-+                            except Exception as exc:
-+                                raise LookupError("Conversation owner store unavailable") from exc
-+                            finally:
-+                                if db is not None:
-+                                    with contextlib.suppress(Exception):
-+                                        db.close()
-+                            if row and (row.get("profile_name") or name) == name:
-+                                matches.append(name)
-+                        return matches
-+                    warned = False
-+                    while True:
-+                        try:
-+                            matches = await asyncio.to_thread(owners)
-+                            if len(matches) > 1:
-+                                raise LookupError("Ambiguous original conversation owner")
-+                            break
-+                        except LookupError:
-+                            if not warned:
-+                                logger.warning("Background task owner is unavailable or ambiguous; will retry")
-+                                warned = True
-+                            await asyncio.sleep(evt["check_interval"])
-+                    if matches and matches[0] != primary:
-+                        source = SessionSource(platform=Platform.API_SERVER, chat_id=parent, profile=matches[0])
-+            if source is None or not getattr(source, "profile", None):
-+                from tui_gateway.launch_profile_policy import async_launch_profile_scope_if_multiplexed
-+                manager = async_launch_profile_scope_if_multiplexed()
-+            else:
-+                profile_home = self._resolve_profile_home_for_source(source)
-+                manager = (contextlib.nullcontext() if get_hermes_home_override() == str(profile_home)
-+                           else _async_profile_runtime_scope(profile_home))
-+            async with manager:
-+                yield
-+        return scope()
- 
-     async def _deliver_completion_notification(
-         self, synth_text: str, evt: dict, *, sibling_claims=(),
-@@ -1573,9 +1629,15 @@
-             if not claim.proceed:
-                 return claim.early_result
-             if identity is not None:
--                if self._completion_identity_seen(identity, claim=True):
--                    return None
--                identity_claimed = True
-+                # Inflight не означает доставку: второй watcher должен повторить попытку,
-+                # если первая ещё ожидает ответ транспорта или завершится отказом.
-+                with self._completion_delivery_lock:
-+                    if identity in self._completion_deliveries_inflight:
-+                        return False
-+                    if identity in self._completion_deliveries_delivered:
-+                        return None
-+                    self._completion_deliveries_inflight.add(identity)
-+                    identity_claimed = True
-             if evt.get("type") == "async_delegation":
-                 evt = {**evt, "brai_delegation_ids": [evt["delegation_id"],
-                     *[event["delegation_id"] for event, _ in sibling_claims]]}
-@@ -1991,28 +2053,6 @@
+     def _record_coalesced_completion_siblings(self, events: list[dict]) -> None:
+@@ -1722,7 +1726,7 @@
+                 setattr(self, attr, default())
+         if self._completion_notification_batches_stopping:
+             return False
+-        key = self._event_route_key(evt, self._COMPLETION_BATCH_KEY_FIELDS)
++        key = self._event_route_key(evt, (*self._COMPLETION_BATCH_KEY_FIELDS, "parent_session_id"))
+         future = asyncio.get_running_loop().create_future()
+         self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
+         if key not in self._completion_notification_batch_tasks:
+@@ -1991,27 +1995,19 @@
              ),
          }
  
@@ -9659,295 +9546,166 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -                                                        duration_seconds=_dur)
 -        header = _format_concise_process_notification(session_id, command, session.exit_code, "", duration_seconds=_dur)
 -        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
--
--    def _format_process_running_message(self, session) -> str:
++    def _format_process_final_message(self, session_id: str, session, notify_mode: str, reference=None) -> str:
++        """A direct chat status never contains a command or process output."""
++        if session.exit_code not in (0, None):
++            from tools.process_registry_notifications import background_failure_notice
++            return background_failure_notice(reference)
++        if session.exit_code is None:
++            key = "gateway.background.task_unknown"
++            value = t(key)
++            return "The background task result is unknown." if value == key else value
++        return t("gateway.background.task_finished")
+ 
+     def _format_process_running_message(self, session) -> str:
 -        from gateway.run import _redact_gateway_user_facing_secrets, _shorten_command_for_display
 -        new_output = self._redacted_output_tail(session, 500)
 -        short_cmd = _shorten_command_for_display(_redact_gateway_user_facing_secrets(getattr(session, "command", "") or ""))
 -        header = t("gateway.background.still_running") + (f" — `{short_cmd}`" if short_cmd else "")
 -        return t("gateway.background.recent_output", header=header, output=new_output.strip()) if new_output.strip() else header
--
++        return t("gateway.background.still_running")
+ 
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
-         tool thread. Waiting for the post-turn drain leaves a process that finishes while its
-@@ -2031,16 +2071,13 @@
- 
-     async def _run_process_watcher(self, watcher: dict) -> None:
-         """Poll a background process and push updates until it exits. Mode
--        (``display.background_process_notifications``): concise (default one-liner; failures append
--        the output tail) / all (running updates + final raw) / result (final raw) / error (final raw
--        if exit != 0) / off."""
-+        (``display.background_process_notifications``): concise / all / result / error / off.
-+        Process output stays out of automatic chat notifications."""
-         from tools.process_registry import process_registry
-         from tools.process_registry_notifications import format_process_notification
-+        watcher = {**watcher, "brai_retry_profile": True}
-         session_id = watcher["session_id"]
-         interval = watcher["check_interval"]
--        platform_name = watcher.get("platform", "")
--        chat_id = watcher.get("chat_id", "")
--        thread_id = watcher.get("thread_id", "")
-         agent_notify = watcher.get("notify_on_complete", False)
-         # The mode belongs to the profile that started the process; recovered watchers run in the
-         # root context, so resolve it under the owning profile's scope (no-op for the default).
-@@ -2049,69 +2086,76 @@
-         logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
+@@ -2050,11 +2046,20 @@
                        session_id, interval, notify_mode, agent_notify)
          silent = notify_mode == "off" and not agent_notify
--        last_output_len = 0
-+        completion_logged = False
+         last_output_len = 0
++        failure_logged = False
 +        failure_reference = None
-+        pending_session = None
-+        retain_unroutable = False
          while True:
              await asyncio.sleep(interval)
--            session = process_registry.get(session_id)
--            if session is None:
--                break
-+            async with self._completion_event_scope(watcher):
-+                session = None if watcher.get("brai_lost") else pending_session or process_registry.get(session_id)
-+            missing = session is None
-+            if missing:
-+                # Результат утрачен, но исходный адресат всё ещё проходит обычную проверку поколения.
-+                from types import SimpleNamespace
-+                session = SimpleNamespace(exited=True, exit_code=None, completion_reason="lost")
-+            if (missing or (getattr(session, "detached", False) and session.exit_code is None)) and not (
-+                    watcher.get("parent_session_id") or getattr(session, "parent_session_id", None)):
-+                retain_unroutable = True
-+            failed = (session.exit_code != 0 or getattr(session, "completion_reason", "")
-+                      in {"lost", "failed_start", "rejected", "killed"})
-+            if session.exited and failed and not completion_logged:
-+                async with self._completion_event_scope(watcher):
-+                    from tools.process_registry_notifications import record_background_failure
-+                    failure_reference = await asyncio.to_thread(record_background_failure, session_id, session.exit_code)
-+                completion_logged = True
-             if silent:
--                # Still wait for the process to exit so we can log it, but don't push any messages.
-                 if session.exited:
-                     break
-                 continue
--            current_output_len = len(session.output_buffer)
--            has_new_output = current_output_len > last_output_len
--            last_output_len = current_output_len
--            if session.exited:
--                # Agent-notify: inject a synthetic message unless the agent already consumed the result via
--                # wait/log (poll() is read-only and deliberately does NOT mark consumed).
--                if agent_notify and not process_registry.is_completion_consumed(session_id):
-+            if not session.exited:
-+                continue
-+            async with self._completion_event_scope(watcher):
-+                consumed = process_registry.is_completion_consumed(session_id)
-+            if consumed:
-+                break
-+            if not agent_notify and not (notify_mode in {"concise", "all", "result"} or (
-+                    notify_mode == "error" and failed)):
-+                break
-+            if missing:
-+                completion_evt = {**watcher, "type": "completion", "session_id": session_id,
-+                                  "exit_code": None, "completion_reason": "lost", "started_at": None}
-+            else:
-+                async with self._completion_event_scope(watcher):
-                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
--                    synth_text = format_process_notification(completion_evt)
--                    if not synth_text:
--                        break
--                    # Captured before injection: afterwards the key is busy either way (the injected
--                    # turn itself installs the guard).
--                    turn_busy = await self._launching_turn_active(platform_name, watcher)
--                    delivered = await self._enqueue_process_completion_notification(synth_text, completion_evt)
--                    if delivered is False:
--                        # The process remains terminal; retry after failed adapter injection instead
--                        # of suppressing the result.
--                        continue
--                    # The agent normally reports the result itself, so the chat gets no separate receipt.
--                    # While the launching turn is still running the injection only queues a follow-up, and
--                    # the chat would stay mute for as long as that turn lasts (#112033): send the concise
--                    # receipt now.
--                    if turn_busy and (notify_mode in {"concise", "all", "result"} or (
--                        notify_mode == "error" and session.exit_code not in {0, None}
--                    )):
--                        message_text = self._format_process_final_message(session_id, session, "concise")
--                        await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
--                    break
--                # Text-only notification; skip when already consumed via wait/log (the agent_notify branch
--                # FALLS THROUGH here, hence the re-check).
--                if process_registry.is_completion_consumed(session_id):
--                    logger.debug(
--                        "Process watcher: completion for %s already consumed "
--                        "via wait/log — skipping raw notification (#65379)", session_id,
--                    )
--                    break
--                if notify_mode in {"concise", "all", "result"} or (
--                    notify_mode == "error" and session.exit_code not in {0, None}
--                ):
--                    message_text = self._format_process_final_message(session_id, session, notify_mode)
--                    from gateway.warning_notifications import present_notification
--                    async with self._completion_event_scope(watcher):
--                        # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
--                        await present_notification(
--                            lambda: self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher),
--                            platform=platform_name, diagnostic=session.exit_code not in {0, None})
-+            completion_evt["brai_require_delivery"] = True
-+            completion_evt["brai_retry_profile"] = True
-+            completion_evt["check_interval"] = interval
-+            # Для старых записей без времени запуска используем ID процесса и исходного разговора.
-+            if not completion_evt.get("parent_session_id"):
-+                logger.warning("Background process completion lacks original session; delivery skipped")
-+                retain_unroutable = True
+             session = process_registry.get(session_id)
+             if session is None:
                  break
--            elif has_new_output and notify_mode == "all" and not agent_notify:
--                # New output — deliver a status update (only in "all" mode; agent_notify watchers
--                # only care about completion).
--                await self._send_watcher_message(
--                    platform_name, chat_id, thread_id, self._format_process_running_message(session), watcher,
--                )
-+            if completion_evt.get("started_at") is None:
-+                completion_evt["brai_legacy_identity"] = True
-+            if failed:
-+                completion_evt["_brai_failure_recorded"] = True
-+                completion_evt["_brai_failure_reference"] = failure_reference
-+            async with self._completion_event_scope(watcher):
-+                synth_text = await asyncio.to_thread(format_process_notification, completion_evt)
-+            if not synth_text:
-+                break
-+            if not failed:
-+                synth_text += ("\n[Если вывод содержит ошибку, не цитируй технические подробности пользователю.]")
-+            # AIDEV-NOTE: Каждое завершение проходит свой preflight; общий пакет может смешать поколения.
-+            delivered = await self._deliver_completion_notification(synth_text, completion_evt)
-+            if delivered is False:
-+                pending_session = None if missing else session
-+                continue
-+            break
-+        if not retain_unroutable and (watcher.get("brai_lost") or missing or
-+                                       (getattr(session, "detached", False) and session.exit_code is None)):
-+            async with self._completion_event_scope(watcher):
-+                await asyncio.to_thread(process_registry._brai_forget_lost_checkpoint, session_id,
-+                                        watcher.get("brai_checkpoint_key"))
-         logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
++            if session.exited and session.exit_code not in (0, None) and not failure_logged:
++                from tools.process_registry_notifications import background_failure_reference
++                failure_event = {"session_id": session_id, "exit_code": session.exit_code,
++                                 "command": getattr(session, "command", ""), "output": session.output_buffer}
++                async with self._completion_event_scope(watcher):
++                    failure_reference = await asyncio.to_thread(background_failure_reference, failure_event)
++                failure_logged = True
+             if silent:
+                 # Still wait for the process to exit so we can log it, but don't push any messages.
+                 if session.exited:
+@@ -2068,9 +2073,18 @@
+                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).
+                 if agent_notify and not process_registry.is_completion_consumed(session_id):
+                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
++                    if failure_logged:
++                        completion_evt["_brai_failure_reference"] = failure_reference
+                     synth_text = format_process_notification(completion_evt)
+                     if not synth_text:
+                         break
++                    if failure_logged:
++                        from tools.process_registry_notifications import background_failure_notice
++                        notice = background_failure_notice(failure_reference)
++                        synth_text += (f"\n[Сообщи об ошибке понятными словами без технических подробностей: "
++                                       f"{notice}]")
++                    else:
++                        synth_text += "\n[Если в результате есть ошибка, объясни её без технических подробностей.]"
+                     # Captured before injection: afterwards the key is busy either way (the injected
+                     # turn itself installs the guard).
+                     turn_busy = await self._launching_turn_active(platform_name, watcher)
+@@ -2086,7 +2100,7 @@
+                     if turn_busy and (notify_mode in {"concise", "all", "result"} or (
+                         notify_mode == "error" and session.exit_code not in {0, None}
+                     )):
+-                        message_text = self._format_process_final_message(session_id, session, "concise")
++                        message_text = self._format_process_final_message(session_id, session, "concise", failure_reference)
+                         await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
+                     break
+                 # Text-only notification; skip when already consumed via wait/log (the agent_notify branch
+@@ -2100,7 +2114,18 @@
+                 if notify_mode in {"concise", "all", "result"} or (
+                     notify_mode == "error" and session.exit_code not in {0, None}
+                 ):
+-                    message_text = self._format_process_final_message(session_id, session, notify_mode)
++                    if session.exit_code in (0, None):
++                        # Text-only legacy watchers still hand the available result to the agent.
++                        completion_evt = self._build_process_completion_event(watcher, session, session_id)
++                        synth_text = format_process_notification(completion_evt)
++                        if synth_text:
++                            synth_text += "\n[Передай результат понятными словами, не цитируя сырые ошибки.]"
++                            delivered = await self._enqueue_process_completion_notification(synth_text, completion_evt)
++                            if delivered is False:
++                                continue
++                            if delivered is True:
++                                break
++                    message_text = self._format_process_final_message(session_id, session, notify_mode, failure_reference)
+                     from gateway.warning_notifications import present_notification
+                     async with self._completion_event_scope(watcher):
+                         # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
 diff --git a/tools/process_registry_notifications.py b/tools/process_registry_notifications.py
 --- a/tools/process_registry_notifications.py
 +++ b/tools/process_registry_notifications.py
-@@ -4,9 +4,112 @@
+@@ -4,9 +4,58 @@
  TUI inject into the agent conversation."""
  
  import time
++import json
++import logging
++import secrets
 +import threading
  from dataclasses import dataclass
  from contextlib import suppress
  
-+def record_background_failure(session_id: str, exit_code) -> "str | None":
-+    """Записать безопасную диагностику в существующий журнал и вернуть подтверждённый номер."""
-+    import os
-+    import re
-+    import secrets
-+    import stat
-+    from datetime import datetime, timezone
-+    from hermes_constants import get_hermes_home
-+
-+    # AIDEV-NOTE: Обычный logger ставит сообщение в очередь и не подтверждает запись.
-+    # Не создаём новый файл и не следуем символическим ссылкам на каталог или журнал.
-+    if not hasattr(os, "O_NOFOLLOW") or not re.fullmatch(r"[A-Za-z0-9_-]+", str(session_id)):
-+        return None
-+    reference = secrets.token_hex(8)
-+    status = str(exit_code) if type(exit_code) is int else "unknown"
-+    record = (f"{datetime.now(timezone.utc).isoformat()} WARNING gateway.run: "
-+              f"BACKGROUND_PROCESS_FAILURE reference={reference} session={session_id} exit={status}\n").encode("utf-8")
-+    directory = fd = None
-+    try:
-+        directory = os.open(get_hermes_home() / "logs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-+        fd = os.open("errors.log", os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
-+                     dir_fd=directory)
-+        current = os.fstat(fd)
-+        if not stat.S_ISREG(current.st_mode) or current.st_nlink == 0:
-+            return None
-+        start = os.lseek(fd, 0, os.SEEK_END)
-+        if os.write(fd, record) != len(record):
-+            return None
-+        os.fsync(fd)
-+        # Проверяем содержимое после fsync: copytruncate сохраняет inode, но удаляет запись.
-+        offset, tail, found_record = start, b"", False
-+        end = os.fstat(fd).st_size
-+        while offset < end:
-+            chunk = os.pread(fd, min(65536, end - offset), offset)
-+            if not chunk:
-+                break
-+            tail += chunk
-+            if record in tail:
-+                found_record = True
-+                break
-+            tail = tail[-len(record):]
-+            offset += len(chunk)
-+        if not found_record:
-+            return None
-+        # AIDEV-NOTE: Номер нельзя выдавать, если ротация уже убрала записанный inode.
-+        found = False
-+        for name in ("errors.log", "errors.log.1", "errors.log.2"):
-+            try:
-+                present = os.stat(name, dir_fd=directory, follow_symlinks=False)
-+            except FileNotFoundError:
-+                continue
-+            if stat.S_ISREG(present.st_mode) and (present.st_dev, present.st_ino) == (current.st_dev, current.st_ino):
-+                found = True
-+                break
-+        return reference if found else None
-+    except (OSError, ValueError, TypeError):
-+        return None
-+    finally:
-+        for handle in (fd, directory):
-+            if handle is not None:
-+                try:
-+                    os.close(handle)
-+                except OSError:
-+                    pass
++_failure_log_lock = threading.Lock()
 +
 +
-+_failure_reference_lock = threading.Lock()
++def background_failure_reference(evt: dict) -> "str | None":
++    """Write one numbered diagnostic using the existing Hermes error logger."""
++    with _failure_log_lock:
++        if "_brai_failure_reference" in evt:
++            return evt["_brai_failure_reference"]
++        logger = logging.getLogger("gateway.run")
++        reference = None
++        try:
++            if logger.isEnabledFor(logging.WARNING):
++                from agent.redact import redact_sensitive_text, redact_terminal_output
++                from tools.ansi_strip import strip_ansi
++                command = str(evt.get("command") or "")
++                output = strip_ansi(str(evt.get("output") or ""))
++                diagnostic = redact_sensitive_text(redact_terminal_output(output, command, force=True),
++                                                   force=True, redact_url_credentials=True)
++                reference = secrets.token_hex(8)
++                logger.warning("BACKGROUND_PROCESS_FAILURE reference=%s session=%s exit=%s data=%s",
++                               reference, evt.get("session_id"), evt.get("exit_code"),
++                               json.dumps({"output": diagnostic[-2000:]}, ensure_ascii=False))
++        except Exception:
++            reference = None
++        evt["_brai_failure_reference"] = reference
++        return reference
 +
 +
-+def _completion_failed(evt: dict) -> bool:
-+    return evt.get("exit_code") != 0 or evt.get("completion_reason") in {"lost", "failed_start", "rejected", "killed"}
-+
-+
-+def _failure_reference(evt: dict) -> "str | None":
-+    # Один и тот же event может быть представлен несколькими поверхностями.
-+    with _failure_reference_lock:
-+        if "_brai_failure_recorded" not in evt:
-+            evt["_brai_failure_reference"] = record_background_failure(
-+                str(evt.get("session_id") or ""), evt.get("exit_code"))
-+            evt["_brai_failure_recorded"] = True
-+        return evt.get("_brai_failure_reference")
-+
-+
-+def _completion_notice(evt: dict) -> str:
++def background_failure_notice(reference) -> str:
 +    from agent.i18n import t
-+    unknown = evt.get("exit_code") is None and evt.get("completion_reason") not in {"failed_start", "rejected"}
-+    reference = _failure_reference(evt)
-+    key = ("gateway.background.task_unknown_ref" if unknown else "gateway.background.task_failed_ref") if reference else (
-+        "gateway.background.task_unknown_unlogged" if unknown else "gateway.background.task_failed_unlogged")
-+    translated = t(key, reference=reference) if reference else t(key)
-+    if translated == key:
-+        # The upstream English catalogue is owned by a separate overlay.
-+        fallback = {
-+            "gateway.background.task_failed_ref": "A background task failed. Journal reference: {reference}",
-+            "gateway.background.task_unknown_ref": "The background task result is unknown. Journal reference: {reference}",
-+            "gateway.background.task_failed_unlogged": "A background task failed. The journal reference is unavailable.",
-+            "gateway.background.task_unknown_unlogged": "The background task result is unknown. The journal reference is unavailable.",
-+        }
-+        return fallback[key].format(reference=reference)
-+    return translated
++    key = "gateway.background.task_failed_ref" if reference else "gateway.background.task_failed_unlogged"
++    result = t(key, reference=reference) if reference else t(key)
++    if result == key:
++        return (f"A background task failed. Journal reference: {reference}." if reference
++                else "A background task failed. The journal reference is unavailable.")
++    return result
++
++
++def process_progress_display_text() -> str:
++    from agent.i18n import t
++    key = "gateway.background.task_progress"
++    result = t(key)
++    return "Background task update." if result == key else result
 +
 +
  _DONE = ("completed", "success")
  _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
  
-@@ -335,18 +438,20 @@
+@@ -333,20 +382,19 @@
+ 
+ 
  def process_completion_display_text(events: list) -> str:
-     """Compact UI title for one or more process completions; the model text keeps the full output."""
-     if len(events) != 1:
+-    """Compact UI title for one or more process completions; the model text keeps the full output."""
+-    if len(events) != 1:
 -        return f"{len(events)} Background Processes Finished"
-+        failures = [_completion_notice(event) for event in events if _completion_failed(event)]
-+        return "\n".join(failures) if failures else f"{len(events)} Background Processes Finished"
-     evt = events[0]
+-    evt = events[0]
 -    reason, exit_code = evt.get("completion_reason") or "exited", evt.get("exit_code", "?")
 -    if reason == "killed":
 -        outcome = "Terminated"
@@ -9958,279 +9716,22 @@ diff --git a/tools/process_registry_notifications.py b/tools/process_registry_no
 -    cmd = _short_command(evt.get("command"))
 -    detail = f" (exit {exit_code})" if reason not in ("killed", *_REASON_STATUS) and exit_code != 0 else ""
 -    return f"Background Process {outcome}{detail}: {cmd}" if cmd else f"Background Process {outcome}{detail}"
-+    if _completion_failed(evt):
-+        return _completion_notice(evt)
++    """Safe status for the interface; the agent still receives the process output."""
 +    from agent.i18n import t
-+    return t("gateway.background.task_finished")
-+
-+
-+def process_progress_display_text() -> str:
-+    from agent.i18n import t
-+    key = "gateway.background.task_progress"
-+    result = t(key)
-+    return "Background task update." if result == key else result
++    failures = [background_failure_notice(background_failure_reference(event)) for event in events
++                if event.get("exit_code") not in (0, None) or event.get("completion_reason") in ("failed_start", "rejected", "killed")]
++    if failures:
++        return "\n".join(failures)
++    if len(events) == 1:
++        if events[0].get("exit_code") is None or events[0].get("completion_reason") == "lost":
++            key = "gateway.background.task_unknown"
++            value = t(key)
++            return "The background task result is unknown." if value == key else value
++        return t("gateway.background.task_finished")
++    return f"{len(events)} Background Processes Finished"
  
  
  HEARTBEAT_DISPLAY_KIND = "hidden"  # a wake, not a message: no surface paints the row
-@@ -418,6 +523,10 @@
-         return f"[IMPORTANT: {evt.get('message', '')}]"
-     if evt_type == "async_delegation":
-         return _format_async_delegation(evt)
-+    if evt_type == "completion" and _completion_failed(evt):
-+        # AIDEV-NOTE: Сырые ошибка и команда остаются в реестре процесса, но не попадают в уведомление модели.
-+        notice = _completion_notice(evt)
-+        return f"[IMPORTANT: {notice} Сообщи пользователю на языке разговора понятными словами. Не показывай технические подробности.]"
-     _sid, _cmd = evt.get("session_id", "unknown"), evt.get("command", "unknown")
-     _attribution = _delegation_attribution_line(evt)
-     if evt.get("handoff_note"):
-diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_checkpoint.py
---- a/tools/process_registry_checkpoint.py
-+++ b/tools/process_registry_checkpoint.py
-@@ -17,35 +17,115 @@
- 
-     # ----- Checkpoint (crash recovery) -----
- 
--    def _write_checkpoint(self, extra_entries: Optional[list[dict[str, Any]]] = None):
-+    def _write_checkpoint(self, extra_entries: Optional[list[dict[str, Any]]] = None, *, _brai_path=None):
-         """Write running process metadata to the checkpoint file atomically."""
-         from tools.process_registry import _checkpoint_path, _CHECKPOINT_FIELDS
- 
--        try:
--            with self._lock:
--                entries = []
--                for s in self._running.values():
--                    if s.exited:
--                        continue
--                    # Backfill the start time so recovery can detect PID recycling
--                    # even for sessions spawned before this field existed.
--                    if s.host_start_time is None and s.pid_scope == "host" and s.pid:
--                        s.host_start_time = self._safe_host_start_time(s.pid)
--                    entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
--                    # Redact inline credentials before persisting (~/.hermes/processes.json).
--                    # Recovery uses command only for display (adoption re-validates the
--                    # PID, never re-runs it), so masking is lossless.
--                    # See #77484.
--                    entry["command"] = redact_sensitive_text(s.command, code_file=True)
--                    entry["owner_task_id"] = s.owner_task_id or s.task_id
--                    entries.append(entry)
--                if extra_entries:
-+        target = _brai_path or _checkpoint_path()
-+        # Сериализуем снимок и запись: поздняя запись старого снимка не должна вернуть уже принятое событие.
-+        with self._lock:
-+            if not hasattr(self, "_brai_checkpoint_write_lock"):
-+                import threading
-+                self._brai_checkpoint_write_lock = threading.Lock()
-+            write_lock = self._brai_checkpoint_write_lock
-+        with write_lock:
-+            try:
-+                with self._lock:
-+                    entries = []
-+                    for s in self._running.values():
-+                        if s.exited:
-+                            continue
-+                        # Backfill the start time so recovery can detect PID recycling
-+                        # even for sessions spawned before this field existed.
-+                        if s.host_start_time is None and s.pid_scope == "host" and s.pid:
-+                            s.host_start_time = self._safe_host_start_time(s.pid)
-+                        entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
-+                        # Redact inline credentials before persisting (~/.hermes/processes.json).
-+                        # Recovery uses command only for display (adoption re-validates the
-+                        # PID, never re-runs it), so masking is lossless.
-+                        # See #77484.
-+                        entry["command"] = redact_sensitive_text(s.command, code_file=True)
-+                        entry["owner_task_id"] = s.owner_task_id or s.task_id
-+                        entries.append(entry)
-+                        keys = getattr(s, "_brai_checkpoint_keys", set())
-+                        s._brai_checkpoint_keys = {*keys, str(target)}
-+                    # Неразрешённый исход остаётся в исходном профиле до подтверждения приёма уведомления.
-+                    pending = getattr(self, "_brai_lost_checkpoints", {}).get(str(target), {})
-                     tracked_ids = {item.get("session_id") for item in entries}
--                    entries.extend(item for item in extra_entries if item.get("session_id") not in tracked_ids)
--            from utils import atomic_json_write
--            atomic_json_write(_checkpoint_path(), entries)
--        except Exception as e:
--            logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
-+                    for item in [*pending.values(), *(extra_entries or [])]:
-+                        if not item.get("session_id") or item.get("session_id") not in tracked_ids:
-+                            entries.append(item)
-+                            tracked_ids.add(item.get("session_id"))
-+                from utils import atomic_json_write
-+                atomic_json_write(target, entries)
-+            except Exception as e:
-+                logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
-+
-+    def _brai_forget_lost_checkpoint(self, session_id: str, checkpoint_key=None) -> None:
-+        from pathlib import Path
-+        from tools.process_registry import _checkpoint_path
-+        key = checkpoint_key or str(_checkpoint_path())
-+        identity_fields = ("session_id", "started_at", "parent_session_id", "session_key",
-+                           "watcher_platform", "watcher_chat_id", "watcher_thread_id", "watcher_user_id")
-+        with self._lock:
-+            all_pending = getattr(self, "_brai_lost_checkpoints", {})
-+            source = all_pending.get(key, {}).get(session_id)
-+            if source is None:
-+                return
-+            identity = tuple(source.get(field) for field in identity_fields)
-+            changed = []
-+            for path, pending in all_pending.items():
-+                entry = pending.get(session_id)
-+                if entry is None or tuple(entry.get(field) for field in identity_fields) != identity:
-+                    continue
-+                if entry.get("brai_scope_pending"):
-+                    pending[session_id] = {**entry, "brai_lost_notified": True}
-+                else:
-+                    pending.pop(session_id, None)
-+                changed.append(path)
-+        for path in changed:
-+            self._write_checkpoint(_brai_path=Path(path))
-+
-+    def _brai_retain_uncollected_session(self, session, *, scope_pending=False):
-+        from pathlib import Path
-+        from tools.process_registry import _CHECKPOINT_FIELDS, _checkpoint_path
-+        if session.watcher_interval <= 0:
-+            return ()
-+        entry = {"session_id": session.id, **{f: getattr(session, f) for f in _CHECKPOINT_FIELDS}}
-+        entry["command"] = redact_sensitive_text(session.command, code_file=True)
-+        entry["brai_scope_pending"] = scope_pending
-+        keys = set(getattr(session, "_brai_checkpoint_keys", ()))
-+        if not keys:
-+            keys.add(getattr(session, "_brai_checkpoint_key", None) or str(_checkpoint_path()))
-+        for key in keys:
-+            self._brai_retain_lost_checkpoint(entry, Path(key))
-+        return tuple(keys)
-+
-+    def _brai_retain_lost_checkpoint(self, entry, checkpoint_path=None, *, enqueue=False):
-+        from tools.process_registry import _checkpoint_path, _WATCHER_ROUTE_KEYS
-+        checkpoint_path = checkpoint_path or _checkpoint_path()
-+        session_id = entry.get("session_id")
-+        interval = entry.get("watcher_interval") or 0
-+        routable = bool(session_id and entry.get("parent_session_id") and
-+                        isinstance(interval, (int, float)) and interval > 0)
-+        lost = {**entry, "brai_lost": True}
-+        key = session_id or json.dumps(lost, sort_keys=True, ensure_ascii=True)
-+        with self._lock:
-+            if not hasattr(self, "_brai_lost_checkpoints"):
-+                self._brai_lost_checkpoints = {}
-+            pending = self._brai_lost_checkpoints.setdefault(str(checkpoint_path), {})
-+            if key in pending:
-+                return
-+            pending[key] = lost
-+            if enqueue and routable:
-+                self.pending_watchers.append({
-+                    "session_id": session_id, "check_interval": interval,
-+                    "session_key": entry.get("session_key", ""),
-+                    **{key: entry.get(f"watcher_{key}", "") for key in _WATCHER_ROUTE_KEYS},
-+                    "notify_on_complete": entry.get("notify_on_complete", False),
-+                    "parent_session_id": entry["parent_session_id"], "brai_lost": True,
-+                    "brai_checkpoint_key": str(checkpoint_path),
-+                })
- 
-     def recover_from_checkpoint(self) -> int:
-         """On gateway startup, probe PIDs from the checkpoint file; returns how many
-@@ -64,9 +144,26 @@
-             return 0
-         recovered = 0
-         unresolved_scope_entries: list[dict[str, Any]] = []
-+
-+        def retain_unknown(entry, *, enqueue=True):
-+            self._brai_retain_lost_checkpoint(entry, checkpoint_path, enqueue=enqueue)
-+
-         for entry in entries:
-+            if entry.get("brai_lost"):
-+                if entry.get("brai_scope_pending"):
-+                    unit = entry.get("systemd_unit", "")
-+                    if unit and not _stop_systemd_unit(unit):
-+                        retain_unknown(entry, enqueue=not entry.get("brai_lost_notified"))
-+                        unresolved_scope_entries.append(entry)
-+                        continue
-+                    if entry.get("brai_lost_notified"):
-+                        continue
-+                    entry = {**entry, "brai_scope_pending": False}
-+                retain_unknown(entry)
-+                continue
-             pid, pid_scope = entry.get("pid"), entry.get("pid_scope", "host")
-             if not pid:
-+                retain_unknown(entry)
-                 continue
-             # The registry is process-global, so every profile's checkpoint carries every live
-             # process; a multiplexer recovering several homes must adopt each session once.
-@@ -78,6 +175,7 @@
-                 logger.info(
-                     "Skipping recovery for non-host process: %s (pid=%s, scope=%s)",
-                     entry.get("command", "unknown")[:60], pid, pid_scope)
-+                retain_unknown(entry)
-                 continue
-             # Alive and still ours: re-attach. A start-time probe that cannot
-             # be read is not proof the PID was reused — dropping it would leave
-@@ -91,6 +189,7 @@
-                     "start time no longer matches — PID was recycled onto "
-                     "an unrelated process; refusing to adopt or signal it.",
-                     entry.get("session_id", "?"), pid)
-+                retain_unknown(entry)
-                 continue
-             if fate != "running":
-                 systemd_unit = entry.get("systemd_unit", "")
-@@ -99,7 +198,11 @@
-                         "Could not reap persisted scope %s for dead wrapper pid %s; "
-                         "retaining checkpoint entry for the next startup",
-                         systemd_unit, pid)
-+                    entry = {**entry, "brai_scope_pending": True}
-+                    retain_unknown(entry)
-                     unresolved_scope_entries.append(entry)
-+                else:
-+                    retain_unknown(entry)
-                 continue
-             fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
-             fields.update(
-@@ -108,6 +211,8 @@
-                 started_at=entry.get("started_at", time.time()))
-             # detached: can't read output, but can report status + kill
-             session = ProcessSession(id=entry["session_id"], detached=True, **fields)
-+            session._brai_checkpoint_key = str(checkpoint_path)
-+            session._brai_checkpoint_keys = {str(checkpoint_path)}
-             with self._lock:
-                 self._running[session.id] = session
-             recovered += 1
-@@ -121,6 +226,7 @@
-                     **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
-                     "notify_on_complete": session.notify_on_complete,
-                     "parent_session_id": session.parent_session_id,
-+                    "brai_checkpoint_key": str(checkpoint_path),
-                 })
-         self._write_checkpoint(extra_entries=unresolved_scope_entries)
-         return recovered
-diff --git a/tools/process_registry.py b/tools/process_registry.py
---- a/tools/process_registry.py
-+++ b/tools/process_registry.py
-@@ -1049,7 +1049,12 @@
-                 session.exited_at = time.time()
-                 self._running.pop(session.id, None)
-             self._finished[session.id] = session
--        self._write_checkpoint()
-+        from pathlib import Path
-+        paths = self._brai_retain_uncollected_session(session)
-+        for path in paths:
-+            self._write_checkpoint(_brai_path=Path(path))
-+        if not paths:
-+            self._write_checkpoint()
-         session._completion_event.set()
- 
-     def _prune_uncollected_detached(self, session: ProcessSession) -> Optional[ProcessSession]:
-@@ -1066,7 +1071,13 @@
-                 self._finished[session.id] = session
-             else:
-                 self._finished.pop(session.id, None)
--        self._write_checkpoint()
-+        # Не удаляем исход восстановленной задачи до приёма уведомления владельцу.
-+        from pathlib import Path
-+        paths = self._brai_retain_uncollected_session(session, scope_pending=bool(session.systemd_unit))
-+        for path in paths:
-+            self._write_checkpoint(_brai_path=Path(path))
-+        if not paths:
-+            self._write_checkpoint()
-         session._completion_event.set()
-         return session if session.systemd_unit else None
- 
 diff --git a/hermes_cli/cli_process_notifications.py b/hermes_cli/cli_process_notifications.py
 --- a/hermes_cli/cli_process_notifications.py
 +++ b/hermes_cli/cli_process_notifications.py
@@ -10273,18 +9774,14 @@ diff --git a/tui_gateway/session_notifications.py b/tui_gateway/session_notifica
 diff --git a/locales/ru.yaml b/locales/ru.yaml
 --- a/locales/ru.yaml
 +++ b/locales/ru.yaml
-@@ -103,7 +103,14 @@
+@@ -103,6 +103,10 @@
      usage: "Использование: /bg <запрос>\nПример: /bg Сделай сводку лучших историй с HN сегодня\n\nЗапускает запрос в отдельном сеансе. Можно продолжить общение — результат появится здесь по завершении."
      started: "🔄 Фоновая задача запущена: «{preview}»\nID задачи: {task_id}\nМожно продолжить общение — результаты появятся здесь по завершении."
      task_finished: "✅ Фоновая задача завершена"
-+    task_progress: "Обновление фоновой задачи."
-     task_failed: "❌ Фоновая задача завершилась с ошибкой"
 +    task_unknown: "⚠️ Результат фоновой задачи неизвестен."
 +    task_failed_ref: "❌ Фоновая задача завершилась с ошибкой. Номер в журнале: {reference}."
-+    task_unknown_ref: "⚠️ Результат фоновой задачи неизвестен. Номер в журнале: {reference}."
 +    task_failed_unlogged: "❌ Фоновая задача завершилась с ошибкой. Номер журнала недоступен."
-+    task_unknown_unlogged: "⚠️ Результат фоновой задачи неизвестен. Номер журнала недоступен."
-+    task_result_ready: "✅ Фоновая задача завершена. Вы можете попросить меня проверить результат."
++    task_progress: "Обновление фоновой задачи."
+     task_failed: "❌ Фоновая задача завершилась с ошибкой"
      exit_code: "код выхода {code}"
      last_output: ". Последний вывод:\n```\n{tail}\n```"
-     rerun_hint: "\nПопросите меня перезапустить её или показать полный журнал."
