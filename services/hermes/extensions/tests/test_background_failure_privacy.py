@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import importlib.util
+import json
 from contextlib import asynccontextmanager
 from collections import OrderedDict
 import threading
@@ -90,6 +91,11 @@ class BackgroundFailureJournalTest(unittest.TestCase):
                 with patch('os.fsync', side_effect=rotate_during_write):
                     rotated_reference = method('proc_rotated', 1)
                 self.assertIn(f'reference={rotated_reference} ', (home / 'logs/errors.log.1').read_text())
+                def truncate_during_write(fd):
+                    journal.write_text('')
+                    original_fsync(fd)
+                with patch('os.fsync', side_effect=truncate_during_write):
+                    self.assertIsNone(method('proc_truncated', 1))
                 with patch('os.fsync', side_effect=OSError('disk error')):
                     self.assertIsNone(method('proc_other', 1))
                 journal.unlink()
@@ -151,7 +157,7 @@ class BackgroundProgressSurfaceTest(unittest.TestCase):
         event = {'type': 'watch_match', 'session_id': 'proc', 'command': '/private/command',
                  'pattern': 'FAIL', 'output': 'Traceback SECRET_VALUE'}
         raw = module.format_process_notification(event)
-        self.assertIn('SECRET_VALUE', raw)  # Агент может исследовать данные сам.
+        self.assertIn('SECRET_VALUE', raw)  # Вывод доступен агенту для осмысленного ответа.
         pending, updates = [], []
         modules = {name: ModuleType(name) for name in ('tools', 'tools.process_registry', 'tools.async_delegation',
                                                         'agent', 'agent.i18n', 'agent.notification_presentation',
@@ -193,6 +199,72 @@ class BackgroundProgressSurfaceTest(unittest.TestCase):
         for displayed in (pending[0].display_text, *updates):
             self.assertNotIn('SECRET_VALUE', displayed)
             self.assertNotIn('/private/command', displayed)
+
+
+class BackgroundCheckpointRecoveryTest(unittest.TestCase):
+    def test_real_checkpoint_keeps_unknown_result_until_acknowledged(self):
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            raise unittest.SkipTest('Нужна подготовленная копия движка HERMES_TEST_CANDIDATE')
+        path = Path(candidate) / 'tools/process_registry_checkpoint.py'
+        modules = {name: ModuleType(name) for name in ('tools', 'tools.process_registry', 'agent', 'agent.redact', 'utils')}
+        modules['agent.redact'].redact_sensitive_text = lambda value, **kwargs: value
+        reg = modules['tools.process_registry']
+        reg._CHECKPOINT_FIELDS = ()
+        reg._CHECKPOINT_DEFAULTS = {}
+        reg._WATCHER_ROUTE_KEYS = ('platform', 'chat_id')
+        reg._stop_systemd_unit = lambda unit: True
+        reg.ProcessSession = SimpleNamespace
+        modules['utils'].atomic_json_write = lambda path, value: path.write_text(json.dumps(value))
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / 'processes.json'
+            reg._checkpoint_path = lambda: checkpoint
+            spec = importlib.util.spec_from_file_location('checkpoint_test', path)
+            module = importlib.util.module_from_spec(spec)
+            with patch.dict(sys.modules, modules):
+                spec.loader.exec_module(module)
+                class Registry(module.ProcessCheckpointMixin):
+                    def __init__(self, fate):
+                        self._running, self.pending_watchers = {}, []
+                        self._lock = threading.Lock()
+                        self.fate = fate
+                    def _detached_host_fate(self, pid, started):
+                        return self.fate
+                for pid, scope, fate in ((10, 'host', 'gone'), (10, 'host', 'reused'),
+                                         (10, 'sandbox', 'gone'), (None, 'host', 'gone')):
+                    with self.subTest(pid=pid, scope=scope, fate=fate):
+                        checkpoint.write_text(json.dumps([{'session_id': 'proc', 'pid': pid, 'pid_scope': scope,
+                            'watcher_interval': 1, 'parent_session_id': 'parent', 'session_key': 'key',
+                            'watcher_platform': 'telegram', 'watcher_chat_id': 'chat', 'notify_on_complete': True}]))
+                        first = Registry(fate)
+                        self.assertEqual(first.recover_from_checkpoint(), 0)
+                        self.assertTrue(first.pending_watchers[0]['brai_lost'])
+                        self.assertEqual(first.pending_watchers[0]['chat_id'], 'chat')
+                        first._write_checkpoint()
+                        self.assertTrue(json.loads(checkpoint.read_text())[0]['brai_lost'])
+                        restarted = Registry(fate)
+                        restarted.recover_from_checkpoint()
+                        self.assertEqual(len(restarted.pending_watchers), 1)
+                        restarted._brai_forget_lost_checkpoint('proc')
+                        self.assertEqual(json.loads(checkpoint.read_text()), [])
+                reg._stop_systemd_unit = lambda unit: False
+                checkpoint.write_text(json.dumps([{'session_id': 'proc', 'pid': 10, 'pid_scope': 'host',
+                    'systemd_unit': 'scope', 'watcher_interval': 1, 'parent_session_id': 'parent',
+                    'watcher_platform': 'telegram', 'watcher_chat_id': 'chat'}]))
+                first = Registry('gone')
+                first.recover_from_checkpoint()
+                self.assertTrue(first.pending_watchers[0]['brai_lost'])
+                first._brai_forget_lost_checkpoint('proc')
+                self.assertTrue(json.loads(checkpoint.read_text())[0]['brai_lost_notified'])
+                again = Registry('gone')
+                again.recover_from_checkpoint()
+                self.assertEqual(again.pending_watchers, [])
+                self.assertEqual(len(json.loads(checkpoint.read_text())), 1)
+                reg._stop_systemd_unit = lambda unit: True
+                cleaned = Registry('gone')
+                cleaned.recover_from_checkpoint()
+                self.assertEqual(cleaned.pending_watchers, [])
+                self.assertEqual(json.loads(checkpoint.read_text()), [])
 
 
 class BackgroundFailureWatcherTest(unittest.IsolatedAsyncioTestCase):
@@ -289,6 +361,19 @@ class BackgroundFailureWatcherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delivered), 1)
         self.assertIn('Результат неизвестен', delivered[0][0])
         self.assertEqual(refs, [('proc', None)])
+
+        delivered.clear()
+        refs.clear()
+        acknowledged = []
+        modules['tools.process_registry'].process_registry = SimpleNamespace(
+            get=lambda sid: failed, is_completion_consumed=lambda sid: False,
+            _brai_forget_lost_checkpoint=acknowledged.append)
+        with patch.dict(sys.modules, modules):
+            await Runner('concise', outcomes=[False, True])._run_process_watcher(
+                {**watcher, 'parent_session_id': 'parent', 'brai_lost': True})
+        self.assertEqual(len(delivered), 2)
+        self.assertTrue(all('Результат неизвестен' in text for text, _ in delivered))
+        self.assertEqual(acknowledged, ['proc'])
 
         delivered.clear()
         success = SimpleNamespace(exited=True, exit_code=0, output_buffer='prepared result')

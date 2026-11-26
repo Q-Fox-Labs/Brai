@@ -9560,7 +9560,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          agent_notify = watcher.get("notify_on_complete", False)
          # The mode belongs to the profile that started the process; recovered watchers run in the
          # root context, so resolve it under the owning profile's scope (no-op for the default).
-@@ -2049,69 +2025,64 @@
+@@ -2049,69 +2025,67 @@
          logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                        session_id, interval, notify_mode, agent_notify)
          silent = notify_mode == "off" and not agent_notify
@@ -9574,7 +9574,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -            if session is None:
 -                break
 +            async with self._completion_event_scope(watcher):
-+                session = pending_session or process_registry.get(session_id)
++                session = None if watcher.get("brai_lost") else pending_session or process_registry.get(session_id)
 +            missing = session is None
 +            if missing:
 +                # Результат утрачен, но исходный адресат всё ещё проходит обычную проверку поколения.
@@ -9681,11 +9681,14 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 +                pending_session = None if missing else session
 +                continue
 +            break
++        if watcher.get("brai_lost"):
++            async with self._completion_event_scope(watcher):
++                await asyncio.to_thread(process_registry._brai_forget_lost_checkpoint, session_id)
          logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
 diff --git a/tools/process_registry_notifications.py b/tools/process_registry_notifications.py
 --- a/tools/process_registry_notifications.py
 +++ b/tools/process_registry_notifications.py
-@@ -4,9 +4,96 @@
+@@ -4,9 +4,112 @@
  TUI inject into the agent conversation."""
  
  import time
@@ -9713,14 +9716,30 @@ diff --git a/tools/process_registry_notifications.py b/tools/process_registry_no
 +    directory = fd = None
 +    try:
 +        directory = os.open(get_hermes_home() / "logs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-+        fd = os.open("errors.log", os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
++        fd = os.open("errors.log", os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
 +                     dir_fd=directory)
 +        current = os.fstat(fd)
 +        if not stat.S_ISREG(current.st_mode) or current.st_nlink == 0:
 +            return None
++        start = os.lseek(fd, 0, os.SEEK_END)
 +        if os.write(fd, record) != len(record):
 +            return None
 +        os.fsync(fd)
++        # Проверяем содержимое после fsync: copytruncate сохраняет inode, но удаляет запись.
++        offset, tail, found_record = start, b"", False
++        end = os.fstat(fd).st_size
++        while offset < end:
++            chunk = os.pread(fd, min(65536, end - offset), offset)
++            if not chunk:
++                break
++            tail += chunk
++            if record in tail:
++                found_record = True
++                break
++            tail = tail[-len(record):]
++            offset += len(chunk)
++        if not found_record:
++            return None
 +        # AIDEV-NOTE: Номер нельзя выдавать, если ротация уже убрала записанный inode.
 +        found = False
 +        for name in ("errors.log", "errors.log.1", "errors.log.2"):
@@ -9782,7 +9801,7 @@ diff --git a/tools/process_registry_notifications.py b/tools/process_registry_no
  _DONE = ("completed", "success")
  _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
  
-@@ -335,18 +422,20 @@
+@@ -335,18 +438,20 @@
  def process_completion_display_text(events: list) -> str:
      """Compact UI title for one or more process completions; the model text keeps the full output."""
      if len(events) != 1:
@@ -9814,7 +9833,7 @@ diff --git a/tools/process_registry_notifications.py b/tools/process_registry_no
  
  
  HEARTBEAT_DISPLAY_KIND = "hidden"  # a wake, not a message: no surface paints the row
-@@ -418,6 +507,10 @@
+@@ -418,6 +523,10 @@
          return f"[IMPORTANT: {evt.get('message', '')}]"
      if evt_type == "async_delegation":
          return _format_async_delegation(evt)
@@ -9825,6 +9844,162 @@ diff --git a/tools/process_registry_notifications.py b/tools/process_registry_no
      _sid, _cmd = evt.get("session_id", "unknown"), evt.get("command", "unknown")
      _attribution = _delegation_attribution_line(evt)
      if evt.get("handoff_note"):
+diff --git a/tools/process_registry_checkpoint.py b/tools/process_registry_checkpoint.py
+--- a/tools/process_registry_checkpoint.py
++++ b/tools/process_registry_checkpoint.py
+@@ -21,31 +21,54 @@
+         """Write running process metadata to the checkpoint file atomically."""
+         from tools.process_registry import _checkpoint_path, _CHECKPOINT_FIELDS
+ 
+-        try:
+-            with self._lock:
+-                entries = []
+-                for s in self._running.values():
+-                    if s.exited:
+-                        continue
+-                    # Backfill the start time so recovery can detect PID recycling
+-                    # even for sessions spawned before this field existed.
+-                    if s.host_start_time is None and s.pid_scope == "host" and s.pid:
+-                        s.host_start_time = self._safe_host_start_time(s.pid)
+-                    entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
+-                    # Redact inline credentials before persisting (~/.hermes/processes.json).
+-                    # Recovery uses command only for display (adoption re-validates the
+-                    # PID, never re-runs it), so masking is lossless.
+-                    # See #77484.
+-                    entry["command"] = redact_sensitive_text(s.command, code_file=True)
+-                    entry["owner_task_id"] = s.owner_task_id or s.task_id
+-                    entries.append(entry)
+-                if extra_entries:
++        # Сериализуем снимок и запись: поздняя запись старого снимка не должна вернуть уже принятое событие.
++        with self._lock:
++            if not hasattr(self, "_brai_checkpoint_write_lock"):
++                import threading
++                self._brai_checkpoint_write_lock = threading.Lock()
++            write_lock = self._brai_checkpoint_write_lock
++        with write_lock:
++            try:
++                with self._lock:
++                    entries = []
++                    for s in self._running.values():
++                        if s.exited:
++                            continue
++                        # Backfill the start time so recovery can detect PID recycling
++                        # even for sessions spawned before this field existed.
++                        if s.host_start_time is None and s.pid_scope == "host" and s.pid:
++                            s.host_start_time = self._safe_host_start_time(s.pid)
++                        entry = {"session_id": s.id, **{f: getattr(s, f) for f in _CHECKPOINT_FIELDS}}
++                        # Redact inline credentials before persisting (~/.hermes/processes.json).
++                        # Recovery uses command only for display (adoption re-validates the
++                        # PID, never re-runs it), so masking is lossless.
++                        # See #77484.
++                        entry["command"] = redact_sensitive_text(s.command, code_file=True)
++                        entry["owner_task_id"] = s.owner_task_id or s.task_id
++                        entries.append(entry)
++                    # Неразрешённый исход остаётся в исходном профиле до подтверждения приёма уведомления.
++                    pending = getattr(self, "_brai_lost_checkpoints", {}).get(str(_checkpoint_path()), {})
+                     tracked_ids = {item.get("session_id") for item in entries}
+-                    entries.extend(item for item in extra_entries if item.get("session_id") not in tracked_ids)
+-            from utils import atomic_json_write
+-            atomic_json_write(_checkpoint_path(), entries)
+-        except Exception as e:
+-            logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
++                    for item in [*pending.values(), *(extra_entries or [])]:
++                        if item.get("session_id") not in tracked_ids:
++                            entries.append(item)
++                            tracked_ids.add(item.get("session_id"))
++                from utils import atomic_json_write
++                atomic_json_write(_checkpoint_path(), entries)
++            except Exception as e:
++                logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
++
++    def _brai_forget_lost_checkpoint(self, session_id: str) -> None:
++        from tools.process_registry import _checkpoint_path
++        with self._lock:
++            pending = getattr(self, "_brai_lost_checkpoints", {}).get(str(_checkpoint_path()), {})
++            entry = pending.get(session_id)
++            if entry and entry.get("brai_scope_pending"):
++                # Ошибка закрытия scope должна пережить уведомление и повториться при перезапуске.
++                pending[session_id] = {**entry, "brai_lost_notified": True}
++            else:
++                pending.pop(session_id, None)
++        self._write_checkpoint()
+ 
+     def recover_from_checkpoint(self) -> int:
+         """On gateway startup, probe PIDs from the checkpoint file; returns how many
+@@ -64,9 +87,45 @@
+             return 0
+         recovered = 0
+         unresolved_scope_entries: list[dict[str, Any]] = []
++
++        def retain_unknown(entry, *, enqueue=True):
++            session_id = entry.get("session_id")
++            interval = entry.get("watcher_interval") or 0
++            if not session_id or not entry.get("parent_session_id") or not isinstance(interval, (int, float)) or interval <= 0:
++                return
++            lost = {**entry, "brai_lost": True}
++            with self._lock:
++                if not hasattr(self, "_brai_lost_checkpoints"):
++                    self._brai_lost_checkpoints = {}
++                pending = self._brai_lost_checkpoints.setdefault(str(checkpoint_path), {})
++                if session_id in pending:
++                    return
++                pending[session_id] = lost
++                if enqueue:
++                    self.pending_watchers.append({
++                        "session_id": session_id, "check_interval": interval,
++                        "session_key": entry.get("session_key", ""),
++                        **{key: entry.get(f"watcher_{key}", "") for key in _WATCHER_ROUTE_KEYS},
++                        "notify_on_complete": entry.get("notify_on_complete", False),
++                        "parent_session_id": entry["parent_session_id"], "brai_lost": True,
++                    })
++
+         for entry in entries:
++            if entry.get("brai_lost"):
++                if entry.get("brai_scope_pending"):
++                    unit = entry.get("systemd_unit", "")
++                    if unit and not _stop_systemd_unit(unit):
++                        retain_unknown(entry, enqueue=not entry.get("brai_lost_notified"))
++                        unresolved_scope_entries.append(entry)
++                        continue
++                    if entry.get("brai_lost_notified"):
++                        continue
++                    entry = {**entry, "brai_scope_pending": False}
++                retain_unknown(entry)
++                continue
+             pid, pid_scope = entry.get("pid"), entry.get("pid_scope", "host")
+             if not pid:
++                retain_unknown(entry)
+                 continue
+             # The registry is process-global, so every profile's checkpoint carries every live
+             # process; a multiplexer recovering several homes must adopt each session once.
+@@ -78,6 +137,7 @@
+                 logger.info(
+                     "Skipping recovery for non-host process: %s (pid=%s, scope=%s)",
+                     entry.get("command", "unknown")[:60], pid, pid_scope)
++                retain_unknown(entry)
+                 continue
+             # Alive and still ours: re-attach. A start-time probe that cannot
+             # be read is not proof the PID was reused — dropping it would leave
+@@ -91,6 +151,7 @@
+                     "start time no longer matches — PID was recycled onto "
+                     "an unrelated process; refusing to adopt or signal it.",
+                     entry.get("session_id", "?"), pid)
++                retain_unknown(entry)
+                 continue
+             if fate != "running":
+                 systemd_unit = entry.get("systemd_unit", "")
+@@ -99,7 +160,11 @@
+                         "Could not reap persisted scope %s for dead wrapper pid %s; "
+                         "retaining checkpoint entry for the next startup",
+                         systemd_unit, pid)
++                    entry = {**entry, "brai_scope_pending": True}
++                    retain_unknown(entry)
+                     unresolved_scope_entries.append(entry)
++                else:
++                    retain_unknown(entry)
+                 continue
+             fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
+             fields.update(
 diff --git a/hermes_cli/cli_process_notifications.py b/hermes_cli/cli_process_notifications.py
 --- a/hermes_cli/cli_process_notifications.py
 +++ b/hermes_cli/cli_process_notifications.py
