@@ -10,19 +10,25 @@ const attachmentMetadataKeys=['artifactId','path','reference','name','filename',
 export function sourceAttachments(value:unknown):unknown[]{
   if(!value||typeof value!=='object'||Array.isArray(value))return [];
   const source=value as Record<string,unknown>;
-  const attachments:unknown[]=[],seen=new Set<string>(),seenIds=new Set<string>(),seenPaths=new Set<string>();
+  const attachments:Record<string,unknown>[]=[];
   const hasMetadata=(item:Record<string,unknown>)=>attachmentMetadataKeys.some(key=>{
     const field=item[key];
     return typeof field==='string'&&field.replace(/^ +| +$/g,'').length>0;
   });
   const add=(item:Record<string,unknown>)=>{
-    const copy={...item},artifactId=copy.artifactId,path=copy.path;
-    if(typeof artifactId==='string'&&artifactIdRegex.test(artifactId)){
-      const key=artifactId.toLowerCase();if(seenIds.has(key))delete copy.artifactId;else seenIds.add(key);
+    let merged={...item},position=attachments.length;
+    const id=(value:unknown)=>typeof value==='string'&&artifactIdRegex.test(value)?value.toLowerCase():null;
+    for(let index=0;index<attachments.length;){
+      const existing=attachments[index],sameId=id(existing.artifactId)&&id(existing.artifactId)===id(merged.artifactId);
+      const samePath=typeof existing.path==='string'&&existing.path!==''&&existing.path===merged.path;
+      const same=canonical(existing)===canonical(merged);
+      const compatible=Object.keys(existing).every(key=>!(key in merged)||
+        key==='artifactId'&&id(existing[key])!==null&&id(existing[key])===id(merged[key])||canonical(existing[key])===canonical(merged[key]));
+      if((sameId||samePath||same)&&compatible){
+        merged={...existing,...merged};position=Math.min(position,index);attachments.splice(index,1);index=0;
+      }else index++;
     }
-    if(typeof path==='string'&&path){if(seenPaths.has(path))delete copy.path;else seenPaths.add(path);}
-    const key=canonical(copy);
-    if(hasMetadata(copy)&&!seen.has(key)){seen.add(key);attachments.push(copy);}
+    if(hasMetadata(merged))attachments.splice(position,0,merged);
   };
   const pathOk=(path:unknown):path is string=>typeof path==='string'&&path.startsWith('/')&&Array.from(path).length<=4096;
   for(const item of Array.isArray(source.attachments)?source.attachments:[]){

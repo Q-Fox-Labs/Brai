@@ -248,8 +248,11 @@ test('PostgreSQL: обмен, контекст, история и перенос
     {attachments:[{artifactId:uuid,filename:'kept'},null,'не файл'],artifact_ids:[uuid,other]},
     {attachments:[null,'не файл',{irrelevant:1}]}, {attachments:[{name:'photo.png'}]},
     {attachments:[{artifactId:uuid,path:'/same'}],attachment_path:'/same'},
-    {attachments:[{artifactId:uuid},{artifactId:uuid,path:'/unique'}]},
-    {attachments:[]},{attachments:[{content_index:0,thread_id:'thread'}]}];
+    {attachments:[{artifactId:uuid},{artifactId:uuid,path:'/unique',filename:'photo'}]},
+    {attachments:[]},{attachments:[{content_index:0,thread_id:'thread'}]},
+    {attachments:[{artifactId:uuid,path:'/reverse',filename:'photo'},{artifactId:uuid}]},
+    {attachments:[{artifactId:uuid},{path:'/bridge'},{artifactId:uuid,path:'/bridge'}]},
+    {attachments:[{artifactId:uuid,path:'/first'},{artifactId:uuid,path:'/second'}]}];
    await api.append(profile,{request_id:req(),dialogue:{id:'historic-files',channel:'synthetic'},
     messages:sources.map((source,i)=>({id:'file-'+i,turn_id:'turn',role:'user',kind:'input',text:'',source}))});
    // Старые импортированные metadata могли не иметь текущего предела 8 КиБ.
@@ -265,14 +268,17 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal(originals.messages[6].attachments,undefined);
    assert.deepEqual(originals.messages[7].attachments,[{name:'photo.png'}]);
    assert.deepEqual(originals.messages[8].attachments,[{artifactId:uuid,path:'/same'}]);
-   assert.deepEqual(originals.messages[9].attachments,[{artifactId:uuid},{path:'/unique'}]);
+   assert.deepEqual(originals.messages[9].attachments,[{artifactId:uuid,path:'/unique',filename:'photo'}]);
    assert.equal(originals.messages[10].attachments,undefined);
    assert.deepEqual(originals.messages[11].attachments,[{content_index:0,thread_id:'thread'}]);
+   assert.deepEqual(originals.messages[12].attachments,[{artifactId:uuid,path:'/reverse',filename:'photo'}]);
+   assert.deepEqual(originals.messages[13].attachments,[{artifactId:uuid,path:'/bridge'}]);
+   assert.deepEqual(originals.messages[14].attachments,[{artifactId:uuid,path:'/first'},{artifactId:uuid,path:'/second'}]);
    const history=await exchange(api,profile,{action:'dialogue_get',arguments:{request_id:req(),dialogue_id:dialogue}});
-   assert.deepEqual(history.items.map(row=>row.attachments??false),[true,true,true,true,false,true,false,true,true,true,false,true]);
+   assert.deepEqual(history.items.map(row=>row.attachments??false),[true,true,true,true,false,true,false,true,true,true,false,true,true,true,true]);
    const input=await exchange(api,profile,{action:'input',arguments:{request_id:req(),
     dialogue:{id:'new-after-files',channel:'synthetic'},messages:[{id:'input',text:'Продолжить'}]}});
-   assert.equal((input.context.match(/\[вложения\]/g)??[]).length,9);
+   assert.equal((input.context.match(/\[вложения\]/g)??[]).length,12);
    assert.doesNotMatch(input.context,/12345678-1234|\/synthetic\/attachments/);
    await assert.rejects(exchange(api,'foreign-profile',{action:'read_many',arguments:{request_id:req(),message_ids:[rows[0].ref]}}),{code:'NOT_FOUND'});
   });
