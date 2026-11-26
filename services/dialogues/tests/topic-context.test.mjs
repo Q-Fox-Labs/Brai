@@ -3,7 +3,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {collectCompact,countContextTokens,topicIndexChanges} from '../dist/compact-context.js';
-import {chooseGrouping,summarizeTopic} from '../dist/topic-jobs.js';
+import {chooseGrouping,pruneTopicRetries,summarizeTopic} from '../dist/topic-jobs.js';
 import {matchesTopicReference} from '../dist/topic-references.js';
 import {invoke} from '../dist/api.js';
 import {DialoguesFault} from '../dist/domain.js';
@@ -63,6 +63,20 @@ test('успешный фрагмент темы не пересчитывает
  const result=await summarizeTopic(luna,sources,checkpoint,p=>{checkpoint=p;});
  assert.equal(firstCalls,1);assert.equal(secondCalls,2);
  assert.deepEqual(new Set(result.source_refs.map(ref=>ref.message_id)),new Set(['m1','m2']));
+});
+
+test('задержки пропавших тем и сообщений не накапливаются бесконечно',()=>{
+ const now=10_000_000,retries=new Map([
+  ['removed-topic',{until:now-31*60_000,failures:3}],
+  ['removed-message',{until:now-31*60_000,failures:1}],
+  ['recent',{until:now-1000,failures:2}],['waiting',{until:now+60_000,failures:1}]
+ ]);
+ pruneTopicRetries(retries,now);
+ assert.deepEqual([...retries.keys()],['recent','waiting']);
+ for(let i=0;i<260;i++)retries.set('recent-'+i,{until:now+60_000,failures:1});
+ pruneTopicRetries(retries,now);
+ assert.equal(retries.size,256);
+ assert.ok(retries.has('recent-259'));
 });
 
 test('группировка возвращает только выбранный короткий ID из списка или null',async()=>{
