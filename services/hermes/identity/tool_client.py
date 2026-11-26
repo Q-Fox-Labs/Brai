@@ -18,12 +18,16 @@ DIALOGUES_RECEIPTS = {}
 
 
 def dialogues_call_scope(name, arguments):
-    """Передать квитанцию предыдущей выдачи внутри следующего обычного вызова."""
+    """Использовать автоматический режим Диалогов для разговоров Hermes."""
     if name != 'dialogues_exchange':
         return None, arguments
     scoped = {key: value for key, value in arguments.items() if key != '_brai_context_receipt'}
+    action = scoped.get('action')
+    if action in ('input', 'poll', 'update', 'finish', 'read', 'history', 'snapshot'):
+        # Старый каталог и история хода могут подсказать модели поле context.
+        scoped.pop('context', None)
     payload = scoped.get('arguments')
-    if (scoped.get('action') not in ('input', 'poll') or 'context' in scoped or not isinstance(payload, dict)):
+    if action not in ('input', 'poll') or not isinstance(payload, dict):
         return None, scoped
     dialogue = payload.get('dialogue')
     thread = payload.get('dialogue_id') or (dialogue.get('id') if isinstance(dialogue, dict) else None)
