@@ -44,6 +44,8 @@ async function resolveTopic(db:PoolClient,owner:string,id:string):Promise<string
 /** Выбирает недавние карточки; для старых тем остаётся только доступ по ID и поиск. */
 export async function recentTopics(db:PoolClient,owner:string,pinned?:string,currentDialogue?:string,legacy=false){
  return (await db.query(`WITH recent AS (SELECT t.id,CASE WHEN $4::boolean THEN t.id ELSE 'T'||t.short_id END AS topic_id,left(t.title,128) AS title,
+  EXISTS(SELECT 1 FROM dialogues_live.topic_members own WHERE own.owner_id=t.owner_id
+   AND own.topic_id=t.id AND own.dialogue_id=$3) AS includes_current,
   max(COALESCE(m.occurred_at,m.recorded_at)) AS last_activity,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
   FROM dialogues_live.topics t JOIN dialogues_live.topic_members tm ON tm.owner_id=t.owner_id AND tm.topic_id=t.id
   JOIN LATERAL (SELECT occurred_at,recorded_at FROM dialogues_live.messages m
@@ -53,26 +55,27 @@ export async function recentTopics(db:PoolClient,owner:string,pinned?:string,cur
   LEFT JOIN LATERAL (SELECT version,extended,compact,extended_tokens,compact_tokens,source_refs FROM dialogues_live.topic_summaries
    WHERE owner_id=t.owner_id AND topic_id=t.id AND membership_version=t.membership_version ORDER BY version DESC LIMIT 1) s ON true
   WHERE t.owner_id=$1 AND t.merged_into IS NULL
-  GROUP BY t.id,t.short_id,t.title,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
+  GROUP BY t.owner_id,t.id,t.short_id,t.title,s.version,s.extended,s.compact,s.extended_tokens,s.compact_tokens,s.source_refs
   ORDER BY (t.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,t.id LIMIT 220
   )
   SELECT recent.*,fallback.text AS fallback FROM recent
   LEFT JOIN LATERAL (
-   SELECT left(COALESCE(ds.text,ms.text),1600) AS text
+   SELECT string_agg(left(concat_ws(' ',ds.text,ms.text),1600),' '
+    ORDER BY GREATEST(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id) AS text
    FROM dialogues_live.topic_members tm
-   LEFT JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.dialogue_summaries
+   LEFT JOIN LATERAL (SELECT text,change_seq,through_order FROM dialogues_live.dialogue_summaries
     WHERE owner_id=tm.owner_id AND dialogue_id=tm.dialogue_id ORDER BY version DESC LIMIT 1) ds ON true
    LEFT JOIN LATERAL (
-    SELECT s.text,s.change_seq FROM dialogues_live.messages m
+    SELECT s.text,GREATEST(m.change_seq,s.change_seq) AS change_seq FROM dialogues_live.messages m
     JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.message_summaries
      WHERE owner_id=m.owner_id AND dialogue_id=m.dialogue_id AND message_id=m.id ORDER BY version DESC LIMIT 1) s ON true
     WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND ${visibleMessage}
+    AND m.message_order>COALESCE(ds.through_order,-1)
     ORDER BY m.message_order DESC LIMIT 1
-   ) ms ON ds.text IS NULL
+   ) ms ON true
    WHERE tm.owner_id=$1 AND tm.topic_id=recent.id AND COALESCE(ds.text,ms.text) IS NOT NULL
     AND ($3::text IS NULL OR tm.dialogue_id<>$3)
-   ORDER BY (ds.text IS NOT NULL) DESC,COALESCE(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id LIMIT 1
-  ) fallback ON recent.version IS NULL AND NOT $4::boolean
+  ) fallback ON (recent.version IS NULL OR recent.includes_current) AND NOT $4::boolean
   ORDER BY (recent.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,recent.id`,[owner,pinned??null,currentDialogue??null,legacy])).rows;
 }
 
@@ -140,9 +143,11 @@ export function createTopics(pool:DB){
     WHERE t.owner_id=$1 AND t.id=$2`,[owner,topic])).rows[0];
    const afterNumber=after===undefined?null:shortNumber(after,'D');
    if(after!==undefined&&!afterNumber)fail('INVALID_CURSOR');
-   const rows=(await db.query(`SELECT 'D'||d.short_id AS dialogue_id,left(d.title,128) AS title,COALESCE(s.text,recent.text) AS summary
+   const rows=(await db.query(`SELECT 'D'||d.short_id AS dialogue_id,left(d.title,128) AS title,COALESCE(s.text,recent.text) AS summary,
+    s.through_order IS NOT NULL AND EXISTS(SELECT 1 FROM dialogues_live.messages m
+     WHERE m.owner_id=d.owner_id AND m.dialogue_id=d.id AND m.message_order>s.through_order AND ${visibleMessage}) AS summary_incomplete
     FROM dialogues_live.topic_members tm JOIN dialogues_live.dialogues d ON d.owner_id=tm.owner_id AND d.id=tm.dialogue_id
-    LEFT JOIN LATERAL (SELECT text FROM dialogues_live.dialogue_summaries
+    LEFT JOIN LATERAL (SELECT text,through_order FROM dialogues_live.dialogue_summaries
      WHERE owner_id=d.owner_id AND dialogue_id=d.id ORDER BY version DESC LIMIT 1) s ON true
     LEFT JOIN LATERAL (
      SELECT string_agg(excerpt,' ' ORDER BY message_order) AS text FROM (
@@ -157,9 +162,10 @@ export function createTopics(pool:DB){
     WHERE tm.owner_id=$1 AND tm.topic_id=$2 AND ($3::bigint IS NULL OR d.short_id>$3)
     ORDER BY d.short_id LIMIT 51`,[owner,topic,afterNumber])).rows;
    const dialogues=[];
-   for(const {dialogue_id,title,summary} of rows.slice(0,50)){
+   for(const {dialogue_id,title,summary,summary_incomplete} of rows.slice(0,50)){
     const excerpt=summary?contextExcerpt(summary,topicLimits.extended):null;
-    const row={dialogue_id,title,summary:excerpt?.text??null,...(excerpt?.truncated?{summary_excerpt:true}:{})};
+    const row={dialogue_id,title,summary:excerpt?.text??null,...(excerpt?.truncated?{summary_excerpt:true}:{}),
+     ...(summary_incomplete?{summary_incomplete:true}:{})};
     if(bytes({...card,dialogues:[...dialogues,row]})>limits.responseBytes-1024)break;
     dialogues.push(row);
    }

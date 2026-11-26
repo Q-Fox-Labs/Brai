@@ -116,11 +116,13 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
 }){
  const {boundary,checkpoint,bootstrap,dialogue,inputIds,automatic,previous}=options;
  const pinned=await referencedTopic(db,owner,dialogue);
- const topics=await recentTopics(db,owner,pinned,automatic?dialogue:undefined);
+ const topics=(await recentTopics(db,owner,pinned,automatic?dialogue:undefined)).map(topic=>
+  topic.includes_current?{...topic,extended:null,compact:null}:topic);
  const {lines,view}=topicIndexChanges(topics,previous);
  const selected=(await db.query(`SELECT 'M'||m.short_id AS message_id,m.role,
   GREATEST(m.change_seq,c.change_seq,s.change_seq,CASE WHEN m.kind='final' THEN t.completion_seq END)::text AS revision,
   char_length(m.text)<=100 AS exact,
+  CASE WHEN jsonb_typeof(m.source->'attachments')='array' THEN jsonb_array_length(m.source->'attachments')>0 ELSE false END AS attachments,
   CASE WHEN char_length(m.text)<=100 THEN m.text ELSE COALESCE(c.text,s.text) END AS text
  FROM dialogues_live.messages m
  JOIN dialogues_live.turns t ON t.owner_id=m.owner_id AND t.dialogue_id=m.dialogue_id AND t.id=m.turn_id
@@ -135,11 +137,12 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
  ORDER BY COALESCE(m.occurred_at,m.recorded_at) DESC,m.change_seq DESC,m.dialogue_id,m.id
  LIMIT (CASE WHEN $5::boolean THEN 20 ELSE NULL END)`,
  [owner,boundary,dialogue??null,inputIds,bootstrap,checkpoint,Boolean(automatic&&!bootstrap)])).rows.reverse();
- const messageLine=({text,message_id,role,exact}:any)=>{
+ const messageLine=({text,message_id,role,exact,attachments}:any)=>{
   const speaker=role==='user'?'Пользователь':'Агент';
-  if(text===null)return message_id+' '+speaker+' [оригинал по запросу]';
+  const files=attachments?' [вложения]':'';
+  if(text===null)return message_id+' '+speaker+files+' [оригинал по запросу]';
   const label=exact?' ':' [свёртка] ';
-  return message_id+' '+speaker+label+quote(exact?text:contextExcerpt(text,topicLimits.message).text);
+  return message_id+' '+speaker+files+label+quote(exact?text:contextExcerpt(text,topicLimits.message).text);
  };
  const active=(await db.query(`SELECT t.dialogue_id,'D'||d.short_id AS dialogue_ref,t.id AS turn_id,t.version,t.status,t.purpose,t.constraints_text,t.change_seq::text AS revision,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'formulation',r.formulation) ORDER BY r.id)

@@ -70,20 +70,20 @@ test('30 владельцев: личный транспорт, одинаков
   for(const run of runs)if(run.status==='rejected')throw run.reason;
   const first=results[0],second=results[1];
   const receipts=new Map();
-  const automatic = async (profile, action, arguments_) => {
+  const automatic = async (profile, action, arguments_,context) => {
    const thread=action==='input'?arguments_.dialogue.id:action==='poll'?arguments_.dialogue_id:null;
    const scope=thread?profile.i+':'+thread:null;
    const receipt=scope?(receipts.get(scope)??'start'):undefined;
-   const reply = await profile.client.call('dialogues_exchange', {action, arguments:arguments_},undefined,receipt);
+   const reply = await profile.client.call('dialogues_exchange', {action, arguments:arguments_,...(context?{context}:{})},undefined,receipt);
    assert.equal(reply.isError, undefined, JSON.stringify(reply));
    const delivered=reply._meta?.brai_dialogues_delivery;
    if(scope&&delivered)receipts.set(scope,delivered);
    return reply.structuredContent;
   };
-  const input = (profile, thread, id, text, request_id=profile.request(), summary) =>
+  const input = (profile, thread, id, text, request_id=profile.request(), summary,context) =>
    automatic(profile, 'input', {request_id, dialogue:{id:thread,channel:'synthetic'},
-    messages:[{id,text,...(summary ? {summary} : {})}]});
-  const a = await input(first, 'auto-a', 'one', 'Задача в первом треде');
+    messages:[{id,text,...(summary ? {summary} : {})}]},context);
+  const a = await input(first, 'auto-a', 'one', 'Задача в первом треде',undefined,undefined,{consumer_id:'legacy-client'});
   assert.match(a.context, /private-user-0:/u);
   assert.doesNotMatch(a.context, /private-user-1:|Задача в первом треде/u);
   await input(first, 'auto-b', 'one', 'Изменение в параллельном треде');
