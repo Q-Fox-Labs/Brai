@@ -11,7 +11,8 @@ import {exchange} from '../dist/exchange.js';
 import {createTopicJobs,seedTopicIndex} from '../dist/topic-jobs.js';
 import {countContextTokens} from '../dist/compact-context.js';
 import {backfill,ensureBackfilled} from '../dist/backfill.js';
-import {createJobs} from '../dist/jobs.js';
+import {createJobs,summaryQueueStatus} from '../dist/jobs.js';
+import {execFileSync} from 'node:child_process';
 import {DialoguesFault} from '../dist/domain.js';
 
 const ownerUrl=process.env.DIALOGUES_TEST_OWNER_DATABASE_URL,appUrl=process.env.DIALOGUES_TEST_DATABASE_URL;
@@ -239,6 +240,27 @@ test('PostgreSQL: обмен, контекст, история и перенос
    await assert.rejects(run('read_many',{message_ids:ids},'foreign'),{code:'NOT_FOUND'});
   });
 
+  await t.test('архив сохраняет прежние ссылки на вложения и изоляцию владельцев',async()=>{
+   const profile='historical-attachments-fixture',uuid='12345678-1234-4234-8234-123456789abc';
+   const sources=[{artifactId:uuid},{artifact_ids:[uuid,'invalid']},{artifacts:[uuid]},
+    {attachment_path:'/synthetic/attachments/report.txt'},{artifact_ids:['invalid']}];
+   await api.append(profile,{request_id:req(),dialogue:{id:'historic-files',channel:'synthetic'},
+    messages:sources.map((source,i)=>({id:'file-'+i,turn_id:'turn',role:'user',kind:'input',text:'',source}))});
+   const rows=(await app.query("SELECT id,'M'||short_id AS ref FROM dialogues_live.messages WHERE owner_id=$1 ORDER BY message_order",[profile])).rows;
+   const dialogue=(await app.query("SELECT 'D'||short_id AS ref FROM dialogues_live.dialogues WHERE owner_id=$1 AND id='historic-files'",[profile])).rows[0].ref;
+   const originals=await exchange(api,profile,{action:'read_many',arguments:{request_id:req(),message_ids:rows.map(row=>row.ref)}});
+   assert.deepEqual(originals.messages.slice(0,3).map(row=>row.attachments),Array(3).fill([{artifactId:uuid}]));
+   assert.deepEqual(originals.messages[3].attachments,[{path:'/synthetic/attachments/report.txt'}]);
+   assert.equal(originals.messages[4].attachments,undefined);
+   const history=await exchange(api,profile,{action:'dialogue_get',arguments:{request_id:req(),dialogue_id:dialogue}});
+   assert.deepEqual(history.items.map(row=>row.attachments??false),[true,true,true,true,false]);
+   const input=await exchange(api,profile,{action:'input',arguments:{request_id:req(),
+    dialogue:{id:'new-after-files',channel:'synthetic'},messages:[{id:'input',text:'Продолжить'}]}});
+   assert.equal((input.context.match(/\[вложения\]/g)??[]).length,4);
+   assert.doesNotMatch(input.context,/12345678-1234|\/synthetic\/attachments/);
+   await assert.rejects(exchange(api,'foreign-profile',{action:'read_many',arguments:{request_id:req(),message_ids:[rows[0].ref]}}),{code:'NOT_FOUND'});
+  });
+
   await t.test('неудачная авторизация Luna восстанавливает только актуальное задание',async()=>{
    const profile='auth-recovery-fixture';
    let online=false;
@@ -258,6 +280,32 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.deepEqual((await app.query("SELECT state,attempts,error_code FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0],
     {state:'succeeded',attempts:1,error_code:null});
    assert.equal((await app.query("SELECT count(*)::integer AS n FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[profile])).rows[0].n,1);
+  });
+
+  await t.test('оператор видит возраст и состояния только своей очереди без текста',async()=>{
+   const profile='queue-status-fixture';
+   await api.append(profile,{request_id:req(),dialogue:{id:'queue-status',channel:'synthetic'},
+    messages:Array.from({length:10},(_,i)=>({id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',text:'Не выводить секрет '+i}))});
+   const jobs=createJobs(app,profile,{async probe(){},async run(){return 'Готово';}});
+   await jobs.schedule();
+   await owner.query("UPDATE dialogues_live.summary_jobs SET created_at=now()-interval '2 minutes' WHERE owner_id=$1",[profile]);
+   const queued=await summaryQueueStatus(app,profile);
+   assert.equal(queued.queued,1);
+   assert.ok(queued.oldest_pending_seconds>=119);
+   assert.equal(queued.published,0);
+   assert.deepEqual(await summaryQueueStatus(app,'unrelated-owner'),{queued:0,running:0,failed:0,published:0,stale:0,oldest_pending_seconds:null,failed_codes:[]});
+   const env={...process.env,DIALOGUES_DATABASE_URL:appUrl,DIALOGUES_MCP_OWNER_ID:profile,DIALOGUES_MCP_USER_ID:''};
+   const output=execFileSync(process.execPath,['services/dialogues/dist/health.js','--summary-queue'],{env,encoding:'utf8'});
+   assert.equal(JSON.parse(output).queued,1);
+   assert.doesNotMatch(output,/Не выводить секрет|queue-status-fixture/);
+   await owner.query("UPDATE dialogues_live.summary_jobs SET state='failed',error_code='LUNA_AUTH_UNAVAILABLE' WHERE owner_id=$1",[profile]);
+   const failed=await summaryQueueStatus(app,profile);
+   assert.equal(failed.failed,1);
+   assert.deepEqual(failed.failed_codes,[{code:'LUNA_AUTH_UNAVAILABLE',count:1}]);
+   await jobs.tick();
+   const done=await summaryQueueStatus(app,profile);
+   assert.equal(done.published,1);
+   assert.equal(done.oldest_pending_seconds,null);
   });
 
   await t.test('другие временные отказы и истёкшие аренды восстанавливаются после проверки модели',async()=>{

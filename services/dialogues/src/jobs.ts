@@ -5,6 +5,23 @@ import {randomUUID} from 'node:crypto';
 import {ownerTransaction} from './context.js';
 import {digest,fail,summaryText,DialoguesFault} from './domain.js';
 import type {Execution,createLuna} from './luna.js';
+/** Возвращает только агрегаты очереди владельца без ID и текстов переписки. */
+export async function summaryQueueStatus(pool:Pool,owner:string){
+ const row=(await pool.query(`WITH jobs AS MATERIALIZED (
+  SELECT state,created_at,CASE WHEN error_code ~ '^[A-Z0-9_]{1,80}$' THEN error_code ELSE 'UNKNOWN' END AS code
+  FROM dialogues_live.summary_jobs WHERE owner_id=$1
+ ), failures AS (SELECT code,count(*)::integer AS count FROM jobs WHERE state='failed' GROUP BY code)
+ SELECT count(*) FILTER (WHERE state='queued')::integer AS queued,
+  count(*) FILTER (WHERE state='running')::integer AS running,
+  count(*) FILTER (WHERE state='failed')::integer AS failed,
+  count(*) FILTER (WHERE state='succeeded')::integer AS published,
+  count(*) FILTER (WHERE state='stale')::integer AS stale,
+  CASE WHEN count(*) FILTER (WHERE state IN('queued','running'))=0 THEN NULL
+   ELSE GREATEST(0,floor(extract(epoch FROM now()-min(created_at) FILTER (WHERE state IN('queued','running')))))::bigint END AS oldest_pending_seconds,
+  (SELECT COALESCE(jsonb_agg(jsonb_build_object('code',code,'count',count) ORDER BY code),'[]'::jsonb) FROM failures) AS failed_codes
+ FROM jobs`,[owner])).rows[0];
+ return {...row,oldest_pending_seconds:row.oldest_pending_seconds===null?null:Number(row.oldest_pending_seconds)};
+}
 /** Под owner lock фиксирует точный префикс, не дублируя активное задание. */
 export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string,boundary:string,idle:boolean){
  const previous=(await db.query('SELECT version,through_order,text FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 AND dialogue_id=$2 ORDER BY version DESC LIMIT 1',[owner,dialogue])).rows[0];
