@@ -247,6 +247,46 @@ class BackgroundCheckpointRecoveryTest(unittest.TestCase):
                         self.assertEqual(len(restarted.pending_watchers), 1)
                         restarted._brai_forget_lost_checkpoint('proc')
                         self.assertEqual(json.loads(checkpoint.read_text()), [])
+                orphan = {'session_id': 'orphan', 'pid': 10, 'pid_scope': 'host', 'watcher_interval': 1}
+                checkpoint.write_text(json.dumps([orphan]))
+                unrouteable = Registry('gone')
+                unrouteable.recover_from_checkpoint()
+                self.assertEqual(unrouteable.pending_watchers, [])
+                self.assertEqual(json.loads(checkpoint.read_text())[0]['session_id'], 'orphan')
+                other_checkpoint = Path(directory) / 'other-processes.json'
+                checkpoint.write_text(json.dumps([{'session_id': 'profile_b', 'pid': 10, 'pid_scope': 'host',
+                    'watcher_interval': 1, 'parent_session_id': 'parent', 'watcher_platform': 'telegram'}]))
+                other_checkpoint.write_text('[]')
+                profiles = Registry('gone')
+                profiles.recover_from_checkpoint()
+                source_key = profiles.pending_watchers[0]['brai_checkpoint_key']
+                reg._checkpoint_path = lambda: other_checkpoint
+                profiles._brai_forget_lost_checkpoint('profile_b', source_key)
+                self.assertEqual(json.loads(checkpoint.read_text()), [])
+                self.assertEqual(json.loads(other_checkpoint.read_text()), [])
+                reg._checkpoint_path = lambda: checkpoint
+                source = Path(candidate) / 'tools/process_registry.py'
+                source_tree = ast.parse(source.read_text())
+                owner = next(node for node in source_tree.body if isinstance(node, ast.ClassDef) and node.name == 'ProcessRegistry')
+                prune = next(node for node in owner.body if isinstance(node, ast.FunctionDef)
+                             and node.name == '_prune_uncollected_detached')
+                scope = {'Optional': Optional, 'ProcessSession': object, '_CHECKPOINT_FIELDS':
+                         ('pid', 'pid_scope', 'watcher_interval', 'parent_session_id', 'session_key',
+                          'watcher_platform', 'watcher_chat_id')}
+                exec(compile(ast.fix_missing_locations(ast.Module(body=[prune], type_ignores=[])), str(source), 'exec'), scope)
+                Registry._prune_uncollected_detached = scope['_prune_uncollected_detached']
+                detached = Registry('gone')
+                session = SimpleNamespace(id='proc_detached', pid=10, pid_scope='host',
+                    watcher_interval=1, parent_session_id='parent', session_key='key', watcher_platform='telegram',
+                    watcher_chat_id='chat', command='safe', systemd_unit='', exited=False,
+                    _lock=threading.Lock(), _completion_event=threading.Event())
+                detached._running[session.id] = session
+                detached._finished = {}
+                detached._prune_uncollected_detached(session)
+                self.assertEqual(json.loads(checkpoint.read_text())[0]['session_id'], 'proc_detached')
+                replay = Registry('gone')
+                replay.recover_from_checkpoint()
+                self.assertEqual(replay.pending_watchers[0]['session_id'], 'proc_detached')
                 reg._stop_systemd_unit = lambda unit: False
                 checkpoint.write_text(json.dumps([{'session_id': 'proc', 'pid': 10, 'pid_scope': 'host',
                     'systemd_unit': 'scope', 'watcher_interval': 1, 'parent_session_id': 'parent',
@@ -355,7 +395,8 @@ class BackgroundFailureWatcherTest(unittest.IsolatedAsyncioTestCase):
         delivered.clear()
         refs.clear()
         modules['tools.process_registry'].process_registry = SimpleNamespace(
-            get=lambda sid: None, is_completion_consumed=lambda sid: False)
+            get=lambda sid: None, is_completion_consumed=lambda sid: False,
+            _brai_forget_lost_checkpoint=lambda sid, key: None)
         with patch.dict(sys.modules, modules):
             await Runner('concise')._run_process_watcher({**watcher, 'parent_session_id': 'parent'})
         self.assertEqual(len(delivered), 1)
@@ -367,7 +408,7 @@ class BackgroundFailureWatcherTest(unittest.IsolatedAsyncioTestCase):
         acknowledged = []
         modules['tools.process_registry'].process_registry = SimpleNamespace(
             get=lambda sid: failed, is_completion_consumed=lambda sid: False,
-            _brai_forget_lost_checkpoint=acknowledged.append)
+            _brai_forget_lost_checkpoint=lambda sid, key: acknowledged.append(sid))
         with patch.dict(sys.modules, modules):
             await Runner('concise', outcomes=[False, True])._run_process_watcher(
                 {**watcher, 'parent_session_id': 'parent', 'brai_lost': True})
