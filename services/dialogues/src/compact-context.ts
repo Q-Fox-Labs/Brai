@@ -3,7 +3,7 @@
 import type {PoolClient} from 'pg';
 import {Tiktoken} from 'js-tiktoken/lite';
 import o200k from 'js-tiktoken/ranks/o200k_base';
-import {bytes,digest,limits} from './domain.js';
+import {bytes,digest,hasAttachmentsSql,limits} from './domain.js';
 import {recentTopics,visibleMessage} from './topics.js';
 import {linkedDialogueIds,matchesTopicReference} from './topic-references.js';
 
@@ -127,7 +127,7 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
  const selected=(await db.query(`SELECT 'M'||m.short_id AS message_id,m.role,
   GREATEST(m.change_seq,c.change_seq,s.change_seq,CASE WHEN m.kind='final' THEN t.completion_seq END)::text AS revision,
   char_length(m.text)<=100 AS exact,
-  CASE WHEN jsonb_typeof(m.source->'attachments')='array' THEN jsonb_array_length(m.source->'attachments')>0 ELSE false END AS attachments,
+  ${hasAttachmentsSql('m.source')} AS attachments,
   CASE WHEN char_length(m.text)<=100 THEN m.text ELSE COALESCE(c.text,s.text) END AS text
  FROM dialogues_live.messages m
  JOIN dialogues_live.turns t ON t.owner_id=m.owner_id AND t.dialogue_id=m.dialogue_id AND t.id=m.turn_id

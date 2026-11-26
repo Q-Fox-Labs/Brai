@@ -3,6 +3,30 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export const limits = { messageBytes:1_048_576, requestBytes:2_097_152, responseBytes:65_024, metadataBytes:8_192 };
+const artifactIdPattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+const artifactIdRegex=new RegExp(artifactIdPattern,'i');
+/** Распознаёт исходные ссылки старых записей без изменения или проверки файлов. */
+export function sourceAttachments(value:unknown):unknown[]{
+  if(!value||typeof value!=='object'||Array.isArray(value))return [];
+  const source=value as Record<string,unknown>;
+  if(Array.isArray(source.attachments)&&source.attachments.length)return source.attachments;
+  const ids=[source.artifactId,...(Array.isArray(source.artifact_ids)?source.artifact_ids:[]),
+    ...(Array.isArray(source.artifacts)?source.artifacts:[])].filter((id):id is string=>
+      typeof id==='string'&&artifactIdRegex.test(id));
+  const attachments:unknown[]=Array.from(new Set(ids.map(id=>id.toLowerCase())),artifactId=>({artifactId}));
+  if(typeof source.attachment_path==='string'&&source.attachment_path.startsWith('/')&&source.attachment_path.length<=4096)
+    attachments.push({path:source.attachment_path});
+  return attachments;
+}
+/** То же обнаружение для компактного списка, без загрузки metadata в контекст. */
+export function hasAttachmentsSql(column:string){
+  const array=(key:string)=>`CASE WHEN jsonb_typeof(${column}->'${key}')='array' THEN
+    EXISTS(SELECT 1 FROM jsonb_array_elements(${column}->'${key}') v WHERE jsonb_typeof(v)='string' AND (v #>> '{}') ~* '${artifactIdPattern}') ELSE false END`;
+  return `(CASE WHEN jsonb_typeof(${column}->'attachments')='array' THEN jsonb_array_length(${column}->'attachments')>0 ELSE false END
+    OR (jsonb_typeof(${column}->'artifactId')='string' AND (${column}->>'artifactId') ~* '${artifactIdPattern}')
+    OR ${array('artifact_ids')} OR ${array('artifacts')}
+    OR (jsonb_typeof(${column}->'attachment_path')='string' AND left(${column}->>'attachment_path',1)='/' AND char_length(${column}->>'attachment_path')<=4096))`;
+}
 /** Содержит безопасный код предметной ошибки и необязательные диагностические поля. */
 export class DialoguesFault extends Error {
   constructor(public code:string, public details?:Record<string,unknown>) {super(code);}
