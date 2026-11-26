@@ -9547,7 +9547,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -                if agent_notify and not process_registry.is_completion_consumed(session_id):
 +                if (agent_notify or (session.exit_code == 0 and notify_mode != "error" and (watcher.get("parent_session_id") or getattr(session, "parent_session_id", "")))) and not process_registry.is_completion_consumed(session_id):
                      completion_evt = self._build_process_completion_event(watcher, session, session_id)
-+                    completion_evt["output"] += f"\n[Без сырых ошибок. Номер в журнале: {session_id.removeprefix('proc_')}]" if session.exit_code and logger.isEnabledFor(logging.WARNING) else ""
++                    if session.exit_code != 0: completion_evt.update(command="", output=self._format_process_final_message(session_id, session, notify_mode))
                      synth_text = format_process_notification(completion_evt)
                      if not synth_text:
                          break

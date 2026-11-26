@@ -67,7 +67,7 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
             def _redacted_output_tail(self, item, limit):
                 return item.output_buffer.replace('SECRET', '[redacted]')
             def _build_process_completion_event(self, watcher, item, session_id):
-                return {'session_id': session_id, 'output': item.output_buffer,
+                return {'session_id': session_id, 'command': 'run /private/path SECRET', 'output': item.output_buffer,
                         'parent_session_id': watcher.get('parent_session_id', '')}
             async def _enqueue_process_completion_notification(self, text, event):
                 self.agent.append((text, event))
@@ -87,7 +87,8 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
                     for private in ('Traceback', '/private/path', 'SECRET'):
                         self.assertNotIn(private, runner.direct[0])
                     if notify:
-                        self.assertIn('Traceback /private/path SECRET', runner.agent[0][0])
+                        for private in ('Traceback', '/private/path', 'SECRET'):
+                            self.assertNotIn(private, str(runner.agent[0]))
                         self.assertIn('abcdef123456', runner.agent[0][0])
                 self.assertIn('reference=abcdef123456', stream.getvalue())
                 self.assertNotIn('SECRET', stream.getvalue())
@@ -95,6 +96,11 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('abcdef123456', runner._format_process_final_message('proc_abcdef123456', session, 'error'))
                 log.disabled = False
                 self.assertEqual(runner._format_process_running_message(session), 'Фоновая задача выполняется')
+                session.exit_code = None
+                runner = Runner('concise', busy=True)
+                await runner._run_process_watcher({**watcher, 'notify_on_complete': True})
+                self.assertNotIn('/private/path', str(runner.agent[0]))
+                self.assertNotIn('abcdef123456', runner.direct[0])
                 session.exit_code, session.output_buffer = 0, 'готовый результат'
                 runner = Runner('result', busy=False)
                 await runner._run_process_watcher({**watcher, 'notify_on_complete': False, 'parent_session_id': 'new-session'})
@@ -149,7 +155,7 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
         run = ModuleType('gateway.run')
         run._redact_gateway_user_facing_secrets = lambda text: text
         entries = [('', {'session_id': f'proc_{number}', 'exit_code': 1,
-                         'output': 'x' * 1000 + f'\n[Без сырых ошибок. Номер в журнале: {number}]'}, None)
+                         'output': 'x' * 1000 + f'\nФоновая задача завершилась с ошибкой · Номер в журнале: {number}'}, None)
                    for number in ('abcdef123456', 'fedcba654321')]
         with patch.dict(sys.modules, {'gateway.run': run}):
             text = formatter(entries)
