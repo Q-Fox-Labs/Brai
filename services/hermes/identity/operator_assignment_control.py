@@ -2,14 +2,27 @@
 # ABOUTME: Этот порт вызывается через защищённый root Unix socket Telegram ingress.
 """Owner-bound native assignment lifecycle and approval at the delivery boundary."""
 import asyncio
+from pathlib import PurePath
 import re
 import uuid
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 from .artifact_read import receive_artifact
 from .delivery_journal import delivery_id
 from .ipc import RpcError
 from .operator_assignments import OperatorAssignments
 from .reply_outbox import DeliveryDeferred
+
+OFFICE_DOCUMENTS = {
+    '.docx': ('application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              'word/document.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
+              '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}document'),
+    '.pptx': ('application/vnd.openxmlformats-officedocument.presentationml.presentation',
+              'ppt/presentation.xml', 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml',
+              '{http://schemas.openxmlformats.org/presentationml/2006/main}presentation'),
+}
+OFFICE_CONTENT_TYPES = '{http://schemas.openxmlformats.org/package/2006/content-types}'
 
 
 class OperatorAssignmentControl:
@@ -43,7 +56,8 @@ class OperatorAssignmentControl:
         return profile, route, metadata
 
     async def __call__(self, action, operationId, userId, profileId, chat, thread, anchor,
-                       sessionKey=None, sessionId=None, instructions=None, requiredMimeTypes=None, resultDigest=None):
+                       sessionKey=None, sessionId=None, instructions=None, requiredMimeTypes=None, resultDigest=None,
+                       publicFacts=None):
         if str(uuid.UUID(operationId)) != operationId:
             raise RpcError(-32602, 'Invalid operator assignment ID')
         profile, route, metadata = await self.target(userId, profileId, chat, thread, anchor)
@@ -52,7 +66,8 @@ class OperatorAssignmentControl:
             if (not isinstance(sessionKey, str) or not sessionKey.strip() or len(sessionKey) > 512
                     or not isinstance(sessionId, str) or not sessionId.strip() or len(sessionId) > 256
                     or not isinstance(instructions, str) or not instructions.strip()
-                    or not 1 <= len(instructions.encode()) <= 48000
+                    or publicFacts is not None and (not isinstance(publicFacts, str) or not publicFacts.strip())
+                    or len(instructions.encode()) + len((publicFacts or '').encode()) > 48000
                     or not isinstance(requiredMimeTypes, list) or len(requiredMimeTypes) > 10
                     or any(not isinstance(item, str) or not re.fullmatch(r'[a-z0-9.+-]+/[a-z0-9.+-]+', item)
                            for item in requiredMimeTypes)):
@@ -62,6 +77,8 @@ class OperatorAssignmentControl:
                        'sessionKey': sessionKey, 'sessionId': sessionId, 'instructions': instructions,
                        'requiredMimeTypes': requiredMimeTypes, 'chatGeneration': generation,
                        'role': profile.get('role'), 'authGeneration': profile.get('generation')}
+            if publicFacts is not None:
+                request['publicFacts'] = publicFacts
             self.store.create(operationId, owner, request)
             if self.resolver._startup_held() or getattr(self.resolver.release_gate, 'operation', None) is not None:
                 return {'state': 'prepared'}
@@ -94,8 +111,11 @@ class OperatorAssignmentControl:
 
     @staticmethod
     def worker_params(ident, user, request):
-        return {'operationId': ident, 'owner': user, **{key: request[key] for key in
+        params = {'operationId': ident, 'owner': user, **{key: request[key] for key in
             ('chat', 'thread', 'sessionKey', 'sessionId', 'chatGeneration', 'instructions')}}
+        if 'publicFacts' in request:
+            params['publicFacts'] = request['publicFacts']
+        return params
 
     async def run(self, peer, ident, owner, user, request):
         if self.store.read(ident, owner)['state'] != 'running':
@@ -128,12 +148,36 @@ class OperatorAssignmentControl:
             try:
                 if metadata['artifactId'] != ident or metadata['sizeBytes'] <= 0:
                     raise ValueError('Incomplete operator assignment artifact')
-                kinds.append(metadata['mimeType'])
+                kind = metadata['mimeType']
+                if kind == 'application/octet-stream':
+                    office = OFFICE_DOCUMENTS.get(PurePath(metadata['filename']).suffix.lower())
+                    if office is not None and office[0] in request['requiredMimeTypes']:
+                        kind = self.checked_office_type(office, stream)
+                kinds.append(kind)
             finally:
                 stream.close()
         if sorted(kinds) != sorted(request['requiredMimeTypes']):
             raise ValueError('Incorrect operator assignment artifacts')
         return [{'artifact': {'artifact_id': ident}, 'presentation': 'document', 'caption': ''} for ident in ids]
+
+    @staticmethod
+    def checked_office_type(office, stream):
+        """Recognize a published Office document using its OPC manifest and main part."""
+        mime, main_part, main_mime, main_root = office
+        with ZipFile(stream) as archive:
+            types = archive.getinfo('[Content_Types].xml')
+            if types.file_size > 64 * 1024 or archive.getinfo(main_part).file_size <= 0:
+                raise ValueError('Invalid Office document package')
+            root = ElementTree.fromstring(archive.read(types))
+            if root.tag != OFFICE_CONTENT_TYPES + 'Types' or not any(
+                    part.get('PartName') == '/' + main_part and part.get('ContentType') == main_mime
+                    for part in root.findall(OFFICE_CONTENT_TYPES + 'Override')):
+                raise ValueError('Invalid Office document package')
+            with archive.open(main_part) as document:
+                _, element = next(ElementTree.iterparse(document, events=('start',)))
+                if element.tag != main_root:
+                    raise ValueError('Invalid Office document package')
+        return mime
 
     @staticmethod
     def outbox_id(ident, part):

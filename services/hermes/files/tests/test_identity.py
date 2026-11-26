@@ -5,7 +5,7 @@ import ast
 import base64
 import contextlib
 import datetime
-from hashlib import sha256
+from hashlib import file_digest, sha256
 import importlib.util
 import json
 import os
@@ -63,8 +63,8 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(Path(args['path']).read_bytes(), b'report')
         return dict(self.result)
 
-    def own_cache(self, root, path, uid):
-        return identity.open_file(root, path, self.uid)
+    def own_cache(self, root, path, uid, **kwargs):
+        return identity.open_file(root, path, self.uid, **kwargs)
 
     def test_open_rejects_symlink_hardlink_and_foreign_uid(self):
         area = self.home / 'workspace'
@@ -123,7 +123,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_returns_personal_path_and_never_root_descriptor(self):
         original = identity.open_file
-        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)):
+        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kwargs: original(root, path, self.uid, **kwargs)):
             result = await self.port.fetch(self.uid, self.profile, {'artifactId': self.aid})
         self.assertEqual(result['localPath'], str(self.home / 'results' / self.aid / 'report.txt'))
         self.assertIn(result['localPath'], result['markdown'])
@@ -132,7 +132,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ingress_opens_exact_inode_without_delivery_copy(self):
         original = identity.open_file
-        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)):
+        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kwargs: original(root, path, self.uid, **kwargs)):
             metadata, fd = await self.port.open_ingress(self.uid, self.profile, self.aid)
         try:
             self.assertEqual(os.fstat(fd).st_ino, self.cached.stat().st_ino)
@@ -161,14 +161,14 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         for mode in (0o620, 0o602):
             with self.subTest(mode=oct(mode)):
                 self.cached.chmod(mode)
-                with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)):
+                with patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kwargs: original(root, path, self.uid, **kwargs)):
                     with self.assertRaisesRegex(PermissionError, 'Writable artifact cache'):
                         await self.port.open_ingress(self.uid, self.profile, self.aid)
 
     async def test_ingress_receives_readable_copy_without_exposing_root_cache(self):
         (self.root / 'delivery').mkdir(mode=0o700)
         original = identity.open_file
-        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)):
+        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kwargs: original(root, path, self.uid, **kwargs)):
             result = await self.port.fetch(self.uid, self.profile, {'artifactId': self.aid}, ingress=True)
         self.assertTrue(Path(result['localPath']).is_relative_to(self.root / 'delivery'))
         self.assertNotIn(str(self.cache), str(result))
@@ -178,7 +178,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         source = self.home / 'workspace' / 'report.txt'
         source.write_bytes(b'report')
         directory, file = identity.open_directory, identity.open_file
-        with patch.object(identity, 'open_directory', side_effect=lambda path, uid: directory(path, self.uid)), patch.object(identity, 'open_file', side_effect=lambda root, path, uid: file(root, path, self.uid)):
+        with patch.object(identity, 'open_directory', side_effect=lambda path, uid: directory(path, self.uid)), patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kwargs: file(root, path, self.uid, **kwargs)):
             result = await self.port.publish(self.uid, self.profile, {'path': str(source), 'requestId': 'stable'})
         self.assertEqual(result['artifactId'], self.aid)
         self.assertEqual(list(self.stage.iterdir()), [])
@@ -202,6 +202,86 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.read_text(), 'input')
         with self.assertRaises(PermissionError):
             await self.port.prepare_ingress(self.uid, self.profile, ['/etc/passwd'])
+
+    async def test_large_audio_reaches_publisher_through_admitted_ingress(self):
+        ingress = self.root / 'ingress'
+        ingress.mkdir(mode=0o700)
+        source = ingress / 'recording.wav'
+        size = identity.MAX_FILE + 1
+        with source.open('wb') as stream:
+            stream.truncate(size)
+        with source.open('rb') as stream:
+            digest = file_digest(stream, 'sha256').hexdigest()
+        cache = self.cached.with_name(source.name)
+        self.cached.rename(cache)
+        with cache.open('r+b') as stream:
+            stream.truncate(0)
+            stream.truncate(size)
+        result = {**self.result, 'localPath': str(cache), 'filename': source.name,
+                  'mimeType': 'audio/wav', 'sizeBytes': size, 'sha256': digest}
+
+        async def publish(method, args, **kwargs):
+            self.assertEqual(method, 'artifacts.publish')
+            self.assertEqual(args['requestId'], 'stable')
+            snapshot = Path(args['path'])
+            self.assertEqual(snapshot.name, source.name)
+            with snapshot.open('rb') as stream:
+                self.assertEqual(file_digest(stream, 'sha256').hexdigest(), digest)
+            return result
+
+        prepared = await self.port.prepare_ingress(self.uid, self.profile, [str(source)])
+        self.control.call = publish
+        open_file, open_directory = identity.open_file, identity.open_directory
+        marker = Path(prepared['paths'][0]).parent / '.brai-admission.json'
+        marker_stat, fstat = marker.stat(), os.fstat
+
+        def marker_owner(fd):
+            info = fstat(fd)
+            if (info.st_dev, info.st_ino) == (marker_stat.st_dev, marker_stat.st_ino):
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=info.st_nlink, st_size=info.st_size)
+            return info
+
+        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kw:
+                          open_file(root, path, self.uid, **kw)), patch.object(
+                          identity, 'open_directory', side_effect=lambda path, uid: open_directory(path, self.uid)), patch.object(
+                          identity.os, 'fstat', side_effect=marker_owner):
+            published = await self.port.publish(self.uid, self.profile,
+                {'path': prepared['paths'][0], 'requestId': 'stable'}, admitted=True)
+            with Path(published['localPath']).open('rb') as stream:
+                self.assertEqual(file_digest(stream, 'sha256').hexdigest(), digest)
+            with self.assertRaisesRegex(ValueError, 'Invalid artifact'):
+                self.port.materialize(self.uid, self.profile, {**result, 'mimeType': 'application/octet-stream'})
+        self.assertEqual(list(self.stage.iterdir()), [])
+        source.rename(source.with_suffix('.txt'))
+        with self.assertRaisesRegex(PermissionError, 'File denied'):
+            await self.port.prepare_ingress(self.uid, self.profile, [str(source.with_suffix('.txt'))])
+
+    def test_media_header_applies_full_limit_to_aac_and_m4a_from_real_publisher_type(self):
+        import subprocess
+
+        cache = self.cached.parent
+        open_file = identity.open_file
+        with patch.object(identity, 'MAX_FILE', 1024), patch.object(
+                identity, 'open_file', side_effect=lambda root, path, uid, **kwargs:
+                open_file(root, path, self.uid, **kwargs)):
+            for name in ('voice.aac', 'voice.m4a'):
+                path = cache / name
+                subprocess.run(['/usr/bin/ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                                '-i', 'sine=duration=2', str(path)], check=True)
+                media = path.read_bytes()
+                self.assertGreater(len(media), 1024)
+                result = {**self.result, 'localPath': str(path), 'filename': name,
+                          'mimeType': 'application/octet-stream', 'sizeBytes': len(media),
+                          'sha256': sha256(media).hexdigest()}
+                materialized = self.port.materialize(self.uid, self.profile, result)
+                self.assertEqual(Path(materialized['localPath']).read_bytes(), media)
+            path = cache / 'opaque.m4a'
+            path.write_bytes(b'x' * 2048)
+            result = {**self.result, 'localPath': str(path), 'filename': path.name,
+                      'mimeType': 'application/octet-stream', 'sizeBytes': 2048,
+                      'sha256': sha256(path.read_bytes()).hexdigest()}
+            with self.assertRaisesRegex(PermissionError, 'Unsupported large audio'):
+                self.port.materialize(self.uid, self.profile, result)
 
     def test_runtime_mapping_reloads_and_rejects_changed_owner(self):
         entry = {'userId': 'owner', 'profileId': 'profile', 'home': str(self.home),
@@ -281,7 +361,7 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         try:
             native.configure(configured, SimpleNamespace(call=worker_call))
             # Только Root-владение эмулируется; snapshot, SQLite, hash и descriptors настоящие.
-            with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)), \
+            with patch.object(identity, 'open_file', side_effect=lambda root, path, uid, **kwargs: original(root, path, self.uid, **kwargs)), \
                     patch.object(identity, 'open_directory', side_effect=lambda path, uid: directory(path, self.uid)), \
                     patch.dict(sys.modules, {'hermes_constants': SimpleNamespace(get_hermes_home=lambda: self.home)}):
                 for number, (name, payload, sources) in enumerate(cases):

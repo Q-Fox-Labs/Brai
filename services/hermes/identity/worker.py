@@ -272,7 +272,8 @@ class Worker:
             async def paused_admit(event):
                 def allowed():
                     state = self.chat_states.get(self._chat_route(event.source), {})
-                    return (self.route_allowed(event.source, recovery=bool(getattr(event, 'internal', False)))
+                    recovered = (getattr(event, 'metadata', None) or {}).get('recovered')
+                    return (self.route_allowed(event.source, recovery=bool(recovered or getattr(event, 'internal', False)))
                         and getattr(event, '_brai_chat_generation', state.get('generation', 0)) == state.get('generation', 0))
                 if not allowed():
                     return None
@@ -294,6 +295,20 @@ class Worker:
         original = getattr(runner, '_hmwa_shape_agent_response', None)
         if not callable(original):
             return
+
+        system_prompt = getattr(runner, '_get_system_prompt_for_channel', None)
+        if callable(system_prompt):
+            def assignment_prompt(platform, chat_id, *, thread_id=None, parent_id=None):
+                from .scope import operator_assignment
+                prompt = system_prompt(platform, chat_id, thread_id=thread_id, parent_id=parent_id)
+                assignment = operator_assignment.get()
+                if (assignment is not None and getattr(assignment, 'public_facts', None)
+                        and getattr(platform, 'value', platform) == 'telegram'
+                        and self._chat_route(SimpleNamespace(chat_id=chat_id, thread_id=thread_id)) == assignment.route):
+                    prompt = (prompt + '\n\nVerified public service facts from the deployment operator for this assignment:\n'
+                              + assignment.public_facts).strip()
+                return prompt
+            runner._get_system_prompt_for_channel = assignment_prompt
 
         async def remember(source, session_key):
             if session_key and self.route_allowed(source, recovery=True):
@@ -317,7 +332,13 @@ class Worker:
                         and not any(result.get(key) for key in ('failed', 'partial', 'error',
                                                                'interrupted', 'guardrail'))
                         and not value[1] and isinstance(value[0], str) and value[0].strip()):
-                    artifacts = [item['file']['artifactId'] for group in result.get('fileSets', [])
+                    groups = result.get('fileSets', [])
+                    if not groups and 'MEDIA:' in value[0]:
+                        import brai_files
+                        # The gateway result can omit the file envelope while retaining prepared media paths.
+                        groups = brai_files.result_envelope({'final_response': value[0]},
+                                                           SimpleNamespace(platform='telegram')).get('fileSets', [])
+                    artifacts = [item['file']['artifactId'] for group in groups
                                  for item in group['items']]
                     text = self.adapter.strip_media_directives_for_display(value[0]) if artifacts else value[0]
                     assignment.result = {'text': text, 'artifactIds': list(dict.fromkeys(artifacts))}
@@ -462,7 +483,7 @@ class Worker:
         return entry is not None and entry.session_id == session_id
 
     async def run_operator_assignment(self, owner, operationId, sessionKey, sessionId, chat, thread,
-                                      chatGeneration, instructions, checkOnly=False):
+                                      chatGeneration, instructions, checkOnly=False, publicFacts=None):
         """Run the same authorized native injection and keep the final answer private."""
         if (owner != self.user_id or not isinstance(operationId, str)
                 or str(uuid.UUID(operationId)) != operationId
@@ -473,7 +494,8 @@ class Worker:
                 or type(checkOnly) is not bool
                 or type(chatGeneration) is not int or chatGeneration < 0
                 or not isinstance(instructions, str) or not instructions.strip()
-                or not 1 <= len(instructions.encode()) <= 48000):
+                or publicFacts is not None and (not isinstance(publicFacts, str) or not publicFacts.strip())
+                or len(instructions.encode()) + len((publicFacts or '').encode()) > 48000):
             raise RpcError(-32602, 'Invalid operator assignment')
         if self.operator_lock.locked():
             return {'state': 'busy'}
@@ -488,12 +510,12 @@ class Worker:
                 self.operator_run = operationId, asyncio.current_task()
             try:
                 return await self._run_operator_session(operationId, sessionKey, sessionId, route,
-                                                        chatGeneration, instructions, checkOnly)
+                                                        chatGeneration, instructions, checkOnly, publicFacts)
             finally:
                 self.operator_run = None
                 self.operator_route = None
 
-    async def _run_operator_session(self, ident, key, session_id, route, generation, instructions, check_only):
+    async def _run_operator_session(self, ident, key, session_id, route, generation, instructions, check_only, public_facts):
         from .scope import delivery_scope, input_delivery, operator_assignment
         runner, adapter = self.runner, self.adapter
         entry = await runner.async_session_store.lookup_by_session_key(key)
@@ -523,7 +545,7 @@ class Worker:
         self._enable_delivery()
         self.delivery_journal.hold_operator_turn(key, session_id, ident)
         assignment = SimpleNamespace(session_key=key, session_id=session_id, can_start=can_start,
-                                     completed=False, result=None)
+                                     route=route, public_facts=public_facts, completed=False, result=None)
         assignment_token = operator_assignment.set(assignment)
         scope_token = delivery_scope.set('operator-assignment:' + ident)
         source_token = input_delivery.set(None)
@@ -1183,6 +1205,7 @@ class Worker:
                     source._brai_dialogues_input = (str(archive_id), original)
         from .scope import input_delivery
         message._brai_identity_input_id = input_delivery.get()
+        message._brai_input_delivery_id = message._brai_identity_input_id
         from gateway.platforms import base as native_base
         coerce = getattr(native_base, 'coerce_plaintext_gateway_command', None)
         if callable(coerce):

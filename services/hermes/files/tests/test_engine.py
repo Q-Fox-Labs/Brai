@@ -8,9 +8,12 @@ import asyncio
 from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 import json
+import logging
 import os
 import re
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 import tempfile
 import struct
@@ -19,6 +22,8 @@ import zlib
 from types import SimpleNamespace, ModuleType, MethodType
 import time
 import unittest
+import uuid
+import wave
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -167,6 +172,165 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             operator_assignment.reset(token)
         self.assertEqual(acquired, [])
         self.assertEqual(invoked, [])
+
+    async def test_hidden_result_keeps_files_from_shaped_native_response(self):
+        from identity.scope import operator_assignment
+        from identity.worker import Worker
+
+        file = self.input_file()
+        response = native.final_text(f'Готово.\nMEDIA:"{file}"', 'hidden')
+        expected = native.result_envelope({'final_response': response}, SimpleNamespace(platform='telegram'))
+        artifact = expected['fileSets'][0]['items'][0]['file']['artifactId']
+        worker = Worker(os.getuid() + 1, 'owner', '101', AsyncMock())
+        worker.adapter = SimpleNamespace(strip_media_directives_for_display=lambda text: text.split('\n', 1)[0])
+        runner = SimpleNamespace(_hmwa_shape_agent_response=AsyncMock(return_value=(response, False, [])))
+        worker._install_failure_recovery(runner)
+
+        assignment = SimpleNamespace(session_key='current', result=None)
+        token = operator_assignment.set(assignment)
+        try:
+            with patch.dict(sys.modules, {'brai_files': native}):
+                await runner._hmwa_shape_agent_response({'completed': True}, None, [], None, 'current')
+        finally:
+            operator_assignment.reset(token)
+        self.assertEqual(assignment.result, {'text': 'Готово.', 'artifactIds': [artifact]})
+
+    async def test_managed_command_resumes_same_media_after_new_temporary_output(self):
+        from identity.audio_parts import PART_SECONDS, RATE
+        from identity.transcribe import PART_TIMEOUT, transcribe_audio
+
+        source = self.input / 'long audio.wav'
+        frames = RATE * 830
+        with wave.open(str(source), 'wb') as audio:
+            audio.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
+            for _ in range(830):
+                audio.writeframesraw(bytes(RATE * 2))
+        self.assertGreater(source.stat().st_size, 25 * 1024 * 1024)
+        model = {'modelId': 'fixture', 'revision': 'v1', 'profileId': 'asr'}
+        (self.root / 'workspace').mkdir()
+        published, requests, invocations = [], {}, []
+
+        def broker(method, params, *, timeout):
+            if method == 'files.publish':
+                with wave.open(params['path'], 'rb') as part:
+                    published.append(part.getnframes())
+                return {'artifactId': str(uuid.uuid4()), 'mimeType': 'audio/wav'}
+            self.assertEqual(method, 'tools.call')
+            args = params['args']
+            if params['name'] == 'transcription_request_submit':
+                request = str(uuid.uuid4())
+                requests[request] = f'part {len(requests) + 1}'
+                return {'request': {'taskState': 'succeeded', 'requestId': request,
+                                    'actualModel': model, 'requestedModel': args['requestedModel']}}
+            self.assertEqual(params['name'], 'transcription_result_get')
+            return {'state': 'available', 'result': {'requestId': args['requestId'], 'actualModel': model,
+                                                     'text': requests[args['requestId']]}}
+
+        def run_command(command, timeout, *, env_passthrough):
+            name, input_flag, audio, output_flag, output, key_flag, operation = shlex.split(command)
+            self.assertEqual((name, input_flag, output_flag, key_flag),
+                             ('fixture', '--input', '--output', '--operation-id'))
+            self.assertEqual(Path(audio), source)
+            self.assertGreater(timeout, PART_TIMEOUT)
+            invocations.append((output, operation))
+            transcribe_audio(audio, output, model, call=broker, operation_id=operation)
+            return SimpleNamespace(stdout='HERMES_IDENTITY_STT_PART 1')
+
+        render = function('tools/tts_command_provider.py',
+                          {'render_command_template', 'shell_quote_context', 'quote_command_placeholder'},
+                          {'os': os, 're': re, 'shlex': shlex, 'subprocess': subprocess})['render_command_template']
+        command = function('tools/transcription_command.py', {'_transcribe_command_stt', '_read_command_stt_output'}, {
+            'tempfile': tempfile, 'Path': Path, 'subprocess': subprocess, 'logger': logging.getLogger(__name__),
+            '_get_command_stt_timeout': lambda config: config['timeout'], '_get_command_stt_output_format': lambda _: 'txt',
+            '_command_stt_env_passthrough': lambda _: [], '_normalize_command_stt_input': lambda audio, *_: (str(audio), None),
+            '_render_command_stt_template': render, '_run_command_stt': run_command,
+            '_ok_result': lambda result, name: (result, name),
+        })['_transcribe_command_stt']
+        config = {'command': 'fixture --input {input_path} --output {output_path}', 'timeout': 200, 'language': 'ru'}
+
+        def reject_generic_route(*args, **kwargs):
+            self.fail('Managed long audio entered the generic remote splitting path')
+
+        hooks = function('tools/transcription_tools.py', {'transcribe_audio', '_transcribe_prepared_audio'}, {
+            'Path': Path, '_read_block_error': lambda *_: None, '_validate_audio_file': lambda *_, **__: None,
+            '_validate_audio_source_file': lambda *_, **__: None, '_load_stt_config': lambda: config,
+            '_prepare_audio_for_transcription': lambda path: (path, None, None), 'is_stt_enabled': lambda _: True,
+            '_get_provider': lambda _: 'brai_local_ai', '_is_local_stt_provider': reject_generic_route,
+            '_dispatch_stt_provider': lambda path, name, stt, *_: command(path, name, stt, stt),
+        })
+
+        async def transcribe(path):
+            return await asyncio.to_thread(hooks['transcribe_audio'], path)
+
+        operation = 'd' * 64
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': str(self.root)}), \
+                patch.dict(sys.modules, {'brai_files': native,
+                                        'tools.transcription_tools': module(_resolve_stt_language=lambda *_: 'ru')}):
+            first = await native.transcribe_voice_once(SimpleNamespace(_brai_voice_operations={str(source): operation}),
+                                                       str(source), transcribe)
+            recovered = await native.transcribe_voice_once(SimpleNamespace(_brai_voice_operations={str(source): operation}),
+                                                           str(source), transcribe)
+        self.assertEqual(first, recovered)
+        self.assertEqual(first, ('\n'.join(requests.values()), 'brai_local_ai'))
+        self.assertEqual(sum(published), frames)
+        self.assertTrue(all(part <= RATE * PART_SECONDS for part in published))
+        self.assertEqual(len(published), len(requests))
+        self.assertEqual([value[1] for value in invocations], [operation, operation])
+        self.assertNotEqual(invocations[0][0], invocations[1][0])
+
+    async def test_pending_voice_merge_shares_computation_and_echoes_each_clip_once(self):
+        ready, release = asyncio.Event(), asyncio.Event()
+        compute, echoes, consent_transcripts = [], [], []
+
+        async def transcribe(path):
+            compute.append(path)
+            if path == '/first.ogg':
+                ready.set()
+                await release.wait()
+            return path
+
+        async def enrich(text, paths, *, event):
+            results = [await native.transcribe_voice_once(event, path, transcribe) for path in paths]
+            return text, results
+
+        async def echo(adapter, source, transcripts, **kwargs):
+            echoes.extend(transcripts)
+
+        inbound = function('gateway/run_inbound.py', {
+            '_transcribe_pending_audio_event_once', '_echo_pending_stt_transcripts_once',
+        }, {})
+        base = function('gateway/platforms/base.py', {'merge_pending_message_event'}, {
+            'MessageType': SimpleNamespace(PHOTO='photo', TEXT='text'),
+            'BasePlatformAdapter': SimpleNamespace(_merge_caption=lambda previous, later: previous + ' ' + later),
+        })
+        runner = SimpleNamespace(_enrich_message_with_transcription=enrich, _echo_stt_transcripts=echo,
+                                 _should_echo_stt_transcripts=lambda: True,
+                                 _pending_event_audio_paths=lambda event: list(event.media_urls))
+
+        def event(path, text):
+            return SimpleNamespace(text=text, message_type='voice', media_urls=[path], media_types=['audio/ogg'],
+                                   media_text_inlined=[], absorb_reply_expected=lambda incoming: None)
+
+        first = event('/first.ogg', 'start')
+        pending = inbound['_transcribe_pending_audio_event_once']
+        earlier = asyncio.create_task(pending(runner, first, first.text))
+        duplicate = asyncio.create_task(pending(runner, first, first.text))
+        await ready.wait()
+        with patch.dict(sys.modules, {'brai_files': SimpleNamespace(merge_events=lambda *_: None)}):
+            base['merge_pending_message_event']({'session': first}, 'session', event('/second.ogg', 'append'))
+        approvals = module(record_transcripts=lambda _, _event, text: consent_transcripts.append(list(text)))
+        with patch.dict(sys.modules, {'tools.approval_conversation': approvals}):
+            release.set()
+            results = await asyncio.gather(earlier, duplicate)
+        self.assertEqual(results, [('start append', ['/first.ogg', '/second.ogg'])] * 2)
+        echo_once = inbound['_echo_pending_stt_transcripts_once']
+        await asyncio.gather(*(echo_once(runner, first, object(), object(), result) for _, result in results))
+        recovered = event('/first.ogg', 'start')
+        recovered.metadata = {'recovered': True}
+        await echo_once(runner, recovered, object(), object(), ['/first.ogg'])
+        self.assertCountEqual(compute, ['/first.ogg', '/second.ogg'])
+        self.assertEqual(echoes, ['/first.ogg', '/second.ogg'])
+        self.assertEqual(consent_transcripts, [['/first.ogg', '/second.ogg']])
 
     def loop(self, callback):
         ports = {'brai_files': native,
@@ -831,6 +995,211 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(agent._pending_steer,pending)
         self.assertEqual(worker.delivery_journal.input_status(ident,digest)['state'],'accepted')
         native.clear_steer_turn(turn)
+
+    async def test_slow_voice_after_completed_turn_is_returned_to_native_queue(self):
+        """A completed prior turn must not turn already echoed STT into not_received."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        event=SimpleNamespace(source=source,message_id='voice-1',text='',internal=False,
+            metadata={},media_urls=['/voice.ogg'],media_types=['audio/ogg'],_gateway_accepted=False)
+        started,finish=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def transcribe(value):
+            calls.append('stt');started.set();await finish.wait()
+            value._gateway_pending_stt_text='"голосовой запрос"'
+            value._gateway_pending_stt_transcripts=['голосовой запрос']
+            value._gateway_pending_stt_echoed=1
+            return value._gateway_pending_stt_text
+        async def accept(_):return True
+        runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+        runner._prepare_busy_steer_text=transcribe
+        with patch.object(native,'accept_event',accept), patch.object(native,'release_event') as release:
+            task=asyncio.create_task(native.steer_active_input(runner,event,'session'))
+            await started.wait()
+            runner._peek_session_state=lambda _:None
+            finish.set()
+            self.assertFalse(await task)
+            release.assert_not_called()
+        self.assertEqual(calls,['stt'])
+        self.assertEqual(event._gateway_pending_stt_transcripts,['голосовой запрос'])
+        self.assertEqual(event._gateway_pending_stt_echoed,1)
+        self.assertFalse(event._gateway_accepted)
+        native.clear_steer_turn(turn)
+
+    async def test_rejected_stale_reservation_releases_original_waiter(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        original_turn=SimpleNamespace()
+        ready=threading.Event()
+        event=SimpleNamespace(source=source,message_id='voice-1',internal=False,
+                              _brai_preparation=(original_turn,object(),ready))
+        with patch.object(native,'release_event') as release:
+            self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        self.assertTrue(ready.is_set())
+        release.assert_called_once_with(event)
+        native.clear_steer_turn(turn)
+
+    async def test_voice_turn_finishes_during_stt_does_not_retranscribe_delivery(self):
+        """A transport retry of one delivery must not launch STT and echo twice."""
+        from identity.worker import Worker
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        first_runner,first_agent,first_turn,_=self.steering_runner(source)
+        next_runner,next_agent,next_turn,_=self.steering_runner(source)
+        runners=[first_runner]
+        started,finish=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def transcribe(value):
+            calls.append(value.message_id)
+            if len(calls)==1:
+                started.set()
+                await finish.wait()
+            value._gateway_pending_stt_text='voice request'
+            value._gateway_pending_stt_transcripts=['voice request']
+            value._gateway_pending_stt_echoed=1
+            return value._gateway_pending_stt_text
+        for runner in (first_runner,next_runner):
+            runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+            runner._prepare_busy_steer_text=transcribe
+        def event():
+            return SimpleNamespace(source=source,message_id='same-update',text='',internal=False,
+                metadata={},media_urls=['/voice.ogg'],media_types=['audio/ogg'],_gateway_accepted=False)
+        async def accepted(_):return True
+        async def capture(_adapter, _event):
+            return True  # This case covers receipts. The next case uses real file capture.
+        worker=Worker.__new__(Worker)
+        worker.user_id='owner';worker.active={'turn':object()}
+        worker.delivery_lock=asyncio.Lock()
+        worker.delivery_journal=DeliveryJournal(self.root/'voice-delivery.sqlite3','owner')
+        def start_prepared(value, _):
+            self.assertEqual(value._gateway_pending_stt_transcripts,['voice request'])
+            self.assertEqual(value._gateway_pending_stt_echoed,1)
+            return True
+        target=SimpleNamespace(_message_handler=True,_drop_unresolved=lambda _:False,
+            _event_session_key=lambda _:'session',_active_sessions={},_start_session_processing=start_prepared)
+        handle=function('gateway/platforms/base.py',['handle_message'],{})['handle_message']
+        async def dispatch(value,owner):
+            if not await native.steer_active_input(runners[0],value,'session'):
+                value.allow_gateway_control=False
+                await handle(target,value)
+            return {'accepted':value._gateway_accepted,'turn_id':'turn' if value._gateway_accepted else None}
+        worker._dispatch_native=dispatch
+        ident,digest=delivery_id('voice-update'),delivery_id('voice-payload')
+        with patch.dict(sys.modules,{'brai_files':native}), patch.object(native,'accept_event',accepted), \
+                patch.object(native,'capture_authorized',capture), patch.object(native,'release_event'):
+            task=asyncio.create_task(worker.dispatch(event(),'owner',ident,digest))
+            await started.wait()
+            first_runner._peek_session_state=lambda _:None
+            finish.set()
+            receipt=await task
+            if not receipt['accepted']:
+                runners[0]=next_runner
+                receipt=await worker.dispatch(event(),'owner',ident,digest)
+            self.assertEqual(await worker.dispatch(event(),'owner',ident,digest),receipt)
+        self.assertTrue(receipt['accepted'])
+        self.assertEqual(calls,['same-update'])
+        native.clear_steer_turn(first_turn)
+        native.clear_steer_turn(next_turn)
+
+    async def test_voice_capture_retry_preserves_one_stt_and_file_ownership(self):
+        """Exercise real file capture and worker receipt at the stale-voice boundary."""
+        from identity.worker import Worker
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2',profile=None)
+        first,agent,turn,_=self.steering_runner(source)
+        next_runner,next_agent,next_turn,_=self.steering_runner(source)
+        path=self.input/'voice.ogg'
+        path.write_bytes(b'OggS test voice')
+        started,finish=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def transcribe(value):
+            calls.append(value.message_id)
+            if len(calls)==1:
+                started.set()
+                await finish.wait()
+            value._gateway_pending_stt_text='voice request'
+            value._gateway_pending_stt_transcripts=['voice request']
+            value._gateway_pending_stt_echoed=1
+            return value._gateway_pending_stt_text
+        adapter=SimpleNamespace(gateway_runner=first,_accept_update=lambda:None)
+        for runner in (first,next_runner):
+            runner._session_key_for_source=lambda _:'session'
+            runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+            runner._prepare_busy_steer_text=transcribe
+            runner._delivery_adapter_for=lambda _:adapter
+        def event():
+            return SimpleNamespace(source=source,message_id='same-update',text='',internal=False,
+                raw_message=SimpleNamespace(media_group_id=None), metadata={}, media_urls=[str(path)],
+                media_types=['audio/ogg'],_gateway_accepted=False)
+        worker=Worker.__new__(Worker)
+        worker.user_id='owner';worker.active={'turn':object()}
+        worker.delivery_lock=asyncio.Lock()
+        worker.delivery_journal=DeliveryJournal(self.root/'voice-capture.sqlite3','owner')
+        def start_prepared(value, _):
+            self.assertIsNone(value._brai_preparation)
+            self.assertEqual(value._gateway_pending_stt_echoed,1)
+            self.assertTrue(value._brai_capture_leases)
+            self.assertEqual(len(value.metadata['_brai_artifacts']),1)
+            native.release_event(value)
+            return True
+        adapter._message_handler=True
+        adapter._drop_unresolved=lambda _:False
+        adapter._event_session_key=lambda _:'session'
+        adapter._active_sessions={}
+        adapter._start_session_processing=start_prepared
+        handle=function('gateway/platforms/base.py',['handle_message'],{})['handle_message']
+        async def dispatch(value,owner):
+            if await native.capture_authorized(adapter,value):
+                value.allow_gateway_control=False
+                await handle(adapter,value)
+            return {'accepted':value._gateway_accepted,'turn_id':'turn' if value._gateway_accepted else None}
+        worker._dispatch_native=dispatch
+        ident,digest=delivery_id('voice-capture'),delivery_id('voice-bytes')
+        with patch.dict(sys.modules,{'brai_files':native}):
+            task=asyncio.create_task(worker.dispatch(event(),'owner',ident,digest))
+            await started.wait()
+            first._peek_session_state=lambda _:None
+            finish.set()
+            receipt=await task
+            if not receipt['accepted']:
+                adapter.gateway_runner=next_runner
+                receipt=await worker.dispatch(event(),'owner',ident,digest)
+            self.assertEqual(await worker.dispatch(event(),'owner',ident,digest),receipt)
+        try:
+            self.assertTrue(receipt['accepted'])
+            self.assertEqual(calls,['same-update'])
+        finally:
+            native.clear_steer_turn(turn)
+            native.clear_steer_turn(next_turn)
+
+    async def test_slow_voice_does_not_restart_after_stop_or_changed_chat_generation(self):
+        for cause in ('stop','chat_generation'):
+            with self.subTest(cause=cause):
+                source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+                runner,agent,turn,ctx=self.steering_runner(source)
+                event=SimpleNamespace(source=source,message_id='voice-1',text='',internal=False,
+                    metadata={},media_urls=['/voice.ogg'],media_types=['audio/ogg'],_gateway_accepted=False)
+                started,finish=asyncio.Event(),asyncio.Event()
+                async def transcribe(value):
+                    started.set();await finish.wait()
+                    value._gateway_pending_stt_text='"голосовой запрос"'
+                    value._gateway_pending_stt_transcripts=['голосовой запрос']
+                    value._gateway_pending_stt_echoed=1
+                    return value._gateway_pending_stt_text
+                async def accept(_):return True
+                runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+                runner._prepare_busy_steer_text=transcribe
+                runner._brai_consent_route_current=lambda _:cause!='chat_generation'
+                with patch.object(native,'accept_event',accept), patch.object(native,'release_event') as release:
+                    task=asyncio.create_task(native.steer_active_input(runner,event,'session'))
+                    await started.wait()
+                    runner._peek_session_state=lambda _:None
+                    if cause=='stop':agent._interrupt_requested=True
+                    finish.set()
+                    self.assertTrue(await task)
+                    release.assert_called_once_with(event)
+                self.assertTrue(event._gateway_accepted)
+                native.clear_steer_turn(turn)
 
     async def test_source_replay_is_accepted_without_repeating_steer_but_edits_survive(self):
         """Новый transport ID не обходит source dedup; новые сообщения и редакции остаются."""

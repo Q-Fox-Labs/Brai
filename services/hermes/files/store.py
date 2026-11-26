@@ -215,7 +215,7 @@ class FileStore:
                 db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
             return result
 
-    def ingest(self, source, item_id, path, position=0, caption="", group_id=None):
+    def ingest(self, source, item_id, path, position=0, caption="", group_id=None, *, audio_mime="", chat_generation=None):
         """Сохранить элемент по исходной identity до сборки альбома; порядок не входит в ключ файла."""
         required = {"platform", "account", "chat", "thread", "sender"}
         if (set(source) != required or any(not isinstance(v, str) for v in source.values())
@@ -230,8 +230,18 @@ class FileStore:
                 if row and (row["group_key"] != group or row["caption"] != caption):
                     raise FileError("SOURCE_CONFLICT")
                 db.execute("INSERT OR IGNORE INTO groups(identity) VALUES (?)", (group,))
+                origin = {**source, "itemId": item_id, "sourceGroupId": group_id}
+                if audio_mime:
+                    origin['audioMime'] = audio_mime
+                if chat_generation is not None:
+                    origin['chatGeneration'] = chat_generation
                 db.execute("INSERT OR IGNORE INTO items VALUES (?,?,?,?,?,?,NULL,NULL)",
-                           (identity, group, canonical({**source, "itemId": item_id, "sourceGroupId": group_id}), position, caption, str(path)))
+                           (identity, group, canonical(origin), position, caption, str(path)))
+                if row and audio_mime:
+                    previous = json.loads(row['source'])
+                    if 'audioMime' not in previous:
+                        db.execute('UPDATE items SET source=? WHERE identity=?',
+                                   (canonical({**previous, 'audioMime': audio_mime}), identity))
             result = self.fetch(row["artifact"]) if row and row["artifact"] else self.publish(path, ["input", identity])
             ref = self.checked(result)
             with self.db() as db:

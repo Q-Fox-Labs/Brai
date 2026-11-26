@@ -225,6 +225,15 @@
                  existing.media_urls.extend(event.media_urls)
                  existing.media_types.extend(event.media_types)
                  existing.media_text_inlined.extend(incoming_inline_flags)
+@@ -1835,7 +1837,8 @@
+             elif existing_type == MessageType.TEXT and event.message_type != MessageType.TEXT:
+                 existing.message_type = event.message_type
+             # Drop the *derived* STT cache (event changed); the echo ledger must survive or
+             # notes echo twice.
++            existing._brai_voice_media_version = getattr(existing, "_brai_voice_media_version", 0) + 1
+             for attr in ("_gateway_pending_stt_text", "_gateway_pending_stt_transcripts"):
+                 if hasattr(existing, attr):
+                     delattr(existing, attr)
 @@ -1964,6 +1966,8 @@
      def __init__(self, config: PlatformConfig, platform: Platform):
          self.config = config
@@ -1423,3 +1432,48 @@
      "DO NOT USE FOR (use these instead):\n"
      "- Mechanical multi-step work with no reasoning needed -> execute_code\n"
      "- A single tool call -> call the tool directly\n"
+--- a/tools/transcription_tools.py
++++ b/tools/transcription_tools.py
+@@ -444,6 +444,10 @@
+     if not is_stt_enabled(stt_config):
+         return _error_result("STT is disabled in config.yaml (stt.enabled: false).")
+     provider = _get_provider(stt_config)
++    import brai_files
++    if brai_files.is_managed_voice_provider(provider):
++        # The managed service validates the original duration and owns waveform segmentation.
++        return _dispatch_stt_provider(file_path, provider, stt_config, model, source)
+     remote = not _is_local_stt_provider(provider, stt_config)
+     with ExitStack() as cleanup:
+         # Never overwrite a neighboring WAV or leave converted voice notes behind.
+--- a/tools/transcription_command.py
++++ b/tools/transcription_command.py
+@@ -108,6 +108,13 @@
+     if not audio.exists():
+         return fail(f"Audio file not found: {file_path}")
+     timeout = _get_command_stt_timeout(config)
++    import brai_files
++    managed = brai_files.is_managed_voice_provider(provider_name)
++    if managed:
++        from identity.audio_parts import PREPARE_TIMEOUT
++        from identity.transcribe import PART_TIMEOUT
++        # The command runner resets its idle deadline on output between parts.
++        timeout += max(PREPARE_TIMEOUT, PART_TIMEOUT)
+     output_format = _get_command_stt_output_format(config)
+     language = (language_override or config.get("language")
+                 or _resolve_stt_language(provider_name, stt_config) or DEFAULT_COMMAND_STT_LANGUAGE)
+@@ -122,9 +129,14 @@
+                 "output_dir": str(output_path.parent), "format": output_format,
+                 "language": str(language), "model": str(model_override or config.get("model") or ""),
+             })
++            if managed:
++                operation = brai_files.voice_transcription_operation()
++                if operation:
++                    import shlex
++                    command += " --operation-id " + shlex.quote(operation)
+             logger.info("Transcribing %s via command STT provider '%s'...", audio.name, provider_name)
+             result = _run_command_stt(command, timeout, env_passthrough=_command_stt_env_passthrough(config))
+-            transcript_text = _read_command_stt_output(output_path, result.stdout or "", output_format)
++            transcript_text = _read_command_stt_output(output_path, "" if managed else result.stdout or "", output_format)
+     except subprocess.TimeoutExpired:
+         return fail(f"STT command provider '{provider_name}' timed out after {timeout:g}s")
+     except subprocess.CalledProcessError as exc:

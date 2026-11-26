@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет скрытый запуск и единственную доставку принятого результата на синтетическом owner.
 # ABOUTME: Использует реальную SQLite, штатную исходящую очередь и подставной Telegram transport.
 import asyncio
+from io import BytesIO
 import os
 from pathlib import Path
 import sys
@@ -10,9 +11,10 @@ from types import ModuleType
 import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
+from zipfile import ZipFile
 
 from identity.delivery_journal import DeliveryJournal, delivery_id
-from identity.operator_assignment_control import OperatorAssignmentControl
+from identity.operator_assignment_control import OFFICE_DOCUMENTS, OperatorAssignmentControl
 from identity.operator_assignments import OperatorAssignments
 from identity.reply_outbox import ReplyOutbox
 from identity.routes import RouteLedger
@@ -72,6 +74,33 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state['state'], 'running')
         await self.control.tasks[self.selector['operationId']]
         return await self.control('status', **self.selector)
+
+    async def test_office_documents_are_verified_when_publisher_uses_octet_stream(self):
+        artifact = str(uuid.uuid4())
+        for suffix, (mime, main_part, main_mime, main_root) in OFFICE_DOCUMENTS.items():
+            request = {'requiredMimeTypes': [mime]}
+            result = {'text': 'Проверенный ответ.', 'artifactIds': [artifact]}
+            content_namespace, content_name = main_root[1:].split('}', 1)
+            valid_document = f'<{content_name} xmlns="{content_namespace}"/>'
+            for expected, declared, document in ((True, main_mime, valid_document),
+                                                 (False, 'application/xml', valid_document),
+                                                 (False, main_mime, '<test/>')):
+                stream = BytesIO()
+                with ZipFile(stream, 'w') as file:
+                    xml = ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                           f'<Override PartName="/{main_part}" ContentType="{declared}" /></Types>')
+                    file.writestr('[Content_Types].xml', xml)
+                    file.writestr(main_part, document)
+                meta = {'artifactId': artifact, 'sizeBytes': stream.tell(), 'filename': 'result' + suffix,
+                        'mimeType': 'application/octet-stream'}
+                with patch('identity.operator_assignment_control.receive_artifact', return_value=(meta, stream)):
+                    if expected:
+                        items = await self.control.checked_artifacts(self.binding, request, result)
+                        self.assertEqual(items[0]['artifact']['artifact_id'], artifact)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'Invalid Office document'):
+                            await self.control.checked_artifacts(self.binding, request, result)
+                self.assertTrue(stream.closed)
 
     async def test_approved_new_answer_does_not_reopen_old_output(self):
         ready = await self.start()
@@ -286,6 +315,7 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
             original_resume = AsyncMock()
             runner = SimpleNamespace(async_session_store=auth, _restored_source=lambda value: source,
                 _peek_session_state=lambda key: None, _run_startup_resume_event=original_resume,
+                _get_system_prompt_for_channel=lambda *_args, **_kwargs: 'Настройки профиля',
                 _hmwa_shape_agent_response=AsyncMock(return_value=('Готовый ответ.', False, [])),
                 _hmwa_deliver_turn_response=AsyncMock(), _hmwa_agent_error_reply=AsyncMock(),
                 _mark_durable_active_turn=AsyncMock(return_value=True))
@@ -295,6 +325,8 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
 
                 async def turn():
                     self.assertIsNotNone(operator_assignment.get())
+                    self.assertIn('Обновление завершено.', runner._get_system_prompt_for_channel('telegram', 123, thread_id=88))
+                    self.assertEqual(runner._get_system_prompt_for_channel('telegram', 123, thread_id=89), 'Настройки профиля')
                     self.assertFalse(await runner._mark_durable_active_turn(None, session_key))
                     with self.assertRaises(PermissionError):
                         await proxy.send_message(chat_id=123, text='private progress')
@@ -310,10 +342,12 @@ class WorkerOperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
             worker._install_failure_recovery(runner)
             ident = str(uuid.uuid4())
             value = await worker.run_operator_assignment('owner', ident, 'session', 'existing',
-                                                         '123', '88', 0, 'Выполни поручение.')
+                                                         '123', '88', 0, 'Выполни поручение.',
+                                                         publicFacts='Обновление завершено.')
             self.assertEqual(value, {'state': 'ready', 'result': {'text': 'Готовый ответ.', 'artifactIds': []}})
             network.assert_not_awaited()
             self.assertIsNone(operator_assignment.get())
+            self.assertEqual(runner._get_system_prompt_for_channel('telegram', 123, thread_id=88), 'Настройки профиля')
             worker.delivery_journal = DeliveryJournal(journal_path, 'owner')
             fake_gateway = ModuleType('gateway.run')
             fake_gateway._AGENT_PENDING_SENTINEL = object()
