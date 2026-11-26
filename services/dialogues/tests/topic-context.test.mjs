@@ -79,12 +79,18 @@ test('поиск, тема и чтение архива не создают вы
  const store={
   topics:{async search(owner,query){return {owner,query};},async get(owner,id){return {owner,id};}},
   async logExchange(){},async message(owner,args){return {owner,...args};},
+  async turnGet(owner,args){return {owner,...args};},
+  async history(owner,args){return {owner,...args};},
   async pull(){assert.fail('архивное чтение не должно вызывать pull');}
  };
- const call=(action,args)=>invoke(store,'profile','dialogues_exchange',{action,arguments:{request_id:action,...args}});
+ const call=(action,args,context)=>invoke(store,'profile','dialogues_exchange',{action,arguments:{request_id:action,...args},...(context?{context}:{})});
  assert.equal((await call('search',{query:'номер PR'})).query,'номер PR');
  assert.equal((await call('topic_get',{topic_id:'topic'})).id,'topic');
- assert.equal((await call('read',{archive_only:true,dialogue_id:'dialogue',message_id:'message'})).message_id,'message');
+ assert.equal((await call('read',{dialogue_id:'dialogue',message_id:'message'})).message_id,'message');
+ assert.equal((await call('history',{dialogue_id:'dialogue'})).dialogue_id,'dialogue');
+ assert.equal((await call('snapshot',{dialogue_id:'dialogue',turn_id:'turn'})).turn_id,'turn');
+ const legacyContext={consumer_id:'legacy-reader'};
+ assert.equal((await call('read',{archive_only:true,dialogue_id:'dialogue',message_id:'message'},legacyContext)).message_id,'message');
 });
 
 test('PR сравнивается целиком вместе с репозиторием, имя файла тоже целиком',()=>{
