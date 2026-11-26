@@ -3,20 +3,23 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {collectCompact,countContextTokens,topicIndexChanges} from '../dist/compact-context.js';
-import {chooseGrouping,summarizeTopic} from '../dist/topic-jobs.js';
+import {chooseGrouping,pruneTopicRetries,summarizeTopic} from '../dist/topic-jobs.js';
 import {matchesTopicReference} from '../dist/topic-references.js';
 import {invoke} from '../dist/api.js';
+import {DialoguesFault} from '../dist/domain.js';
 
 test('свёртка перерабатывает превышение 50 токенов и оставляет исходный ID',async()=>{
  let calls=0;
- const card=await summarizeTopic({async structured(raw){
+ const card=await summarizeTopic({async structured(raw,prompt){
   calls++;
   if(calls===2){
-   const previous=JSON.parse(raw).previous_attempt;
-   assert.equal(previous.compact,'лишнее '.repeat(60).trim());
-   assert.ok(previous.tokens.compact>50);
+   const previous=JSON.parse(raw);
+   assert.equal(previous.previous_attempt,'лишнее '.repeat(60).trim());
+   assert.ok(previous.previous_attempt_tokens>50);
+   assert.deepEqual(prompt.schema.required,['text']);
+   return JSON.stringify({text:'Выпуск подтверждён, остался замер.'});
   }
-  return JSON.stringify({extended:calls===1?'Выпуск подтверждён. Следующий шаг — замер.':'Другая свёртка',compact:calls===1?'лишнее '.repeat(60):'Выпуск подтверждён, остался замер.',source_indexes:[0]});
+  return JSON.stringify({extended:'Выпуск подтверждён. Следующий шаг — замер.',compact:'лишнее '.repeat(60),source_indexes:[0]});
  }},[{dialogue_id:'dialogue',message_id:'message',text:'Исходная переписка.'}]);
  assert.equal(calls,2);
  assert.equal(card.extended,'Выпуск подтверждён. Следующий шаг — замер.');
@@ -25,6 +28,70 @@ test('свёртка перерабатывает превышение 50 ток
  await assert.rejects(summarizeTopic({async structured(){
   return JSON.stringify({extended:'Допустимый текст.',compact:'Допустимый текст.',source_indexes:[1]});
  }},[{dialogue_id:'dialogue',message_id:'message',text:'Исходная переписка.'}]),{code:'TOPIC_SOURCE_INVALID'});
+});
+
+test('обе формы сокращаются отдельно и не теряют принятую версию и ссылки',async()=>{
+ const calls=[];
+ const luna={async structured(raw,prompt){
+  const input=JSON.parse(raw);calls.push({input,prompt});
+  if(calls.length===1)return JSON.stringify({extended:'лишнее '.repeat(450),compact:'подробности '.repeat(60),source_indexes:[0]});
+  if(input.limit===50)return JSON.stringify({text:'Короткий итог и открытый шаг.'});
+  assert.equal(input.limit,400);return JSON.stringify({text:'Актуальное решение и ограничения.'});
+ }};
+ const card=await summarizeTopic(luna,[{dialogue_id:'d',message_id:'m',text:'Данные темы.'}]);
+ assert.equal(calls.length,3);
+ assert.equal(card.extended,'Актуальное решение и ограничения.');
+ assert.equal(card.compact,'Короткий итог и открытый шаг.');
+ assert.deepEqual(card.source_refs,[{dialogue_id:'d',message_id:'m'}]);
+ assert.ok(calls.slice(1).every(call=>JSON.stringify(call.prompt.schema.required)==='["text"]'));
+ assert.ok(countContextTokens(card.extended)<=400&&countContextTokens(card.compact)<=50);
+});
+
+test('успешный фрагмент темы не пересчитывается после временного сбоя',async()=>{
+ let checkpoint,firstCalls=0,secondCalls=0,offline=true;
+ const luna={async structured(raw){
+  const data=JSON.parse(raw),first=data.sources[0].text.startsWith('X');
+  if(first)firstCalls++;else secondCalls++;
+  if(!first&&offline)throw new DialoguesFault('LUNA_UNAVAILABLE');
+  return JSON.stringify({extended:'Суть и следующий шаг.',compact:'Суть.',source_indexes:[0]});
+ }};
+ const sources=[{dialogue_id:'d',message_id:'m1',text:'X'.repeat(12000)},
+  {dialogue_id:'d',message_id:'m2',text:'Y'.repeat(12000)}];
+ await assert.rejects(summarizeTopic(luna,sources,undefined,p=>{checkpoint=p;}),{code:'LUNA_UNAVAILABLE'});
+ assert.equal(checkpoint.nextBatch,1);assert.equal(firstCalls,1);assert.equal(secondCalls,1);
+ offline=false;
+ const result=await summarizeTopic(luna,sources,checkpoint,p=>{checkpoint=p;});
+ assert.equal(firstCalls,1);assert.equal(secondCalls,2);
+ assert.deepEqual(new Set(result.source_refs.map(ref=>ref.message_id)),new Set(['m1','m2']));
+});
+
+test('задержки пропавших тем и сообщений не накапливаются бесконечно',()=>{
+ const now=10_000_000,retries=new Map([
+  ['removed-topic',{until:now-31*60_000,failures:3}],
+  ['removed-message',{until:now-31*60_000,failures:1}],
+  ['recent',{until:now-1000,failures:2}],['waiting',{until:now+60_000,failures:1}]
+ ]);
+ pruneTopicRetries(retries,now);
+ assert.deepEqual([...retries.keys()],['recent','waiting']);
+ for(let i=0;i<260;i++)retries.set('recent-'+i,{until:now+60_000,failures:1});
+ pruneTopicRetries(retries,now);
+ assert.equal(retries.size,256);
+ assert.ok(retries.has('recent-259'));
+});
+
+test('группировка возвращает только выбранный короткий ID из списка или null',async()=>{
+ const candidates=[{topic_id:'topic-real-a',title:'А',extended:'Первый проект'},
+  {topic_id:'topic-real-b',title:'Б',extended:'Второй проект'}];
+ let reply='C2';
+ const luna={async structured(raw,prompt){
+  const data=JSON.parse(raw);
+  assert.deepEqual(data.candidates.map(c=>c.topic_id),['C1','C2']);
+  assert.deepEqual(prompt.schema.properties.topic_id.enum,['C1','C2',null]);
+  return JSON.stringify({topic_id:reply});
+ }};
+ assert.equal(await chooseGrouping(luna,{title:'Тема',text:'Задача'},candidates),'topic-real-b');
+ reply=null;assert.equal(await chooseGrouping(luna,{title:'Тема',text:'Задача'},candidates),null);
+ reply='topic-real-a';await assert.rejects(chooseGrouping(luna,{title:'Тема',text:'Задача'},candidates),{code:'TOPIC_CANDIDATE_INVALID'});
 });
 
 test('граница свёртки беседы не становится ссылкой на исходное сообщение',async()=>{

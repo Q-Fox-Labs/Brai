@@ -463,6 +463,45 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.deepEqual(await memberships(),{...initial,followup:initial[moved]});
   });
 
+  await t.test('промежуточная свёртка не применяется после изменения источника или состава темы',async()=>{
+   for(const mutation of ['message','membership']){
+    const profile='topic-checkpoint-'+mutation,dialogue='source',time={now:1_000_000};
+    await api.append(profile,{request_id:req(),dialogue:{id:dialogue,channel:'synthetic',title:'Проверка'},
+     messages:[{id:'first',turn_id:'turn',role:'user',kind:'input',text:'A'.repeat(101),summary:'A '.repeat(6000)},
+      {id:'second',turn_id:'turn',role:'user',kind:'input',text:'B'.repeat(101),summary:'B '.repeat(6000)}]});
+    let first=0,second=0,offline=true;
+    const generator={async structured(raw){
+     const input=JSON.parse(raw);
+     if(input.candidates)return JSON.stringify({topic_id:null});
+     if(input.fragment!==undefined)return JSON.stringify({text:'Краткое сообщение.'});
+     const value=input.sources.map(s=>s.text).join('');
+     if(value.startsWith('A '))first++;
+     if(value.startsWith('B ')){second++;if(offline)throw new DialoguesFault('LUNA_UNAVAILABLE');}
+     return JSON.stringify({extended:'Проверенный итог.',compact:'Итог.',source_indexes:[0]});
+    }};
+    const jobs=createTopicJobs(app,profile,generator,undefined,()=>time.now);
+    await assert.rejects(jobs.tick(),{code:'LUNA_UNAVAILABLE'});
+    assert.equal(first,1);assert.equal(second,1);
+    assert.equal((await app.query('SELECT count(*)::int AS n FROM dialogues_live.topic_summaries WHERE owner_id=$1',[profile])).rows[0].n,0);
+    if(mutation==='message'){
+     await api.append(profile,{request_id:req(),dialogue:{id:dialogue,channel:'synthetic',title:'Проверка'},
+      messages:[{id:'new',turn_id:'turn',role:'user',kind:'input',text:'Новое свидетельство'}]});
+    }else{
+     await api.append(profile,{request_id:req(),dialogue:{id:'other',channel:'synthetic',title:'Другая'},
+      messages:[{id:'other-message',turn_id:'turn',role:'user',kind:'input',text:'Дополнение другой беседы'}]});
+     const target=(await app.query("SELECT 'T'||short_id AS ref FROM dialogues_live.topics WHERE owner_id=$1 AND home_dialogue_id=$2",[profile,dialogue])).rows[0].ref;
+     await api.topics.move(profile,req(),'other',target);
+    }
+    offline=false;time.now+=61_000;
+    for(let i=0;i<8&&await jobs.tick();i++){}
+    assert.equal(first,2);assert.equal(second,2);
+    const rows=(await app.query('SELECT source_refs FROM dialogues_live.topic_summaries WHERE owner_id=$1',[profile])).rows;
+    assert.equal(rows.length,1);
+    assert.ok(rows[0].source_refs.some(ref=>ref.message_id==='first'));
+    assert.ok(rows[0].source_refs.some(ref=>ref.message_id==='second'));
+   }
+  });
+
   await t.test('сначала сопоставляет новое свидетельство, затем обновляет только итоговую тему',async()=>{
    const profile='grouping-order-fixture';
    const append=(id,title,message,text)=>api.append(profile,{request_id:req(),dialogue:{id,channel:'synthetic',title},

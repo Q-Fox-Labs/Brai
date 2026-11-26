@@ -80,7 +80,10 @@ try {
     jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
       try{return await topicJobs.tick();}
       catch(error){
-        console.error(JSON.stringify({service:'dialogues',event:'topic_job_failed',code:error instanceof DialoguesFault?error.code:'INTERNAL'}));
+        const details=error instanceof DialoguesFault&&error.code==='TOPIC_SUMMARY_TOO_LONG'?error.details:undefined;
+        console.error(JSON.stringify({service:'dialogues',event:'topic_job_failed',code:error instanceof DialoguesFault?error.code:'INTERNAL',
+          ...(Number.isInteger(details?.extended_tokens)?{extended_tokens:details!.extended_tokens}:{}),
+          ...(Number.isInteger(details?.compact_tokens)?{compact_tokens:details!.compact_tokens}:{})}));
         return false;
       }
     }));jobs.start();
