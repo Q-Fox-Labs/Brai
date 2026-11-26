@@ -63,7 +63,8 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
   const limit=expanded?topicLimits.extended:topicLimits.compact;
   const parts=fallback_parts?.filter(Boolean)??[];
   const share=parts.length?Math.max(1,Math.floor(limit/parts.length)):limit;
-  const fromParts=parts.map(part=>contextExcerpt(part,share).text).join(' ');
+  const excerpts=parts.map(part=>contextExcerpt(part,share));
+  const fromParts=(excerpts.some(part=>part.truncated)?'[неполно: открой тему] ':'')+excerpts.map(part=>part.text).join(' ');
   return (expanded?extended:compact)??(fallback?contextExcerpt(fromParts||fallback,limit).text:null);
  });
  const fixedChars=titles.reduce((n,title)=>n+title.length+24,0);

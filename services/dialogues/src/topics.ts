@@ -60,16 +60,16 @@ export async function recentTopics(db:PoolClient,owner:string,pinned?:string,cur
   )
   SELECT recent.*,fallback.text AS fallback,fallback.parts AS fallback_parts FROM recent
   LEFT JOIN LATERAL (
-   SELECT string_agg(left(concat_ws(' ',ms.text,ds.text),1600),' '
+   SELECT string_agg(left(concat_ws(' ',CASE WHEN early.incomplete THEN '[неполно: открой тему]' END,ms.text,early.text,ds.text),1601),' '
     ORDER BY GREATEST(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id) AS text,
-    jsonb_agg(left(concat_ws(' ',ms.text,ds.text),1600)
+    jsonb_agg(left(concat_ws(' ',CASE WHEN early.incomplete THEN '[неполно: открой тему]' END,ms.text,early.text,ds.text),1601)
     ORDER BY GREATEST(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id) AS parts
    FROM dialogues_live.topic_members tm
    LEFT JOIN LATERAL (SELECT text,change_seq,through_order FROM dialogues_live.dialogue_summaries
     WHERE owner_id=tm.owner_id AND dialogue_id=tm.dialogue_id ORDER BY version DESC LIMIT 1) ds ON true
    LEFT JOIN LATERAL (
     SELECT CASE WHEN recent.includes_current AND char_length(m.text)<=100 THEN m.text ELSE s.text END AS text,
-     GREATEST(m.change_seq,s.change_seq) AS change_seq FROM dialogues_live.messages m
+     GREATEST(m.change_seq,s.change_seq) AS change_seq,m.message_order FROM dialogues_live.messages m
     LEFT JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.message_summaries
      WHERE owner_id=m.owner_id AND dialogue_id=m.dialogue_id AND message_id=m.id ORDER BY version DESC LIMIT 1) s ON true
     WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND ${visibleMessage}
@@ -77,6 +77,22 @@ export async function recentTopics(db:PoolClient,owner:string,pinned?:string,cur
     AND (s.text IS NOT NULL OR (recent.includes_current AND char_length(m.text)<=100))
     ORDER BY m.message_order DESC LIMIT 1
    ) ms ON true
+   LEFT JOIN LATERAL (
+    SELECT string_agg(CASE WHEN char_length(early_message.text)<=100 THEN early_message.text ELSE s.text END,' '
+     ORDER BY early_message.message_order) FILTER (WHERE early_message.position<=10) AS text,
+     count(*)>10 OR count(*) FILTER (WHERE char_length(early_message.text)>100 AND s.text IS NULL)>0 AS incomplete
+    FROM (
+     SELECT m.text,m.id,m.owner_id,m.dialogue_id,m.message_order,
+      row_number() OVER (ORDER BY m.message_order) AS position
+     FROM dialogues_live.messages m
+     WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND ${visibleMessage}
+      AND m.message_order>COALESCE(ds.through_order,-1) AND m.message_order IS DISTINCT FROM ms.message_order
+     ORDER BY m.message_order LIMIT 11
+    ) early_message
+    LEFT JOIN LATERAL (SELECT text FROM dialogues_live.message_summaries
+     WHERE owner_id=early_message.owner_id AND dialogue_id=early_message.dialogue_id
+      AND message_id=early_message.id ORDER BY version DESC LIMIT 1) s ON true
+   ) early ON recent.includes_current
    WHERE tm.owner_id=$1 AND tm.topic_id=recent.id AND COALESCE(ds.text,ms.text) IS NOT NULL
     AND ($3::text IS NULL OR tm.dialogue_id<>$3)
   ) fallback ON (recent.version IS NULL OR recent.includes_current) AND NOT $4::boolean
@@ -148,8 +164,10 @@ export function createTopics(pool:DB){
    const afterNumber=after===undefined?null:shortNumber(after,'D');
    if(after!==undefined&&!afterNumber)fail('INVALID_CURSOR');
    const rows=(await db.query(`SELECT 'D'||d.short_id AS dialogue_id,left(d.title,128) AS title,COALESCE(s.text,recent.text) AS summary,
-    s.through_order IS NOT NULL AND EXISTS(SELECT 1 FROM dialogues_live.messages m
-     WHERE m.owner_id=d.owner_id AND m.dialogue_id=d.id AND m.message_order>s.through_order AND ${visibleMessage}) AS summary_incomplete
+    CASE WHEN s.through_order IS NOT NULL THEN EXISTS(SELECT 1 FROM dialogues_live.messages m
+     WHERE m.owner_id=d.owner_id AND m.dialogue_id=d.id AND m.message_order>s.through_order AND ${visibleMessage})
+    ELSE EXISTS(SELECT 1 FROM dialogues_live.messages m WHERE m.owner_id=d.owner_id AND m.dialogue_id=d.id
+     AND ${visibleMessage} ORDER BY m.message_order DESC OFFSET 20) END AS summary_incomplete
     FROM dialogues_live.topic_members tm JOIN dialogues_live.dialogues d ON d.owner_id=tm.owner_id AND d.id=tm.dialogue_id
     LEFT JOIN LATERAL (SELECT text,through_order FROM dialogues_live.dialogue_summaries
      WHERE owner_id=d.owner_id AND dialogue_id=d.id ORDER BY version DESC LIMIT 1) s ON true

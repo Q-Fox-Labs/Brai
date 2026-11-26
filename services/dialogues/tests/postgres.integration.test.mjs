@@ -126,6 +126,27 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.ok(input.turn_id);
   });
 
+  await t.test('общая тема не скрывает раннее решение под последним коротким ответом',async()=>{
+   const profile='shared-topic-old-important-fixture';
+   const dialogue={id:'important-b',channel:'synthetic',title:'Вторая беседа'};
+   await api.append(profile,{request_id:req(),dialogue,messages:Array.from({length:25},(_,i)=>({
+    id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',
+    text:i===0?'Решение: выпуск назначен на пятницу':i===24?'Ок':'Промежуточная деталь '+i
+   }))});
+   await exchange(api,profile,{action:'input',arguments:{request_id:req(),
+    dialogue:{id:'important-a',channel:'synthetic'},messages:[{id:'own',text:'Свои сведения'}]}});
+   const row=(await app.query("SELECT 'T'||short_id AS ref FROM dialogues_live.topics WHERE owner_id=$1 AND home_dialogue_id='important-b'",[profile])).rows[0];
+   await exchange(api,profile,{action:'topic_move',arguments:{request_id:req(),dialogue_id:'important-a',topic_id:row.ref}});
+   const result=await exchange(api,profile,{action:'poll',arguments:{request_id:req(),dialogue_id:'important-a'}});
+   const line=result.context.split('\n').find(value=>value.startsWith(row.ref+' '));
+   assert.match(line,/Решение: выпуск назначен на пятницу/);
+   assert.match(line,/Ок/);
+   assert.match(line,/неполно/);
+   assert.doesNotMatch(line,/Свои сведения/);
+   const topic=await exchange(api,profile,{action:'topic_get',arguments:{request_id:req(),topic_id:row.ref}});
+   assert.equal(topic.dialogues.find(d=>d.title==='Вторая беседа').summary_incomplete,true);
+  });
+
   await t.test('старт после миграции показывает старую свёртку до вызова модели',async()=>{
    const profile='upgrade-index-fixture';
    const old={id:'old-task',channel:'synthetic',title:'Архивный проект'};
