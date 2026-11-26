@@ -16,9 +16,11 @@ from .reply_outbox import DeliveryDeferred
 
 OFFICE_DOCUMENTS = {
     '.docx': ('application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-              'word/document.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'),
+              'word/document.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
+              '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}document'),
     '.pptx': ('application/vnd.openxmlformats-officedocument.presentationml.presentation',
-              'ppt/presentation.xml', 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'),
+              'ppt/presentation.xml', 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml',
+              '{http://schemas.openxmlformats.org/presentationml/2006/main}presentation'),
 }
 OFFICE_CONTENT_TYPES = '{http://schemas.openxmlformats.org/package/2006/content-types}'
 
@@ -154,7 +156,7 @@ class OperatorAssignmentControl:
     @staticmethod
     def checked_office_type(office, stream):
         """Recognize a published Office document using its OPC manifest and main part."""
-        mime, main_part, main_mime = office
+        mime, main_part, main_mime, main_root = office
         with ZipFile(stream) as archive:
             types = archive.getinfo('[Content_Types].xml')
             if types.file_size > 64 * 1024 or archive.getinfo(main_part).file_size <= 0:
@@ -164,6 +166,10 @@ class OperatorAssignmentControl:
                     part.get('PartName') == '/' + main_part and part.get('ContentType') == main_mime
                     for part in root.findall(OFFICE_CONTENT_TYPES + 'Override')):
                 raise ValueError('Invalid Office document package')
+            with archive.open(main_part) as document:
+                _, element = next(ElementTree.iterparse(document, events=('start',)))
+                if element.tag != main_root:
+                    raise ValueError('Invalid Office document package')
         return mime
 
     @staticmethod

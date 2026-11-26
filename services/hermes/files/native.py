@@ -167,6 +167,7 @@ async def accept_event(event, admit=True):
     inputs = getattr(event, '_brai_identity_inputs', None)
     source = source_of(event)
     media_types = getattr(event, 'media_types', []) or []
+    generation = getattr(event, '_brai_chat_generation', None)
 
     def audio_mime(index):
         mime = media_types[index] if index < len(media_types) else ''
@@ -187,7 +188,7 @@ async def accept_event(event, admit=True):
                 position = int(message_id) * 1000 + int(attachment_id)
             refs.append(await asyncio.to_thread(files.ingest, source, item['itemId'], item['path'],
                 position, item.get('caption') or '', item.get('groupId') or str(event.message_id),
-                audio_mime=audio_mime(len(refs))))
+                audio_mime=audio_mime(len(refs)), chat_generation=generation))
         event.metadata['_brai_artifacts'] = refs
         with files.db() as db:
             route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
@@ -1629,9 +1630,14 @@ async def recover(adapter):
                 rows = db.execute('SELECT * FROM items WHERE group_key=? ORDER BY position,identity', (group['identity'],)).fetchall()
                 rows = [row for row in rows if not db.execute('SELECT 1 FROM legacy_recovery_review WHERE identity=?', (row['identity'],)).fetchone()]
             previous = json.loads(group['admitted']) if group['admitted'] else []
-            if not rows or all(row['identity'] in previous for row in rows) or any(not row['artifact'] for row in rows):
+            pending = [row for row in rows if row['identity'] not in previous]
+            if not pending or any(not row['artifact'] for row in rows):
                 continue
-            origin = json.loads(rows[0]['source'])
+            origins = [json.loads(row['source']) for row in pending]
+            generation = origins[0].get('chatGeneration', 0)
+            if any(item.get('chatGeneration', 0) != generation for item in origins):
+                continue
+            origin = origins[0]
             if origin['platform'] != str(getattr(adapter.platform, 'value', adapter.platform)):
                 continue
             route = json.loads(group['route']) if group['route'] else {}
@@ -1643,12 +1649,13 @@ async def recover(adapter):
                 value = await asyncio.to_thread(files.fetch, row['artifact'])
                 refs.append({'groupId': group['identity'], 'itemId': row['identity'],
                              'file': json.loads(row['ref']), 'localPath': value['localPath']})
-            event = MessageEvent(text=rows[0]['caption'], message_type=MessageType.DOCUMENT, source=source,
+            event = MessageEvent(text=pending[0]['caption'], message_type=MessageType.DOCUMENT, source=source,
                                  message_id=origin['itemId'].rsplit(':', 1)[0],
                                  media_urls=[item['localPath'] for item in refs],
                                  media_types=[json.loads(row['source']).get('audioMime') or item['file']['mimeType']
                                               for row, item in zip(rows, refs)],
                                  metadata={'_brai_artifacts': refs, 'recovered': True})
+            event._brai_chat_generation = generation
             await adapter.handle_message(event)
     except Exception:
         logging.getLogger(__name__).warning('BRAI_FILES_RECOVERY_INCOMPLETE')
@@ -1808,6 +1815,11 @@ async def capture_authorized(adapter, event):
     if runner is None or not runner._is_user_authorized_for_source(event.source):
         finish_steer_preparation(event)
         return False
+    if (getattr(event, 'metadata', None) or {}).get('recovered'):
+        recovery_allowed = getattr(runner, '_brai_identity_recovery_allowed', None)
+        generation_current = getattr(runner, '_brai_consent_route_current', None)
+        return ((recovery_allowed is None or recovery_allowed(event.source))
+                and (generation_current is None or generation_current(event)))
     if str(getattr(event.source.platform, 'value', event.source.platform)) == 'telegram':
         admit = getattr(runner, '_admit_bot_message_for_source', None)
         if callable(admit) and not getattr(event, '_bot_loop_admitted', False):

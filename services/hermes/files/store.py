@@ -215,7 +215,7 @@ class FileStore:
                 db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
             return result
 
-    def ingest(self, source, item_id, path, position=0, caption="", group_id=None, *, audio_mime=""):
+    def ingest(self, source, item_id, path, position=0, caption="", group_id=None, *, audio_mime="", chat_generation=None):
         """Сохранить элемент по исходной identity до сборки альбома; порядок не входит в ключ файла."""
         required = {"platform", "account", "chat", "thread", "sender"}
         if (set(source) != required or any(not isinstance(v, str) for v in source.values())
@@ -233,6 +233,8 @@ class FileStore:
                 origin = {**source, "itemId": item_id, "sourceGroupId": group_id}
                 if audio_mime:
                     origin['audioMime'] = audio_mime
+                if chat_generation is not None:
+                    origin['chatGeneration'] = chat_generation
                 db.execute("INSERT OR IGNORE INTO items VALUES (?,?,?,?,?,?,NULL,NULL)",
                            (identity, group, canonical(origin), position, caption, str(path)))
                 if row and audio_mime:

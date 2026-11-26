@@ -111,18 +111,14 @@ def copy_fd(source, target, *, maximum=MAX_FILE):
     return size, digest.hexdigest()
 
 
-def copy_snapshot(root, path, uid, snapshot, expected, maximum):
-    source = open_file(root, path, uid, maximum=maximum)
+def copy_snapshot(source, snapshot, expected, maximum):
+    target = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        target = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            size, digest = copy_fd(source, target, maximum=maximum)
-            if expected is not None and (size != expected['sizeBytes'] or digest != expected['sha256']):
-                raise PermissionError('Input bytes changed')
-        finally:
-            os.close(target)
+        size, digest = copy_fd(source, target, maximum=maximum)
+        if expected is not None and (size != expected['sizeBytes'] or digest != expected['sha256']):
+            raise PermissionError('Input bytes changed')
     finally:
-        os.close(source)
+        os.close(target)
 
 
 def copy_to_profile(source, home, area, folder, name, uid, expected=None, receipt=None, *, maximum=MAX_FILE):
@@ -277,14 +273,15 @@ class OwnerFiles:
             raise PermissionError('File root denied')
         expected = self.input_admission(uid, profile, path) if admitted else None
         maximum = media_file_limit(path)
-        stage = Path(self.runtime(uid, profile)['stagingRoot'])
-        checked = open_directory(stage, 0)
-        os.close(checked)
-        folder = Path(tempfile.mkdtemp(prefix='publish-', dir=stage))
+        source = open_file(home / relative.parts[0], path, uid, maximum=maximum)
+        folder = None
         try:
+            stage = Path(self.runtime(uid, profile)['stagingRoot'])
+            checked = open_directory(stage, 0)
+            os.close(checked)
+            folder = Path(tempfile.mkdtemp(prefix='publish-', dir=stage))
             snapshot = folder / path.name
-            copying = asyncio.create_task(asyncio.to_thread(
-                copy_snapshot, home / relative.parts[0], path, uid, snapshot, expected, maximum))
+            copying = asyncio.create_task(asyncio.to_thread(copy_snapshot, source, snapshot, expected, maximum))
             try:
                 await asyncio.shield(copying)
             except asyncio.CancelledError:
@@ -293,7 +290,9 @@ class OwnerFiles:
             result = await self.control.call('artifacts.publish', {'uid': uid, 'path': str(snapshot), 'requestId': params['requestId']}, timeout=1800)
             return await asyncio.to_thread(self.materialize, uid, profile, result)
         finally:
-            shutil.rmtree(folder)
+            os.close(source)
+            if folder is not None:
+                shutil.rmtree(folder)
 
     async def create_text(self, uid, profile, params):
         """Публиковать точные UTF-8 байты без произвольного пути или программы."""

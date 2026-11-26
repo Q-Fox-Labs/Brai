@@ -77,16 +77,20 @@ class OperatorAssignmentTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_office_documents_are_verified_when_publisher_uses_octet_stream(self):
         artifact = str(uuid.uuid4())
-        for suffix, (mime, main_part, main_mime) in OFFICE_DOCUMENTS.items():
+        for suffix, (mime, main_part, main_mime, main_root) in OFFICE_DOCUMENTS.items():
             request = {'requiredMimeTypes': [mime]}
             result = {'text': 'Проверенный ответ.', 'artifactIds': [artifact]}
-            for expected, declared in ((True, main_mime), (False, 'application/xml')):
+            content_namespace, content_name = main_root[1:].split('}', 1)
+            valid_document = f'<{content_name} xmlns="{content_namespace}"/>'
+            for expected, declared, document in ((True, main_mime, valid_document),
+                                                 (False, 'application/xml', valid_document),
+                                                 (False, main_mime, '<test/>')):
                 stream = BytesIO()
                 with ZipFile(stream, 'w') as file:
                     xml = ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
                            f'<Override PartName="/{main_part}" ContentType="{declared}" /></Types>')
                     file.writestr('[Content_Types].xml', xml)
-                    file.writestr(main_part, '<test/>')
+                    file.writestr(main_part, document)
                 meta = {'artifactId': artifact, 'sizeBytes': stream.tell(), 'filename': 'result' + suffix,
                         'mimeType': 'application/octet-stream'}
                 with patch('identity.operator_assignment_control.receive_artifact', return_value=(meta, stream)):

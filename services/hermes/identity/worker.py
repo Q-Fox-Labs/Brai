@@ -267,7 +267,8 @@ class Worker:
             async def paused_admit(event):
                 def allowed():
                     state = self.chat_states.get(self._chat_route(event.source), {})
-                    return (self.route_allowed(event.source, recovery=bool(getattr(event, 'internal', False)))
+                    recovered = (getattr(event, 'metadata', None) or {}).get('recovered')
+                    return (self.route_allowed(event.source, recovery=bool(recovered or getattr(event, 'internal', False)))
                         and getattr(event, '_brai_chat_generation', state.get('generation', 0)) == state.get('generation', 0))
                 if not allowed():
                     return None

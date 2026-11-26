@@ -323,6 +323,9 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [('start append', ['/first.ogg', '/second.ogg'])] * 2)
         echo_once = inbound['_echo_pending_stt_transcripts_once']
         await asyncio.gather(*(echo_once(runner, first, object(), object(), result) for _, result in results))
+        recovered = event('/first.ogg', 'start')
+        recovered.metadata = {'recovered': True}
+        await echo_once(runner, recovered, object(), object(), ['/first.ogg'])
         self.assertCountEqual(compute, ['/first.ogg', '/second.ogg'])
         self.assertEqual(echoes, ['/first.ogg', '/second.ogg'])
 

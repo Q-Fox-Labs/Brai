@@ -547,6 +547,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
     async def test_unadmitted_voice_recovers_its_mime_and_transcription_operation(self):
         first = self.event('91')
         first.media_types = ['audio/aac']
+        first._brai_chat_generation = 4
         first._brai_identity_inputs = [{'path': first.media_urls[0], 'itemId': '91:0'}]
         self.assertTrue(await native.accept_event(first, admit=False))
         path = first.media_urls[0]
@@ -559,6 +560,11 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
 
         async def handle_message(event):
             self.assertEqual(event.media_types, ['audio/aac'])
+            self.assertEqual(event._brai_chat_generation, 4)
+            with patch.object(native, 'capture', side_effect=AssertionError('recovery attempted inline steer')):
+                self.assertFalse(await native.capture_authorized(adapter, event))
+                adapter.gateway_runner._brai_consent_route_current = lambda event: event._brai_chat_generation == 4
+                self.assertTrue(await native.capture_authorized(adapter, event))
             self.assertTrue(await native.accept_event(event))
             observed.append((event._brai_voice_operations[event.media_urls[0]], event._brai_audio_paths))
             self.assertTrue(native.commit_inbound(event.source, event.message_id))
@@ -571,7 +577,10 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         event.MessageEvent = SimpleNamespace
         ports = {'gateway.config': config, 'gateway.session': session, 'gateway.platforms.event': event}
         with patch.dict(sys.modules, ports):
-            adapter = SimpleNamespace(platform='telegram', handle_message=handle_message)
+            runner = SimpleNamespace(_is_user_authorized_for_source=lambda _: True,
+                                     _brai_identity_recovery_allowed=lambda _: True,
+                                     _brai_consent_route_current=lambda event: event._brai_chat_generation == 5)
+            adapter = SimpleNamespace(platform='telegram', handle_message=handle_message, gateway_runner=runner)
             await native.recover(adapter)
             await native.recover(adapter)
         self.assertEqual(observed, [(operation, {path})])
