@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import instructions, images
-from identity.native_policy import install_dialogues_result_budget
+from identity.native_policy import dialogues_result, install_dialogues_result_budget
 from identity.skills import catalog_files
 from identity import skills as system_skills
 from identity.synthesize import synthesize_file
@@ -224,6 +224,17 @@ class SystemTests(unittest.TestCase):
                              'Приоритет общения. Личное дополнение.')
             self.assertIn('Current policies/DIALOGUES.md', instructions.read_context(root))
         self.assertEqual(instructions.without_legacy_dialogues(previous), previous)
+
+    def test_dialogues_native_error_distinguishes_rejection_from_unknown_outcome(self):
+        rejection = {'code': 'INVALID_ARGUMENT', 'applied': False}
+        timeout = {'code': 'DEADLINE_EXCEEDED'}
+        label = '<untrusted_tool_result source="mcp__brai__dialogues_exchange">'
+        for value in (rejection, timeout):
+            encoded = json.dumps({'error': json.dumps(value)})
+            self.assertEqual(dialogues_result(encoded).get('applied'), value.get('applied'))
+            self.assertEqual(dialogues_result(label + '\n' + encoded + '\n</untrusted_tool_result>').get('applied'),
+                             value.get('applied'))
+        self.assertEqual(dialogues_result({'structuredContent': {'status': 'rejected'}}), {'status': 'rejected'})
 
     def test_dialogues_context_and_short_id_pages_use_turn_budget(self):
         calls = []

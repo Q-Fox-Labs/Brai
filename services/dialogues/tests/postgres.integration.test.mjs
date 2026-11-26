@@ -82,20 +82,25 @@ test('PostgreSQL: обмен, контекст, история и перенос
    ]});
    await api.summary(profile,{request_id:req(),dialogue_id:old.id,through_message_id:'first',target:'dialogue',
     expected_version:null,text:fact+' '+('Детали '.repeat(2500))});
+   await api.append(profile,{request_id:req(),dialogue:{...old,id:'message-summary-only',title:'Отдельный стенд'},messages:[
+    {id:'only',turn_id:'old',role:'user',kind:'input',text:'Исходный длинный текст. '.repeat(10),
+     summary:'Репозиторий уже перенесён.',occurred_at:'2025-01-01T00:00:00Z'}
+   ]});
    await owner.query('DELETE FROM dialogues_live.topic_members WHERE owner_id=$1',[profile]);
    await owner.query('DELETE FROM dialogues_live.topics WHERE owner_id=$1',[profile]);
    await api.append(profile,{request_id:req(),dialogue:{id:'newer',channel:'synthetic'},
     messages:Array.from({length:25},(_,i)=>({id:'recent-'+i,turn_id:'recent',role:'user',kind:'input',
      text:'Свежий текст '+i,occurred_at:'2025-01-02T00:00:00Z'}))});
-   assert.equal(await seedTopicIndex(app,profile),1);
+   assert.equal(await seedTopicIndex(app,profile),2);
    assert.equal(await seedTopicIndex(app,profile),0);
    const input=(owner,id)=>exchange(api,owner,{action:'input',arguments:{request_id:req(),
     dialogue:{id:'new',channel:'synthetic'},messages:[{id,text:'Начало работы'}]}});
    const first=await input(profile,'input-1');
    const line=first.context.split('\n').find(line=>line.includes(fact));
-   assert.match(line,/^T[1-9]\d* "Архивный проект" .*\[из свёртки беседы\]$/u);
-   assert.ok(countContextTokens(JSON.parse(line.split('"Архивный проект" ')[1].split(' [из свёртки беседы]')[0]))<=400);
-   assert.doesNotMatch(first.context,/Старое сообщение/u);
+   assert.match(line,/^T[1-9]\d* "Архивный проект" .*\[из архива\]$/u);
+   assert.ok(countContextTokens(JSON.parse(line.split('"Архивный проект" ')[1].split(' [из архива]')[0]))<=400);
+   assert.match(first.context,/^T[1-9]\d* "Отдельный стенд" "Репозиторий уже перенесён." \[из архива\]$/mu);
+   assert.doesNotMatch(first.context,/Старое сообщение|Исходный длинный текст/u);
    assert.equal((await input(profile,'input-2')).context,null);
    assert.equal((await input('another-owner','input-1')).context,null);
   });

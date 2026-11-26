@@ -58,13 +58,20 @@ export async function recentTopics(db:PoolClient,owner:string,pinned?:string,cur
   )
   SELECT recent.*,fallback.text AS fallback FROM recent
   LEFT JOIN LATERAL (
-   SELECT left(ds.text,1600) AS text
+   SELECT left(COALESCE(ds.text,ms.text),1600) AS text
    FROM dialogues_live.topic_members tm
-   JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.dialogue_summaries
+   LEFT JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.dialogue_summaries
     WHERE owner_id=tm.owner_id AND dialogue_id=tm.dialogue_id ORDER BY version DESC LIMIT 1) ds ON true
-   WHERE tm.owner_id=$1 AND tm.topic_id=recent.id
+   LEFT JOIN LATERAL (
+    SELECT s.text,s.change_seq FROM dialogues_live.messages m
+    JOIN LATERAL (SELECT text,change_seq FROM dialogues_live.message_summaries
+     WHERE owner_id=m.owner_id AND dialogue_id=m.dialogue_id AND message_id=m.id ORDER BY version DESC LIMIT 1) s ON true
+    WHERE m.owner_id=tm.owner_id AND m.dialogue_id=tm.dialogue_id AND ${visibleMessage}
+    ORDER BY m.message_order DESC LIMIT 1
+   ) ms ON ds.text IS NULL
+   WHERE tm.owner_id=$1 AND tm.topic_id=recent.id AND COALESCE(ds.text,ms.text) IS NOT NULL
     AND ($3::text IS NULL OR tm.dialogue_id<>$3)
-   ORDER BY ds.change_seq DESC,tm.dialogue_id LIMIT 1
+   ORDER BY (ds.text IS NOT NULL) DESC,COALESCE(ds.change_seq,ms.change_seq) DESC,tm.dialogue_id LIMIT 1
   ) fallback ON recent.version IS NULL AND NOT $4::boolean
   ORDER BY (recent.id IS NOT DISTINCT FROM $2) DESC,last_activity DESC,recent.id`,[owner,pinned??null,currentDialogue??null,legacy])).rows;
 }

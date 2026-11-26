@@ -80,7 +80,7 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
    }
    excerpt=excerpt.trimEnd()+'…';
   }
-  const provisional=fallback&&!(index<20?extended:compact)?' [из свёртки беседы]':'';
+  const provisional=fallback&&!(index<20?extended:compact)?' [из архива]':'';
   const line=titles[index]+(excerpt?quote(excerpt)+provisional:'[свёртка готовится]');
   view[topic_id]=digest(line);
   if(previous[topic_id]!==view[topic_id])lines.push(line);
