@@ -32,6 +32,41 @@ _resolvers = {}
 _notices = {}
 _logger = logging.getLogger(__name__)
 
+_WAIT = r'(?:пожалуйста[ ,]+)?(?:жди|ждите|подожди|подождите)(?:[ ,]+пожалуйста)?'
+_SOURCE_FILE = r'это (?:таблица|файл|документ|первый (?:файл|документ|протокол))'
+_INCOMING_FILES = (
+    r'(?:(?:сейчас|скоро) (?:будет|будут)|(?:я )?(?:(?:сейчас|скоро) )?(?:пришлю|отправлю|загружу)) '
+    r'(?:ещ[её] )?(?:(?:один|одну|два|две|три|пару|несколько|следующий|следующее) )?'
+    r'(?:файл(?:а|ы|ов)?|документ(?:а|ы|ов)?|протокол(?:а|ы|ов)?|таблиц(?:а|у|ы)?)'
+)
+_WAITING_TEXT = re.compile(
+    rf'(?:{_WAIT}|{_SOURCE_FILE}[,.! ]+{_WAIT}|{_WAIT}[,.! ]+{_INCOMING_FILES}|{_INCOMING_FILES})[.!]*'
+)
+
+
+def _waiting_for_files(event, message_type, inputs):
+    """Permit silence only for a standalone wait or incoming-file notice."""
+    text = getattr(event, 'text', None)
+    if (message_type != 'text' or not isinstance(text, str) or not text.strip() or inputs
+            or getattr(event, 'media_urls', None) or getattr(event, 'media_types', None)
+            or getattr(event, 'media_text_inlined', None)):
+        return False
+    return all(_WAITING_TEXT.fullmatch(' '.join(line.casefold().split()))
+               for line in text.splitlines() if line.strip())
+
+
+def _private_topic_failure(error):
+    """Classify a refusal without conflating it with a lost acceptance."""
+    from plugins.platforms.telegram.adapter import _BraiPrivateTopicRetryFailed
+    from telegram.error import BadRequest, Forbidden
+    if isinstance(error, _BraiPrivateTopicRetryFailed):
+        kind = error.args[0]
+    elif isinstance(error, (BadRequest, Forbidden)):
+        kind = 'telegram_rejected'
+    else:
+        return None
+    return {'success': False, 'retryable': False, 'error_kind': kind}
+
 
 async def broker_call(method, params, timeout=15):
     """Вызвать единственный root broker, проверив его UID ядром."""
@@ -1105,6 +1140,8 @@ class Resolver:
         if voice_retry:
             data['voice_retry'] = True
         data['message_type'] = getattr(event.message_type, 'value', event.message_type)
+        if _waiting_for_files(event, data['message_type'], inputs):
+            data['reply_expected'] = False
         document = getattr(getattr(event, 'raw_message', None), 'document', None)
         declared = getattr(document, 'mime_type', None)
         if (data['message_type'] == 'video' and isinstance(declared, str) and declared.startswith('audio/')
@@ -1257,6 +1294,16 @@ class Resolver:
         uid = profile['uid']
         input_id = turn.get('inputId') if turn else None
         offer_id = turn.get('accountOfferId') if turn else None
+        async def recheck_anchor(anchor):
+            try:
+                active = await self._account(profile, route[0])
+                if (any(active.get(key) != profile.get(key) for key in ('role', 'generation'))
+                        or not self.ledger.owns(profile, route, anchor, outgoing=False)):
+                    raise PermissionError('Telegram reply anchor is no longer admitted')
+                current()
+            except (ConnectionError, TimeoutError, RpcError) as error:
+                raise PermissionError('Telegram reply authorization unavailable') from error
+
         file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
         if turn is not None and turn.get('replyTo') and action in ('send', 'send_file_set', *file_actions):
             payload = {**payload, 'reply_to': turn['replyTo']}
@@ -1292,19 +1339,37 @@ class Resolver:
                         'caption': item['caption'], 'presentation': view})
                 validate_telegram(prepared)
                 current()
-                # Только media API receipt означает доставку файла. Native text fallback
-                # после ошибки не может превратиться в успешный голосовой ответ.
-                with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
-                    parameters = {'strict': True, 'before_send': before_send} if before_send is not None else {}
-                    ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
-                                                fallback, reply_to=payload.get('reply_to'), **parameters)
+                anchor = payload.get('reply_to') or metadata.get('telegram_reply_to_message_id')
+                private_topic = (route[1] and metadata.get('telegram_dm_topic_reply_fallback')
+                                 and callable(getattr(self.adapter, '_brai_send_with_private_topic_retry', None)))
+                parameters = {'strict': True, 'before_send': before_send} if before_send is not None else {}
+                if private_topic and anchor and (before_retry is not None
+                        or self.ledger.owns(profile, route, anchor, outgoing=False)):
+                    async def check_retry():
+                        if before_retry is not None:
+                            await before_retry()
+                            current()
+                        else:
+                            await recheck_anchor(anchor)
+
+                    parameters.update(before_retry=check_retry, topic_anchor=anchor)
+                try:
+                    with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
+                        ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
+                                                    fallback, reply_to=payload.get('reply_to'), **parameters)
+                except Exception as error:
+                    failure = _private_topic_failure(error) if private_topic else None
+                    if failure is None:
+                        raise
+                    return failure
                 if (not isinstance(ids, list) or len(ids) != len(prepared)
                         or any(type(value) not in (int, str) or not str(value).isdecimal()
-                               or int(value) <= 0 for value in ids)):
-                    raise ValueError('Incomplete file delivery receipt')
+                               or int(value) <= 0 for value in ids)
+                        or len({int(value) for value in ids}) != len(ids)):
+                    return {'success': False, 'retryable': False, 'error_kind': 'delivery_unknown'}
                 ids = [str(value) for value in ids]
                 for message_id in ids:
-                    self._record_delivery(profile, route, message_id, current.generation, created=action != 'edit_message')
+                    self._index_delivery(profile, route, message_id, current.generation, created=True)
                 return {'success': True, 'message_id': ids[-1], 'continuation_message_ids': ids[:-1],
                         'raw_response': {'message_ids': ids}}
             finally:
@@ -1323,35 +1388,37 @@ class Resolver:
             with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
                 send = getattr(self.adapter, '_brai_send_with_private_topic_retry', None)
                 if callable(send):
-                    from plugins.platforms.telegram.adapter import _BraiPrivateTopicRetryFailed
-                    from telegram.error import BadRequest, Forbidden
-                    attempted = False
-
-                    async def wire():
-                        nonlocal attempted
-                        if attempted:
-                            await before_retry()
-                            current()
-                        attempted = True
-                        return await self.adapter._send_chunk_markdown_or_plain(formatted, target)
+                    async def check_retry():
+                        await before_retry()
+                        current()
 
                     try:
-                        sent = await send(wire, metadata, target, values['reply_to'])
-                    except _BraiPrivateTopicRetryFailed as error:
-                        kind = error.args[0]
-                        if isinstance(error.__cause__, PermissionError):
-                            kind = 'forbidden'
-                        elif isinstance(error.__cause__, (BadRequest, Forbidden)) and kind == 'delivery_unknown':
-                            kind = 'telegram_rejected'
-                        return {'success': False, 'retryable': False, 'error_kind': kind}
+                        anchor = values['reply_to']
+                        trusted = {**metadata, 'telegram_reply_to_message_id': anchor}
+                        sent = await send(lambda options: self.adapter._send_chunk_markdown_or_plain(formatted, options),
+                                          trusted, target, anchor, before_retry=check_retry)
+                    except Exception as error:
+                        failure = _private_topic_failure(error)
+                        if failure is None:
+                            raise
+                        return failure
                 else:
                     sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
-            verify_telegram_target(sent, target)
+            from files.store import FileError
+            try:
+                verify_telegram_target(sent, target)
+            except FileError:
+                return {'success': False, 'retryable': False, 'error_kind': 'delivery_unknown'}
             message_id = getattr(sent, 'message_id', None)
             if type(message_id) is not int or message_id <= 0:
-                raise ValueError('Missing operator assignment delivery receipt')
-            self._record_delivery(profile, route, message_id, current.generation, created=True)
+                return {'success': False, 'retryable': False, 'error_kind': 'delivery_unknown'}
+            self._index_delivery(profile, route, message_id, current.generation, created=True)
             return {'success': True, 'message_id': str(message_id)}
+        anchor = values.get('reply_to') or metadata.get('telegram_reply_to_message_id')
+        if (action == 'send' and metadata.get('telegram_dm_topic_reply_fallback') and anchor
+                and self.ledger.owns(profile, route, anchor, outgoing=False)):
+            values['metadata'] = {**metadata, 'telegram_reply_to_message_id': anchor,
+                                  '_brai_before_topic_retry': lambda: recheck_anchor(anchor)}
         method = getattr(self.adapter, action, None)
         if not callable(method):
             raise ValueError('Native delivery unavailable')
@@ -1394,7 +1461,7 @@ class Resolver:
         if receipt.get('success'):
             for message_id in [receipt.get('message_id'), *(receipt.get('continuation_message_ids') or [])]:
                 if message_id:
-                    self._record_delivery(profile, route, message_id, current.generation, created=action != 'edit_message')
+                    self._index_delivery(profile, route, message_id, current.generation, created=action != 'edit_message')
         return receipt
 
     def _chat_generation(self, profile, route, expected=UNSCOPED):
@@ -1411,6 +1478,13 @@ class Resolver:
         if created and self.journal is not None:
             canonical = (route[0], '' if route[1] == '1' else route[1])
             self.journal.record_presentation(profile, canonical, message_id, generation)
+
+    def _index_delivery(self, profile, route, message_id, generation, *, created):
+        """Retain Telegram's receipt if the secondary route index is unavailable."""
+        try:
+            self._record_delivery(profile, route, message_id, generation, created=created)
+        except (sqlite3.Error, OSError) as error:
+            _logger.warning('telegram_receipt_index_failed error=%s', type(error).__name__)
 
     async def interactive_binding(self, update):
         """Проверить настоящего clicker и точное сообщение его личного worker."""

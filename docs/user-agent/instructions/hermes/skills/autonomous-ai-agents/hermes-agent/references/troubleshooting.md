@@ -1,9 +1,12 @@
 # Troubleshooting
 
 ### Voice not working
-1. Check `stt.enabled: true` in config.yaml
-2. Verify provider: `python -c "import pm; pm.sync_venv(['stt-whisper'], explicit=True)"` or set API key
-3. In gateway: `/restart`. In CLI: exit and relaunch.
+
+In a managed Brai profile, check the request and service status through
+Transcription. Keep the original media. To continue interrupted processing of a
+local file, use the original file and the original output path. If the service is
+unavailable, report that state to the user. For a separately managed Hermes
+installation, inspect the configured recognition provider and its status.
 
 ### Tool not available
 1. `hermes tools` — check if toolset is enabled for your platform

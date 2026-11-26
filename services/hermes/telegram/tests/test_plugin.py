@@ -202,6 +202,19 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.resume_operator_request()
         self.assertEqual(len(calls), 1)
 
+    async def test_identity_worker_leaves_the_old_operator_file_inert(self):
+        self.plugin.config = replace(self.config, identity_worker=True, game_core_enabled=False)
+        path = self.config.state_dir / 'operator-resume.json'
+        request = {'requestId': ATTEMPT, 'status': 'pending',
+                   'sessionKey': self.native_context['HERMES_SESSION_KEY'], 'content': 'Служебное поручение'}
+        path.write_text(json.dumps(request))
+        path.chmod(0o600)
+        calls = []
+        self.plugin.inject_message = lambda *args, **kwargs: calls.append((args, kwargs)) or True
+        await self.plugin.resume_operator_request()
+        self.assertEqual(json.loads(path.read_text()), request)
+        self.assertEqual(calls, [])
+
     async def test_operator_resume_waits_for_native_host_before_its_only_injection(self):
         """Factory может стартовать до host; до готовности нет попытки или смены marker."""
         calls = []

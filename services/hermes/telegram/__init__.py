@@ -669,9 +669,10 @@ class TelegramPlugin:
             task = self.loop.create_task(self._recover_history())
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
-        task = self.loop.create_task(self.resume_operator_request())
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        if not self.config.identity_worker:
+            task = self.loop.create_task(self.resume_operator_request())
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
         if not self.config.game_core_enabled:
             task = self.loop.create_task(self._recover_input_notices())
             self.tasks.add(task)
@@ -705,6 +706,8 @@ class TelegramPlugin:
         Статус submitting после обрыва означает неизвестный исход; автоматического
         повтора нет. Успешная постановка в native loop ещё не подтверждает ответ.
         """
+        if self.config.identity_worker:
+            return
         path = self.config.state_dir / 'operator-resume.json'
         try:
             info = path.lstat()
