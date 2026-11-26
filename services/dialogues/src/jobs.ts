@@ -12,7 +12,7 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
  const tail=(await db.query(`SELECT count(*)::integer AS count,max(message_order)::text AS through_order,max(recorded_at) AS last_at
  FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND message_order>=$3 AND change_seq<=$4 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND (z.final_message_id IS DISTINCT FROM dialogues_live.messages.id OR z.completion_seq>$4))`,[owner,dialogue,from,boundary])).rows[0];
  if(!tail.count||tail.count<10&&(!idle||Date.now()-Date.parse(tail.last_at)<6*3600000))return false;
- const blocked=(await db.query("SELECT 1 FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND dialogue_id=$2 AND (state IN('queued','running') OR (state='failed' AND through_order>=$3)) LIMIT 1",[owner,dialogue,tail.through_order])).rowCount;
+ const blocked=(await db.query("SELECT 1 FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND dialogue_id=$2 AND (state IN('queued','running') OR (state='failed' AND through_order>=$3 AND previous_version IS NOT DISTINCT FROM $4::bigint)) LIMIT 1",[owner,dialogue,tail.through_order,previous?.version??null])).rowCount;
  if(blocked)return false;
  const last=(await db.query('SELECT id FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND message_order=$3',[owner,dialogue,tail.through_order])).rows[0];
  await db.query(`INSERT INTO dialogues_live.summary_jobs(owner_id,id,dialogue_id,previous_version,from_order,through_order,through_message_id,boundary_seq,state,progress)
@@ -24,7 +24,8 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
  let preferTopics=true;
  let running=false,stopping=false,timer:NodeJS.Timeout|undefined,active:Promise<void>|undefined,verified=false;
  const recoverable=['LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE',
-  'LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','ATTEMPTS_EXHAUSTED'];
+  'LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','LUNA_CLI_UNAVAILABLE','LUNA_RPC_REJECTED',
+  'LUNA_EXECUTION_TIMEOUT','LUNA_EXECUTION_FAILED','NATIVE_OUTCOME_UNKNOWN','ATTEMPTS_EXHAUSTED'];
  async function schedule(){
   return ownerTransaction(pool,owner,async db=>{
    const boundary=(await db.query('SELECT COALESCE(max(change_seq),0)::text AS seq FROM dialogues_live.requests WHERE owner_id=$1',[owner])).rows[0].seq;

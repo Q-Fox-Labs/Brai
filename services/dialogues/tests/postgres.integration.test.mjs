@@ -105,6 +105,48 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.doesNotMatch(mixed.context,/Собственный факт A3/);
   });
 
+  await t.test('карточка общей темы сохраняет свежие короткие сведения нескольких бесед',async()=>{
+   const profile='shared-topic-coverage-fixture';
+   const add=(dialogue,messages)=>api.append(profile,{request_id:req(),dialogue:{id:dialogue,channel:'synthetic',title:dialogue},
+    messages:messages.map((text,i)=>({id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',text}))});
+   await add('many-b',Array.from({length:25},(_,i)=>'Факт B'+i));
+   await add('many-c',['Факт C']);
+   const input=await exchange(api,profile,{action:'input',arguments:{request_id:req(),
+    dialogue:{id:'many-a',channel:'synthetic',title:'many-a'},messages:[{id:'a',text:'Текущий факт A'}]}});
+   const row=(await app.query("SELECT 'T'||short_id AS ref FROM dialogues_live.topics WHERE owner_id=$1 AND home_dialogue_id='many-b'",[profile])).rows[0];
+   for(const dialogue_id of ['many-a','many-c'])await exchange(api,profile,{action:'topic_move',
+    arguments:{request_id:req(),dialogue_id,topic_id:row.ref}});
+   await api.summary(profile,{request_id:req(),dialogue_id:'many-b',through_message_id:'m4',target:'dialogue',
+    expected_version:null,text:'Старая свёртка B. '.repeat(200)});
+   const result=await exchange(api,profile,{action:'poll',arguments:{request_id:req(),dialogue_id:'many-a'}});
+   const line=result.context.split('\n').find(value=>value.startsWith(row.ref+' '));
+   assert.match(line,/Факт B24/);
+   assert.match(line,/Факт C/);
+   assert.doesNotMatch(line,/Текущий факт A/);
+   assert.ok(input.turn_id);
+  });
+
+  await t.test('общая тема не скрывает раннее решение под последним коротким ответом',async()=>{
+   const profile='shared-topic-old-important-fixture';
+   const dialogue={id:'important-b',channel:'synthetic',title:'Вторая беседа'};
+   await api.append(profile,{request_id:req(),dialogue,messages:Array.from({length:25},(_,i)=>({
+    id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',
+    text:i===0?'Решение: выпуск назначен на пятницу':i===24?'Ок':'Промежуточная деталь '+i
+   }))});
+   await exchange(api,profile,{action:'input',arguments:{request_id:req(),
+    dialogue:{id:'important-a',channel:'synthetic'},messages:[{id:'own',text:'Свои сведения'}]}});
+   const row=(await app.query("SELECT 'T'||short_id AS ref FROM dialogues_live.topics WHERE owner_id=$1 AND home_dialogue_id='important-b'",[profile])).rows[0];
+   await exchange(api,profile,{action:'topic_move',arguments:{request_id:req(),dialogue_id:'important-a',topic_id:row.ref}});
+   const result=await exchange(api,profile,{action:'poll',arguments:{request_id:req(),dialogue_id:'important-a'}});
+   const line=result.context.split('\n').find(value=>value.startsWith(row.ref+' '));
+   assert.match(line,/Решение: выпуск назначен на пятницу/);
+   assert.match(line,/Ок/);
+   assert.match(line,/неполно/);
+   assert.doesNotMatch(line,/Свои сведения/);
+   const topic=await exchange(api,profile,{action:'topic_get',arguments:{request_id:req(),topic_id:row.ref}});
+   assert.equal(topic.dialogues.find(d=>d.title==='Вторая беседа').summary_incomplete,true);
+  });
+
   await t.test('старт после миграции показывает старую свёртку до вызова модели',async()=>{
    const profile='upgrade-index-fixture';
    const old={id:'old-task',channel:'synthetic',title:'Архивный проект'};
@@ -219,7 +261,8 @@ test('PostgreSQL: обмен, контекст, история и перенос
   });
 
   await t.test('другие временные отказы и истёкшие аренды восстанавливаются после проверки модели',async()=>{
-   for(const code of ['LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','LUNA_CATALOG_UNAVAILABLE','ATTEMPTS_EXHAUSTED']){
+   for(const code of ['LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','LUNA_CATALOG_UNAVAILABLE',
+                      'NATIVE_OUTCOME_UNKNOWN','LUNA_EXECUTION_TIMEOUT','ATTEMPTS_EXHAUSTED']){
     const profile='recovery-'+code;
     let online=false;
     const luna={async probe(){if(!online)throw new DialoguesFault('LUNA_UNAVAILABLE');},
@@ -235,6 +278,48 @@ test('PostgreSQL: обмен, контекст, история и перенос
     assert.equal((await app.query("SELECT state FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0].state,'succeeded');
     assert.equal((await app.query("SELECT count(*)::integer AS n FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[profile])).rows[0].n,1);
    }
+  });
+
+  await t.test('потерянный запрос Luna продолжает работу с сохранённым прогрессом',async()=>{
+   for(const code of ['NATIVE_OUTCOME_UNKNOWN','LUNA_EXECUTION_TIMEOUT']){
+    const profile='running-recovery-'+code;
+    let online=false,resumed=false;
+    const luna={async probe(){},async run(_input,state,save){
+     if(!online){
+      await save({execution_state:'running',native_thread_id:'synthetic',native_launch_id:'synthetic'});
+      throw new DialoguesFault(code);
+     }
+     resumed=state.execution_state==='running'&&state.native_thread_id==='synthetic';
+     return 'Свёртка после перезапуска';
+    }};
+    const jobs=createJobs(app,profile,luna);
+    await api.append(profile,{request_id:req(),dialogue:{id:'recovery',channel:'synthetic'},
+     messages:Array.from({length:10},(_,i)=>({id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',text:'Вход '+i}))});
+    for(let i=0;i<3;i++){
+     await owner.query("UPDATE dialogues_live.summary_jobs SET available_at=now() WHERE owner_id=$1",[profile]);
+     await jobs.tick();
+    }
+    assert.equal((await app.query("SELECT state FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0].state,'failed');
+    online=true;
+    await owner.query("UPDATE dialogues_live.summary_jobs SET available_at=now() WHERE owner_id=$1",[profile]);
+    await jobs.tick();
+    assert.equal(resumed,true);
+    assert.equal((await app.query("SELECT state FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0].state,'succeeded');
+   }
+  });
+
+  await t.test('устаревшее failed-задание не блокирует непокрытый хвост новой версии',async()=>{
+   const profile='stale-failed-fixture';
+   const jobs=createJobs(app,profile,{async probe(){},async run(){return 'Обновлённая свёртка';}});
+   await api.append(profile,{request_id:req(),dialogue:{id:'stale',channel:'synthetic'},
+    messages:Array.from({length:10},(_,i)=>({id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',text:'Вход '+i}))});
+   await owner.query("UPDATE dialogues_live.summary_jobs SET state='failed',attempts=3,error_code='LUNA_AUTH_UNAVAILABLE' WHERE owner_id=$1",[profile]);
+   await api.summary(profile,{request_id:req(),dialogue_id:'stale',through_message_id:'m4',
+    target:'dialogue',expected_version:null,text:'Ручная свёртка первых сообщений'});
+   await owner.query("UPDATE dialogues_live.messages SET recorded_at=now()-interval '7 hours' WHERE owner_id=$1",[profile]);
+   await jobs.schedule();
+   const jobsByState=(await app.query("SELECT state,previous_version::text FROM dialogues_live.summary_jobs WHERE owner_id=$1 ORDER BY state",[profile])).rows;
+   assert.deepEqual(jobsByState,[{state:'failed',previous_version:null},{state:'queued',previous_version:'1'}]);
   });
 
   await t.test('фон сохраняет компактную версию отдельно от обычного саммари',async()=>{
