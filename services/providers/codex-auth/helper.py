@@ -121,14 +121,13 @@ def accepted_owner(provider):
     require(str(paths['ownerHome']) in mounts and str(paths['codexHome']) in mounts
             and 'rw' in mounts[str(paths['ownerHome'])] and 'rw' in mounts[str(paths['codexHome'])]
             and 'ro' in mounts.get(str(target), []))
-    # ownerHome не принадлежит Root; проверка закрытого bind mount идёт отдельно.
+    # Root launcher проверяет исходный файл. Provider UID проверяет его read-only mount.
     fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(fd, 'rb') as source:
         item = os.fstat(source.fileno())
         require(stat.S_ISREG(item.st_mode) and item.st_uid == 0
                 and item.st_nlink == 1 and not item.st_mode & 0o222
                 and hashlib.sha256(source.read()).hexdigest() == p['closedConfig']['sha256'])
-    root_file(p['closedConfig']['path'], p['closedConfig']['sha256'])
     spec = importlib.util.spec_from_file_location('_accepted_subscription_codex_owner', helper)
     owner = importlib.util.module_from_spec(spec)
     # AIDEV-NOTE: Исполняются проверенные байты, без повторного открытия пути.
