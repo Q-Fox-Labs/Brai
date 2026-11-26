@@ -39,6 +39,8 @@ class DeliveryJournal:
             db.execute('''CREATE TABLE IF NOT EXISTS output_deliveries (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
                 action TEXT NOT NULL, payload TEXT NOT NULL, phase TEXT NOT NULL, receipt TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS operator_turns (
+                session_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, operation_id TEXT NOT NULL)''')
 
     @contextmanager
     def open(self):
@@ -108,6 +110,22 @@ class DeliveryJournal:
         with self.open() as db:
             db.execute("DELETE FROM output_deliveries WHERE id=? AND action='continuation' AND phase='continuation'",
                        (delivery_id(['continuation', session_key]),))
+
+    def hold_operator_turn(self, session_key, session_id, operation_id):
+        """Keep a hidden native turn outside normal continuation after worker restart."""
+        with self.open() as db:
+            db.execute('''INSERT INTO operator_turns VALUES(?,?,?) ON CONFLICT(session_key) DO UPDATE SET
+                session_id=excluded.session_id, operation_id=excluded.operation_id''',
+                (session_key, session_id, operation_id))
+
+    def operator_session_id(self, session_key):
+        with self.open() as db:
+            row = db.execute('SELECT session_id FROM operator_turns WHERE session_key=?', (session_key,)).fetchone()
+            return row[0] if row is not None else None
+
+    def clear_operator_turn(self, session_key):
+        with self.open() as db:
+            db.execute('DELETE FROM operator_turns WHERE session_key=?', (session_key,))
 
     def begin_input(self, ident, digest):
         """До native handler закрепить попытку; dispatching после crash не переисполняется."""

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { ErrorCode as McpErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { connect, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
 import { compileInput, natsTools, gameCoreNames, historyNames, transcriptionNames } from './catalog.mjs';
 import { planningReadTool, readPlanningPacket } from './planning-read.mjs';
@@ -115,7 +116,8 @@ export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeo
   }
   return {
     list: () => invoke('listTools', {}, undefined, timeout, true),
-    call: (name, args, signal) => invoke('callTool', { name, arguments: args }, signal, callTimeout, repeatableMcpTools.has(name)),
+    call: (name, args, signal, contextReceipt) => invoke('callTool', { name, arguments: args,
+      ...(contextReceipt?{_meta:{brai_dialogues_delivery:contextReceipt}}:{}) }, signal, callTimeout, repeatableMcpTools.has(name)),
     async close() { closed = true; await opening?.catch(() => {}); await Promise.allSettled([...clients].map(value => value.close())); clients.clear(); current = undefined; },
   };
 }
@@ -143,7 +145,8 @@ export async function connectPorts(config) {
       if(name==='dialogues'&&config.dialogues?.enabled!==true)continue;
       if (config[name]?.enabled === false) continue;
       const endpoint = config[name];
-      const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
+      const endpointClient = await connectMcpEndpoint(endpoint, { timeout,
+        callTimeout: name==='dialogues'?timeout:config.longRequestTimeoutMs??300_000, endpointName: name });
       clients.push(endpointClient);
       endpoints[name] = endpointClient;
     }
@@ -156,8 +159,8 @@ export async function connectPorts(config) {
     endpoints.publisher = publisher;
     return {
       async list(name) { return (await endpoints[name].list()).tools; },
-      async mcp(name, tool, args, signal) {
-        const response=await endpoints[name].call(tool,args,signal);
+      async mcp(name, tool, args, signal, contextReceipt) {
+        const response=await endpoints[name].call(tool,args,signal,contextReceipt);
         if(name==='dialogues')return response;
         return unwrap(response, { planning: name === 'gameCore' && tool.startsWith('game_core_planning_') });
       },
@@ -275,6 +278,14 @@ export async function createBraiTools(config, ports) {
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {
       if (!object(args) || hasOwner(args)) throw fault('INVALID_ARGUMENT');
+      let contextReceipt;
+      if(name==='dialogues_exchange'&&Object.hasOwn(args,'_brai_context_receipt')){
+        const {_brai_context_receipt:receipt,...exchange}=args;
+        if(exchange.context!==undefined||!['input','poll'].includes(exchange.action)||typeof receipt!=='string'||
+            !/^(?:start|[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12})$/.test(receipt))throw fault('INVALID_ARGUMENT');
+        contextReceipt=receipt;
+        args=exchange;
+      }
       // AIDEV-NOTE: Старый каталог загруженной сессии не может обойти выключение владельцем.
       if (!gameCoreEnabled && name.startsWith('game_core_')) throw fault('GAME_CORE_DISABLED');
       if (name === 'local_ai_invoke_synthesize' && typeof args.text === 'string' && /[^А-Яа-яЁё\s.,!?;:—–\-…«»"'()]/u.test(args.text)) throw fault('VOICE_TEXT_REQUIRES_CYRILLIC');
@@ -326,11 +337,17 @@ export async function createBraiTools(config, ports) {
           }
           mutation = name === 'publish_file' || /(?:_create|_revise|_reclassify|_expand_repeat|_link|_activate|_claim|_complete|_fail|_submit|_cancel|_set|_bind|_build|_apply|_skip)$/.test(name);
           if(upstream.endpoint==='dialogues'){
-            try{return await ports.mcp(upstream.endpoint,name,args,signal);}
+            try{return await ports.mcp(upstream.endpoint,name,args,signal,contextReceipt);}
             catch(error){
               const forbidden=error.code===401||error.code===403;
-              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
-              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую'})}]};
+              const timedOut=[McpErrorCode.RequestTimeout,'TIMEOUT','DEADLINE_EXCEEDED'].includes(error.code);
+              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:
+                timedOut?{code:'DEADLINE_EXCEEDED',...(error.applied===false?{applied:false}:{})}:
+                error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
+              const next_action=forbidden?'Проверьте доступ':timedOut?'Вызови bug_hunt_help, зарегистрируй тайм-аут и продолжай разрешённую работу. Сохрани прежний request_id для сверки исхода.':
+                error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':
+                'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую';
+              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action})}]};
             }
           }
           return await ports.mcp(upstream.endpoint, name, args, signal);

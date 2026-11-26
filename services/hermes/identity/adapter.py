@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from contextvars import ContextVar
 from .ipc import RpcError
-from .scope import delivery_scope, input_delivery
+from .scope import delivery_scope, input_delivery, operator_assignment
 from .telegram_proxy import BotProxy
 
 
@@ -31,13 +31,26 @@ def make_adapter(config, platform, peer, publish_file):
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
         def _send_retry_is_final(self, result):
-            """Outbox владеет повтором сохранённого ответа; запрет прав не лечится fallback."""
-            return (getattr(result, 'error_kind', None) in {'delivery_pending', 'forbidden'}
+            """Сохранить решение ingress об отправке и не создавать новый исходящий ответ."""
+            return (getattr(result, 'error_kind', None) in {
+                        'delivery_pending', 'forbidden', 'topic_unavailable', 'telegram_rejected', 'delivery_unknown'}
                     or super()._send_retry_is_final(result))
+
+        async def handle_message(self, event):
+            assignment = operator_assignment.get()
+            if assignment is not None:
+                metadata = event.metadata or {}
+                if (event.internal is not True or metadata.get('gateway_session_strict') is not True
+                        or metadata.get('gateway_session_key') != assignment.session_key
+                        or metadata.get('gateway_session_id') != assignment.session_id
+                        or not assignment.can_start()):
+                    raise PermissionError('Operator assignment session changed before admission')
+            return await super().handle_message(event)
 
         async def _record_delivery_obligation(self, *args, **kwargs):
             """Один владелец ответа: современный IPC input сохраняет worker/ingress outbox."""
-            if getattr(self, '_brai_delivery_journal', None) is not None and input_delivery.get() is not None:
+            if (operator_assignment.get() is not None
+                    or getattr(self, '_brai_delivery_journal', None) is not None and input_delivery.get() is not None):
                 return None
             return await super()._record_delivery_obligation(*args, **kwargs)
 
@@ -111,6 +124,8 @@ def make_adapter(config, platform, peer, publish_file):
             self._bot = None
 
         async def _action(self, name, payload):
+            if operator_assignment.get() is not None:
+                return SendResult(success=False, retryable=False, error_kind='operator_assignment_held')
             metadata = payload.get('metadata') or {}
             if (delivery_scope.get() is None and name in {
                     'send', 'send_file_set', 'send_image_file', 'send_document', 'send_video',
@@ -149,7 +164,16 @@ def make_adapter(config, platform, peer, publish_file):
                     boundary = journal.input_boundary()
                     state_reader = getattr(getattr(self, 'gateway_runner', None), '_brai_return_notice_state', None)
                     state = state_reader(*route) if callable(state_reader) else None
-                    signature = (boundary, canonical(state), name, canonical(wire).encode('utf-8'))
+                    signature_wire = wire
+                    anchor = payload.get('reply_to')
+                    if (name == 'send' and route[1] and anchor
+                            and str(metadata.get('reply_to_message_id') or '') == str(anchor)):
+                        # Streaming repeats the explicit reply anchor in metadata.
+                        # The normal final uses the same route without that copy.
+                        fingerprint_payload = {**payload, 'metadata': {
+                            key: item for key, item in metadata.items() if key != 'reply_to_message_id'}}
+                        signature_wire = {**wire, 'payload': fingerprint_payload}
+                    signature = (boundary, canonical(state), name, canonical(signature_wire).encode('utf-8'))
                     previous = self._brai_last_outputs.get(route)
                     if boundary is not None and previous is not None and previous[0] == signature:
                         existing = journal.output(previous[1])

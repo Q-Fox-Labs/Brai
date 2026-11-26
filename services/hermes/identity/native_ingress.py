@@ -309,6 +309,10 @@ class ReleaseGate:
                 adapter._polling_last_progress_monotonic = None
                 adapter._polling_pending_stuck_count = 0
                 adapter._polling_not_running_count = 0
+            if os.environ.get('BRAI_IDENTITY_RELEASE_HOLD_OPERATION') == operationId:
+                # Reconnecting the application in this process must not reapply a released startup fence.
+                os.environ.pop('BRAI_IDENTITY_RELEASE_HOLD_OPERATION', None)
+                os.environ.pop('BRAI_IDENTITY_RELEASE_HOLD_SOURCE_SHA256', None)
             self.operation = None
             self.probe_held_startup = False
             self.poll_held = False

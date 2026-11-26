@@ -351,6 +351,42 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     broker.assert_not_awaited()
                     adapter.send.assert_not_awaited()
 
+    async def test_only_standalone_waits_make_the_reply_optional(self):
+        resolver = runtime.Resolver(NS())
+        self.addAsyncCleanup(resolver.close)
+        sequence = (
+            ('Внеси два протокола в таблицу', None, True),
+            ('Таблица', 'xlsx', True),
+            ('Это таблица жди', None, False),
+            ('Сейчас будет два протокола', None, False),
+            ('Сейчас будут ещё два протокола.', None, False),
+            ('Я пришлю ещё файл', None, False),
+            ('Подожди, пожалуйста.\nСейчас отправлю еще один файл.', None, False),
+            ('Жди, но сначала проверь сумму', None, True),
+            ('Сейчас будет два протокола?', None, True),
+            ('Жди\nПроверь итог', None, True),
+            ('Жди', 'docx', True),
+            ('Второй протокол', 'docx', True),
+        )
+
+        async def broker(method, payload, **_):
+            return {'paths': ['/isolated/' + Path(path).name for path in payload['paths']]} if method == 'ingress.prepare' else {}
+
+        with patch.object(runtime, 'broker_call', side_effect=broker):
+            for index, (body, filetype, expected) in enumerate(sequence, 100):
+                with self.subTest(body=body, filetype=filetype):
+                    path = f'/ingress/{index}.{filetype}' if filetype else None
+                    incoming = NS(source=NS(chat_id='123', thread_id='77', chat_type='dm'),
+                                  text=body, message_id=str(index), message_type='document' if filetype else 'text',
+                                  reply_expected=True, media_urls=[path] if path else [],
+                                  _brai_identity_inputs=[{'path': path, 'itemId': str(index)}] if path else [])
+                    data = await resolver.prepare(profile(), incoming)
+                    self.assertEqual(data['reply_expected'], expected)
+                    self.assertEqual(data['text'], body)
+                    if filetype:
+                        self.assertEqual(data['media_urls'], [f'/isolated/{index}.{filetype}'])
+                    self.assertTrue(resolver.ledger.owns(profile(), ('123', '77'), str(index), outgoing=False))
+
     async def test_non_private_event_cannot_register_turn_or_prepare_media(self):
         for chat_type, chat_id in [('group', '-10'), ('supergroup', '-100'), ('channel', '-100'),
                                    ('dm', '456'), ('', '123')]:

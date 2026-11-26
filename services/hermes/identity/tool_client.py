@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import struct
 import sys
@@ -12,6 +13,27 @@ import uuid
 TOOL_POLICY = json.loads(Path(__file__).with_name('tool-policy.json').read_text())
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
+DIALOGUES_RECEIPTS = {}
+
+
+def dialogues_call_scope(name, arguments):
+    """Использовать автоматический режим Диалогов для разговоров Hermes."""
+    if name != 'dialogues_exchange':
+        return None, arguments
+    scoped = {key: value for key, value in arguments.items() if key != '_brai_context_receipt'}
+    action = scoped.get('action')
+    if action in ('input', 'poll', 'update', 'finish', 'read', 'history', 'snapshot'):
+        # Старый каталог и история хода могут подсказать модели поле context.
+        scoped.pop('context', None)
+    payload = scoped.get('arguments')
+    if action not in ('input', 'poll') or not isinstance(payload, dict):
+        return None, scoped
+    dialogue = payload.get('dialogue')
+    thread = payload.get('dialogue_id') or (dialogue.get('id') if isinstance(dialogue, dict) else None)
+    if not isinstance(thread, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{1,256}', thread):
+        return None, scoped
+    scoped['_brai_context_receipt'] = DIALOGUES_RECEIPTS.get(thread, 'start')
+    return thread, scoped
 
 
 def broker_call(method, params, *, path=None, timeout=120):
@@ -197,7 +219,21 @@ def handle(method, params):
             if not isinstance(result, dict) or not isinstance(result.get('markdown'), str) or not result['markdown']:
                 raise RuntimeError('Invalid artifact receipt')
             return {'content':[{'type':'text', 'text':result['markdown']}], 'structuredContent':result}
-        result = broker_call('tools.call', {'name': name, 'args': arguments})
+        thread, arguments = dialogues_call_scope(name, arguments)
+        try:
+            result = broker_call('tools.call', {'name': name, 'args': arguments})
+        except TimeoutError:
+            if name not in ('dialogues_exchange', 'dialogues_context_ack'):
+                raise
+            message = {'code': 'DEADLINE_EXCEEDED',
+                       'next_action': 'Вызови bug_hunt_help, зарегистрируй тайм-аут и продолжай работу. Сверь исход по прежнему request_id.'}
+            return {'isError': True, 'content': [{'type': 'text', 'text': json.dumps(message, ensure_ascii=False)}]}
+        if thread and isinstance(result, dict) and not result.get('isError'):
+            metadata = result.get('_meta')
+            receipt = metadata.get('brai_dialogues_delivery') if isinstance(metadata, dict) else None
+            if isinstance(receipt, str) and re.fullmatch(r'[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}', receipt):
+                DIALOGUES_RECEIPTS[thread] = receipt
+                result = {key: value for key, value in result.items() if key != '_meta'}
         if isinstance(result, dict) and isinstance(result.get('content'), list):
             return result
         return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]}

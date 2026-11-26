@@ -220,9 +220,49 @@ def arguments_permitted(name, args, state):
     return validate(name,args)
 
 
+def dialogues_result(content):
+    """Извлечь поля квитанции из обычного или обёрнутого ответа native MCP."""
+    try:
+        if isinstance(content, str):
+            if content.startswith('<untrusted_tool_result source="mcp__brai__dialogues_exchange">'):
+                content = content[content.index('\n{') + 1:content.rindex('\n</untrusted_tool_result>')]
+            content = json.loads(content)
+        if isinstance(content, dict):
+            value = content.get('structuredContent', content.get('result', content))
+            if not isinstance(value, dict):
+                return {}
+            error = value.get('error')
+            if isinstance(error, str) and error.startswith('{'):
+                rejected = json.loads(error)
+                if isinstance(rejected, dict) and isinstance(rejected.get('code'), str) and rejected.get('applied') is False:
+                    return rejected
+            return value
+    except (TypeError, ValueError):
+        pass
+    return {}
+
+
+def install_dialogues_result_budget(tool_executor):
+    """Передать компактный индекс целиком в пределах штатного бюджета хода."""
+    persist = tool_executor.maybe_persist_tool_result
+    def preserve_context(content, tool_name, tool_use_id, env=None, config=None):
+        if tool_name == 'mcp__brai__dialogues_exchange' and config is not None:
+            result = dialogues_result(content)
+            archive = ('messages' in result and 'continuation_cursor' in result or
+                       'dialogues' in result and 'topic_id' in result or
+                       'items' in result and str(result.get('dialogue_id', '')).startswith('D'))
+            if isinstance(result.get('context'), str) or archive:
+                return persist(content, tool_name, tool_use_id, env=env, config=config, threshold=config.turn_budget)
+        options = {} if config is None else {'config': config}
+        return persist(content, tool_name, tool_use_id, env=env, **options)
+    tool_executor.maybe_persist_tool_result = preserve_context
+
+
 def install_executor_guard():
     """Закрыть общий executor и direct API, включая inline/delegation до Registry."""
     from agent import tool_executor, agent_runtime_helpers, inline_tool_executors
+    if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
+        install_dialogues_result_budget(tool_executor)
     invocation = _execution_state
     resolve_inline = inline_tool_executors.resolve_invoke_tool_executor
     class RevokedInvocation(Exception):
@@ -232,6 +272,14 @@ def install_executor_guard():
     repair = agent_runtime_helpers.repair_tool_call
     denied = json.dumps({'error': 'Это действие недоступно для вашей роли.'}, ensure_ascii=False)
     changed = json.dumps({'error': 'Права доступа изменились. Результат не выдан.'}, ensure_ascii=False)
+    def dispatch(agent, name, args, send):
+        if name == 'mcp__brai__dialogues_exchange' and isinstance(args, dict) and args.get('action') == 'finish':
+            from files.native import dialogues_finish
+            def can_retry(result):
+                receipt = dialogues_result(result)
+                return receipt.get('applied') is False or receipt.get('status') == 'rejected'
+            return dialogues_finish(agent, send, can_retry)
+        return send()
     def guarded_common(agent, state, ref, *, execute, scope_block, display_index,
                        begin_execution, authorization_gate):
         before = execution_grant(ref.name)
@@ -249,7 +297,7 @@ def install_executor_guard():
                 raise RevokedInvocation()
             tool_token = _tool_invocation.set(ref.name)
             try:
-                result = execute(*args, **kwargs)
+                result = dispatch(agent, ref.name, args[0] if args else getattr(ref, 'args', {}), lambda: execute(*args, **kwargs))
             finally:
                 _tool_invocation.reset(tool_token)
             if not grant_current(before):
@@ -276,7 +324,7 @@ def install_executor_guard():
             return denied
         token = invocation.set(before)
         try:
-            result = invoke(agent, function_name, function_args, *args, **kwargs)
+            result = dispatch(agent, function_name, function_args, lambda: invoke(agent, function_name, function_args, *args, **kwargs))
             return result if grant_current(before) else changed
         except RevokedInvocation:
             return changed
@@ -296,7 +344,7 @@ def install_executor_guard():
                 raise RevokedInvocation()
             tool_token = _tool_invocation.set(name)
             try:
-                result = execute(*args, **kwargs)
+                result = dispatch(agent, name, args[1] if len(args)>1 else kwargs.get('function_args', {}), lambda: execute(*args, **kwargs))
             finally:
                 _tool_invocation.reset(tool_token)
             if not grant_current(before):

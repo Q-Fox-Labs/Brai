@@ -32,6 +32,9 @@ class Worker:
         self.runner_factory = runner_factory
         self.peer = self.runner = self.adapter = None
         self.active = {}
+        self.operator_lock = asyncio.Lock()
+        self.operator_route = None
+        self.operator_run = None
         self.typing = {}
         self.turn_scopes = {}
         self.tools_ready = False
@@ -139,6 +142,8 @@ class Worker:
 
         peer = Peer(reader, writer, {'health': check_health, 'dispatch': primary(self.dispatch),
                     'dispatch.status': primary(self.dispatch_status), 'outbox.flush': primary(self.flush_outputs),
+                    'operator.assignment': primary(self.run_operator_assignment),
+                    'operator.assignment.cancel': primary(self.cancel_operator_assignment),
                     'cancel': primary(self.cancel), 'interactive': primary(self.interactive),
                     'chat_pause': primary(self.chat_pause), 'release.begin': primary(self.release.begin), 'release.try': primary(self.release.try_hold),
                     'release.try_status': primary(self.release.try_status), 'release.reject_attempt': primary(self.release.reject_attempt),
@@ -262,7 +267,8 @@ class Worker:
             async def paused_admit(event):
                 def allowed():
                     state = self.chat_states.get(self._chat_route(event.source), {})
-                    return (self.route_allowed(event.source, recovery=bool(getattr(event, 'internal', False)))
+                    recovered = (getattr(event, 'metadata', None) or {}).get('recovered')
+                    return (self.route_allowed(event.source, recovery=bool(recovered or getattr(event, 'internal', False)))
                         and getattr(event, '_brai_chat_generation', state.get('generation', 0)) == state.get('generation', 0))
                 if not allowed():
                     return None
@@ -285,6 +291,20 @@ class Worker:
         if not callable(original):
             return
 
+        system_prompt = getattr(runner, '_get_system_prompt_for_channel', None)
+        if callable(system_prompt):
+            def assignment_prompt(platform, chat_id, *, thread_id=None, parent_id=None):
+                from .scope import operator_assignment
+                prompt = system_prompt(platform, chat_id, thread_id=thread_id, parent_id=parent_id)
+                assignment = operator_assignment.get()
+                if (assignment is not None and getattr(assignment, 'public_facts', None)
+                        and getattr(platform, 'value', platform) == 'telegram'
+                        and self._chat_route(SimpleNamespace(chat_id=chat_id, thread_id=thread_id)) == assignment.route):
+                    prompt = (prompt + '\n\nVerified public service facts from the deployment operator for this assignment:\n'
+                              + assignment.public_facts).strip()
+                return prompt
+            runner._get_system_prompt_for_channel = assignment_prompt
+
         async def remember(source, session_key):
             if session_key and self.route_allowed(source, recovery=True):
                 from .scope import input_delivery
@@ -295,6 +315,26 @@ class Worker:
                 await runner.async_session_store.mark_resume_pending(session_key, 'brai_technical_failure')
 
         async def shape(result, source, history, entry, session_key, *args, **kwargs):
+            from .scope import operator_assignment
+            assignment = operator_assignment.get()
+            if assignment is not None:
+                value = await original(result, source, history, entry, session_key, *args, **kwargs)
+                if (session_key == assignment.session_key and isinstance(result, dict)
+                        and result.get('completed') is not False
+                        and not any(result.get(key) for key in ('failed', 'partial', 'error',
+                                                               'interrupted', 'guardrail'))
+                        and not value[1] and isinstance(value[0], str) and value[0].strip()):
+                    groups = result.get('fileSets', [])
+                    if not groups and 'MEDIA:' in value[0]:
+                        import brai_files
+                        # The gateway result can omit the file envelope while retaining prepared media paths.
+                        groups = brai_files.result_envelope({'final_response': value[0]},
+                                                           SimpleNamespace(platform='telegram')).get('fileSets', [])
+                    artifacts = [item['file']['artifactId'] for group in groups
+                                 for item in group['items']]
+                    text = self.adapter.strip_media_directives_for_display(value[0]) if artifacts else value[0]
+                    assignment.result = {'text': text, 'artifactIds': list(dict.fromkeys(artifacts))}
+                return value
             guardrail = result.get('guardrail') if isinstance(result, dict) else None
             review_unavailable = isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable'
             if (isinstance(result, dict) and not result.get('interrupted')
@@ -314,7 +354,9 @@ class Worker:
         original_error = getattr(runner, '_hmwa_agent_error_reply', None)
         if callable(original_error):
             async def error_reply(error, event, source, entry, session_key, prepared):
-                from .scope import continuation_turn
+                from .scope import continuation_turn, operator_assignment
+                if operator_assignment.get() is not None:
+                    return None
                 value = await original_error(error, event, source, entry, session_key, prepared)
                 await remember(source, session_key)
                 return None if continuation_turn.get() else value
@@ -322,7 +364,12 @@ class Worker:
         original_deliver = getattr(runner, '_hmwa_deliver_turn_response', None)
         if callable(original_deliver):
             async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
-                from .scope import continuation_turn
+                from .scope import continuation_turn, operator_assignment
+                assignment = operator_assignment.get()
+                if assignment is not None:
+                    assignment.completed = (session_key == assignment.session_key
+                                            and entry.session_id == assignment.session_id)
+                    return None
                 guardrail = result.get('guardrail') if isinstance(result, dict) else None
                 if (continuation_turn.get() and isinstance(result, dict)
                         and (result.get('failed') or (result.get('partial') and result.get('error'))
@@ -332,6 +379,134 @@ class Worker:
                 return await original_deliver(event, source, entry, session_key, generation, result, *args, **kwargs)
             runner._hmwa_deliver_turn_response = deliver
         runner._brai_retry_failed_sessions = self._retry_failed_sessions
+        mark_active = getattr(runner, '_mark_durable_active_turn', None)
+        if callable(mark_active):
+            async def mark_visible_turn(event, session_key):
+                from .scope import operator_assignment
+                if operator_assignment.get() is None:
+                    return await mark_active(event, session_key)
+                return False
+            runner._mark_durable_active_turn = mark_visible_turn
+        original_resume = getattr(runner, '_run_startup_resume_event', None)
+        if callable(original_resume):
+            async def resume(adapter, event, session_key):
+                if not await self._operator_turn_held(session_key):
+                    return await original_resume(adapter, event, session_key)
+                from gateway.run import _AGENT_PENDING_SENTINEL
+                try:
+                    await runner.async_session_store.clear_resume_pending(session_key)
+                finally:
+                    state = runner._peek_session_state(session_key)
+                    if state is not None and state.turn.agent is _AGENT_PENDING_SENTINEL:
+                        runner._release_running_agent_state(session_key)
+            runner._run_startup_resume_event = resume
+        self.operator_hooks_ready = all(callable(hook) for hook in
+            (original, original_error, original_deliver, mark_active, original_resume))
+
+    async def _operator_turn_held(self, session_key):
+        home = os.environ.get('HERMES_HOME', '')
+        if self.delivery_journal is None and home.startswith('/') and (Path(home) / 'identity-delivery.sqlite3').is_file():
+            self._enable_delivery()
+        if self.delivery_journal is None:
+            return False
+        session_id = self.delivery_journal.operator_session_id(session_key)
+        if session_id is None:
+            return False
+        entry = await self.runner.async_session_store.lookup_by_session_key(session_key)
+        return entry is not None and entry.session_id == session_id
+
+    async def run_operator_assignment(self, owner, operationId, sessionKey, sessionId, chat, thread,
+                                      chatGeneration, instructions, checkOnly=False, publicFacts=None):
+        """Run the same authorized native injection and keep the final answer private."""
+        if (owner != self.user_id or not isinstance(operationId, str)
+                or str(uuid.UUID(operationId)) != operationId
+                or not isinstance(sessionKey, str) or not 1 <= len(sessionKey) <= 512
+                or not isinstance(sessionId, str) or not 1 <= len(sessionId) <= 256
+                or not isinstance(chat, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', chat)
+                or not isinstance(thread, str)
+                or type(checkOnly) is not bool
+                or type(chatGeneration) is not int or chatGeneration < 0
+                or not isinstance(instructions, str) or not instructions.strip()
+                or publicFacts is not None and (not isinstance(publicFacts, str) or not publicFacts.strip())
+                or len(instructions.encode()) + len((publicFacts or '').encode()) > 48000):
+            raise RpcError(-32602, 'Invalid operator assignment')
+        if self.operator_lock.locked():
+            return {'state': 'busy'}
+        async with self.operator_lock:
+            if (not self.operational.is_set() or self.release.operation is not None
+                    or self.policy_stopping or any(self.chat_dispatches.values())
+                    or any(not task.done() for task in self.adapter._session_tasks.values())):
+                return {'state': 'busy'}
+            route = (chat, thread)
+            if not checkOnly:
+                self.operator_route = route
+                self.operator_run = operationId, asyncio.current_task()
+            try:
+                return await self._run_operator_session(operationId, sessionKey, sessionId, route,
+                                                        chatGeneration, instructions, checkOnly, publicFacts)
+            finally:
+                self.operator_run = None
+                self.operator_route = None
+
+    async def _run_operator_session(self, ident, key, session_id, route, generation, instructions, check_only, public_facts):
+        from .scope import delivery_scope, input_delivery, operator_assignment
+        runner, adapter = self.runner, self.adapter
+        entry = await runner.async_session_store.lookup_by_session_key(key)
+        if self.release.operation is not None or self.policy_stopping:
+            return {'state': 'busy'}
+        if entry is None or entry.origin is None or entry.session_id != session_id:
+            return {'state': 'session_changed'}
+        source = runner._restored_source(entry)
+
+        def can_start():
+            task = adapter._session_tasks.get(key)
+            return (self.release.operation is None and not self.policy_stopping
+                    and not self.chat_dispatches.get(route) and not self.chat_interactive.get(route)
+                    and (task is None or task.done()) and self.route_allowed(source, recovery=True)
+                    and self.chat_states.get(route, {}).get('generation', 0) == generation)
+
+        if (self._chat_route(source) != route or str(getattr(source, 'user_id', '') or '') != self.telegram_id
+                or not can_start()):
+            return {'state': 'route_changed'}
+        if check_only:
+            authorized = runner._plugin_injection_authorized(source, plugin_id='brai-telegram', target=key)
+            return {'state': 'validated' if authorized else 'route_changed'}
+        if entry.resume_pending or getattr(entry, 'active_turn_token', None):
+            return {'state': 'busy'}
+        if not getattr(self, 'operator_hooks_ready', False):
+            return {'state': 'unsupported'}
+        self._enable_delivery()
+        self.delivery_journal.hold_operator_turn(key, session_id, ident)
+        assignment = SimpleNamespace(session_key=key, session_id=session_id, can_start=can_start,
+                                     route=route, public_facts=public_facts, completed=False, result=None)
+        assignment_token = operator_assignment.set(assignment)
+        scope_token = delivery_scope.set('operator-assignment:' + ident)
+        source_token = input_delivery.set(None)
+        try:
+            adapter.bind_source(source)
+            accepted = await runner._dispatch_plugin_message_injection(
+                session_key=key, content=instructions, plugin_id='brai-telegram')
+            task = adapter._session_tasks.get(key)
+            if not accepted or task is None:
+                return {'state': 'not_started'}
+            await task
+            if not assignment.completed or assignment.result is None:
+                return {'state': 'incomplete'}
+            return {'state': 'ready', 'result': assignment.result}
+        finally:
+            input_delivery.reset(source_token)
+            delivery_scope.reset(scope_token)
+            operator_assignment.reset(assignment_token)
+
+    async def cancel_operator_assignment(self, owner, operationId):
+        if owner != self.user_id or not isinstance(operationId, str) or str(uuid.UUID(operationId)) != operationId:
+            raise RpcError(-32602, 'Invalid operator assignment')
+        active = self.operator_run
+        if active is None or active[0] != operationId:
+            return {'state': 'inactive'}
+        active[1].cancel()
+        await asyncio.gather(active[1], return_exceptions=True)
+        return {'state': 'stopped'}
 
     async def _retry_failed_sessions(self):
         """Вернуть сохранённые попытки в native turn после проверки владельца и маршрута."""
@@ -773,6 +948,8 @@ class Worker:
         if guest_mode() and str(event.get('text', '')).lstrip().startswith('/') and str(event.get('text', '')).split()[0].split('@')[0] not in ('/stop', '/cancel'):
             raise RpcError(-32603, 'Эта команда недоступна для гостя')
         source = SessionSource.from_dict(event['source'])
+        if self.operator_route == self._chat_route(source) and not _cancel_control:
+            return {'accepted': False, 'turn_id': None}
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise RpcError(-32602, 'Invalid source')
         allowed = {'text', 'user_id', 'user_name', 'message_id', 'media_urls', 'media_types', 'media_text_inlined', 'reply_to_message_id', 'reply_to_text', 'timestamp', 'reply_expected'}
@@ -784,6 +961,19 @@ class Worker:
         fields['user_id'] = self.telegram_id
         self.adapter.bind_source(source)
         message = MessageEvent(source=source, message_type=MessageType(event.get('message_type', 'text')), **fields)
+        original = event['source'].get('brai_dialogues_original')
+        if isinstance(original, str):
+            message._brai_original_text = original
+            if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and message.message_id is not None:
+                origin = self.runner._steer_text_with_origin('Вход пользователя', message)
+                try:
+                    archive_id = json.loads(origin.split('\n', 2)[1])['message_id']
+                except (IndexError, KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    source._brai_dialogues_input = (str(archive_id), original)
+        from .scope import input_delivery
+        message._brai_input_delivery_id = input_delivery.get()
         from gateway.platforms import base as native_base
         coerce = getattr(native_base, 'coerce_plaintext_gateway_command', None)
         if callable(coerce):
@@ -828,6 +1018,9 @@ class Worker:
         self.chat_dispatches[route] = self.chat_dispatches.get(route, 0) + 1
         try:
             key = self.adapter._event_session_key(message)
+            if not _cancel_control and await self._operator_turn_held(key):
+                await self.runner.async_session_store.clear_resume_pending(key)
+                self.delivery_journal.clear_operator_turn(key)
             before = self.adapter._session_tasks.get(key)
             if (self.delivery_journal is not None and not str(getattr(message, 'text', '')).lstrip().startswith('/')
                     and any(other != key and not task.done() for other, task in self.adapter._session_tasks.items())):

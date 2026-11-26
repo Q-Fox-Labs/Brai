@@ -390,10 +390,13 @@ class TelegramAccountsTest(unittest.IsolatedAsyncioTestCase):
             async def connect():
                 return PeerStub()
             bridge.connect = connect
-            await bridge.dispatch(SimpleNamespace(source=Source(account), message_id='1'))
+            await bridge.dispatch(SimpleNamespace(source=Source(account), message_id='1',
+                                                  raw_message=SimpleNamespace(text='Исходный текст '+account)))
             bridges.append(bridge)
         self.assertEqual([source['user_id'] for source in calls], ['123', '123'])
         self.assertEqual([source['chat_id'] for source in calls], ['123', '456'])
+        self.assertEqual([source['brai_dialogues_original'] for source in calls],
+                         ['Исходный текст 123', 'Исходный текст 456'])
         with self.assertRaises(RpcError):
             await bridges[0].send('send', {'chat_id': '456', 'content': 'wrong account'})
 

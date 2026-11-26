@@ -132,6 +132,13 @@ class Bridge:
         # AIDEV-NOTE: Внутри профиля автор канонический; исходный личный chat_id
         # сохраняет Telegram-аккаунт и отдельную native session. Права задаёт Auth.
         data['source']['user_id'] = self.worker_telegram_id
+        raw = getattr(event, 'raw_message', None)
+        if raw is not None:
+            original = getattr(raw, 'text', None)
+            if not isinstance(original, str):
+                original = getattr(raw, 'caption', None)
+            # The existing free-form source object is safe for workers that ignore this field.
+            data['source']['brai_dialogues_original'] = original if isinstance(original, str) else ''
         # Не переносить текст другого пользователя или общий групповой контекст.
         data.pop('reply_to_text', None)
         route = (str(source.chat_id), str(source.thread_id or ''))
@@ -283,7 +290,7 @@ class Bridge:
 _authorized_telegram = ContextVar('brai_identity_authorized_telegram', default=None)
 
 
-async def serve_chat_control(path, handler, release=None):
+async def serve_chat_control(path, handler, release=None, operator_assignment=None):
     """Открыть private UDS существующего ingress только для root Control."""
     target = Path(path)
     if not target.is_absolute() or not target.parent.is_dir():
@@ -333,6 +340,8 @@ async def serve_chat_control(path, handler, release=None):
         clients.add(task)
         try:
             methods = {'chats.control': handler}
+            if operator_assignment is not None:
+                methods['operator.assignment'] = operator_assignment
             if release is not None:
                 methods.update({'release.begin': release.begin, 'release.status': release.status,
                                 'release.resume': release.resume, 'release.commit': release.commit,

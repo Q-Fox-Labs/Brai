@@ -5,6 +5,7 @@ import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto
 import { bytes, canonical, fail, id, integer, limits, object, text, DialoguesFault } from './domain.js';
 import { fieldId, message, mergeResult, requireCompletion, validateChanges, version } from './turn-domain.js';
 import { enqueueDialogue } from './jobs.js';
+import {ensureTopic} from './topics.js';
 import type { createContext } from './context.js';
 type DB = Pick<Pool, 'connect'>;
 type Mutation = (owner: string, request: string, op: string, input: unknown, fn: (db: PoolClient, seq: string) => Promise<any>) => Promise<any>;
@@ -133,6 +134,7 @@ export function createTurns(pool: DB, key: string, mutation: Mutation, contextAp
             if (existing && existing.channel !== d.channel)
                 fail('DIALOGUE_CONFLICT');
             await db.query('INSERT INTO dialogues_live.dialogues(owner_id,id,channel,title) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [owner, d.id, d.channel, d.title ?? d.id]);
+            await ensureTopic(db,owner,d.id);
             const prior = (await db.query("SELECT id,turn_id,payload,content_hash,message_order FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND id=ANY($3::text[])", [owner, d.id, messages.map((m: any) => m.id)])).rows;
             if (prior.length === messages.length) {
                 const tid = prior[0].turn_id;

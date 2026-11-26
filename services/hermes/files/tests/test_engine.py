@@ -6,18 +6,26 @@ import dataclasses
 import importlib.util
 import asyncio
 from contextlib import nullcontext, suppress
+from datetime import datetime, timezone
+from io import BytesIO
 import json
+import logging
 import os
 import re
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 import tempfile
 import struct
 import threading
 import zlib
 from types import SimpleNamespace, ModuleType, MethodType
+import time
 import unittest
-from unittest.mock import patch
+import uuid
+import wave
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from files import native
@@ -64,6 +72,266 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         path = self.input / 'input.txt'
         path.write_text('user input')
         return path
+
+    async def test_hidden_result_persisted_before_crash_is_not_owed_on_startup(self):
+        from identity.scope import operator_assignment
+        from identity.worker import Worker
+
+        now = datetime.now(timezone.utc)
+        source = SimpleNamespace(platform='telegram', chat_id='101', thread_id='202')
+        hidden = SimpleNamespace(session_key='held', session_id='private', origin=source,
+                                 active_turn_token=None, active_turn_started_at=None, suspended=False)
+        normal = SimpleNamespace(session_key='ordinary', session_id='normal', origin=source,
+                                 active_turn_token='ordinary-token', active_turn_started_at=now,
+                                 suspended=False, transport_profile=None)
+        entries = {entry.session_key: entry for entry in (hidden, normal)}
+        written = []
+        stored = {'private': 'Private result', 'normal': 'Ordinary result'}
+        async_store = SimpleNamespace(load_transcript=AsyncMock(side_effect=stored.get),
+                                      clear_turn_active=AsyncMock(return_value=True),
+                                      recover_interrupted_turns=AsyncMock(return_value=0))
+        native_store = SimpleNamespace(_lock=threading.RLock(), _entries=entries, _ensure_loaded_locked=lambda: None)
+        runner = SimpleNamespace(session_store=native_store, async_session_store=async_store,
+                                 _crash_left_reply=lambda transcript, timestamp, origin: transcript,
+                                 _hmwa_shape_agent_response=AsyncMock(), _hmwa_agent_error_reply=AsyncMock(),
+                                 _hmwa_deliver_turn_response=AsyncMock(), _run_startup_resume_event=AsyncMock())
+
+        async def native_mark(event, session_key):
+            entries[session_key].active_turn_token = 'new-token'
+            entries[session_key].active_turn_started_at = now
+            return True
+
+        runner._mark_durable_active_turn = native_mark
+        worker = Worker(os.getuid() + 1, 'owner', '101', AsyncMock())
+        worker._install_failure_recovery(runner)
+        token = operator_assignment.set(SimpleNamespace(session_key='held', session_id='private'))
+        try:
+            self.assertFalse(await runner._mark_durable_active_turn(None, 'held'))
+        finally:
+            operator_assignment.reset(token)
+        restart = function('gateway/run_startup.py', {'_recover_unclean_sessions', '_ledger_crash_left_replies'},
+                           {'asyncio': asyncio, 'time': time, 'logging': SimpleNamespace(WARNING=1),
+                            '_log_suppressed': lambda *_: nullcontext()})
+        runner._ledger_crash_left_replies = MethodType(restart['_ledger_crash_left_replies'], runner)
+        with patch.dict(sys.modules, {
+            'gateway.run': module(_float_env=lambda _name, default: default),
+            'gateway.delivery_ledger': module(ledger_enabled=lambda: True,
+                compute_obligation_id=lambda *parts: parts, record_crash_left_reply=lambda **value: written.append(value)),
+        }):
+            self.assertEqual(await restart['_recover_unclean_sessions'](runner), (0, 1))
+        self.assertEqual([(value['session_key'], value['content']) for value in written], [('ordinary', 'Ordinary result')])
+        async_store.load_transcript.assert_awaited_once_with('normal')
+
+    async def test_hidden_assignment_cannot_schedule_or_send_a_separate_caption(self):
+        from identity.scope import operator_assignment
+
+        token = operator_assignment.set(SimpleNamespace())
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}):
+                for name, args in [('cronjob_manage', {}), ('delegate_task', {}), ('terminal', {'heartbeat': True})]:
+                    with self.assertRaisesRegex(FileError, 'OPERATOR_ASSIGNMENT_REQUIRES_FOREGROUND_TOOLS'):
+                        native.before_tool(name, args)
+        finally:
+            operator_assignment.reset(token)
+        bot = SimpleNamespace(send_message=AsyncMock(), send_media_group=AsyncMock())
+        adapter = SimpleNamespace(_bot=bot, format_message=lambda value: value.replace('!', '\\!'))
+        telegram = module(**{name: object for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument')})
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            with self.assertRaisesRegex(FileError, 'TELEGRAM_CAPTION_TOO_LONG'):
+                await native.telegram_sender(adapter, '101', {'thread_id': '202'}, 'album',
+                                             [{'caption': '!' * 700}], False, reply_to='203', strict=True)
+        bot.send_message.assert_not_awaited()
+        bot.send_media_group.assert_not_awaited()
+
+        with self.assertRaisesRegex(FileError, 'DELIVERY_ROUTE_UNCONFIRMED'):
+            native.verify_telegram_target(SimpleNamespace(chat_id=101, message_thread_id=202), {'chat_id': 101})
+
+    def test_hidden_terminal_cannot_promote_timeout_or_yield_to_a_watcher(self):
+        from identity.scope import operator_assignment
+
+        class Rejected(Exception):
+            def __init__(self, result):
+                self.result_json = result
+
+        acquired = []
+        invoked = []
+        hooks = function('tools/terminal_tool.py', {'terminal_tool', '_yield_kwargs'}, {
+            '_plan_execution': lambda *args, **kwargs: SimpleNamespace(promoted_from_foreground_timeout=600),
+            '_acquire_env': lambda *args: acquired.append(args),
+            '_Rejected': Rejected, '_error_json': str, 'EnvironmentConnectionError': OSError,
+            'yield_to_background_handler': lambda **kwargs: invoked.append(kwargs) or 'yield handler',
+        })
+        token = operator_assignment.set(SimpleNamespace())
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules, {
+                'brai_files': native,
+                'hermes_cli.observability.shared_metrics_loop': module(record_terminal_backend=lambda *_: None),
+            }):
+                self.assertEqual(hooks['_yield_kwargs']('sleep 5'), {})
+                self.assertIn('requires a foreground', hooks['terminal_tool']('sleep 5', timeout=600))
+        finally:
+            operator_assignment.reset(token)
+        self.assertEqual(acquired, [])
+        self.assertEqual(invoked, [])
+
+    async def test_hidden_result_keeps_files_from_shaped_native_response(self):
+        from identity.scope import operator_assignment
+        from identity.worker import Worker
+
+        file = self.input_file()
+        response = native.final_text(f'Готово.\nMEDIA:"{file}"', 'hidden')
+        expected = native.result_envelope({'final_response': response}, SimpleNamespace(platform='telegram'))
+        artifact = expected['fileSets'][0]['items'][0]['file']['artifactId']
+        worker = Worker(os.getuid() + 1, 'owner', '101', AsyncMock())
+        worker.adapter = SimpleNamespace(strip_media_directives_for_display=lambda text: text.split('\n', 1)[0])
+        runner = SimpleNamespace(_hmwa_shape_agent_response=AsyncMock(return_value=(response, False, [])))
+        worker._install_failure_recovery(runner)
+
+        assignment = SimpleNamespace(session_key='current', result=None)
+        token = operator_assignment.set(assignment)
+        try:
+            with patch.dict(sys.modules, {'brai_files': native}):
+                await runner._hmwa_shape_agent_response({'completed': True}, None, [], None, 'current')
+        finally:
+            operator_assignment.reset(token)
+        self.assertEqual(assignment.result, {'text': 'Готово.', 'artifactIds': [artifact]})
+
+    async def test_managed_command_resumes_same_media_after_new_temporary_output(self):
+        from identity.audio_parts import PART_SECONDS, RATE
+        from identity.transcribe import PART_TIMEOUT, transcribe_audio
+
+        source = self.input / 'long audio.wav'
+        frames = RATE * 830
+        with wave.open(str(source), 'wb') as audio:
+            audio.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
+            for _ in range(830):
+                audio.writeframesraw(bytes(RATE * 2))
+        self.assertGreater(source.stat().st_size, 25 * 1024 * 1024)
+        model = {'modelId': 'fixture', 'revision': 'v1', 'profileId': 'asr'}
+        (self.root / 'workspace').mkdir()
+        published, requests, invocations = [], {}, []
+
+        def broker(method, params, *, timeout):
+            if method == 'files.publish':
+                with wave.open(params['path'], 'rb') as part:
+                    published.append(part.getnframes())
+                return {'artifactId': str(uuid.uuid4()), 'mimeType': 'audio/wav'}
+            self.assertEqual(method, 'tools.call')
+            args = params['args']
+            if params['name'] == 'transcription_request_submit':
+                request = str(uuid.uuid4())
+                requests[request] = f'part {len(requests) + 1}'
+                return {'request': {'taskState': 'succeeded', 'requestId': request,
+                                    'actualModel': model, 'requestedModel': args['requestedModel']}}
+            self.assertEqual(params['name'], 'transcription_result_get')
+            return {'state': 'available', 'result': {'requestId': args['requestId'], 'actualModel': model,
+                                                     'text': requests[args['requestId']]}}
+
+        def run_command(command, timeout, *, env_passthrough):
+            name, input_flag, audio, output_flag, output, key_flag, operation = shlex.split(command)
+            self.assertEqual((name, input_flag, output_flag, key_flag),
+                             ('fixture', '--input', '--output', '--operation-id'))
+            self.assertEqual(Path(audio), source)
+            self.assertGreater(timeout, PART_TIMEOUT)
+            invocations.append((output, operation))
+            transcribe_audio(audio, output, model, call=broker, operation_id=operation)
+            return SimpleNamespace(stdout='HERMES_IDENTITY_STT_PART 1')
+
+        render = function('tools/tts_command_provider.py',
+                          {'render_command_template', 'shell_quote_context', 'quote_command_placeholder'},
+                          {'os': os, 're': re, 'shlex': shlex, 'subprocess': subprocess})['render_command_template']
+        command = function('tools/transcription_command.py', {'_transcribe_command_stt', '_read_command_stt_output'}, {
+            'tempfile': tempfile, 'Path': Path, 'subprocess': subprocess, 'logger': logging.getLogger(__name__),
+            '_get_command_stt_timeout': lambda config: config['timeout'], '_get_command_stt_output_format': lambda _: 'txt',
+            '_command_stt_env_passthrough': lambda _: [], '_normalize_command_stt_input': lambda audio, *_: (str(audio), None),
+            '_render_command_stt_template': render, '_run_command_stt': run_command,
+            '_ok_result': lambda result, name: (result, name),
+        })['_transcribe_command_stt']
+        config = {'command': 'fixture --input {input_path} --output {output_path}', 'timeout': 200, 'language': 'ru'}
+
+        def reject_generic_route(*args, **kwargs):
+            self.fail('Managed long audio entered the generic remote splitting path')
+
+        hooks = function('tools/transcription_tools.py', {'transcribe_audio', '_transcribe_prepared_audio'}, {
+            'Path': Path, '_read_block_error': lambda *_: None, '_validate_audio_file': lambda *_, **__: None,
+            '_validate_audio_source_file': lambda *_, **__: None, '_load_stt_config': lambda: config,
+            '_prepare_audio_for_transcription': lambda path: (path, None, None), 'is_stt_enabled': lambda _: True,
+            '_get_provider': lambda _: 'brai_local_ai', '_is_local_stt_provider': reject_generic_route,
+            '_dispatch_stt_provider': lambda path, name, stt, *_: command(path, name, stt, stt),
+        })
+
+        async def transcribe(path):
+            return await asyncio.to_thread(hooks['transcribe_audio'], path)
+
+        operation = 'd' * 64
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'HERMES_HOME': str(self.root)}), \
+                patch.dict(sys.modules, {'brai_files': native,
+                                        'tools.transcription_tools': module(_resolve_stt_language=lambda *_: 'ru')}):
+            first = await native.transcribe_voice_once(SimpleNamespace(_brai_voice_operations={str(source): operation}),
+                                                       str(source), transcribe)
+            recovered = await native.transcribe_voice_once(SimpleNamespace(_brai_voice_operations={str(source): operation}),
+                                                           str(source), transcribe)
+        self.assertEqual(first, recovered)
+        self.assertEqual(first, ('\n'.join(requests.values()), 'brai_local_ai'))
+        self.assertEqual(sum(published), frames)
+        self.assertTrue(all(part <= RATE * PART_SECONDS for part in published))
+        self.assertEqual(len(published), len(requests))
+        self.assertEqual([value[1] for value in invocations], [operation, operation])
+        self.assertNotEqual(invocations[0][0], invocations[1][0])
+
+    async def test_pending_voice_merge_shares_computation_and_echoes_each_clip_once(self):
+        ready, release = asyncio.Event(), asyncio.Event()
+        compute, echoes, consent_transcripts = [], [], []
+
+        async def transcribe(path):
+            compute.append(path)
+            if path == '/first.ogg':
+                ready.set()
+                await release.wait()
+            return path
+
+        async def enrich(text, paths, *, event):
+            results = [await native.transcribe_voice_once(event, path, transcribe) for path in paths]
+            return text, results
+
+        async def echo(adapter, source, transcripts, **kwargs):
+            echoes.extend(transcripts)
+
+        inbound = function('gateway/run_inbound.py', {
+            '_transcribe_pending_audio_event_once', '_echo_pending_stt_transcripts_once',
+        }, {})
+        base = function('gateway/platforms/base.py', {'merge_pending_message_event'}, {
+            'MessageType': SimpleNamespace(PHOTO='photo', TEXT='text'),
+            'BasePlatformAdapter': SimpleNamespace(_merge_caption=lambda previous, later: previous + ' ' + later),
+        })
+        runner = SimpleNamespace(_enrich_message_with_transcription=enrich, _echo_stt_transcripts=echo,
+                                 _should_echo_stt_transcripts=lambda: True,
+                                 _pending_event_audio_paths=lambda event: list(event.media_urls))
+
+        def event(path, text):
+            return SimpleNamespace(text=text, message_type='voice', media_urls=[path], media_types=['audio/ogg'],
+                                   media_text_inlined=[], absorb_reply_expected=lambda incoming: None)
+
+        first = event('/first.ogg', 'start')
+        pending = inbound['_transcribe_pending_audio_event_once']
+        earlier = asyncio.create_task(pending(runner, first, first.text))
+        duplicate = asyncio.create_task(pending(runner, first, first.text))
+        await ready.wait()
+        with patch.dict(sys.modules, {'brai_files': SimpleNamespace(merge_events=lambda *_: None)}):
+            base['merge_pending_message_event']({'session': first}, 'session', event('/second.ogg', 'append'))
+        approvals = module(record_transcripts=lambda _, _event, text: consent_transcripts.append(list(text)))
+        with patch.dict(sys.modules, {'tools.approval_conversation': approvals}):
+            release.set()
+            results = await asyncio.gather(earlier, duplicate)
+        self.assertEqual(results, [('start append', ['/first.ogg', '/second.ogg'])] * 2)
+        echo_once = inbound['_echo_pending_stt_transcripts_once']
+        await asyncio.gather(*(echo_once(runner, first, object(), object(), result) for _, result in results))
+        recovered = event('/first.ogg', 'start')
+        recovered.metadata = {'recovered': True}
+        await echo_once(runner, recovered, object(), object(), ['/first.ogg'])
+        self.assertCountEqual(compute, ['/first.ogg', '/second.ogg'])
+        self.assertEqual(echoes, ['/first.ogg', '/second.ogg'])
+        self.assertEqual(consent_transcripts, [['/first.ogg', '/second.ogg']])
 
     def loop(self, callback):
         ports = {'brai_files': native,
@@ -729,6 +997,211 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.delivery_journal.input_status(ident,digest)['state'],'accepted')
         native.clear_steer_turn(turn)
 
+    async def test_slow_voice_after_completed_turn_is_returned_to_native_queue(self):
+        """A completed prior turn must not turn already echoed STT into not_received."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        event=SimpleNamespace(source=source,message_id='voice-1',text='',internal=False,
+            metadata={},media_urls=['/voice.ogg'],media_types=['audio/ogg'],_gateway_accepted=False)
+        started,finish=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def transcribe(value):
+            calls.append('stt');started.set();await finish.wait()
+            value._gateway_pending_stt_text='"голосовой запрос"'
+            value._gateway_pending_stt_transcripts=['голосовой запрос']
+            value._gateway_pending_stt_echoed=1
+            return value._gateway_pending_stt_text
+        async def accept(_):return True
+        runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+        runner._prepare_busy_steer_text=transcribe
+        with patch.object(native,'accept_event',accept), patch.object(native,'release_event') as release:
+            task=asyncio.create_task(native.steer_active_input(runner,event,'session'))
+            await started.wait()
+            runner._peek_session_state=lambda _:None
+            finish.set()
+            self.assertFalse(await task)
+            release.assert_not_called()
+        self.assertEqual(calls,['stt'])
+        self.assertEqual(event._gateway_pending_stt_transcripts,['голосовой запрос'])
+        self.assertEqual(event._gateway_pending_stt_echoed,1)
+        self.assertFalse(event._gateway_accepted)
+        native.clear_steer_turn(turn)
+
+    async def test_rejected_stale_reservation_releases_original_waiter(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        original_turn=SimpleNamespace()
+        ready=threading.Event()
+        event=SimpleNamespace(source=source,message_id='voice-1',internal=False,
+                              _brai_preparation=(original_turn,object(),ready))
+        with patch.object(native,'release_event') as release:
+            self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        self.assertTrue(ready.is_set())
+        release.assert_called_once_with(event)
+        native.clear_steer_turn(turn)
+
+    async def test_voice_turn_finishes_during_stt_does_not_retranscribe_delivery(self):
+        """A transport retry of one delivery must not launch STT and echo twice."""
+        from identity.worker import Worker
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        first_runner,first_agent,first_turn,_=self.steering_runner(source)
+        next_runner,next_agent,next_turn,_=self.steering_runner(source)
+        runners=[first_runner]
+        started,finish=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def transcribe(value):
+            calls.append(value.message_id)
+            if len(calls)==1:
+                started.set()
+                await finish.wait()
+            value._gateway_pending_stt_text='voice request'
+            value._gateway_pending_stt_transcripts=['voice request']
+            value._gateway_pending_stt_echoed=1
+            return value._gateway_pending_stt_text
+        for runner in (first_runner,next_runner):
+            runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+            runner._prepare_busy_steer_text=transcribe
+        def event():
+            return SimpleNamespace(source=source,message_id='same-update',text='',internal=False,
+                metadata={},media_urls=['/voice.ogg'],media_types=['audio/ogg'],_gateway_accepted=False)
+        async def accepted(_):return True
+        async def capture(_adapter, _event):
+            return True  # This case covers receipts. The next case uses real file capture.
+        worker=Worker.__new__(Worker)
+        worker.user_id='owner';worker.active={'turn':object()}
+        worker.delivery_lock=asyncio.Lock()
+        worker.delivery_journal=DeliveryJournal(self.root/'voice-delivery.sqlite3','owner')
+        def start_prepared(value, _):
+            self.assertEqual(value._gateway_pending_stt_transcripts,['voice request'])
+            self.assertEqual(value._gateway_pending_stt_echoed,1)
+            return True
+        target=SimpleNamespace(_message_handler=True,_drop_unresolved=lambda _:False,
+            _event_session_key=lambda _:'session',_active_sessions={},_start_session_processing=start_prepared)
+        handle=function('gateway/platforms/base.py',['handle_message'],{})['handle_message']
+        async def dispatch(value,owner):
+            if not await native.steer_active_input(runners[0],value,'session'):
+                value.allow_gateway_control=False
+                await handle(target,value)
+            return {'accepted':value._gateway_accepted,'turn_id':'turn' if value._gateway_accepted else None}
+        worker._dispatch_native=dispatch
+        ident,digest=delivery_id('voice-update'),delivery_id('voice-payload')
+        with patch.dict(sys.modules,{'brai_files':native}), patch.object(native,'accept_event',accepted), \
+                patch.object(native,'capture_authorized',capture), patch.object(native,'release_event'):
+            task=asyncio.create_task(worker.dispatch(event(),'owner',ident,digest))
+            await started.wait()
+            first_runner._peek_session_state=lambda _:None
+            finish.set()
+            receipt=await task
+            if not receipt['accepted']:
+                runners[0]=next_runner
+                receipt=await worker.dispatch(event(),'owner',ident,digest)
+            self.assertEqual(await worker.dispatch(event(),'owner',ident,digest),receipt)
+        self.assertTrue(receipt['accepted'])
+        self.assertEqual(calls,['same-update'])
+        native.clear_steer_turn(first_turn)
+        native.clear_steer_turn(next_turn)
+
+    async def test_voice_capture_retry_preserves_one_stt_and_file_ownership(self):
+        """Exercise real file capture and worker receipt at the stale-voice boundary."""
+        from identity.worker import Worker
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2',profile=None)
+        first,agent,turn,_=self.steering_runner(source)
+        next_runner,next_agent,next_turn,_=self.steering_runner(source)
+        path=self.input/'voice.ogg'
+        path.write_bytes(b'OggS test voice')
+        started,finish=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def transcribe(value):
+            calls.append(value.message_id)
+            if len(calls)==1:
+                started.set()
+                await finish.wait()
+            value._gateway_pending_stt_text='voice request'
+            value._gateway_pending_stt_transcripts=['voice request']
+            value._gateway_pending_stt_echoed=1
+            return value._gateway_pending_stt_text
+        adapter=SimpleNamespace(gateway_runner=first,_accept_update=lambda:None)
+        for runner in (first,next_runner):
+            runner._session_key_for_source=lambda _:'session'
+            runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+            runner._prepare_busy_steer_text=transcribe
+            runner._delivery_adapter_for=lambda _:adapter
+        def event():
+            return SimpleNamespace(source=source,message_id='same-update',text='',internal=False,
+                raw_message=SimpleNamespace(media_group_id=None), metadata={}, media_urls=[str(path)],
+                media_types=['audio/ogg'],_gateway_accepted=False)
+        worker=Worker.__new__(Worker)
+        worker.user_id='owner';worker.active={'turn':object()}
+        worker.delivery_lock=asyncio.Lock()
+        worker.delivery_journal=DeliveryJournal(self.root/'voice-capture.sqlite3','owner')
+        def start_prepared(value, _):
+            self.assertIsNone(value._brai_preparation)
+            self.assertEqual(value._gateway_pending_stt_echoed,1)
+            self.assertTrue(value._brai_capture_leases)
+            self.assertEqual(len(value.metadata['_brai_artifacts']),1)
+            native.release_event(value)
+            return True
+        adapter._message_handler=True
+        adapter._drop_unresolved=lambda _:False
+        adapter._event_session_key=lambda _:'session'
+        adapter._active_sessions={}
+        adapter._start_session_processing=start_prepared
+        handle=function('gateway/platforms/base.py',['handle_message'],{})['handle_message']
+        async def dispatch(value,owner):
+            if await native.capture_authorized(adapter,value):
+                value.allow_gateway_control=False
+                await handle(adapter,value)
+            return {'accepted':value._gateway_accepted,'turn_id':'turn' if value._gateway_accepted else None}
+        worker._dispatch_native=dispatch
+        ident,digest=delivery_id('voice-capture'),delivery_id('voice-bytes')
+        with patch.dict(sys.modules,{'brai_files':native}):
+            task=asyncio.create_task(worker.dispatch(event(),'owner',ident,digest))
+            await started.wait()
+            first._peek_session_state=lambda _:None
+            finish.set()
+            receipt=await task
+            if not receipt['accepted']:
+                adapter.gateway_runner=next_runner
+                receipt=await worker.dispatch(event(),'owner',ident,digest)
+            self.assertEqual(await worker.dispatch(event(),'owner',ident,digest),receipt)
+        try:
+            self.assertTrue(receipt['accepted'])
+            self.assertEqual(calls,['same-update'])
+        finally:
+            native.clear_steer_turn(turn)
+            native.clear_steer_turn(next_turn)
+
+    async def test_slow_voice_does_not_restart_after_stop_or_changed_chat_generation(self):
+        for cause in ('stop','chat_generation'):
+            with self.subTest(cause=cause):
+                source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+                runner,agent,turn,ctx=self.steering_runner(source)
+                event=SimpleNamespace(source=source,message_id='voice-1',text='',internal=False,
+                    metadata={},media_urls=['/voice.ogg'],media_types=['audio/ogg'],_gateway_accepted=False)
+                started,finish=asyncio.Event(),asyncio.Event()
+                async def transcribe(value):
+                    started.set();await finish.wait()
+                    value._gateway_pending_stt_text='"голосовой запрос"'
+                    value._gateway_pending_stt_transcripts=['голосовой запрос']
+                    value._gateway_pending_stt_echoed=1
+                    return value._gateway_pending_stt_text
+                async def accept(_):return True
+                runner._pending_event_audio_paths=lambda _:['/voice.ogg']
+                runner._prepare_busy_steer_text=transcribe
+                runner._brai_consent_route_current=lambda _:cause!='chat_generation'
+                with patch.object(native,'accept_event',accept), patch.object(native,'release_event') as release:
+                    task=asyncio.create_task(native.steer_active_input(runner,event,'session'))
+                    await started.wait()
+                    runner._peek_session_state=lambda _:None
+                    if cause=='stop':agent._interrupt_requested=True
+                    finish.set()
+                    self.assertTrue(await task)
+                    release.assert_called_once_with(event)
+                self.assertTrue(event._gateway_accepted)
+                native.clear_steer_turn(turn)
+
     async def test_source_replay_is_accepted_without_repeating_steer_but_edits_survive(self):
         """Новый transport ID не обходит source dedup; новые сообщения и редакции остаются."""
         source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
@@ -841,6 +1314,40 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second.action,'break')
             self.assertEqual([row['role'] for row in kwargs['messages']],['user','assistant'])
             self.assertFalse(agent.steer('После фиксации финала'))
+        native.clear_steer_turn(turn)
+
+    @patch.dict(sys.modules, {'brai_files':native})
+    def test_dialogues_finish_fences_steer_until_the_receipt(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        _runner,agent,turn,_ctx=self.steering_runner(source)
+        def complete():
+            self.assertFalse(agent.steer('После начала finish'))
+            return 'completed'
+        self.assertTrue(agent.steer('До начала finish'))
+        self.assertIn('STEER_PENDING',native.dialogues_finish(agent,complete,lambda _result:False))
+        agent._pending_steer=None
+        self.assertEqual(native.dialogues_finish(agent,lambda:'rejected',lambda _result:True),'rejected')
+        self.assertTrue(agent.steer('После отказа finish'))
+        agent._pending_steer=None
+        self.assertEqual(native.dialogues_finish(agent,lambda:'timeout',lambda _result:False),'timeout')
+        self.assertFalse(agent.steer('После неясного исхода'))
+        self.assertEqual(native.dialogues_finish(agent,complete,lambda _result:False),'completed')
+        self.assertFalse(agent.steer('После квитанции'))
+        native.clear_steer_turn(turn)
+
+    async def test_two_dialogues_steers_keep_original_text_and_individual_ids(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,_ctx=self.steering_runner(source)
+        runner._steer_text_with_origin=lambda text,event: 'Origin\n'+json.dumps({'message_id':event.message_id})+'\n\n'+text
+        with patch.dict(sys.modules, {'brai_files':native}), patch.dict(os.environ, BRAI_DIALOGUES_REQUIRED='1'):
+            for ident,text in [('one','  Первое\n'),('two','\nВторое  ')]:
+                event=SimpleNamespace(source=source,message_id=ident,text=text,media_urls=[],media_types=[],metadata={})
+                if ident=='one':
+                    event._brai_original_text=text
+                    event.text+=' (https://example.org)'
+                self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        payloads=[json.loads(line) for line in agent._pending_steer.splitlines() if line.startswith('{"id":')]
+        self.assertEqual(payloads,[{'id':'one','text':'  Первое\n'},{'id':'two','text':'\nВторое  '}])
         native.clear_steer_turn(turn)
 
     def test_edits_belong_to_exact_active_turn_and_sender(self):
@@ -1165,6 +1672,244 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'cannot parse'):
             await scope['_edit_markdown_or_plain'](SimpleNamespace(_edit_text=edit), '1', '2', '*formatted*', '**raw**', '')
         self.assertEqual(edits, [('*formatted*', 'MarkdownV2')])
+
+    async def test_pinned_telegram_recovers_private_topic_by_reply_anchor(self):
+        class BadRequest(OSError):
+            pass
+
+        class Forbidden(Exception):
+            pass
+
+        class RetryAfter(Exception):
+            pass
+
+        class InvalidToken(Exception):
+            pass
+
+        class PrivateTopicRetryFailed(Exception):
+            pass
+
+        async def deadline(awaitable, **kwargs):
+            return await awaitable
+
+        async def record(*args):
+            pass
+
+        native_methods = (
+            '_metadata_thread_id', '_metadata_reply_to_message_id', '_metadata_direct_messages_topic_id',
+            '_dm_topic_fallback', '_is_private_dm_topic_send', '_chunk_reply_routing', '_should_thread_reply',
+            '_thread_kwargs_for_send', '_message_thread_id_for_send', '_direct_topic_kwargs',
+            '_compute_single_send_routing', '_brai_private_topic_route', '_brai_private_topic_rejected',
+            '_brai_send_with_private_topic_retry', '_brai_definitive_send_refusal',
+            '_send_chunk_with_retries', '_try_send_rich', '_is_thread_not_found_error',
+        )
+        scope = function('plugins/platforms/telegram/adapter.py', native_methods, {
+            'os': os, 'normalize_telegram_chat_id': int, 'SendResult': SimpleNamespace,
+            '_await_with_thread_deadline': deadline, '_TEXT_SEND_DEADLINE': 1,
+            '_BraiPrivateTopicRetryFailed': PrivateTopicRetryFailed,
+            'logger': SimpleNamespace(warning=lambda *args: None),
+        })
+        adapter = type('TelegramFixture', (), {
+            **{name: scope[name] for name in native_methods}, '_GENERAL_TOPIC_THREAD_ID': '1',
+        })()
+        types = (OSError, BadRequest, TimeoutError)
+        adapter._telegram_error_types = lambda: types
+        adapter._link_preview_kwargs = dict
+        adapter._notification_kwargs = lambda metadata: {}
+        adapter._rich_payload_base = lambda chat, content: {'chat_id': int(chat), 'rich_message': {'markdown': content}}
+        adapter._record_rich_sent = record
+        adapter._rich_rejected = lambda *_: self.fail('private topic rejection fell back to Markdown')
+        anchor = 93
+        topic = {'thread_id': '88', 'telegram_dm_topic_reply_fallback': True,
+                 'telegram_reply_to_message_id': str(anchor), 'direct_messages_topic_id': '88',
+                 '_brai_before_topic_retry': AsyncMock()}
+        errors = module(BadRequest=BadRequest, Forbidden=Forbidden, RetryAfter=RetryAfter, InvalidToken=InvalidToken)
+
+        denied = BadRequest('Message thread not found')
+        delivered = SimpleNamespace(message_id=101, chat=SimpleNamespace(id=23), message_thread_id=88,
+                                    reply_to_message=SimpleNamespace(message_id=anchor))
+        wrong_topic = SimpleNamespace(**{**vars(delivered), 'message_thread_id': 89})
+        wrong_anchor = SimpleNamespace(**{**vars(delivered), 'reply_to_message': None})
+        wrapped = {'result': {'message_id': 101, 'chat': {'id': 23}, 'message_thread_id': 88,
+                              'reply_to_message': {'message_id': anchor}}}
+        for rich in (False, True):
+            for results, created, mode, error in (
+                    ((denied, delivered), False, 'all', None),
+                    ((denied, wrong_topic), False, 'all', 'delivery_unknown'),
+                    ((denied, wrong_anchor), False, 'all', 'delivery_unknown'),
+                    ((denied, denied), False, 'all', 'topic_unavailable'),
+                    ((denied,), True, 'all', 'topic_unavailable'),
+                    ((denied,), False, 'off', 'topic_unavailable'),
+                    ((denied, BadRequest('Message to be replied not found')), False, 'all', 'telegram_rejected'),
+                    ((denied, OSError('connection state unknown')), False, 'all', 'delivery_unknown'),
+                    ((OSError('connection state unknown'),), False, 'all', 'delivery_unknown'),
+                    ((wrong_topic,), False, 'all', 'delivery_unknown'),
+                    ((denied, {}), False, 'all', 'delivery_unknown'),
+                    (({'result': []},), False, 'all', 'delivery_unknown'),
+                    (({'message_id': 0, 'result': {'message_id': 101}},), False, 'all', 'delivery_unknown')):
+                with self.subTest(rich=rich, results=results, created=created, reply_mode=mode):
+                    attempts = []
+
+                    async def send(method, kwargs):
+                        attempts.append((method, dict(kwargs)))
+                        result = results[len(attempts) - 1]
+                        if rich and result is delivered:
+                            return wrapped
+                        if isinstance(result, Exception):
+                            raise result
+                        return result
+
+                    adapter._reply_to_mode = mode
+                    adapter._bot = SimpleNamespace(do_api_request=lambda method, api_kwargs: send(method, api_kwargs))
+                    adapter._send_chunk_markdown_or_plain = send
+                    metadata = {**topic, 'telegram_dm_topic_created_for_send': created}
+                    with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}), \
+                            patch.dict(sys.modules, {'telegram': module(error=errors)}):
+                        if rich:
+                            actual = await adapter._try_send_rich('23', 'готовый ответ', None, metadata)
+                        else:
+                            actual = await adapter._send_chunk_with_retries('23', 'готовый ответ', 0, None,
+                                                                           metadata, '88', False, types)
+                    expected = {'chat_id': 23, 'message_thread_id': 88}
+                    if rich:
+                        expected['rich_message'] = {'markdown': 'готовый ответ'}
+                        if mode != 'off':
+                            expected['reply_parameters'] = {'message_id': anchor}
+                    else:
+                        expected['reply_to_message_id'] = anchor if mode != 'off' else None
+                    method = 'sendRichMessage' if rich else 'готовый ответ'
+                    expected_calls = [(method, expected)]
+                    if len(results) == 2:
+                        by_anchor = {key: value for key, value in expected.items() if key != 'message_thread_id'}
+                        if rich:
+                            by_anchor['reply_parameters'] = {'message_id': anchor, 'allow_sending_without_reply': False}
+                        else:
+                            by_anchor['allow_sending_without_reply'] = False
+                        expected_calls.append((method, by_anchor))
+                    self.assertEqual(attempts, expected_calls)
+                    if error is None:
+                        self.assertEqual(actual.message_id if rich else actual[0].message_id, '101' if rich else 101)
+                    else:
+                        self.assertFalse(actual.retryable)
+                        self.assertEqual(actual.error_kind, error)
+
+        adapter._reply_to_mode = 'all'
+        adapter._send_chunk_markdown_or_plain = AsyncMock(side_effect=denied)
+        adapter._bot = SimpleNamespace(do_api_request=AsyncMock(side_effect=denied))
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+            result = await adapter._send_chunk_with_retries('23', 'готовый ответ', 0, '94',
+                                                            topic, '88', False, types)
+            self.assertEqual(result.error_kind, 'topic_unavailable')
+            result = await adapter._try_send_rich('23', 'готовый ответ', '94', topic)
+            self.assertEqual(result.error_kind, 'topic_unavailable')
+        adapter._send_chunk_markdown_or_plain.assert_awaited_once()
+        adapter._bot.do_api_request.assert_awaited_once()
+
+        from identity.telegram_runtime import Resolver
+
+        resolver = Resolver.__new__(Resolver)
+        resolver.adapter = adapter
+        adapter.format_message = str
+        resolver.journal = None
+        recorded = []
+        resolver._record_delivery = lambda *args, **kwargs: recorded.append(args)
+        current = lambda: None
+        current.generation = 1
+        receipt = SimpleNamespace(**vars(delivered), chat_id=23)
+        ports = {'plugins.platforms.telegram.adapter': module(_BraiPrivateTopicRetryFailed=PrivateTopicRetryFailed),
+                 'telegram.error': errors, 'telegram': module(error=errors)}
+        for outcomes, retry_error, error_kind in (
+                ((receipt,), None, None), ((denied, receipt), None, None),
+                ((denied, denied), None, 'topic_unavailable'),
+                ((denied, wrong_topic), None, 'delivery_unknown'),
+                ((denied, BadRequest('Message to be replied not found')), None, 'telegram_rejected'),
+                ((denied, Forbidden()), None, 'telegram_rejected'),
+                ((denied, TimeoutError()), None, 'delivery_unknown'),
+                ((denied,), PermissionError('Conversation generation changed'), 'forbidden')):
+            with self.subTest(operator_outcomes=outcomes), patch.dict(sys.modules, ports), \
+                    patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                admitted = AsyncMock()
+                retry_admitted = AsyncMock(side_effect=retry_error)
+                wire = AsyncMock(side_effect=outcomes)
+                adapter._send_chunk_markdown_or_plain = wire
+                result = await resolver._deliver_route({'uid': 1}, 'send',
+                    {'chat_id': '23', 'reply_to': str(anchor), 'content': 'готовый ответ'}, ('23', '88'),
+                    topic, None, current, before_send=admitted, before_retry=retry_admitted)
+                admitted.assert_awaited_once()
+                self.assertEqual(retry_admitted.await_count, int(outcomes[0] is denied))
+                self.assertEqual(wire.await_count, len(outcomes))
+                initial = {'chat_id': 23, 'message_thread_id': 88, 'reply_to_message_id': anchor,
+                           'allow_sending_without_reply': False}
+                self.assertEqual(wire.await_args_list[0].args, ('готовый ответ', initial))
+                if len(outcomes) == 2:
+                    by_anchor = {key: value for key, value in initial.items() if key != 'message_thread_id'}
+                    self.assertEqual(wire.await_args_list[1].args, ('готовый ответ', by_anchor))
+                if error_kind:
+                    self.assertEqual(result, {'success': False, 'retryable': False, 'error_kind': error_kind})
+                else:
+                    self.assertEqual(result, {'success': True, 'message_id': '101'})
+        self.assertEqual(len(recorded), 2)
+
+        telegram = module(error=errors, **{name: SimpleNamespace for name in (
+            'InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument')})
+        second_receipt = SimpleNamespace(**{**vars(receipt), 'message_id': 102, 'reply_to_message': None})
+        conflicting_anchor = SimpleNamespace(**{**vars(second_receipt),
+                                                 'reply_to_message': SimpleNamespace(message_id=94)})
+        for album in (False, True):
+            delivered_media = [receipt, second_receipt] if album else receipt
+            unreliable = [receipt, wrong_topic] if album else wrong_topic
+            cases = [
+                    ((denied, delivered_media), None, 'sent'),
+                    ((denied, unreliable), None, 'delivery_unknown'),
+                    ((TimeoutError(),), None, 'delivery_unknown'),
+                    ((denied,), PermissionError('Binding changed'), 'forbidden')]
+            if album:
+                cases.extend(((denied, value), None, 'delivery_unknown') for value in (
+                    [receipt, conflicting_anchor], [receipt, receipt], [wrong_anchor, second_receipt]))
+            for outcomes, recheck_error, expected in cases:
+                with self.subTest(album=album, media_outcomes=outcomes), \
+                        patch.dict(sys.modules, {**ports, 'telegram': telegram}), \
+                        patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                    sends = []
+                    def response(options, received):
+                        index = len(sends)
+                        sends.append((options, [file.read() for file in received]))
+                        result = outcomes[index]
+                        if isinstance(result, Exception):
+                            raise result
+                        return result
+
+                    async def document(document, caption, parse_mode, **options):
+                        return response(options, [document])
+
+                    async def group(media, **options):
+                        return response(options, [item.media for item in media])
+
+                    adapter._bot = SimpleNamespace(send_document=document, send_media_group=group)
+                    items = [{'caption': '', 'presentation': 'document', 'readHandle': BytesIO(body)}
+                             for body in ([b'first', b'second'] if album else [b'first'])]
+                    before_send = AsyncMock()
+                    before_retry = AsyncMock(side_effect=recheck_error)
+                    request = native.telegram_sender(adapter, '23', topic, 'album' if album else 'single',
+                        items, False, reply_to='93', strict=True, before_send=before_send,
+                        before_retry=before_retry, topic_anchor='93')
+                    if expected == 'sent':
+                        self.assertEqual(await request, [101, 102] if album else [101])
+                    else:
+                        with self.assertRaises(PrivateTopicRetryFailed) as raised:
+                            await request
+                        from identity.telegram_runtime import _private_topic_failure
+                        self.assertEqual(_private_topic_failure(raised.exception)['error_kind'], expected)
+                    before_send.assert_awaited_once()
+                    self.assertEqual(before_retry.await_count, int(outcomes[0] is denied))
+                    self.assertEqual(len(sends), len(outcomes))
+                    initial, bodies = sends[0]
+                    self.assertEqual(initial, {'chat_id': 23, 'message_thread_id': 88,
+                                              'reply_to_message_id': 93, 'allow_sending_without_reply': False})
+                    self.assertEqual(bodies, [b'first', b'second'] if album else [b'first'])
+                    if len(sends) > 1:
+                        self.assertEqual(sends[1], ({'chat_id': 23, 'reply_to_message_id': 93,
+                                                    'allow_sending_without_reply': False}, bodies))
 
     async def test_pinned_telegram_draft_never_retries_with_raw_markup(self):
         async def deadline(value, **kwargs):

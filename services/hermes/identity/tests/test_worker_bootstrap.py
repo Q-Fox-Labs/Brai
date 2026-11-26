@@ -150,6 +150,41 @@ class ToolClientTest(unittest.TestCase):
             tool_client.handle('tools/call', {'name':'test', 'arguments':{'value':1}, 'uid':0})
         call.assert_called_once_with('tools.call', {'name':'test', 'args':{'value':1}})
 
+    def test_dialogues_input_and_poll_ignore_model_context_and_pass_delivery_receipt(self):
+        legacy = {'consumer_id': 'from-old-prompt', 'context_instance_id': 'session', 'reset': True}
+        receipt = '12eb61a5-7feb-4136-b687-4112f46ad197'
+        upstream = {'content': [], 'structuredContent': {'context': 'T1 "Тема"'}, '_meta': {
+            'brai_dialogues_delivery': receipt}}
+        with patch.dict(tool_client.DIALOGUES_RECEIPTS, clear=True), \
+                patch.object(tool_client, 'broker_call', return_value=upstream) as broker:
+            for action, payload, expected in (
+                ('input', {'dialogue': {'id': 'chat-1', 'channel': 'telegram'},
+                           'messages': [{'id': 'entry-1', 'text': 'Вход'}]}, 'start'),
+                ('poll', {'dialogue_id': 'chat-1'}, receipt),
+                ('input', {'dialogue': {'id': 'chat-2', 'channel': 'telegram'},
+                           'messages': [{'id': 'entry-2', 'text': 'Второй тред'}]}, 'start'),
+            ):
+                with self.subTest(action=action, expected=expected):
+                    args = {'action': action, 'arguments': payload, 'context': legacy,
+                            '_brai_context_receipt': 'model-value'}
+                    result = tool_client.handle('tools/call', {'name': 'dialogues_exchange', 'arguments': args})
+                    broker.assert_called_with('tools.call', {'name': 'dialogues_exchange', 'args': {
+                        'action': action, 'arguments': payload, '_brai_context_receipt': expected}})
+                    self.assertEqual(args['context'], legacy)
+                    self.assertEqual(result['structuredContent'], upstream['structuredContent'])
+                    self.assertNotIn('_meta', result)
+
+    def test_dialogues_archive_and_turn_operations_omit_context(self):
+        payload = {'dialogue_id': 'chat-1'}
+        context = {'consumer_id': 'from-old-prompt', 'context_instance_id': 'session'}
+        for action in ('read', 'history', 'snapshot', 'update', 'finish', 'import', 'summary', 'repair'):
+            with self.subTest(action=action), patch.object(tool_client, 'broker_call', return_value={}) as broker:
+                args = {'action': action, 'arguments': payload, 'context': context}
+                expected = args if action in ('import', 'summary', 'repair') else {
+                    'action': action, 'arguments': payload}
+                tool_client.handle('tools/call', {'name': 'dialogues_exchange', 'arguments': args})
+                broker.assert_called_once_with('tools.call', {'name': 'dialogues_exchange', 'args': expected})
+
 class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
     async def test_register_factory_wires_and_unloads(self):
         from types import SimpleNamespace, ModuleType

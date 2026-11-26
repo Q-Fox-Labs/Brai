@@ -11,7 +11,9 @@ const secret=()=>randomBytes(32).toString('base64url');
 function save(path:string,value:unknown){const temp=path+'.new';writeFileSync(temp,JSON.stringify(value),{mode:0o600});renameSync(temp,path);}
 try{
  let raw='';for await(const chunk of process.stdin)raw+=chunk;
- const {operatorFile,account,directory,stateDirectory,provider,payload,providerPayload=payload,uid}=JSON.parse(raw);
+ const {operatorFile,account,directory,stateDirectory,provider,payload,providerPayload=payload,uid,stageExisting=false,holdFile}=JSON.parse(raw);
+ if(typeof stageExisting!=='boolean'||holdFile!==undefined&&holdFile!=='/etc/brai-release-dialogues/dialogues-independent/release-hold')
+  throw new Error('INVALID_RELEASE_GENERATION');
  const op=JSON.parse(readFileSync(operatorFile,'utf8'));
  const auth=new Pool({connectionString:op.authDatabaseURL,max:1});
  const admin=new Pool({connectionString:op.dialoguesAdminDatabaseURL,max:1});
@@ -26,6 +28,7 @@ try{
   // AIDEV-NOTE: Не меняем пароль существующего login и не переписываем owner_id истории.
   const hasBindings=(await owner.query("SELECT to_regclass('dialogues_access.sys_owner_bindings') AS name")).rows[0].name;
   const previous=hasBindings?(await owner.query('SELECT login_role,owner_id,profile_id FROM dialogues_access.sys_owner_bindings WHERE user_id=$1',[account.user_id])).rows[0]:undefined;
+  if(stageExisting&&(!previous||!state?.natsPassword))throw new Error('EXISTING_CONNECTION_REQUIRED');
   if(previous&&!state){
    if(!account.connection_file)throw new Error('EXISTING_CONNECTION_IMPORT_REQUIRED');
    state=JSON.parse(readFileSync(account.connection_file,'utf8'));
@@ -35,14 +38,26 @@ try{
   if(!state.natsPassword)state.natsPassword=secret();
   if(!existsSync(path))save(path,state);
   if(!/^[a-z][a-z0-9_]{0,62}$/.test(state.login))throw new Error('INVALID_LOGIN');
-  const role=(await admin.query('SELECT 1 FROM pg_roles WHERE rolname=$1',[state.login])).rowCount;
-  if(!role)await admin.query('CREATE ROLE '+quote(state.login)+" LOGIN PASSWORD '"+state.password.replaceAll("'","''")+"' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION");
-  const database=new URL(op.dialoguesOwnerDatabaseURL).pathname.slice(1);
-  await admin.query('GRANT CONNECT ON DATABASE '+quote(database)+' TO '+quote(state.login));
-  if(!previous){await migrate(owner,op.dialoguesOwnerRole,state.login);await migrateIsolation(owner,op.dialoguesOwnerRole);}
-  await bindOwner(owner,op.dialoguesOwnerRole,state.login,{userId:state.userId,profileId:state.profileId,ownerId:state.ownerId});
+  if(!stageExisting){
+   const role=(await admin.query('SELECT 1 FROM pg_roles WHERE rolname=$1',[state.login])).rowCount;
+   if(!role)await admin.query('CREATE ROLE '+quote(state.login)+" LOGIN PASSWORD '"+state.password.replaceAll("'","''")+"' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION");
+   const database=new URL(op.dialoguesOwnerDatabaseURL).pathname.slice(1);
+   await admin.query('GRANT CONNECT ON DATABASE '+quote(database)+' TO '+quote(state.login));
+   if(!previous)await migrate(owner,op.dialoguesOwnerRole,state.login);
+   // AIDEV-NOTE: Старые привязки тоже получают добавочные таблицы и права до запуска нового runtime.
+   if(!previous||!(await owner.query('SELECT 1 FROM dialogues_live.migrations WHERE version=9')).rowCount)
+    await migrateIsolation(owner,op.dialoguesOwnerRole);
+   await bindOwner(owner,op.dialoguesOwnerRole,state.login,{userId:state.userId,profileId:state.profileId,ownerId:state.ownerId});
+  }
   const databaseURL=new URL(op.dialoguesRuntimeDatabaseURL??op.dialoguesOwnerDatabaseURL);databaseURL.username=state.login;databaseURL.password=state.password;
-  const check=new Pool({connectionString:databaseURL.href,max:1});try{await check.query('SELECT 1');}finally{await check.end();}
+  const check=new Pool({connectionString:databaseURL.href,max:1});
+  try{
+   if(stageExisting){
+    const binding=(await check.query('SELECT * FROM dialogues_access.current_binding()')).rows[0];
+    if(binding?.owner_id!==state.ownerId||binding?.user_id!==state.userId||binding?.profile_id!==state.profileId)
+     throw new Error('CONNECTION_CONFLICT');
+   }else await check.query('SELECT 1');
+  }finally{await check.end();}
   const subject='brai.auth.v2.dialogues-access.'+id,inbox='_INBOX.dialogues.'+id;
   const socket='/run/'+account.unit+'-credential/credentials.sock';
   const helper=providerPayload+'/services/providers/codex-auth/helper.py';
@@ -52,7 +67,8 @@ try{
   save(directory+'/nats.json',{user:state.login,pass:state.natsPassword});
   writeFileSync(directory+'/token',state.token,{mode:0o600});writeFileSync(directory+'/cursor',state.cursor,{mode:0o600});
   if(state.operatorToken)writeFileSync(directory+'/operator-token',state.operatorToken,{mode:0o600});
-  const env={...(state.operatorToken?{DIALOGUES_OPERATOR_TOKEN_FILE:directory+'/operator-token'}:{}),DIALOGUES_DATABASE_URL:databaseURL.href,DIALOGUES_MCP_TOKEN_FILE:directory+'/token',DIALOGUES_CURSOR_KEY_FILE:directory+'/cursor',DIALOGUES_MCP_PORT:String(account.port),DIALOGUES_MCP_HOST:'127.0.0.1',DIALOGUES_MCP_ALLOWED_HOSTS:'127.0.0.1:'+account.port+',localhost:'+account.port,DIALOGUES_MCP_ALLOWED_ORIGINS:'http://127.0.0.1',DIALOGUES_MCP_USER_ID:state.userId,DIALOGUES_MCP_PROFILE_ID:state.profileId,DIALOGUES_MCP_OWNER_ID:state.ownerId,DIALOGUES_AUTH_SUBJECT:subject,DIALOGUES_NATS_CREDS_FILE:directory+'/nats.json',DIALOGUES_NATS_SERVERS:op.natsServers.join(','),DIALOGUES_NATS_INBOX_PREFIX:inbox,DIALOGUES_SUBSCRIPTION_CONFIG_FILE:directory+'/subscription.json',DIALOGUES_SUMMARY_ENABLED:'true',...(op.natsCAFile?{DIALOGUES_NATS_CA_FILE:op.natsCAFile}:{})};
+  if(holdFile)writeFileSync(directory+'/release-probe-token',secret(),{mode:0o600});
+  const env={...(holdFile?{DIALOGUES_MCP_HOLD_FILE:holdFile,DIALOGUES_MCP_HOLD_TOKEN_FILE:directory+'/release-probe-token'}:{}),...(state.operatorToken?{DIALOGUES_OPERATOR_TOKEN_FILE:directory+'/operator-token'}:{}),DIALOGUES_DATABASE_URL:databaseURL.href,DIALOGUES_MCP_TOKEN_FILE:directory+'/token',DIALOGUES_CURSOR_KEY_FILE:directory+'/cursor',DIALOGUES_MCP_PORT:String(account.port),DIALOGUES_MCP_HOST:'127.0.0.1',DIALOGUES_MCP_ALLOWED_HOSTS:'127.0.0.1:'+account.port+',localhost:'+account.port,DIALOGUES_MCP_ALLOWED_ORIGINS:'http://127.0.0.1',DIALOGUES_MCP_USER_ID:state.userId,DIALOGUES_MCP_PROFILE_ID:state.profileId,DIALOGUES_MCP_OWNER_ID:state.ownerId,DIALOGUES_AUTH_SUBJECT:subject,DIALOGUES_NATS_CREDS_FILE:directory+'/nats.json',DIALOGUES_NATS_SERVERS:op.natsServers.join(','),DIALOGUES_NATS_INBOX_PREFIX:inbox,DIALOGUES_SUBSCRIPTION_CONFIG_FILE:directory+'/subscription.json',DIALOGUES_SUMMARY_ENABLED:'true',...(op.natsCAFile?{DIALOGUES_NATS_CA_FILE:op.natsCAFile}:{})};
   writeFileSync(directory+'/runtime.env',Object.entries(env).map(([k,v])=>k+'='+JSON.stringify(v)).join('\n')+'\n',{mode:0o600});
   save(directory+'/endpoint.json',{enabled:true,url:'http://127.0.0.1:'+account.port+'/mcp',userId:state.userId,profileId:state.profileId,token:state.token});
   save(directory+'/admission.json',{binding:{subject,userId:state.userId,profileId:state.profileId},nats:{user:state.login,password:state.natsPassword,permissions:{publish:{allow:[subject]},subscribe:{allow:[inbox+'.>']}}}});

@@ -1,12 +1,14 @@
 // ABOUTME: Собирает PostgreSQL и MCP независимого live-сервиса Диалогов.
 // ABOUTME: Миграции и подготовка входных данных выполняются отдельной owner-операцией.
 import {createSubscriptionLuna} from './subscription-luna.js';
-import { readFileSync } from "node:fs";
+import { readFileSync,statSync } from "node:fs";
 import { Pool } from "pg";
 import { createStore } from "./store.js";
 import { startMcp } from "./mcp.js";
 import {createLuna} from "./luna.js";
 import {createJobs} from "./jobs.js";
+import {createTopicJobs,seedTopicIndex} from "./topic-jobs.js";
+import {DialoguesFault} from "./domain.js";
 import {verifyOwnerConnection} from "./isolation.js";
 import {connectAuthAccess} from './auth-access.js';
 import {createPersonalAuthorizer} from "./personal-auth.js";
@@ -20,7 +22,7 @@ let jobs:ReturnType<typeof createJobs>|undefined,luna:ReturnType<typeof createLu
 let authAccess:Awaited<ReturnType<typeof connectAuthAccess>>|undefined;
 let mcp:Awaited<ReturnType<typeof startMcp>>;
 try {
-  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=5")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
+  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=9")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
   const owner=required("DIALOGUES_MCP_OWNER_ID");
   const isolated=Boolean((await pool.query('SELECT 1 FROM dialogues_live.migrations WHERE version=6')).rowCount);
   let personal:Parameters<typeof startMcp>[1]['personal'];
@@ -46,9 +48,22 @@ try {
   if((await pool.query("SELECT 1 FROM dialogues_live.messages m WHERE m.owner_id=$1 AND char_length(m.text)>100 AND NOT EXISTS(SELECT 1 FROM dialogues_live.message_summaries s WHERE s.owner_id=m.owner_id AND s.dialogue_id=m.dialogue_id AND s.message_id=m.id) LIMIT 1",[owner])).rowCount)throw new Error("BACKFILL_REQUIRED");
   if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"&&!personal)
     luna=createLuna(required("DIALOGUES_CODEX_SOCKET_URL"),required("DIALOGUES_SUMMARY_CWD"));
-  mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal});
-  if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"){
-    jobs=createJobs(pool,owner,luna!,personal?.authorize);jobs.start();
+  const generator=luna;
+  const topicJobs=generator&&'structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
+  if(topicJobs)await topicJobs.seed();
+  else await seedTopicIndex(pool,owner);
+  const marker=process.env.DIALOGUES_MCP_HOLD_FILE;
+  const hold=marker?{active:()=>statSync(marker,{throwIfNoEntry:false})!==undefined,
+    token:readFileSync(required('DIALOGUES_MCP_HOLD_TOKEN_FILE'),'utf8').trim()}:undefined;
+  mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal,hold});
+  if(generator){
+    jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
+      try{return await topicJobs.tick();}
+      catch(error){
+        console.error(JSON.stringify({service:'dialogues',event:'topic_job_failed',code:error instanceof DialoguesFault?error.code:'INTERNAL'}));
+        return false;
+      }
+    }));jobs.start();
   }
 } catch(error) {await luna?.close();await authAccess?.close();await pool.end();const code=error instanceof Error&&error.message==='BACKFILL_REQUIRED'?'BACKFILL_REQUIRED':'STARTUP_FAILED';console.error(JSON.stringify({service:'dialogues',code}));process.exit(1);}
 let stopping=false;

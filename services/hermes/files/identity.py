@@ -1,5 +1,6 @@
 # ABOUTME: Переносит проверенные inode между профилем и привилегированным Artifacts.
 # ABOUTME: Владелец поступает из SO_PEERCRED; root cache недоступен worker.
+import asyncio
 import hashlib
 import io
 import importlib.util
@@ -14,6 +15,32 @@ import uuid
 import zipfile
 
 MAX_FILE = 64 * 1024 * 1024
+MAX_MEDIA_FILE = 2**31  # Existing Artifacts upload budget.
+MEDIA_SUFFIXES = frozenset({
+    '.aac', '.caf', '.flac', '.m4a', '.mkv', '.mov', '.mp3', '.mp4', '.oga', '.ogg',
+    '.opus', '.wav', '.webm', '.3gp', '.3g2',
+})
+
+
+def media_file_limit(path, mime_type=None):
+    """Use the existing Artifacts streaming budget for supported media."""
+    if Path(path).suffix.lower() in MEDIA_SUFFIXES and (
+            mime_type is None or mime_type.startswith(('audio/', 'video/'))):
+        return MAX_MEDIA_FILE
+    return MAX_FILE
+
+
+def opaque_audio_header(filename, source):
+    """Recognize formats stored as application/octet-stream by the publisher."""
+    suffix = Path(filename).suffix.lower()
+    header = os.pread(source, 16, 0)
+    if suffix == '.aac' and len(header) >= 7 and header[0] == 0xff and header[1] & 0xf6 == 0xf0:
+        frame_size = (header[3] & 3) << 11 | header[4] << 3 | header[5] >> 5
+        next_frame = os.pread(source, 2, frame_size) if frame_size >= 7 else b''
+        return len(next_frame) == 2 and next_frame[0] == 0xff and next_frame[1] & 0xf6 == 0xf0
+    if suffix == '.m4a' and len(header) >= 16:
+        return header[4:8] == b'ftyp' and header[8:12] in {b'M4A ', b'M4B ', b'mp41', b'mp42', b'isom', b'iso2'}
+    return False
 
 
 def open_directory(path, uid):
@@ -35,7 +62,7 @@ def open_directory(path, uid):
         os.close(current)
 
 
-def open_file(root, path, uid):
+def open_file(root, path, uid, *, maximum=MAX_FILE):
     """Закрепить обычный односсылочный файл в разрешённом корне."""
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts:
@@ -54,7 +81,7 @@ def open_file(root, path, uid):
                 raise PermissionError('Foreign directory')
         fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1 or not 0 <= info.st_size <= MAX_FILE:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1 or not 0 <= info.st_size <= maximum:
             os.close(fd)
             raise PermissionError('File denied')
         return fd
@@ -62,13 +89,13 @@ def open_file(root, path, uid):
         os.close(directory)
 
 
-def copy_fd(source, target):
+def copy_fd(source, target, *, maximum=MAX_FILE):
     """Скопировать ограниченный стабильный inode и вычислить SHA-256."""
     before = os.fstat(source)
     digest, size = hashlib.sha256(), 0
     while chunk := os.read(source, 1024 * 1024):
         size += len(chunk)
-        if size > MAX_FILE:
+        if size > maximum:
             raise ValueError('File too large')
         digest.update(chunk)
         view = memoryview(chunk)
@@ -84,7 +111,17 @@ def copy_fd(source, target):
     return size, digest.hexdigest()
 
 
-def copy_to_profile(source, home, area, folder, name, uid, expected=None, receipt=None):
+def copy_snapshot(source, snapshot, expected, maximum):
+    target = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        size, digest = copy_fd(source, target, maximum=maximum)
+        if expected is not None and (size != expected['sizeBytes'] or digest != expected['sha256']):
+            raise PermissionError('Input bytes changed')
+    finally:
+        os.close(target)
+
+
+def copy_to_profile(source, home, area, folder, name, uid, expected=None, receipt=None, *, maximum=MAX_FILE):
     """Атомарно записать личную копию через descriptor каталога."""
     if not isinstance(name, str) or not name or name in ('.', '..') or Path(name).name != name or '\\' in name:
         raise ValueError('Invalid filename')
@@ -103,7 +140,7 @@ def copy_to_profile(source, home, area, folder, name, uid, expected=None, receip
             raise PermissionError('Unsafe destination')
         target = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         try:
-            size, digest = copy_fd(source, target)
+            size, digest = copy_fd(source, target, maximum=maximum)
             if expected is not None and (size != expected['sizeBytes'] or digest != expected['sha256']):
                 raise PermissionError('Hash mismatch')
             os.fchown(target, uid, -1)
@@ -166,23 +203,33 @@ class OwnerFiles:
                 raise PermissionError('Foreign file root')
         return value
 
-    def open_cache(self, uid, result, profile=None):
+    def open_cache(self, uid, result, profile=None, *, maximum=MAX_FILE):
         """Проверить точный root-owned cache path и метаданные результата."""
         aid = str(uuid.UUID(result['artifactId']))
         name, root = result['filename'], self.runtime(uid, profile)['cacheRoot']
         if (aid != result['artifactId'] or not isinstance(name, str) or not name or name in ('.', '..')
                 or Path(name).name != name or '\\' in name or Path(result['localPath']) != Path(root) / aid / name
-                or type(result['sizeBytes']) is not int or not 0 <= result['sizeBytes'] <= MAX_FILE
+                or type(result['sizeBytes']) is not int or not 0 <= result['sizeBytes'] <= maximum
                 or not isinstance(result['sha256'], str) or len(result['sha256']) != 64
                 or not isinstance(result['mimeType'], str) or not result['mimeType']):
             raise ValueError('Invalid artifact')
-        return open_file(root, result['localPath'], 0)
+        return open_file(root, result['localPath'], 0, maximum=maximum)
 
     def materialize(self, uid, profile, result):
         """Вернуть только копию результата в собственном results worker."""
-        source = self.open_cache(uid, result, profile)
+        mime = result.get('mimeType')
+        maximum = media_file_limit(result['filename'], mime) if isinstance(mime, str) else MAX_FILE
+        size = result.get('sizeBytes')
+        opaque_media = (mime == 'application/octet-stream' and type(size) is int and size > MAX_FILE
+                        and Path(result['filename']).suffix.lower() in {'.aac', '.m4a'})
+        if opaque_media:
+            maximum = MAX_MEDIA_FILE
+        source = self.open_cache(uid, result, profile, maximum=maximum)
         try:
-            path = copy_to_profile(source, profile['home'], 'results', result['artifactId'], result['filename'], uid, result)
+            if opaque_media and not opaque_audio_header(result['filename'], source):
+                raise PermissionError('Unsupported large audio format')
+            path = copy_to_profile(source, profile['home'], 'results', result['artifactId'],
+                                   result['filename'], uid, result, maximum=maximum)
         finally:
             os.close(source)
         name = result['filename'].replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
@@ -211,7 +258,7 @@ class OwnerFiles:
             os.close(directory)
         if (value.get('path') != str(path) or value.get('userId') != profile['userId']
                 or value.get('profileId') != profile['profileId'] or type(value.get('sizeBytes')) is not int
-                or not 0 <= value['sizeBytes'] <= MAX_FILE or not isinstance(value.get('sha256'), str)
+                or not 0 <= value['sizeBytes'] <= media_file_limit(path) or not isinstance(value.get('sha256'), str)
                 or len(value['sha256']) != 64):
             raise PermissionError('Invalid input admission')
         return value
@@ -225,7 +272,8 @@ class OwnerFiles:
         if len(relative.parts) < 2 or relative.parts[0] not in ('workspace', 'results', 'media'):
             raise PermissionError('File root denied')
         expected = self.input_admission(uid, profile, path) if admitted else None
-        source = open_file(home / relative.parts[0], path, uid)
+        maximum = media_file_limit(path)
+        source = open_file(home / relative.parts[0], path, uid, maximum=maximum)
         folder = None
         try:
             stage = Path(self.runtime(uid, profile)['stagingRoot'])
@@ -233,15 +281,14 @@ class OwnerFiles:
             os.close(checked)
             folder = Path(tempfile.mkdtemp(prefix='publish-', dir=stage))
             snapshot = folder / path.name
-            target = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            copying = asyncio.create_task(asyncio.to_thread(copy_snapshot, source, snapshot, expected, maximum))
             try:
-                size, digest = copy_fd(source, target)
-                if expected is not None and (size != expected['sizeBytes'] or digest != expected['sha256']):
-                    raise PermissionError('Input bytes changed')
-            finally:
-                os.close(target)
+                await asyncio.shield(copying)
+            except asyncio.CancelledError:
+                await asyncio.gather(copying, return_exceptions=True)
+                raise
             result = await self.control.call('artifacts.publish', {'uid': uid, 'path': str(snapshot), 'requestId': params['requestId']}, timeout=1800)
-            return self.materialize(uid, profile, result)
+            return await asyncio.to_thread(self.materialize, uid, profile, result)
         finally:
             os.close(source)
             if folder is not None:
@@ -406,7 +453,7 @@ class OwnerFiles:
             finally:
                 os.close(fd)
             return {**result, 'localPath': path, 'markdown': '[file](<' + path + '>)'}
-        return self.materialize(uid, profile, result)
+        return await asyncio.to_thread(self.materialize, uid, profile, result)
 
     async def open_ingress(self, uid, profile, artifact_id):
         """Открыть конкретный owner-bound артефакт; права каталогов не меняются."""
@@ -438,22 +485,26 @@ class OwnerFiles:
             roots = [root for root in self.config['ingressReadRoots'] if Path(path).is_relative_to(root)]
             if len(roots) != 1:
                 raise PermissionError('Ingress root denied')
-            source = open_file(roots[0], path, self.config['ingressUid'])
-            try:
-                receipt = {}
-                destination = copy_to_profile(source, profile['home'], 'media', uuid.uuid4().hex,
-                                              Path(path).name, uid, receipt=receipt)
-                folder = open_directory(Path(destination).parent, uid)
-                try:
-                    fd = os.open('.brai-admission.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
-                    with os.fdopen(fd, 'w') as marker:
-                        json.dump({**receipt, 'path': destination, 'userId': profile['userId'],
-                                   'profileId': profile['profileId']}, marker)
-                        marker.flush()
-                        os.fsync(marker.fileno())
-                finally:
-                    os.close(folder)
-                copied.append(destination)
-            finally:
-                os.close(source)
+            copied.append(await asyncio.to_thread(self.copy_ingress_file, roots[0], path, uid, profile))
         return {'paths': copied}
+
+    def copy_ingress_file(self, root, path, uid, profile):
+        maximum = media_file_limit(path)
+        source = open_file(root, path, self.config['ingressUid'], maximum=maximum)
+        try:
+            receipt = {}
+            destination = copy_to_profile(source, profile['home'], 'media', uuid.uuid4().hex,
+                                          Path(path).name, uid, receipt=receipt, maximum=maximum)
+            folder = open_directory(Path(destination).parent, uid)
+            try:
+                fd = os.open('.brai-admission.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+                with os.fdopen(fd, 'w') as marker:
+                    json.dump({**receipt, 'path': destination, 'userId': profile['userId'],
+                               'profileId': profile['profileId']}, marker)
+                    marker.flush()
+                    os.fsync(marker.fileno())
+            finally:
+                os.close(folder)
+            return destination
+        finally:
+            os.close(source)

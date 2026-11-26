@@ -53,6 +53,19 @@ async function fixture(mode='completed'){
  const luna=createLuna('ws+unix:'+path+':/','/tmp');
  return {luna,calls,replies,get starts(){return turnStarts;},async close(){await luna.close();for(const x of wss.clients)x.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});}};
 }
+test('Luna: структурированная свёртка темы использует временный изолированный ход',async()=>{
+ const f=await fixture();
+ try{
+  const prompt={instructions:'Верни свёртку темы.',schema:{type:'object',properties:{summary:{type:'string'}},required:['summary'],additionalProperties:false}};
+  const output=await f.luna.structured('synthetic',prompt);
+  assert.match(JSON.parse(output).summary,/37/);
+  const start=f.calls.find(x=>x.method==='thread/start').params;
+  assert.equal(start.baseInstructions,prompt.instructions);
+  assert.equal(start.ephemeral,true);
+  assert.equal(start.config['mcp_servers.synthetic.enabled'],false);
+  assert.deepEqual(f.calls.find(x=>x.method==='turn/start').params.outputSchema,prompt.schema);
+ }finally{await f.close();}
+});
 test('Luna: потерянный временный запрос повторяется без чтения истории',async()=>{
  const f=await fixture('unknown');let state={};
  try{
