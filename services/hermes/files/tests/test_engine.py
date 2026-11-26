@@ -280,7 +280,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pending_voice_merge_shares_computation_and_echoes_each_clip_once(self):
         ready, release = asyncio.Event(), asyncio.Event()
-        compute, echoes = [], []
+        compute, echoes, consent_transcripts = [], [], []
 
         async def transcribe(path):
             compute.append(path)
@@ -318,8 +318,10 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         await ready.wait()
         with patch.dict(sys.modules, {'brai_files': SimpleNamespace(merge_events=lambda *_: None)}):
             base['merge_pending_message_event']({'session': first}, 'session', event('/second.ogg', 'append'))
-        release.set()
-        results = await asyncio.gather(earlier, duplicate)
+        approvals = module(record_transcripts=lambda _, _event, text: consent_transcripts.append(list(text)))
+        with patch.dict(sys.modules, {'tools.approval_conversation': approvals}):
+            release.set()
+            results = await asyncio.gather(earlier, duplicate)
         self.assertEqual(results, [('start append', ['/first.ogg', '/second.ogg'])] * 2)
         echo_once = inbound['_echo_pending_stt_transcripts_once']
         await asyncio.gather(*(echo_once(runner, first, object(), object(), result) for _, result in results))
@@ -328,6 +330,7 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         await echo_once(runner, recovered, object(), object(), ['/first.ogg'])
         self.assertCountEqual(compute, ['/first.ogg', '/second.ogg'])
         self.assertEqual(echoes, ['/first.ogg', '/second.ogg'])
+        self.assertEqual(consent_transcripts, [['/first.ogg', '/second.ogg']])
 
     def loop(self, callback):
         ports = {'brai_files': native,
