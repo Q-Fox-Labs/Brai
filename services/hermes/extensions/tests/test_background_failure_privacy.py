@@ -2,6 +2,8 @@
 # ABOUTME: Использует изолированные файлы, реестр процессов и транспорт; RELEASE не затрагивается.
 import ast
 import asyncio
+import contextlib
+from contextvars import ContextVar
 import importlib.util
 import json
 from contextlib import asynccontextmanager
@@ -552,6 +554,74 @@ class BackgroundCompletionAdmissionTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await runner._deliver_completion_notification_scoped('SAFE_NEW_RESULT', event('new', 'new')))
             self.assertFalse(await runner._deliver_completion_notification_scoped('DEFERRED', event('offline', 'third')))
         self.assertEqual(accepted, [('SAFE_NEW_RESULT', 'new')])
+
+        profile = ContextVar('test_completion_profile', default='A')
+        @asynccontextmanager
+        async def profile_scope(home):
+            token = profile.set(str(home))
+            try:
+                yield
+            finally:
+                profile.reset(token)
+        owner_modules = {name: ModuleType(name) for name in ('gateway', 'gateway.run', 'gateway.wake',
+                                                               'hermes_constants', 'tui_gateway',
+                                                               'tui_gateway.launch_profile_policy')}
+        owner_modules['gateway.run']._USER_BOUNDARY_END_REASONS = {'new'}
+        owner_modules['gateway.run']._async_profile_runtime_scope = profile_scope
+        owner_modules['gateway.run']._multiplex_profile_homes = lambda config: [('default', 'A'), ('B', 'B')]
+        owner_modules['gateway.wake'].WakeNotAccepted = wake.WakeNotAccepted
+        owner_modules['gateway.wake'].session_owned_by_profile = lambda config, name, sid: name == 'B' and sid == 'parent_b'
+        owner_modules['hermes_constants'].get_hermes_home_override = lambda: None
+        owner_modules['tui_gateway.launch_profile_policy'].async_launch_profile_scope_if_multiplexed = lambda: profile_scope('A')
+        extra = candidate_methods({'_completion_event_scope', '_deliver_completion_notification'})
+        extra.update(contextlib=contextlib, SessionSource=lambda **kwargs: SimpleNamespace(**kwargs),
+                     Platform=SimpleNamespace(API_SERVER='api_server'))
+        class ProfileRunner(Runner):
+            _completion_event_scope = extra['_completion_event_scope']
+            _deliver_completion_notification = extra['_deliver_completion_notification']
+            config = SimpleNamespace(multiplex_profiles=True)
+            _primary_profile_name = 'default'
+            def _build_process_event_source(self, event):
+                return None
+            def _resolve_profile_home_for_source(self, source):
+                return source.profile
+            @property
+            def _session_db(self):
+                class ScopedDB:
+                    async def get_session(self, session_id):
+                        return {'ended_at': None} if profile.get() == 'B' and session_id == 'parent_b' else None
+                return ScopedDB()
+            @_session_db.setter
+            def _session_db(self, value):
+                pass
+            async def _inject_watch_notification(self, text, event, **kwargs):
+                self.delivered_in = profile.get()
+                return True
+        owned = ProfileRunner()
+        with patch.dict(sys.modules, owner_modules):
+            self.assertTrue(await owned._deliver_completion_notification('SAFE', event('parent_b', 'proc_b')))
+            self.assertEqual(owned.delivered_in, 'B')
+            self.assertFalse(await owned._deliver_completion_notification('SAFE', event('missing', 'proc_missing')))
+            owner_modules['gateway.wake'].session_owned_by_profile = lambda config, name, sid: True
+            with self.assertRaises(LookupError):
+                await owned._deliver_completion_notification('SAFE', event('ambiguous', 'proc_ambiguous'))
+
+        started, release = asyncio.Event(), asyncio.Event()
+        async def pending_send(text, event, **kwargs):
+            started.set()
+            await release.wait()
+            return False
+        runner._inject_watch_notification = pending_send
+        with patch.dict(sys.modules, modules):
+            first = asyncio.create_task(runner._deliver_completion_notification_scoped('FAIL', event('new', 'pending')))
+            await started.wait()
+            self.assertFalse(await runner._deliver_completion_notification_scoped('FAIL', event('new', 'pending')))
+            release.set()
+            self.assertFalse(await first)
+            async def success(text, event, **kwargs):
+                return True
+            runner._inject_watch_notification = success
+            self.assertTrue(await runner._deliver_completion_notification_scoped('OK', event('new', 'pending')))
 
 
 if __name__ == '__main__':

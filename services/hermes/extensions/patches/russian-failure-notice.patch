@@ -9512,7 +9512,103 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          return None
  
      def _mark_completions_delivered_locked(self, identities) -> None:
-@@ -1991,28 +1993,6 @@
+@@ -1502,6 +1504,17 @@
+         # acknowledge the durable row as delivered. Verify the target here, before acceptance, and give
+         # drops an honest durable disposition.
+         verdict = await self._classify_completion_target(parent_session_id)
++        if verdict == "terminal" and evt_type == "completion" and getattr(getattr(self, "config", None), "multiplex_profiles", False):
++            # An unreadable secondary store is not proof that an unstamped owner is gone.
++            source = await asyncio.to_thread(self._build_process_event_source, evt)
++            if not getattr(source, "profile", None):
++                try:
++                    parent = await self._session_db.get_session(parent_session_id)
++                except Exception:
++                    parent = None
++                if parent is None:
++                    claim.proceed, claim.early_result = False, False
++                    return claim
+         if verdict == "terminal":
+             if evt_type == "async_delegation":
+                 logger.warning(
+@@ -1527,27 +1540,37 @@
+         return claim
+ 
+     def _completion_event_scope(self, evt: dict):
+-        """Profile runtime scope of the session a completion event targets (a no-op context when the
+-        event is the default profile's or the scope is already installed).
+-
+-        The pre-flight (``_classify_completion_target`` → ``_session_db``) and every durable-ledger op
+-        (``tools.async_delegation`` → ``get_hermes_home()/state.db``) resolve from the ambient scope.
+-        The supervised ``_async_delegation_watcher`` and startup-recovered process watchers run under
+-        the ROOT scope, so a secondary profile's completion was looked up in the DEFAULT profile's
+-        state.db — classified ``terminal`` and dropped, its ledger row stranded ``pending`` forever."""
+-        from gateway.run import _async_profile_runtime_scope
+-        from hermes_constants import get_hermes_home_override
+-        source = self._build_process_event_source(evt)
+-        if source is None or not getattr(source, "profile", None):
+-            # No routed profile: the launch profile's own completion. Bind ITS scope once the
+-            # process multiplexes — unscoped, a fail-closed ledger read raises on a legitimate
+-            # launch-profile event (no-op while single-profile).
+-            from tui_gateway.launch_profile_policy import async_launch_profile_scope_if_multiplexed
+-            return async_launch_profile_scope_if_multiplexed()
+-        profile_home = self._resolve_profile_home_for_source(source)
+-        if get_hermes_home_override() == str(profile_home):
+-            return contextlib.nullcontext()  # already inside this profile's scope
+-        return _async_profile_runtime_scope(profile_home)
++        """Resolve the owning profile before checking or delivering a completion."""
++        @contextlib.asynccontextmanager
++        async def scope():
++            from gateway.run import _async_profile_runtime_scope, _multiplex_profile_homes
++            from hermes_constants import get_hermes_home_override
++            source = await asyncio.to_thread(self._build_process_event_source, evt)
++            if not getattr(source, "profile", None) and getattr(getattr(self, "config", None), "multiplex_profiles", False):
++                # A checkpoint can contain processes from every profile. Its file path is
++                # not proof of ownership: check the original conversation in each store.
++                parent = str(evt.get("parent_session_id") or "").strip()
++                if parent:
++                    from gateway.wake import session_owned_by_profile
++                    primary = getattr(self, "_primary_profile_name", None) or "default"
++                    def owners():
++                        return [name for name, _home in _multiplex_profile_homes(self.config)
++                                if session_owned_by_profile(self.config, name, parent)]
++                    matches = await asyncio.to_thread(owners)
++                    if len(matches) > 1:
++                        raise LookupError("Ambiguous original conversation owner")
++                    if matches and matches[0] != primary:
++                        source = SessionSource(platform=Platform.API_SERVER, chat_id=parent, profile=matches[0])
++            if source is None or not getattr(source, "profile", None):
++                from tui_gateway.launch_profile_policy import async_launch_profile_scope_if_multiplexed
++                manager = async_launch_profile_scope_if_multiplexed()
++            else:
++                profile_home = self._resolve_profile_home_for_source(source)
++                manager = (contextlib.nullcontext() if get_hermes_home_override() == str(profile_home)
++                           else _async_profile_runtime_scope(profile_home))
++            async with manager:
++                yield
++        return scope()
+ 
+     async def _deliver_completion_notification(
+         self, synth_text: str, evt: dict, *, sibling_claims=(),
+@@ -1573,9 +1596,15 @@
+             if not claim.proceed:
+                 return claim.early_result
+             if identity is not None:
+-                if self._completion_identity_seen(identity, claim=True):
+-                    return None
+-                identity_claimed = True
++                # Inflight не означает доставку: второй watcher должен повторить попытку,
++                # если первая ещё ожидает ответ транспорта или завершится отказом.
++                with self._completion_delivery_lock:
++                    if identity in self._completion_deliveries_inflight:
++                        return False
++                    if identity in self._completion_deliveries_delivered:
++                        return None
++                    self._completion_deliveries_inflight.add(identity)
++                    identity_claimed = True
+             if evt.get("type") == "async_delegation":
+                 evt = {**evt, "brai_delegation_ids": [evt["delegation_id"],
+                     *[event["delegation_id"] for event, _ in sibling_claims]]}
+@@ -1991,28 +2020,6 @@
              ),
          }
  
@@ -9541,7 +9637,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
          tool thread. Waiting for the post-turn drain leaves a process that finishes while its
-@@ -2031,16 +2011,12 @@
+@@ -2031,16 +2038,12 @@
  
      async def _run_process_watcher(self, watcher: dict) -> None:
          """Poll a background process and push updates until it exits. Mode
@@ -9560,7 +9656,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          agent_notify = watcher.get("notify_on_complete", False)
          # The mode belongs to the profile that started the process; recovered watchers run in the
          # root context, so resolve it under the owning profile's scope (no-op for the default).
-@@ -2049,69 +2025,74 @@
+@@ -2049,69 +2052,74 @@
          logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                        session_id, interval, notify_mode, agent_notify)
          silent = notify_mode == "off" and not agent_notify
