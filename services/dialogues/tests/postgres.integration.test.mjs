@@ -246,11 +246,15 @@ test('PostgreSQL: обмен, контекст, история и перенос
    const sources=[{artifactId:uuid},{artifact_ids:[uuid,'invalid']},{artifacts:[uuid]},
     {attachment_path:'/synthetic/attachments/report.txt'},{artifact_ids:['invalid']},
     {attachments:[{artifactId:uuid,filename:'kept'},null,'не файл'],artifact_ids:[uuid,other]},
-    {attachments:[null,'не файл',{irrelevant:1}]}, {attachments:[{name:'photo.png'}]}];
+    {attachments:[null,'не файл',{irrelevant:1}]}, {attachments:[{name:'photo.png'}]},
+    {attachments:[{artifactId:uuid,path:'/same'}],attachment_path:'/same'},
+    {attachments:[{artifactId:uuid},{artifactId:uuid,path:'/unique'}]},
+    {attachments:[]},{attachments:[{content_index:0,thread_id:'thread'}]}];
    await api.append(profile,{request_id:req(),dialogue:{id:'historic-files',channel:'synthetic'},
     messages:sources.map((source,i)=>({id:'file-'+i,turn_id:'turn',role:'user',kind:'input',text:'',source}))});
    // Старые импортированные metadata могли не иметь текущего предела 8 КиБ.
    await owner.query("UPDATE dialogues_live.messages SET source=jsonb_set(source,'{attachment_path}',to_jsonb($3::text)) WHERE owner_id=$1 AND id=$2",[profile,'file-5',longPath]);
+   await owner.query(`UPDATE dialogues_live.messages SET source='{"attachments":[{"content_index":1e400}]}'::jsonb WHERE owner_id=$1 AND id='file-10'`,[profile]);
    const rows=(await app.query("SELECT id,'M'||short_id AS ref FROM dialogues_live.messages WHERE owner_id=$1 ORDER BY message_order",[profile])).rows;
    const dialogue=(await app.query("SELECT 'D'||short_id AS ref FROM dialogues_live.dialogues WHERE owner_id=$1 AND id='historic-files'",[profile])).rows[0].ref;
    const originals=await exchange(api,profile,{action:'read_many',arguments:{request_id:req(),message_ids:rows.map(row=>row.ref)}});
@@ -260,11 +264,15 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.deepEqual(originals.messages[5].attachments,[{artifactId:uuid,filename:'kept'},{artifactId:other},{path:longPath}]);
    assert.equal(originals.messages[6].attachments,undefined);
    assert.deepEqual(originals.messages[7].attachments,[{name:'photo.png'}]);
+   assert.deepEqual(originals.messages[8].attachments,[{artifactId:uuid,path:'/same'}]);
+   assert.deepEqual(originals.messages[9].attachments,[{artifactId:uuid},{path:'/unique'}]);
+   assert.equal(originals.messages[10].attachments,undefined);
+   assert.deepEqual(originals.messages[11].attachments,[{content_index:0,thread_id:'thread'}]);
    const history=await exchange(api,profile,{action:'dialogue_get',arguments:{request_id:req(),dialogue_id:dialogue}});
-   assert.deepEqual(history.items.map(row=>row.attachments??false),[true,true,true,true,false,true,false,true]);
+   assert.deepEqual(history.items.map(row=>row.attachments??false),[true,true,true,true,false,true,false,true,true,true,false,true]);
    const input=await exchange(api,profile,{action:'input',arguments:{request_id:req(),
     dialogue:{id:'new-after-files',channel:'synthetic'},messages:[{id:'input',text:'Продолжить'}]}});
-   assert.equal((input.context.match(/\[вложения\]/g)??[]).length,6);
+   assert.equal((input.context.match(/\[вложения\]/g)??[]).length,9);
    assert.doesNotMatch(input.context,/12345678-1234|\/synthetic\/attachments/);
    await assert.rejects(exchange(api,'foreign-profile',{action:'read_many',arguments:{request_id:req(),message_ids:[rows[0].ref]}}),{code:'NOT_FOUND'});
   });

@@ -5,24 +5,28 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 export const limits = { messageBytes:1_048_576, requestBytes:2_097_152, responseBytes:65_024, metadataBytes:8_192 };
 const artifactIdPattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 const artifactIdRegex=new RegExp(artifactIdPattern,'i');
-const attachmentMetadataKeys=['artifactId','path','reference','name','filename','description','content_index','message_id'];
+const attachmentMetadataKeys=['artifactId','path','reference','name','filename','description','thread_id','message_id','type','kind','mimeType','mime_type'];
 /** Распознаёт исходные ссылки старых записей без изменения или проверки файлов. */
 export function sourceAttachments(value:unknown):unknown[]{
   if(!value||typeof value!=='object'||Array.isArray(value))return [];
   const source=value as Record<string,unknown>;
-  const attachments:unknown[]=[],seen=new Set<string>();
+  const attachments:unknown[]=[],seen=new Set<string>(),seenIds=new Set<string>(),seenPaths=new Set<string>();
+  const hasMetadata=(item:Record<string,unknown>)=>attachmentMetadataKeys.some(key=>{
+    const field=item[key];
+    return typeof field==='string'&&field.replace(/^ +| +$/g,'').length>0;
+  });
   const add=(item:Record<string,unknown>)=>{
-    const artifactId=item.artifactId,path=item.path;
-    const key=typeof artifactId==='string'&&artifactIdRegex.test(artifactId)?'id:'+artifactId.toLowerCase():
-      typeof path==='string'?'path:'+path:'metadata:'+canonical(item);
-    if(!seen.has(key)){seen.add(key);attachments.push(item);}
+    const copy={...item},artifactId=copy.artifactId,path=copy.path;
+    if(typeof artifactId==='string'&&artifactIdRegex.test(artifactId)){
+      const key=artifactId.toLowerCase();if(seenIds.has(key))delete copy.artifactId;else seenIds.add(key);
+    }
+    if(typeof path==='string'&&path){if(seenPaths.has(path))delete copy.path;else seenPaths.add(path);}
+    const key=canonical(copy);
+    if(hasMetadata(copy)&&!seen.has(key)){seen.add(key);attachments.push(copy);}
   };
   const pathOk=(path:unknown):path is string=>typeof path==='string'&&path.startsWith('/')&&Array.from(path).length<=4096;
   for(const item of Array.isArray(source.attachments)?source.attachments:[]){
-    if(item&&typeof item==='object'&&!Array.isArray(item)&&attachmentMetadataKeys.some(key=>{
-      const field=(item as Record<string,unknown>)[key];
-      return typeof field==='string'?field.replace(/^ +| +$/g,'').length>0:typeof field==='number'&&Number.isFinite(field);
-    }))add(item as Record<string,unknown>);
+    if(item&&typeof item==='object'&&!Array.isArray(item)&&hasMetadata(item as Record<string,unknown>))add(item as Record<string,unknown>);
     else if(typeof item==='string'&&artifactIdRegex.test(item))add({artifactId:item.toLowerCase()});
     else if(pathOk(item))add({path:item});
   }
@@ -40,8 +44,8 @@ export function hasAttachmentsSql(column:string){
   return `(CASE WHEN jsonb_typeof(${column}->'attachments')='array' THEN EXISTS(
       SELECT 1 FROM jsonb_array_elements(${column}->'attachments') v WHERE
       (jsonb_typeof(v)='object' AND EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(v)='object' THEN v ELSE '{}'::jsonb END) field
-       WHERE field.key=ANY(ARRAY['artifactId','path','reference','name','filename','description','content_index','message_id'])
-       AND (jsonb_typeof(field.value)='number' OR (jsonb_typeof(field.value)='string' AND btrim(field.value #>> '{}')<>'')))) OR (jsonb_typeof(v)='string' AND
+       WHERE field.key=ANY(ARRAY['artifactId','path','reference','name','filename','description','thread_id','message_id','type','kind','mimeType','mime_type'])
+       AND jsonb_typeof(field.value)='string' AND btrim(field.value #>> '{}')<>'')) OR (jsonb_typeof(v)='string' AND
        ((v #>> '{}') ~* '${artifactIdPattern}' OR (left(v #>> '{}',1)='/' AND char_length(v #>> '{}')<=4096)))) ELSE false END
     OR (jsonb_typeof(${column}->'artifactId')='string' AND (${column}->>'artifactId') ~* '${artifactIdPattern}')
     OR ${array('artifact_ids')} OR ${array('artifacts')}
