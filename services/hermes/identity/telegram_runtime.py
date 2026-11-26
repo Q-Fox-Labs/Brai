@@ -702,6 +702,7 @@ class Resolver:
             self._chat_generation(profile, route, body['generation'])
         current.generation = body['generation']
         if 'operatorAssignmentId' in body:
+            from telegram.error import BadRequest, Forbidden
             ident = body['operatorAssignmentId']
             control = self.operator_assignment
             async def before_send():
@@ -712,6 +713,8 @@ class Resolver:
             try:
                 return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current,
                                                  before_send=before_send)
+            except (BadRequest, Forbidden):
+                return {'success': False, 'retryable': False, 'error_kind': 'telegram_rejected'}
             finally:
                 control.deliveries.discard(ident)
         turn = self.turns.get(profile['uid'])
@@ -1047,7 +1050,23 @@ class Resolver:
             target = telegram_target(self.adapter, values['chat_id'], values['reply_to'], metadata, exact=True)
             await before_send()
             with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
-                sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
+                send = getattr(self.adapter, '_brai_send_with_private_topic_retry', None)
+                if callable(send):
+                    from plugins.platforms.telegram.adapter import _BraiPrivateTopicRetryFailed
+                    from telegram.error import BadRequest, Forbidden
+
+                    async def wire():
+                        return await self.adapter._send_chunk_markdown_or_plain(formatted, target)
+
+                    try:
+                        sent = await send(wire, metadata, target, values['reply_to'])
+                    except _BraiPrivateTopicRetryFailed as error:
+                        kind = error.args[0]
+                        if kind == 'delivery_unknown' and isinstance(error.__cause__, (BadRequest, Forbidden)):
+                            kind = 'telegram_rejected'
+                        return {'success': False, 'retryable': False, 'error_kind': kind}
+                else:
+                    sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
             verify_telegram_target(sent, target)
             message_id = getattr(sent, 'message_id', None)
             if type(message_id) is not int or message_id <= 0:

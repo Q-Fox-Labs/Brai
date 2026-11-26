@@ -105,6 +105,10 @@ class ReplyOutbox:
                     except asyncio.CancelledError:
                         raise
                     except Exception as error:
+                        if operator_assignment:
+                            logging.getLogger(__name__).warning(
+                                'BRAI_OPERATOR_DELIVERY_EXCEPTION id=%s attempted=%s class=%s',
+                                body['operatorAssignmentId'], attempted, type(error).__name__)
                         if operator_assignment and not attempted:
                             if isinstance(error, (ConnectionError, TimeoutError)):
                                 continue
