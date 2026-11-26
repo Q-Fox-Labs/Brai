@@ -9516,7 +9516,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          # acknowledge the durable row as delivered. Verify the target here, before acceptance, and give
          # drops an honest durable disposition.
          verdict = await self._classify_completion_target(parent_session_id)
-+        if verdict == "terminal" and evt_type == "completion" and getattr(getattr(self, "config", None), "multiplex_profiles", False):
++        if verdict == "terminal" and evt_type == "completion" and evt.get("brai_retry_profile") and getattr(getattr(self, "config", None), "multiplex_profiles", False):
 +            # An unreadable secondary store is not proof that an unstamped owner is gone.
 +            source = await asyncio.to_thread(self._build_process_event_source, evt)
 +            if not getattr(source, "profile", None):
@@ -9530,7 +9530,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          if verdict == "terminal":
              if evt_type == "async_delegation":
                  logger.warning(
-@@ -1527,27 +1540,37 @@
+@@ -1527,27 +1540,67 @@
          return claim
  
      def _completion_event_scope(self, evt: dict):
@@ -9561,19 +9561,49 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 +            from gateway.run import _async_profile_runtime_scope, _multiplex_profile_homes
 +            from hermes_constants import get_hermes_home_override
 +            source = await asyncio.to_thread(self._build_process_event_source, evt)
-+            if not getattr(source, "profile", None) and getattr(getattr(self, "config", None), "multiplex_profiles", False):
-+                # A checkpoint can contain processes from every profile. Its file path is
-+                # not proof of ownership: check the original conversation in each store.
++            if (evt.get("brai_retry_profile") and not getattr(source, "profile", None)
++                    and getattr(getattr(self, "config", None), "multiplex_profiles", False)):
++                # The global process registry copies checkpoints across profiles; only the
++                # conversation stores can prove ownership, and every store must be readable.
 +                parent = str(evt.get("parent_session_id") or "").strip()
 +                if parent:
-+                    from gateway.wake import session_owned_by_profile
++                    from hermes_state import SessionDB
 +                    primary = getattr(self, "_primary_profile_name", None) or "default"
 +                    def owners():
-+                        return [name for name, _home in _multiplex_profile_homes(self.config)
-+                                if session_owned_by_profile(self.config, name, parent)]
-+                    matches = await asyncio.to_thread(owners)
-+                    if len(matches) > 1:
-+                        raise LookupError("Ambiguous original conversation owner")
++                        matches = []
++                        for name, home in _multiplex_profile_homes(self.config):
++                            path = Path(home) / "state.db"
++                            try:
++                                path.stat()
++                            except FileNotFoundError:
++                                continue
++                            except OSError as exc:
++                                raise LookupError("Conversation owner store unavailable") from exc
++                            db = None
++                            try:
++                                db = SessionDB(path, read_only=True)
++                                row = db.get_session(parent)
++                            except Exception as exc:
++                                raise LookupError("Conversation owner store unavailable") from exc
++                            finally:
++                                if db is not None:
++                                    with contextlib.suppress(Exception):
++                                        db.close()
++                            if row and (row.get("profile_name") or name) == name:
++                                matches.append(name)
++                        return matches
++                    warned = False
++                    while True:
++                        try:
++                            matches = await asyncio.to_thread(owners)
++                            if len(matches) > 1:
++                                raise LookupError("Ambiguous original conversation owner")
++                            break
++                        except LookupError:
++                            if not warned:
++                                logger.warning("Background task owner is unavailable or ambiguous; will retry")
++                                warned = True
++                            await asyncio.sleep(evt["check_interval"])
 +                    if matches and matches[0] != primary:
 +                        source = SessionSource(platform=Platform.API_SERVER, chat_id=parent, profile=matches[0])
 +            if source is None or not getattr(source, "profile", None):
@@ -9589,7 +9619,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
  
      async def _deliver_completion_notification(
          self, synth_text: str, evt: dict, *, sibling_claims=(),
-@@ -1573,9 +1596,15 @@
+@@ -1573,9 +1626,15 @@
              if not claim.proceed:
                  return claim.early_result
              if identity is not None:
@@ -9608,7 +9638,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
              if evt.get("type") == "async_delegation":
                  evt = {**evt, "brai_delegation_ids": [evt["delegation_id"],
                      *[event["delegation_id"] for event, _ in sibling_claims]]}
-@@ -1991,28 +2020,6 @@
+@@ -1991,28 +2050,6 @@
              ),
          }
  
@@ -9637,7 +9667,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
          tool thread. Waiting for the post-turn drain leaves a process that finishes while its
-@@ -2031,16 +2038,12 @@
+@@ -2031,16 +2068,13 @@
  
      async def _run_process_watcher(self, watcher: dict) -> None:
          """Poll a background process and push updates until it exits. Mode
@@ -9648,6 +9678,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 +        Process output stays out of automatic chat notifications."""
          from tools.process_registry import process_registry
          from tools.process_registry_notifications import format_process_notification
++        watcher = {**watcher, "brai_retry_profile": True}
          session_id = watcher["session_id"]
          interval = watcher["check_interval"]
 -        platform_name = watcher.get("platform", "")
@@ -9656,7 +9687,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          agent_notify = watcher.get("notify_on_complete", False)
          # The mode belongs to the profile that started the process; recovered watchers run in the
          # root context, so resolve it under the owning profile's scope (no-op for the default).
-@@ -2049,69 +2052,74 @@
+@@ -2049,69 +2083,76 @@
          logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                        session_id, interval, notify_mode, agent_notify)
          silent = notify_mode == "off" and not agent_notify
@@ -9754,6 +9785,8 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -                            lambda: self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher),
 -                            platform=platform_name, diagnostic=session.exit_code not in {0, None})
 +            completion_evt["brai_require_delivery"] = True
++            completion_evt["brai_retry_profile"] = True
++            completion_evt["check_interval"] = interval
 +            # Для старых записей без времени запуска используем ID процесса и исходного разговора.
 +            if not completion_evt.get("parent_session_id"):
 +                logger.warning("Background process completion lacks original session; delivery skipped")

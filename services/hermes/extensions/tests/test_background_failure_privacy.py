@@ -564,17 +564,41 @@ class BackgroundCompletionAdmissionTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 profile.reset(token)
         owner_modules = {name: ModuleType(name) for name in ('gateway', 'gateway.run', 'gateway.wake',
-                                                               'hermes_constants', 'tui_gateway',
+                                                               'hermes_constants', 'hermes_state', 'tui_gateway',
                                                                'tui_gateway.launch_profile_policy')}
         owner_modules['gateway.run']._USER_BOUNDARY_END_REASONS = {'new'}
         owner_modules['gateway.run']._async_profile_runtime_scope = profile_scope
-        owner_modules['gateway.run']._multiplex_profile_homes = lambda config: [('default', 'A'), ('B', 'B')]
+        temp_profiles = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_profiles.cleanup)
+        profile_root = Path(temp_profiles.name)
+        for name in ('A', 'B'):
+            (profile_root / name).mkdir()
+            (profile_root / name / 'state.db').touch()
+        owner_modules['gateway.run']._multiplex_profile_homes = lambda config: [('default', profile_root / 'A'), ('B', profile_root / 'B')]
         owner_modules['gateway.wake'].WakeNotAccepted = wake.WakeNotAccepted
-        owner_modules['gateway.wake'].session_owned_by_profile = lambda config, name, sid: name == 'B' and sid == 'parent_b'
+        state = {'scenario': 'normal', 'round': 0}
+        class ProfileDB:
+            def __init__(self, path, read_only):
+                self.name = Path(path).parent.name
+            def get_session(self, sid):
+                if self.name == 'A':
+                    state['round'] += 1
+                if sid == 'missing':
+                    return None
+                if state['scenario'] == 'unreadable' and state['round'] == 1:
+                    if self.name == 'B':
+                        raise OSError('B unavailable')
+                    return {'profile_name': 'default'}
+                if state['scenario'] == 'ambiguous' and state['round'] == 1:
+                    return {'profile_name': 'default' if self.name == 'A' else 'B'}
+                return {'profile_name': 'B'} if self.name == 'B' else None
+            def close(self):
+                pass
+        owner_modules['hermes_state'].SessionDB = ProfileDB
         owner_modules['hermes_constants'].get_hermes_home_override = lambda: None
         owner_modules['tui_gateway.launch_profile_policy'].async_launch_profile_scope_if_multiplexed = lambda: profile_scope('A')
         extra = candidate_methods({'_completion_event_scope', '_deliver_completion_notification'})
-        extra.update(contextlib=contextlib, SessionSource=lambda **kwargs: SimpleNamespace(**kwargs),
+        extra.update(contextlib=contextlib, Path=Path, SessionSource=lambda **kwargs: SimpleNamespace(**kwargs),
                      Platform=SimpleNamespace(API_SERVER='api_server'))
         class ProfileRunner(Runner):
             _completion_event_scope = extra['_completion_event_scope']
@@ -598,13 +622,17 @@ class BackgroundCompletionAdmissionTest(unittest.IsolatedAsyncioTestCase):
                 self.delivered_in = profile.get()
                 return True
         owned = ProfileRunner()
+        def scoped_event(parent, proc):
+            return {**event(parent, proc), 'brai_retry_profile': True, 'check_interval': 0}
         with patch.dict(sys.modules, owner_modules):
-            self.assertTrue(await owned._deliver_completion_notification('SAFE', event('parent_b', 'proc_b')))
+            self.assertTrue(await owned._deliver_completion_notification('SAFE', scoped_event('parent_b', 'proc_b')))
             self.assertEqual(owned.delivered_in, 'B')
-            self.assertFalse(await owned._deliver_completion_notification('SAFE', event('missing', 'proc_missing')))
-            owner_modules['gateway.wake'].session_owned_by_profile = lambda config, name, sid: True
-            with self.assertRaises(LookupError):
-                await owned._deliver_completion_notification('SAFE', event('ambiguous', 'proc_ambiguous'))
+            self.assertFalse(await owned._deliver_completion_notification('SAFE', scoped_event('missing', 'proc_missing')))
+            for scenario in ('unreadable', 'ambiguous'):
+                state.update(scenario=scenario, round=0)
+                self.assertTrue(await owned._deliver_completion_notification('SAFE', scoped_event('parent_b', 'proc_' + scenario)))
+                self.assertEqual(owned.delivered_in, 'B')
+                self.assertGreaterEqual(state['round'], 2)
 
         started, release = asyncio.Event(), asyncio.Event()
         async def pending_send(text, event, **kwargs):
