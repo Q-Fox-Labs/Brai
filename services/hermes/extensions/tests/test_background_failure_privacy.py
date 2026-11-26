@@ -26,6 +26,8 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
         scope = {'asyncio': asyncio, 'logging': logging, 'logger': logging.getLogger('background-privacy-test'),
                  't': lambda key, **kw: {'gateway.background.task_failed': 'Фоновая задача завершилась с ошибкой',
                                          'gateway.background.still_running': 'Фоновая задача выполняется',
+                                         'gateway.background.task_result_ready': 'Фоновая задача завершена. Можно попросить проверить результат.',
+                                         'gateway.background.task_unknown': 'Результат неизвестен',
                                          'gateway.background.final_output': f"{kw.get('header')} {kw.get('output')}"}[key]}
         @contextmanager
         def suppressed(*args):
@@ -90,7 +92,8 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn('SECRET_VALUE', text)
                         self.assertNotIn('export', text)
                     self.assertNotIn('SECRET_VALUE', ' '.join(logs.output))
-                    self.assertIn('[REDACTED]', ' '.join(logs.output))
+                    self.assertNotIn('/private/path', ' '.join(logs.output))
+                    self.assertIn('ended without success (exit 1)', ' '.join(logs.output))
                     if agent_notify:
                         self.assertEqual(runner.injected, [sensitive])
                     if mode == 'off':
@@ -100,9 +103,38 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
                     if mode == 'all' and not agent_notify:
                         self.assertEqual(runner.sent[0], 'Фоновая задача выполняется')
 
-        success = SimpleNamespace(exit_code=0, output_buffer='готовый результат', command='build', started_at=None)
-        with patch.dict(sys.modules, modules):
-            self.assertIn('готовый результат', Runner('result')._format_process_final_message('proc', success, 'result'))
+        class RetryRunner(Runner):
+            async def _enqueue_process_completion_notification(self, text, event):
+                self.injected.append(text)
+                return len(self.injected) > 1
+
+        failed = SimpleNamespace(exited=True, exit_code=1, output_buffer=sensitive, command=command)
+        sessions = iter([failed, failed])
+        modules['tools.process_registry'].process_registry = SimpleNamespace(
+            get=lambda sid: next(sessions, None), is_completion_consumed=lambda sid: False)
+        runner = RetryRunner('concise')
+        watcher = {'session_id': 'proc', 'check_interval': 0, 'platform': 'telegram', 'chat_id': 'chat',
+                   'notify_on_complete': True}
+        with patch.dict(sys.modules, modules), self.assertLogs('background-privacy-test', level='WARNING') as logs:
+            await runner._run_process_watcher(watcher)
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(runner.injected, [sensitive, sensitive])
+        self.assertEqual(runner.sent, ['Фоновая задача завершилась с ошибкой'])
+
+        unknown = SimpleNamespace(exited=True, exit_code=None, output_buffer=sensitive, command=command)
+        modules['tools.process_registry'].process_registry = SimpleNamespace(
+            get=lambda sid: unknown, is_completion_consumed=lambda sid: False)
+        runner = Runner('error')
+        watcher = {'session_id': 'proc', 'check_interval': 0, 'platform': 'telegram', 'chat_id': 'chat'}
+        with patch.dict(sys.modules, modules), self.assertLogs('background-privacy-test', level='WARNING') as logs:
+            await runner._run_process_watcher(watcher)
+        self.assertEqual(runner.sent, ['Результат неизвестен'])
+        self.assertNotIn('SECRET_VALUE', ' '.join(logs.output))
+
+        for exit_code, expected in [(0, 'Фоновая задача завершена. Можно попросить проверить результат.'), (None, 'Результат неизвестен')]:
+            session = SimpleNamespace(exit_code=exit_code, output_buffer=sensitive, command=command)
+            for mode in ('concise', 'all', 'result', 'error'):
+                self.assertEqual(Runner(mode)._format_process_final_message('proc', session, mode), expected)
 
 
 if __name__ == '__main__':

@@ -9490,23 +9490,28 @@ diff --git a/gateway/run.py b/gateway/run.py
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 --- a/gateway/run_notifications.py
 +++ b/gateway/run_notifications.py
-@@ -1992,10 +1992,11 @@
+@@ -1992,26 +1992,15 @@
          }
  
      def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
 -        """Human-facing completion message. Every mode shares the one-line status header; the
 -        raw-output modes (all/result/error) append the bounded output tail under it instead of the
 -        old bracketed ``[Background process proc_… finished~ …]`` debug wrapper (#54266)."""
-+        """Не включать диагностические данные в автоматическое сообщение о сбое."""
-         from gateway.run import _format_concise_process_notification, _redact_gateway_user_facing_secrets
-+        # AIDEV-NOTE: Уведомление идёт прямо в чат, минуя обработку ошибок агента.
-+        if session.exit_code not in {0, None}:
-+            return t("gateway.background.task_failed")
-         new_output = self._redacted_output_tail(session, 1000)
-         _started = getattr(session, "started_at", None)
-         _dur = max(0.0, time.time() - _started) if isinstance(_started, (int, float)) else None
-@@ -2007,11 +2008,8 @@
-         return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
+-        from gateway.run import _format_concise_process_notification, _redact_gateway_user_facing_secrets
+-        new_output = self._redacted_output_tail(session, 1000)
+-        _started = getattr(session, "started_at", None)
+-        _dur = max(0.0, time.time() - _started) if isinstance(_started, (int, float)) else None
+-        command = _redact_gateway_user_facing_secrets(getattr(session, "command", "") or "")
+-        if notify_mode == "concise":
+-            return _format_concise_process_notification(session_id, command, session.exit_code, new_output,
+-                                                        duration_seconds=_dur)
+-        header = _format_concise_process_notification(session_id, command, session.exit_code, "", duration_seconds=_dur)
+-        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
++        """Не включать вывод процесса в автоматическое сообщение чата."""
++        # AIDEV-NOTE: Даже успешный процесс может вывести текст ошибки.
++        if session.exit_code is None:
++            return t("gateway.background.task_unknown")
++        return t("gateway.background.task_result_ready" if session.exit_code == 0 else "gateway.background.task_failed")
  
      def _format_process_running_message(self, session) -> str:
 -        from gateway.run import _redact_gateway_user_facing_secrets, _shorten_command_for_display
@@ -9519,7 +9524,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
  
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
-@@ -2031,9 +2029,8 @@
+@@ -2031,9 +2020,8 @@
  
      async def _run_process_watcher(self, watcher: dict) -> None:
          """Poll a background process and push updates until it exits. Mode
@@ -9527,18 +9532,74 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -        the output tail) / all (running updates + final raw) / result (final raw) / error (final raw
 -        if exit != 0) / off."""
 +        (``display.background_process_notifications``): concise / all / result / error / off.
-+        Running and failed process output stays out of automatic chat notifications."""
++        Process output stays out of automatic chat notifications."""
          from tools.process_registry import process_registry
          from tools.process_registry_notifications import format_process_notification
          session_id = watcher["session_id"]
-@@ -2055,6 +2052,10 @@
+@@ -2050,11 +2038,15 @@
+                       session_id, interval, notify_mode, agent_notify)
+         silent = notify_mode == "off" and not agent_notify
+         last_output_len = 0
++        completion_logged = False
+         while True:
+             await asyncio.sleep(interval)
              session = process_registry.get(session_id)
              if session is None:
                  break
-+            if session.exited and session.exit_code not in {0, None}:
-+                with _log_suppressed(logging.WARNING, "Background process diagnostics unavailable: %s"):
-+                    logger.warning("Background process %s failed (exit %s): %s", session_id,
-+                                   session.exit_code, self._redacted_output_tail(session, 1000))
++            if session.exited and session.exit_code != 0 and not completion_logged:
++                logger.warning("Background process %s ended without success (exit %s)", session_id, session.exit_code)
++                completion_logged = True
              if silent:
                  # Still wait for the process to exit so we can log it, but don't push any messages.
                  if session.exited:
+@@ -2084,7 +2076,7 @@
+                     # the chat would stay mute for as long as that turn lasts (#112033): send the concise
+                     # receipt now.
+                     if turn_busy and (notify_mode in {"concise", "all", "result"} or (
+-                        notify_mode == "error" and session.exit_code not in {0, None}
++                        notify_mode == "error" and session.exit_code != 0
+                     )):
+                         message_text = self._format_process_final_message(session_id, session, "concise")
+                         await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
+@@ -2098,7 +2090,7 @@
+                     )
+                     break
+                 if notify_mode in {"concise", "all", "result"} or (
+-                    notify_mode == "error" and session.exit_code not in {0, None}
++                    notify_mode == "error" and session.exit_code != 0
+                 ):
+                     message_text = self._format_process_final_message(session_id, session, notify_mode)
+                     from gateway.warning_notifications import present_notification
+@@ -2106,7 +2098,7 @@
+                         # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
+                         await present_notification(
+                             lambda: self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher),
+-                            platform=platform_name, diagnostic=session.exit_code not in {0, None})
++                            platform=platform_name, diagnostic=session.exit_code != 0)
+                 break
+             elif has_new_output and notify_mode == "all" and not agent_notify:
+                 # New output — deliver a status update (only in "all" mode; agent_notify watchers
+diff --git a/locales/en.yaml b/locales/en.yaml
+--- a/locales/en.yaml
++++ b/locales/en.yaml
+@@ -105,6 +105,8 @@
+     started: "🔄 Background task started: \"{preview}\"\nTask ID: {task_id}\nYou can keep chatting — results will appear when done."
+     task_finished: "✅ Background task finished"
+     task_failed: "❌ Background task failed"
++    task_unknown: "⚠️ The outcome of the background task is unknown."
++    task_result_ready: "✅ The background task finished. You can ask me to check its result."
+     exit_code: "exit {code}"
+     last_output: ". Last output:\n```\n{tail}\n```"
+     rerun_hint: "\nAsk me to rerun it or show the full log."
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -104,6 +104,8 @@
+     started: "🔄 Фоновая задача запущена: «{preview}»\nID задачи: {task_id}\nМожно продолжить общение — результаты появятся здесь по завершении."
+     task_finished: "✅ Фоновая задача завершена"
+     task_failed: "❌ Фоновая задача завершилась с ошибкой"
++    task_unknown: "⚠️ Результат фоновой задачи неизвестен."
++    task_result_ready: "✅ Фоновая задача завершена. Вы можете попросить меня проверить результат."
+     exit_code: "код выхода {code}"
+     last_output: ". Последний вывод:\n```\n{tail}\n```"
+     rerun_hint: "\nПопросите меня перезапустить её или показать полный журнал."
