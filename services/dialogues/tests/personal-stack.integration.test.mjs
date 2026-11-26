@@ -99,7 +99,9 @@ test('30 владельцев: личный транспорт, одинаков
   const delta = await input(first, 'auto-a', 'four', 'Ещё уточнение');
   assert.match(delta.context, /Краткая свёртка обновления/u);
   assert.doesNotMatch(delta.context, /Полный текст обновления/u);
-  const shortId = delta.context.split('\n').find(line=>line.includes('Краткая свёртка обновления')).match(/M\d+/u)[0];
+  const messageLine = delta.context.split('\n').find(line=>/^M\d+ /u.test(line) && line.includes('Краткая свёртка обновления'));
+  assert.ok(messageLine);
+  const shortId = messageLine.split(' ',1)[0];
   const exact = await automatic(first, 'read_many', {request_id:first.request(), message_ids:[shortId]});
   assert(JSON.stringify(exact).includes(original));
   const foreignRead = await second.client.call('dialogues_exchange', {action:'read_many', arguments:{request_id:second.request(),message_ids:[shortId]}});

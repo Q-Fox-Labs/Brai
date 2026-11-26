@@ -46,7 +46,7 @@ export function topicCardChanges(topics:LegacyTopicCard[],previous:View){
  return {items,view};
 }
 
-type TopicCard={topic_id:string;title:string|null;version:string|null;extended:string|null;compact:string|null};
+type TopicCard={topic_id:string;title:string|null;extended:string|null;compact:string|null;fallback?:string|null};
 
 const quote=(value:string)=>JSON.stringify(value);
 const indexInstruction='В dialogues_exchange: topic_get(T…) — свёртки бесед; dialogue_get(D…) — сообщения; read_many([M…]) — оригиналы. -T… убирает тему из списка.';
@@ -58,12 +58,15 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
  const lines:string[]=[];
  const view:View={};
  const titles=topics.map(({topic_id,title})=>topic_id+' '+quote((title??'').replace(/[\u0000-\u001f]/gu,' '))+' ');
- const summaries=topics.map(({extended,compact},index)=>index<20?extended:compact);
+ const summaries=topics.map(({extended,compact,fallback},index)=>{
+  const expanded=index<20;
+  return (expanded?extended:compact)??(fallback?contextExcerpt(fallback,expanded?topicLimits.extended:topicLimits.compact).text:null);
+ });
  const fixedChars=titles.reduce((n,title)=>n+title.length+24,0);
  const summaryChars=summaries.reduce((n,summary)=>n+(summary?quote(quote(summary)).length:0),0);
  // Reserve the full start window for the twenty message representations.
  const factor=summaryChars?Math.min(1,Math.max(0,(nativeIndexChars-20*(6*100+topicLimits.message*4)-fixedChars)/summaryChars)):1;
- for(const [index,{topic_id}] of topics.entries()){
+ for(const [index,{topic_id,fallback,extended,compact}] of topics.entries()){
   const summary=summaries[index];
   let excerpt=summary;
   if(summary&&factor<1){
@@ -77,7 +80,8 @@ export function topicIndexChanges(topics:TopicCard[],previous:View){
    }
    excerpt=excerpt.trimEnd()+'…';
   }
-  const line=titles[index]+(excerpt?quote(excerpt):'[свёртка готовится]');
+  const provisional=fallback&&!(index<20?extended:compact)?' [из архива]':'';
+  const line=titles[index]+(excerpt?quote(excerpt)+provisional:'[свёртка готовится]');
   view[topic_id]=digest(line);
   if(previous[topic_id]!==view[topic_id])lines.push(line);
  }

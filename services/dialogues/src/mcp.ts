@@ -10,7 +10,7 @@ import { agentInstructions,toolDefinitions,invoke } from "./api.js";
 import { DialoguesFault,limits } from "./domain.js";
 import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
-export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string;personal?:{
+export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string;hold?:{active:()=>boolean;token:string};personal?:{
   userId:string;profileId:string;authorize:()=>Promise<void>;operatorToken?:string;
   suggestTopic?:(input:unknown,signal:AbortSignal)=>Promise<{title:string;icon:number|null}>;
 }};
@@ -19,6 +19,8 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   if(!["127.0.0.1","::1","0.0.0.0"].includes(cfg.host)||!cfg.owner||!cfg.hosts.length||!cfg.origins.length||!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.token))throw new Error("INVALID_MCP_CONFIG");
   if(cfg.personal&&(!cfg.personal.userId||!cfg.personal.profileId||typeof cfg.personal.authorize!=='function'))throw new Error('INVALID_PERSONAL_BINDING');
   if(cfg.personal?.operatorToken!==undefined&&(!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.personal.operatorToken)||cfg.personal.operatorToken===cfg.token))throw new Error('INVALID_OPERATOR_TOKEN');
+  if(cfg.hold&&(!cfg.personal||cfg.host!=='127.0.0.1'||!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.hold.token)))
+    throw new Error('INVALID_RELEASE_HOLD');
   const sessions=new Map<string,Session>(),pending=new Set<Session>();
   const safeId=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9_.:/-]{1,256}$/.test(v)?v:undefined;
   const httpDelivery=new AsyncLocalStorage<{closed:boolean;finish?:()=>void;cancel?:()=>void}>();
@@ -98,6 +100,12 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
       if(!matches(cfg.token)&&!operator){res.writeHead(401).end();return;}
       if(suggest&&(!cfg.hosts.includes(req.headers.host??'')||req.headers.origin&&!cfg.origins.includes(req.headers.origin))){
         res.writeHead(403).end();return;
+      }
+      if(cfg.hold?.active()){
+        const expected=Buffer.from(cfg.hold.token);
+        const header=req.headers['x-brai-release-probe'];
+        const probe=Buffer.from(typeof header==='string'?header:'');
+        if(probe.length!==expected.length||!timingSafeEqual(probe,expected)){res.writeHead(503).end();return;}
       }
       if(cfg.personal){
         if(!operator&&(req.headers['x-brai-user-id']!==cfg.personal.userId||req.headers['x-brai-profile-id']!==cfg.personal.profileId)){res.writeHead(403).end();return;}

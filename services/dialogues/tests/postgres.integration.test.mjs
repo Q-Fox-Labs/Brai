@@ -8,7 +8,7 @@ import {Pool} from 'pg';
 import {migrate} from '../dist/migrate.js';
 import {createStore} from '../dist/store.js';
 import {exchange} from '../dist/exchange.js';
-import {createTopicJobs} from '../dist/topic-jobs.js';
+import {createTopicJobs,seedTopicIndex} from '../dist/topic-jobs.js';
 import {countContextTokens} from '../dist/compact-context.js';
 import {backfill,ensureBackfilled} from '../dist/backfill.js';
 
@@ -71,6 +71,38 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal((await input('empty','first','Пустой снимок',emptyRequest,emptyProfile)).context,null);
    const afterEmpty=await input('empty','new','Обновления',req(),emptyProfile);
    assert.equal(afterEmpty.context.split('Событие архива ').length-1,25);
+  });
+
+  await t.test('старт после миграции показывает старую свёртку до вызова модели',async()=>{
+   const profile='upgrade-index-fixture';
+   const old={id:'old-task',channel:'synthetic',title:'Архивный проект'};
+   const fact='Стенд перенесён в отдельный контур.';
+   await api.append(profile,{request_id:req(),dialogue:old,messages:[
+    {id:'first',turn_id:'old',role:'user',kind:'input',text:'Старое сообщение',occurred_at:'2025-01-01T00:00:00Z'}
+   ]});
+   await api.summary(profile,{request_id:req(),dialogue_id:old.id,through_message_id:'first',target:'dialogue',
+    expected_version:null,text:fact+' '+('Детали '.repeat(2500))});
+   await api.append(profile,{request_id:req(),dialogue:{...old,id:'message-summary-only',title:'Отдельный стенд'},messages:[
+    {id:'only',turn_id:'old',role:'user',kind:'input',text:'Исходный длинный текст. '.repeat(10),
+     summary:'Репозиторий уже перенесён.',occurred_at:'2025-01-01T00:00:00Z'}
+   ]});
+   await owner.query('DELETE FROM dialogues_live.topic_members WHERE owner_id=$1',[profile]);
+   await owner.query('DELETE FROM dialogues_live.topics WHERE owner_id=$1',[profile]);
+   await api.append(profile,{request_id:req(),dialogue:{id:'newer',channel:'synthetic'},
+    messages:Array.from({length:25},(_,i)=>({id:'recent-'+i,turn_id:'recent',role:'user',kind:'input',
+     text:'Свежий текст '+i,occurred_at:'2025-01-02T00:00:00Z'}))});
+   assert.equal(await seedTopicIndex(app,profile),2);
+   assert.equal(await seedTopicIndex(app,profile),0);
+   const input=(owner,id)=>exchange(api,owner,{action:'input',arguments:{request_id:req(),
+    dialogue:{id:'new',channel:'synthetic'},messages:[{id,text:'Начало работы'}]}});
+   const first=await input(profile,'input-1');
+   const line=first.context.split('\n').find(line=>line.includes(fact));
+   assert.match(line,/^T[1-9]\d* "Архивный проект" .*\[из архива\]$/u);
+   assert.ok(countContextTokens(JSON.parse(line.split('"Архивный проект" ')[1].split(' [из архива]')[0]))<=400);
+   assert.match(first.context,/^T[1-9]\d* "Отдельный стенд" "Репозиторий уже перенесён." \[из архива\]$/mu);
+   assert.doesNotMatch(first.context,/Старое сообщение|Исходный длинный текст/u);
+   assert.equal((await input(profile,'input-2')).context,null);
+   assert.equal((await input('another-owner','input-1')).context,null);
   });
 
   await t.test('темы дают свёртки бесед, история — короткие оригиналы и пакетное чтение M',async()=>{

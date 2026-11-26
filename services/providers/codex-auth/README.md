@@ -21,7 +21,8 @@ Helper/state/inputs/cgroup регистрируются самостоятель
 Config: version=1, socket, stateRoot, peerUid, provider из verified source receipt.
 Root создаёт listener, проверяет полный source/producer и закрытый namespace,
 затем запускает helper под provider UID с отдельными ownerHome/codexHome rw
-mounts и read-only closed config. Worker не видит owner DATA и не входит в его
+mounts и read-only closed config. Helper сверяет хеш смонтированного файла.
+Путь к оригиналу может оставаться доступным только Root. Worker не видит owner DATA и не входит в его
 группу. Node native работает под отдельным peer UID и получает только private RPC.
 
 `python3 -I -B -m unittest discover -s services/providers/codex-auth` проверяет

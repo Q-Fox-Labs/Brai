@@ -251,7 +251,14 @@ def dialogues_result(content):
             content = json.loads(content)
         if isinstance(content, dict):
             value = content.get('structuredContent', content.get('result', content))
-            return value if isinstance(value, dict) else {}
+            if not isinstance(value, dict):
+                return {}
+            error = value.get('error')
+            if isinstance(error, str) and error.startswith('{'):
+                rejected = json.loads(error)
+                if isinstance(rejected, dict) and isinstance(rejected.get('code'), str) and rejected.get('applied') is False:
+                    return rejected
+            return value
     except (TypeError, ValueError):
         pass
     return {}

@@ -30,7 +30,6 @@ const changes=obj({purpose:{type:['string','null']},constraints:{type:['string',
 const common={request_id:identifier,dialogue_id:identifier};
 const turn={...common,turn_id:identifier,expected_version:expected};
 const archiveOnly={type:'boolean'};
-const independentActions=new Set(['topic_get','search','topic_move','dialogue_get','read_many']);
 const variants:Record<string,any>={
  input:obj({request_id:identifier,dialogue,messages:{type:'array',minItems:1,maxItems:100,items:publicMessage},reconciled_no_final:{type:'boolean'}},['request_id','dialogue','messages']),
  update:obj({...turn,changes},['request_id','dialogue_id','turn_id','expected_version','changes']),
@@ -50,7 +49,7 @@ const variants:Record<string,any>={
  repair:obj({...turn,final_message_id:identifier,evidence:obj({kind:{enum:['native_client']},native_thread_id:identifier,native_turn_id:identifier,phase:{enum:['final_answer']},status:{enum:['completed']}},['kind','native_thread_id','native_turn_id','phase','status']),changes},['request_id','dialogue_id','turn_id','expected_version','final_message_id','evidence'])
 };
 export const toolDefinitions=[
- {name:operations[0],description:'Единый обмен: input начинает или дополняет ход, update меняет результаты, finish согласует финал, poll получает изменения, page дочитывает контекст, read получает один оригинал или саммари, history — саммари сообщений беседы, snapshot — состояние хода. import, summary и repair предназначены для переноса и восстановления. У input и poll контекст определяется сервером по треду. Для целевого чтения read, history или snapshot укажи archive_only:true. topic_get(T…) даёт свёртки бесед D…, dialogue_get(D…) — короткие оригиналы и свёртки M…, read_many — исходные тексты по списку message_ids с продолжением по cursor; topic_move меняет тему треда только по явному поручению, null возвращает его в собственную тему. search ищет в архиве и возвращает ID и смещения совпадений. Для input передай ID треда и сообщения. Записи и стир получают контекст автоматически, отдельные page и ACK не нужны.'+callExamples,inputSchema:{type:'object',additionalProperties:false,properties:{action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object',anyOf:Object.values(variants)},context},required:['action','arguments']}},
+ {name:operations[0],description:'Единый обмен: input начинает или дополняет ход, update меняет результаты, finish согласует финал, poll получает изменения, page дочитывает контекст, read получает один оригинал или саммари, history — саммари сообщений беседы, snapshot — состояние хода. import, summary и repair предназначены для переноса и восстановления. У input и poll контекст определяется сервером по треду. read, history и snapshot возвращают только запрошенные данные без context. topic_get(T…) даёт свёртки бесед D…, dialogue_get(D…) — короткие оригиналы и свёртки M…, read_many — исходные тексты по списку message_ids с продолжением по cursor; topic_move меняет тему треда только по явному поручению, null возвращает его в собственную тему. search ищет в архиве и возвращает ID и смещения совпадений. Для input передай ID треда и сообщения. Записи и стир получают контекст автоматически, отдельные page и ACK не нужны.'+callExamples,inputSchema:{type:'object',additionalProperties:false,properties:{action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object',anyOf:Object.values(variants)},context},required:['action','arguments']}},
  {name:operations[1],description:'Подтвердить все страницы конкретной выдачи и получить квитанцию.',inputSchema:ack}
 ];
 /** Вызывает только действующий MCP-интерфейс с операторской идентичностью. */
@@ -59,7 +58,7 @@ export function invoke(store:ReturnType<typeof createStore>,owner:string,name:st
  if(name===operations[0]){
   validate(args,obj({action:{type:'string',enum:Object.keys(variants)},arguments:{type:'object'},context},['action','arguments']),'');
   const a=args as Record<string,any>;
-  if(!['page','input','poll','update','finish'].includes(a.action)&&!independentActions.has(a.action)&&a.arguments.archive_only!==true)validate(a.context,context,'context');
+  if(['import','summary','repair'].includes(a.action))validate(a.context,context,'context');
   validate(a.arguments,variants[a.action],'arguments');
   if(a.action==='input'||a.action==='import')a.arguments.messages.forEach((m:Record<string,any>,i:number)=>validateMessage(m,'arguments.messages['+i+']'));
   if(a.action==='finish')validateMessage(a.arguments.final,'arguments.final');

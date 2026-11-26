@@ -609,6 +609,7 @@ async def steer_active_input(runner, event, session_key):
             reserved[2].set()
         return True  # Повтор уже принятого набора не становится новым поручением.
     text = event.text or ''
+    original = getattr(event, '_brai_original_text', text)
     audio_paths = getattr(runner, '_pending_event_audio_paths', lambda _: [])(event)
     if audio_paths:
         text = await runner._prepare_busy_steer_text(event)
@@ -627,7 +628,6 @@ async def steer_active_input(runner, event, session_key):
     if getattr(getattr(event, 'raw_message', None), 'edit_date', None):
         text = '[Правка сообщения ' + str(event.message_id) + ': новая редакция заменяет прежнюю.]\n' + text
     origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
-    original = event._brai_original_text
     if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1' and event.message_id is not None:
         header, separator, _ = origin.partition('\n\n')
         try:
