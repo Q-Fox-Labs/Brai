@@ -7,6 +7,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema,ListToolsRequestSchema,type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { agentInstructions,toolDefinitions,invoke } from "./api.js";
+import {automaticContext} from './exchange.js';
 import { DialoguesFault,limits } from "./domain.js";
 import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
@@ -24,9 +25,12 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   const deliveries=new Map<string,Promise<void>>();
   function rejected(name:string,raw:any,diagnostic:Record<string,any>,started:number){
     const action=['input','update','finish','poll','page','read','history','snapshot','import','summary','repair','topic_get','dialogue_get','read_many','search','topic_move'].includes(raw?.action)?raw.action:undefined;
+    const probe=cfg.hold?.active()&&action==='snapshot'&&typeof raw?.arguments?.request_id==='string'
+      &&raw.arguments.dialogue_id==='release-probe-'+raw.arguments.request_id;
     try{log({service:'dialogues',event:'request_rejected',tool:['dialogues_exchange','dialogues_context_ack'].includes(name)?name:'unknown',
       action,request_id:safeId(raw?.arguments?.request_id??raw?.request_id),code:diagnostic.code,
-      field:diagnostic.unknown_property?(diagnostic.parent_field?diagnostic.parent_field+'.':'')+'<unknown>':diagnostic.field,applied:diagnostic.applied,duration_ms:Date.now()-started});}catch{/* Журнал не меняет исход операции. */}
+      field:diagnostic.unknown_property?(diagnostic.parent_field?diagnostic.parent_field+'.':'')+'<unknown>':diagnostic.field,applied:diagnostic.applied,duration_ms:Date.now()-started,
+      ...(probe?{operator_probe:true}:{})});}catch{/* Журнал не меняет исход операции. */}
   }
   async function make():Promise<Session> {
     const server=new Server({name:"brai-dialogues",version:"0.2.0"},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions});
@@ -40,7 +44,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         await cfg.personal?.authorize();
         const raw=req.params.arguments as any;
         const response=httpDelivery.getStore();
-        const thread=req.params.name==='dialogues_exchange'&&raw?.context===undefined&&['input','poll'].includes(raw?.action)
+        const thread=req.params.name==='dialogues_exchange'&&automaticContext(raw?.action,raw?.context)
           ?safeId(raw.arguments?.dialogue_id??raw.arguments?.dialogue?.id):undefined;
         const clientDelivery=req.params._meta?.brai_dialogues_delivery;
         const clientConfirms=clientDelivery==='start'||typeof clientDelivery==='string'&&/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/.test(clientDelivery);
@@ -66,6 +70,11 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
           if(clientConfirms&&clientDelivery!=='start')await store.confirmThread(cfg.owner,thread,clientDelivery);
         }
         const result=await invoke(store,cfg.owner,req.params.name,raw??{},thread&&response?(commit,id)=>{confirm=commit;deliveredId=id;}:undefined);
+        if(result.context_error&&result.context_error.code!=='CONTEXT_DEFERRED'){
+          try{log({service:'dialogues',event:'context_delivery_failed',action:raw?.action,
+            request_id:safeId(raw?.arguments?.request_id),code:result.context_error.code,
+            input_saved:raw?.action==='input',duration_ms:Date.now()-started});}catch{/* Запись уже завершена. */}
+        }
         // AIDEV-NOTE: Поздний отказ может следовать за commit: исход не объявляется неприменённым.
         await cfg.personal?.authorize();
         if(Buffer.byteLength(JSON.stringify(result))>(typeof result.context==='string'?limits.requestBytes:limits.responseBytes))throw new DialoguesFault("RESPONSE_TOO_LARGE");
@@ -74,7 +83,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         return {content:[],structuredContent:result,...(clientConfirms&&deliveredId?{_meta:{brai_dialogues_delivery:deliveredId}}:{})};
       } catch(error) {
         const code=error instanceof DialoguesFault?error.code:"INTERNAL";
-        const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте field по expected и allowed; сразу повторите с новым request_id, сохранив ID сообщения и исходный текст":"Проверьте данные и состояние перед повтором";
+        const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте field по expected и allowed; сразу повторите ту же операцию с новым request_id, сохранив ID сообщения и исходный текст. До исправленного повтора не вызывайте read или poll":"Проверьте данные и состояние перед повтором";
         const outcomeUnknown=code==="INTERNAL"||code==="RESPONSE_TOO_LARGE";
         const diagnostic={code,...(outcomeUnknown?{next_action:"Исход операции неизвестен: сначала проверьте состояние и исходный ID"}:{applied:false,next_action}),...(error instanceof DialoguesFault?error.details:{})};
         const request_id=safeId((req.params.arguments as any)?.arguments?.request_id??(req.params.arguments as any)?.request_id);

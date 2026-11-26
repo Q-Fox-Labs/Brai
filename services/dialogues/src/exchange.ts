@@ -8,6 +8,11 @@ import type {DeliveryCommit} from './context.js';
 type Store=ReturnType<typeof createStore>;
 const contextId=(request:string,consumer:string,instance:string)=>'exchange-context-'+createHash('sha256').update(JSON.stringify([request,consumer,instance])).digest('hex');
 
+/** Обычный вход определяет потребителя по треду, если формат не выбран явно. */
+export function automaticContext(action:unknown,context:any) {
+ return ['input','poll'].includes(String(action))&&(context===undefined||context?.format===undefined);
+}
+
 /** Выполняет одну операцию и, кроме успешного финала, возвращает доступный контекст. */
 export async function exchange(store:Store,owner:string,raw:unknown,afterResponse?:DeliveryCommit) {
  const a=object(raw,['action','arguments','context']);
@@ -34,7 +39,7 @@ export async function exchange(store:Store,owner:string,raw:unknown,afterRespons
   return store.topics.search(owner,args.query,args.topic_id);
  }
  const archive=['read','history','snapshot'].includes(a.action)&&(!context||args.archive_only===true);
- const automatic=['input','poll'].includes(a.action)&&!context;
+ const automatic=automaticContext(a.action,context);
  if(!context&&!archive&&!automatic&&!['update','finish'].includes(a.action))throw new DialoguesFault('INVALID_ARGUMENT',{field:'context',expected:'стабильный идентификатор потребителя'});
  if(!['input','update','finish','import','summary','repair','read','snapshot','history','poll'].includes(a.action))return fail('UNKNOWN_OPERATION');
  id(args.request_id);
@@ -48,7 +53,7 @@ export async function exchange(store:Store,owner:string,raw:unknown,afterRespons
    const request_id=contextId(args.request_id,dialogue,'server');
    const inputs=input?args.messages.map((message:{id:string})=>message.id):[];
    try{
-    return {...receipt,context:await store.pullThread(owner,dialogue,request_id,inputs,afterResponse)};
+    return {...receipt,context:await store.pullThread(owner,dialogue,request_id,inputs,afterResponse,context?.reset===true)};
    }catch(error){
     return {...receipt,context_error:{code:error instanceof DialoguesFault?error.code:'CONTEXT_UNAVAILABLE'}};
    }
