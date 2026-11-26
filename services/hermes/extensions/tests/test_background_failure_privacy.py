@@ -574,9 +574,14 @@ class BackgroundCompletionAdmissionTest(unittest.IsolatedAsyncioTestCase):
         for name in ('A', 'B'):
             (profile_root / name).mkdir()
             (profile_root / name / 'state.db').touch()
-        owner_modules['gateway.run']._multiplex_profile_homes = lambda config: [('default', profile_root / 'A'), ('B', profile_root / 'B')]
+        state = {'scenario': 'normal', 'round': 0, 'enumerations': 0}
+        def homes(config):
+            state['enumerations'] += 1
+            if state['scenario'] == 'enumeration' and state['enumerations'] == 1:
+                raise OSError('profile enumeration unavailable')
+            return [('default', profile_root / 'A'), ('B', profile_root / 'B')]
+        owner_modules['gateway.run']._multiplex_profile_homes = homes
         owner_modules['gateway.wake'].WakeNotAccepted = wake.WakeNotAccepted
-        state = {'scenario': 'normal', 'round': 0}
         class ProfileDB:
             def __init__(self, path, read_only):
                 self.name = Path(path).parent.name
@@ -585,6 +590,9 @@ class BackgroundCompletionAdmissionTest(unittest.IsolatedAsyncioTestCase):
                     state['round'] += 1
                 if sid == 'missing':
                     return None
+                if (state['scenario'] == 'missing_store' and self.name == 'A'
+                        and not (profile_root / 'B' / 'state.db').exists()):
+                    return {'profile_name': 'default'}
                 if state['scenario'] == 'unreadable' and state['round'] == 1:
                     if self.name == 'B':
                         raise OSError('B unavailable')
@@ -633,6 +641,20 @@ class BackgroundCompletionAdmissionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await owned._deliver_completion_notification('SAFE', scoped_event('parent_b', 'proc_' + scenario)))
                 self.assertEqual(owned.delivered_in, 'B')
                 self.assertGreaterEqual(state['round'], 2)
+            state.update(scenario='enumeration', round=0, enumerations=0)
+            self.assertTrue(await owned._deliver_completion_notification('SAFE', scoped_event('parent_b', 'proc_enumeration')))
+            self.assertEqual(owned.delivered_in, 'B')
+            self.assertGreaterEqual(state['enumerations'], 2)
+            state.update(scenario='missing_store', round=0)
+            missing_db = profile_root / 'B' / 'state.db'
+            missing_db.unlink()
+            task = asyncio.create_task(owned._deliver_completion_notification('SAFE', scoped_event('parent_b', 'proc_missing_store')))
+            while state['round'] == 0:
+                await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            missing_db.touch()
+            self.assertTrue(await task)
+            self.assertEqual(owned.delivered_in, 'B')
 
         started, release = asyncio.Event(), asyncio.Event()
         async def pending_send(text, event, **kwargs):
