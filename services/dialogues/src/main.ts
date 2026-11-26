@@ -1,7 +1,7 @@
 // ABOUTME: Собирает PostgreSQL и MCP независимого live-сервиса Диалогов.
 // ABOUTME: Миграции и подготовка входных данных выполняются отдельной owner-операцией.
 import {createSubscriptionLuna} from './subscription-luna.js';
-import { readFileSync } from "node:fs";
+import { readFileSync,statSync } from "node:fs";
 import { Pool } from "pg";
 import { createStore } from "./store.js";
 import { startMcp } from "./mcp.js";
@@ -52,7 +52,10 @@ try {
   const topicJobs=generator&&'structured' in generator?createTopicJobs(pool,owner,generator,personal?.authorize):undefined;
   if(topicJobs)await topicJobs.seed();
   else await seedTopicIndex(pool,owner);
-  mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal});
+  const marker=process.env.DIALOGUES_MCP_HOLD_FILE;
+  const hold=marker?{active:()=>statSync(marker,{throwIfNoEntry:false})!==undefined,
+    token:readFileSync(required('DIALOGUES_MCP_HOLD_TOKEN_FILE'),'utf8').trim()}:undefined;
+  mcp=await startMcp(createStore(pool,cursorKey),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token,personal,hold});
   if(generator){
     jobs=createJobs(pool,owner,generator,personal?.authorize,topicJobs&& (async()=>{
       try{return await topicJobs.tick();}
