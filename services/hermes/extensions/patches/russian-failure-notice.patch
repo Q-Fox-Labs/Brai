@@ -9490,10 +9490,11 @@ diff --git a/gateway/run.py b/gateway/run.py
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 --- a/gateway/run_notifications.py
 +++ b/gateway/run_notifications.py
-@@ -1992,26 +1992,15 @@
+@@ -1991,27 +1991,20 @@
+             ),
          }
  
-     def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
+-    def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
 -        """Human-facing completion message. Every mode shares the one-line status header; the
 -        raw-output modes (all/result/error) append the bounded output tail under it instead of the
 -        old bracketed ``[Background process proc_… finished~ …]`` debug wrapper (#54266)."""
@@ -9507,11 +9508,16 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -                                                        duration_seconds=_dur)
 -        header = _format_concise_process_notification(session_id, command, session.exit_code, "", duration_seconds=_dur)
 -        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
++    def _format_process_final_message(self, session_id: str, session, notify_mode: str, reference=None) -> str:
 +        """Не включать вывод процесса в автоматическое сообщение чата."""
 +        # AIDEV-NOTE: Даже успешный процесс может вывести текст ошибки.
 +        if session.exit_code is None:
-+            return t("gateway.background.task_unknown")
-+        return t("gateway.background.task_result_ready" if session.exit_code == 0 else "gateway.background.task_failed")
++            key = "gateway.background.task_unknown_ref" if reference else "gateway.background.task_unknown"
++        elif session.exit_code != 0:
++            key = "gateway.background.task_failed_ref" if reference else "gateway.background.task_failed"
++        else:
++            key = "gateway.background.task_result_ready"
++        return t(key, reference=reference) if reference else t(key)
  
      def _format_process_running_message(self, session) -> str:
 -        from gateway.run import _redact_gateway_user_facing_secrets, _shorten_command_for_display
@@ -9524,7 +9530,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
  
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
-@@ -2031,9 +2020,8 @@
+@@ -2031,9 +2024,8 @@
  
      async def _run_process_watcher(self, watcher: dict) -> None:
          """Poll a background process and push updates until it exits. Mode
@@ -9536,41 +9542,79 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          from tools.process_registry import process_registry
          from tools.process_registry_notifications import format_process_notification
          session_id = watcher["session_id"]
-@@ -2050,11 +2038,15 @@
+@@ -2050,11 +2042,39 @@
                        session_id, interval, notify_mode, agent_notify)
          silent = notify_mode == "off" and not agent_notify
          last_output_len = 0
 +        completion_logged = False
++        failure_reference = None
++        failure_notice_sent = False
++
++        def record_failure(exit_code):
++            # AIDEV-NOTE: Не обещать номер, если запись не удалось передать logger.
++            try:
++                if not logger.isEnabledFor(logging.WARNING):
++                    return None
++                import secrets
++                reference = secrets.token_hex(8)
++                logger.warning("BACKGROUND_PROCESS_FAILURE reference=%s session=%s exit=%s",
++                               reference, session_id, exit_code)
++                return reference
++            except Exception:
++                return None
++
          while True:
              await asyncio.sleep(interval)
              session = process_registry.get(session_id)
              if session is None:
++                if not failure_notice_sent and not process_registry.is_completion_consumed(session_id):
++                    if not completion_logged:
++                        failure_reference = record_failure("unknown")
++                    if notify_mode != "off":
++                        key = "gateway.background.task_unknown_ref" if failure_reference else "gateway.background.task_unknown"
++                        message_text = t(key, reference=failure_reference) if failure_reference else t(key)
++                        await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
                  break
 +            if session.exited and session.exit_code != 0 and not completion_logged:
-+                logger.warning("Background process %s ended without success (exit %s)", session_id, session.exit_code)
++                # AIDEV-NOTE: В журнал не попадает сырой вывод процесса.
++                failure_reference = record_failure(session.exit_code)
 +                completion_logged = True
              if silent:
                  # Still wait for the process to exit so we can log it, but don't push any messages.
                  if session.exited:
-@@ -2084,7 +2076,7 @@
+@@ -2067,6 +2087,10 @@
+                 # Agent-notify: inject a synthetic message unless the agent already consumed the result via
+                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).
+                 if agent_notify and not process_registry.is_completion_consumed(session_id):
++                    if session.exit_code != 0 and notify_mode != "off" and not failure_notice_sent:
++                        message_text = self._format_process_final_message(session_id, session, "concise", failure_reference)
++                        await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
++                        failure_notice_sent = True
+                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
+                     synth_text = format_process_notification(completion_evt)
+                     if not synth_text:
+@@ -2083,9 +2107,7 @@
+                     # While the launching turn is still running the injection only queues a follow-up, and
                      # the chat would stay mute for as long as that turn lasts (#112033): send the concise
                      # receipt now.
-                     if turn_busy and (notify_mode in {"concise", "all", "result"} or (
+-                    if turn_busy and (notify_mode in {"concise", "all", "result"} or (
 -                        notify_mode == "error" and session.exit_code not in {0, None}
-+                        notify_mode == "error" and session.exit_code != 0
-                     )):
+-                    )):
++                    if turn_busy and session.exit_code == 0 and notify_mode in {"concise", "all", "result"}:
                          message_text = self._format_process_final_message(session_id, session, "concise")
                          await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
-@@ -2098,7 +2090,7 @@
+                     break
+@@ -2098,15 +2120,15 @@
                      )
                      break
                  if notify_mode in {"concise", "all", "result"} or (
 -                    notify_mode == "error" and session.exit_code not in {0, None}
 +                    notify_mode == "error" and session.exit_code != 0
                  ):
-                     message_text = self._format_process_final_message(session_id, session, notify_mode)
+-                    message_text = self._format_process_final_message(session_id, session, notify_mode)
++                    message_text = self._format_process_final_message(session_id, session, notify_mode, failure_reference)
                      from gateway.warning_notifications import present_notification
-@@ -2106,7 +2098,7 @@
+                     async with self._completion_event_scope(watcher):
                          # Non-zero exit is the automatic diagnostic; a clean completion is the requested result.
                          await present_notification(
                              lambda: self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher),
@@ -9582,11 +9626,13 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 diff --git a/locales/en.yaml b/locales/en.yaml
 --- a/locales/en.yaml
 +++ b/locales/en.yaml
-@@ -105,6 +105,8 @@
+@@ -105,6 +105,10 @@
      started: "🔄 Background task started: \"{preview}\"\nTask ID: {task_id}\nYou can keep chatting — results will appear when done."
      task_finished: "✅ Background task finished"
      task_failed: "❌ Background task failed"
 +    task_unknown: "⚠️ The outcome of the background task is unknown."
++    task_failed_ref: "❌ The background task failed. Journal reference: {reference}."
++    task_unknown_ref: "⚠️ The outcome of the background task is unknown. Journal reference: {reference}."
 +    task_result_ready: "✅ The background task finished. You can ask me to check its result."
      exit_code: "exit {code}"
      last_output: ". Last output:\n```\n{tail}\n```"
@@ -9594,11 +9640,13 @@ diff --git a/locales/en.yaml b/locales/en.yaml
 diff --git a/locales/ru.yaml b/locales/ru.yaml
 --- a/locales/ru.yaml
 +++ b/locales/ru.yaml
-@@ -104,6 +104,8 @@
+@@ -104,6 +104,10 @@
      started: "🔄 Фоновая задача запущена: «{preview}»\nID задачи: {task_id}\nМожно продолжить общение — результаты появятся здесь по завершении."
      task_finished: "✅ Фоновая задача завершена"
      task_failed: "❌ Фоновая задача завершилась с ошибкой"
 +    task_unknown: "⚠️ Результат фоновой задачи неизвестен."
++    task_failed_ref: "❌ Фоновая задача завершилась с ошибкой. Номер в журнале: {reference}."
++    task_unknown_ref: "⚠️ Результат фоновой задачи неизвестен. Номер в журнале: {reference}."
 +    task_result_ready: "✅ Фоновая задача завершена. Вы можете попросить меня проверить результат."
      exit_code: "код выхода {code}"
      last_output: ". Последний вывод:\n```\n{tail}\n```"

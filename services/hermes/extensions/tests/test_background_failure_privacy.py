@@ -28,6 +28,8 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
                                          'gateway.background.still_running': 'Фоновая задача выполняется',
                                          'gateway.background.task_result_ready': 'Фоновая задача завершена. Можно попросить проверить результат.',
                                          'gateway.background.task_unknown': 'Результат неизвестен',
+                                         'gateway.background.task_unknown_ref': 'Результат неизвестен. Номер: ' + str(kw.get('reference')),
+                                         'gateway.background.task_failed_ref': 'Фоновая задача завершилась с ошибкой. Номер: ' + str(kw.get('reference')),
                                          'gateway.background.final_output': f"{kw.get('header')} {kw.get('output')}"}[key]}
         @contextmanager
         def suppressed(*args):
@@ -93,13 +95,16 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn('export', text)
                     self.assertNotIn('SECRET_VALUE', ' '.join(logs.output))
                     self.assertNotIn('/private/path', ' '.join(logs.output))
-                    self.assertIn('ended without success (exit 1)', ' '.join(logs.output))
+                    self.assertIn('BACKGROUND_PROCESS_FAILURE', ' '.join(logs.output))
+                    reference = logs.output[0].split('reference=')[1].split()[0]
+                    if runner.sent and mode != 'off':
+                        self.assertIn(reference, runner.sent[-1])
                     if agent_notify:
                         self.assertEqual(runner.injected, [sensitive])
                     if mode == 'off':
                         self.assertEqual(runner.sent, [])
                     elif not agent_notify or mode != 'off':
-                        self.assertEqual(runner.sent[-1], 'Фоновая задача завершилась с ошибкой')
+                        self.assertIn('Фоновая задача завершилась с ошибкой', runner.sent[-1])
                     if mode == 'all' and not agent_notify:
                         self.assertEqual(runner.sent[0], 'Фоновая задача выполняется')
 
@@ -119,7 +124,8 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
             await runner._run_process_watcher(watcher)
         self.assertEqual(len(logs.output), 1)
         self.assertEqual(runner.injected, [sensitive, sensitive])
-        self.assertEqual(runner.sent, ['Фоновая задача завершилась с ошибкой'])
+        self.assertEqual(len(runner.sent), 1)
+        self.assertIn(logs.output[0].split('reference=')[1].split()[0], runner.sent[0])
 
         unknown = SimpleNamespace(exited=True, exit_code=None, output_buffer=sensitive, command=command)
         modules['tools.process_registry'].process_registry = SimpleNamespace(
@@ -128,8 +134,33 @@ class BackgroundFailurePrivacyTest(unittest.IsolatedAsyncioTestCase):
         watcher = {'session_id': 'proc', 'check_interval': 0, 'platform': 'telegram', 'chat_id': 'chat'}
         with patch.dict(sys.modules, modules), self.assertLogs('background-privacy-test', level='WARNING') as logs:
             await runner._run_process_watcher(watcher)
-        self.assertEqual(runner.sent, ['Результат неизвестен'])
+        self.assertEqual(len(runner.sent), 1)
+        self.assertIn('Результат неизвестен', runner.sent[0])
+        self.assertIn(logs.output[0].split('reference=')[1].split()[0], runner.sent[0])
         self.assertNotIn('SECRET_VALUE', ' '.join(logs.output))
+
+        modules['tools.process_registry'].process_registry = SimpleNamespace(
+            get=lambda sid: None, is_completion_consumed=lambda sid: False)
+        runner = Runner('concise')
+        with patch.dict(sys.modules, modules), self.assertLogs('background-privacy-test', level='WARNING') as logs:
+            await runner._run_process_watcher(watcher)
+        self.assertEqual(len(runner.sent), 1)
+        self.assertIn('Результат неизвестен', runner.sent[0])
+        self.assertIn(logs.output[0].split('reference=')[1].split()[0], runner.sent[0])
+
+        modules['tools.process_registry'].process_registry = SimpleNamespace(
+            get=lambda sid: None, is_completion_consumed=lambda sid: True)
+        runner = Runner('concise')
+        with patch.dict(sys.modules, modules):
+            await runner._run_process_watcher(watcher)
+        self.assertEqual(runner.sent, [])
+
+        modules['tools.process_registry'].process_registry = SimpleNamespace(
+            get=lambda sid: failed, is_completion_consumed=lambda sid: False)
+        runner = Runner('concise')
+        with patch.dict(sys.modules, modules), patch.object(scope['logger'], 'warning', side_effect=OSError('log unavailable')):
+            await runner._run_process_watcher(watcher)
+        self.assertEqual(runner.sent, ['Фоновая задача завершилась с ошибкой'])
 
         for exit_code, expected in [(0, 'Фоновая задача завершена. Можно попросить проверить результат.'), (None, 'Результат неизвестен')]:
             session = SimpleNamespace(exit_code=exit_code, output_buffer=sensitive, command=command)
