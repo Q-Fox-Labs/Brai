@@ -116,7 +116,8 @@ export async function collectCompact(db:PoolClient,owner:string,options:{
 }){
  const {boundary,checkpoint,bootstrap,dialogue,inputIds,automatic,previous}=options;
  const pinned=await referencedTopic(db,owner,dialogue);
- const topics=await recentTopics(db,owner,pinned,automatic?dialogue:undefined);
+ const topics=(await recentTopics(db,owner,pinned,automatic?dialogue:undefined)).map(topic=>
+  topic.includes_current?{...topic,extended:null,compact:null}:topic);
  const {lines,view}=topicIndexChanges(topics,previous);
  const selected=(await db.query(`SELECT 'M'||m.short_id AS message_id,m.role,
   GREATEST(m.change_seq,c.change_seq,s.change_seq,CASE WHEN m.kind='final' THEN t.completion_seq END)::text AS revision,

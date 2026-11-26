@@ -23,6 +23,8 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
 export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof createLuna>['run'];probe:(state?:Execution,save?:(state:Execution)=>Promise<void>)=>Promise<unknown>},authorize?:()=>Promise<void>,maintainTopics?:()=>Promise<boolean>){
  let preferTopics=true;
  let running=false,stopping=false,timer:NodeJS.Timeout|undefined,active:Promise<void>|undefined,verified=false;
+ const recoverable=['LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE',
+  'LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','ATTEMPTS_EXHAUSTED'];
  async function schedule(){
   return ownerTransaction(pool,owner,async db=>{
    const boundary=(await db.query('SELECT COALESCE(max(change_seq),0)::text AS seq FROM dialogues_live.requests WHERE owner_id=$1',[owner])).rows[0].seq;
@@ -34,12 +36,12 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
  async function recoverFailed(){
   const due=await pool.query(`SELECT 1 FROM dialogues_live.summary_jobs j
    WHERE j.owner_id=$1 AND j.state='failed' AND j.available_at<=now()
-    AND j.error_code IN('LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE')
+    AND j.error_code=ANY($2::text[])
     AND NOT EXISTS(SELECT 1 FROM dialogues_live.summary_jobs active
      WHERE active.owner_id=j.owner_id AND active.dialogue_id=j.dialogue_id AND active.state IN('queued','running'))
     AND j.previous_version IS NOT DISTINCT FROM (SELECT s.version FROM dialogues_live.dialogue_summaries s
      WHERE s.owner_id=j.owner_id AND s.dialogue_id=j.dialogue_id ORDER BY s.version DESC LIMIT 1)
-   LIMIT 1`,[owner]);
+   LIMIT 1`,[owner,recoverable]);
   if(!due.rowCount)return;
   try{await luna.probe({},async()=>{});}catch{return;}
   await authorize?.();
@@ -47,7 +49,7 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
    await db.query(`WITH candidates AS (
     SELECT DISTINCT ON(j.dialogue_id) j.id FROM dialogues_live.summary_jobs j
     WHERE j.owner_id=$1 AND j.state='failed' AND j.available_at<=now()
-     AND j.error_code IN('LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE')
+     AND j.error_code=ANY($2::text[])
      AND NOT EXISTS(SELECT 1 FROM dialogues_live.summary_jobs active
       WHERE active.owner_id=j.owner_id AND active.dialogue_id=j.dialogue_id AND active.state IN('queued','running'))
      AND j.previous_version IS NOT DISTINCT FROM (SELECT s.version FROM dialogues_live.dialogue_summaries s
@@ -55,7 +57,7 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
     ORDER BY j.dialogue_id,j.through_order DESC,j.created_at DESC,j.id DESC
    )
    UPDATE dialogues_live.summary_jobs j SET state='queued',attempts=0,available_at=now(),error_code=NULL
-   FROM candidates c WHERE j.owner_id=$1 AND j.id=c.id AND j.state='failed'`,[owner]);
+   FROM candidates c WHERE j.owner_id=$1 AND j.id=c.id AND j.state='failed'`,[owner,recoverable]);
   });
   verified=true;
  }

@@ -75,6 +75,36 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.equal(afterEmpty.context.split('Событие архива ').length-1,25);
   });
 
+  await t.test('общая тема выдаёт только сведения других тредов',async()=>{
+   const profile='shared-topic-delta-fixture';
+   const input=(dialogue,id,text)=>exchange(api,profile,{action:'input',
+    arguments:{request_id:req(),dialogue:{id:dialogue,channel:'synthetic',title:dialogue},messages:[{id,text}]}});
+   const poll=(afterResponse)=>exchange(api,profile,{action:'poll',arguments:{request_id:req(),dialogue_id:'shared-a'}},afterResponse);
+   await input('shared-a','a1','Собственный факт A1');
+   await input('shared-b','b1','Другой факт B1');
+   const row=(await app.query("SELECT 'T'||short_id AS ref FROM dialogues_live.topics WHERE owner_id=$1 AND home_dialogue_id='shared-b'",[profile])).rows[0];
+   await exchange(api,profile,{action:'topic_move',arguments:{request_id:req(),dialogue_id:'shared-a',topic_id:row.ref}});
+   await app.query(`INSERT INTO dialogues_live.topic_summaries
+    (owner_id,topic_id,version,source_digest,membership_version,extended,compact,extended_tokens,compact_tokens,source_refs,change_seq)
+    SELECT owner_id,id,1,'synthetic',membership_version,'Собственный факт A1 и другой факт B1','A1 и B1',10,5,'[]',nextval('dialogues_live.change_seq')
+    FROM dialogues_live.topics WHERE owner_id=$1 AND home_dialogue_id='shared-b'`,[profile]);
+   const initial=await poll();
+   assert.match(initial.context,/Другой факт B1/);
+   assert.doesNotMatch(initial.context,/Собственный факт A1/);
+   assert.equal((await input('shared-a','a2','Собственный факт A2')).context,null);
+   await input('shared-b','b2','Другой факт B2');
+   const pending=await poll(()=>{});
+   assert.match(pending.context,/Другой факт B2/);
+   assert.doesNotMatch(pending.context,/Собственный факт A2/);
+   const repeated=await poll();
+   assert.equal(repeated.context,pending.context);
+   assert.equal((await poll()).context,null);
+   await input('shared-b','b3','Другой факт B3');
+   const mixed=await input('shared-a','a3','Собственный факт A3');
+   assert.match(mixed.context,/Другой факт B3/);
+   assert.doesNotMatch(mixed.context,/Собственный факт A3/);
+  });
+
   await t.test('старт после миграции показывает старую свёртку до вызова модели',async()=>{
    const profile='upgrade-index-fixture';
    const old={id:'old-task',channel:'synthetic',title:'Архивный проект'};
@@ -186,6 +216,25 @@ test('PostgreSQL: обмен, контекст, история и перенос
    assert.deepEqual((await app.query("SELECT state,attempts,error_code FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0],
     {state:'succeeded',attempts:1,error_code:null});
    assert.equal((await app.query("SELECT count(*)::integer AS n FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[profile])).rows[0].n,1);
+  });
+
+  await t.test('другие временные отказы и истёкшие аренды восстанавливаются после проверки модели',async()=>{
+   for(const code of ['LUNA_NOT_AVAILABLE','LUNA_PROBE_FAILED','LUNA_CATALOG_UNAVAILABLE','ATTEMPTS_EXHAUSTED']){
+    const profile='recovery-'+code;
+    let online=false;
+    const luna={async probe(){if(!online)throw new DialoguesFault('LUNA_UNAVAILABLE');},
+     async run(){return 'Свёртка после восстановления';}};
+    const jobs=createJobs(app,profile,luna);
+    await api.append(profile,{request_id:req(),dialogue:{id:'recovery',channel:'synthetic'},
+     messages:Array.from({length:10},(_,i)=>({id:'m'+i,turn_id:'t'+i,role:'user',kind:'input',text:'Вход '+i}))});
+    await owner.query("UPDATE dialogues_live.summary_jobs SET state='failed',attempts=3,error_code=$2,available_at=now() WHERE owner_id=$1",[profile,code]);
+    await jobs.tick();
+    assert.equal((await app.query("SELECT state FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0].state,'failed');
+    online=true;
+    await Promise.all([jobs.tick(),createJobs(app,profile,luna).tick()]);
+    assert.equal((await app.query("SELECT state FROM dialogues_live.summary_jobs WHERE owner_id=$1",[profile])).rows[0].state,'succeeded');
+    assert.equal((await app.query("SELECT count(*)::integer AS n FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[profile])).rows[0].n,1);
+   }
   });
 
   await t.test('фон сохраняет компактную версию отдельно от обычного саммари',async()=>{
