@@ -933,16 +933,27 @@ class Resolver:
             self._chat_generation(profile, route, body['generation'])
         current.generation = body['generation']
         if 'operatorAssignmentId' in body:
+            from telegram.error import BadRequest, Forbidden
+            from .reply_outbox import DeliveryDeferred
             ident = body['operatorAssignmentId']
             control = self.operator_assignment
             async def before_send():
                 await control.check_delivery(body, route)
                 current()
                 control.begin_delivery(body, begin_attempt)
+
+            async def before_retry():
+                try:
+                    await control.check_delivery(body, route, expected_state='sending')
+                except (DeliveryDeferred, ConnectionError, TimeoutError) as error:
+                    raise PermissionError('Operator assignment retry withheld') from error
+
             control.deliveries.add(ident)
             try:
                 return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current,
-                                                 before_send=before_send)
+                                                 before_send=before_send, before_retry=before_retry)
+            except (BadRequest, Forbidden):
+                return {'success': False, 'retryable': False, 'error_kind': 'telegram_rejected'}
             finally:
                 control.deliveries.discard(ident)
         turn = self.turns.get(profile['uid'])
@@ -1240,7 +1251,8 @@ class Resolver:
                                                     text=action == 'send')
         return await self._deliver_route(profile, action, payload, route, metadata, turn, current)
 
-    async def _deliver_route(self, profile, action, payload, route, metadata, turn, current, *, before_send=None):
+    async def _deliver_route(self, profile, action, payload, route, metadata, turn, current, *,
+                             before_send=None, before_retry=None):
         """Отправить в уже проверенный маршрут и сохранить только фактические квитанции."""
         uid = profile['uid']
         input_id = turn.get('inputId') if turn else None
@@ -1309,7 +1321,31 @@ class Resolver:
             target = telegram_target(self.adapter, values['chat_id'], values['reply_to'], metadata, exact=True)
             await before_send()
             with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
-                sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
+                send = getattr(self.adapter, '_brai_send_with_private_topic_retry', None)
+                if callable(send):
+                    from plugins.platforms.telegram.adapter import _BraiPrivateTopicRetryFailed
+                    from telegram.error import BadRequest, Forbidden
+                    attempted = False
+
+                    async def wire():
+                        nonlocal attempted
+                        if attempted:
+                            await before_retry()
+                            current()
+                        attempted = True
+                        return await self.adapter._send_chunk_markdown_or_plain(formatted, target)
+
+                    try:
+                        sent = await send(wire, metadata, target, values['reply_to'])
+                    except _BraiPrivateTopicRetryFailed as error:
+                        kind = error.args[0]
+                        if isinstance(error.__cause__, PermissionError):
+                            kind = 'forbidden'
+                        elif isinstance(error.__cause__, (BadRequest, Forbidden)) and kind == 'delivery_unknown':
+                            kind = 'telegram_rejected'
+                        return {'success': False, 'retryable': False, 'error_kind': kind}
+                else:
+                    sent = await self.adapter._bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
             verify_telegram_target(sent, target)
             message_id = getattr(sent, 'message_id', None)
             if type(message_id) is not int or message_id <= 0:

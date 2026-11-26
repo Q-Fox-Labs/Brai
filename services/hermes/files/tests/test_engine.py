@@ -1674,6 +1674,9 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         class BadRequest(OSError):
             pass
 
+        class Forbidden(Exception):
+            pass
+
         class PrivateTopicRetryFailed(Exception):
             pass
 
@@ -1758,6 +1761,48 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertFalse(actual.retryable)
                         self.assertEqual(actual.error_kind, error)
+
+        from identity.telegram_runtime import Resolver
+
+        resolver = Resolver.__new__(Resolver)
+        resolver.adapter = adapter
+        adapter.format_message = str
+        resolver.journal = None
+        recorded = []
+        resolver._record_delivery = lambda *args, **kwargs: recorded.append(args)
+        current = lambda: None
+        current.generation = 1
+        receipt = SimpleNamespace(chat_id=23, message_thread_id=88, message_id=101)
+        ports = {'plugins.platforms.telegram.adapter': module(_BraiPrivateTopicRetryFailed=PrivateTopicRetryFailed),
+                 'telegram.error': module(BadRequest=BadRequest, Forbidden=Forbidden)}
+        for outcomes, retry_error, error_kind in (
+                ((receipt,), None, None), ((denied, receipt), None, None),
+                ((denied, denied), None, 'topic_unavailable'),
+                ((denied, BadRequest('Message to be replied not found')), None, 'telegram_rejected'),
+                ((denied, Forbidden()), None, 'telegram_rejected'),
+                ((denied, TimeoutError()), None, 'delivery_unknown'),
+                ((denied,), PermissionError('Conversation generation changed'), 'forbidden')):
+            with self.subTest(operator_outcomes=outcomes), patch.dict(sys.modules, ports), \
+                    patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                admitted = AsyncMock()
+                retry_admitted = AsyncMock(side_effect=retry_error)
+                wire = AsyncMock(side_effect=outcomes)
+                adapter._send_chunk_markdown_or_plain = wire
+                result = await resolver._deliver_route({'uid': 1}, 'send',
+                    {'chat_id': '23', 'reply_to': str(anchor), 'content': 'готовый ответ'}, ('23', '88'),
+                    topic, None, current, before_send=admitted, before_retry=retry_admitted)
+                admitted.assert_awaited_once()
+                self.assertEqual(retry_admitted.await_count, int(outcomes[0] is denied))
+                self.assertEqual(wire.await_count, len(outcomes))
+                for attempt in wire.await_args_list:
+                    self.assertEqual(attempt.args, ('готовый ответ', {
+                        'chat_id': 23, 'message_thread_id': 88, 'reply_to_message_id': anchor,
+                        'allow_sending_without_reply': False}))
+                if error_kind:
+                    self.assertEqual(result, {'success': False, 'retryable': False, 'error_kind': error_kind})
+                else:
+                    self.assertEqual(result, {'success': True, 'message_id': '101'})
+        self.assertEqual(len(recorded), 2)
 
     async def test_pinned_telegram_draft_never_retries_with_raw_markup(self):
         async def deadline(value, **kwargs):
