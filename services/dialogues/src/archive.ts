@@ -22,6 +22,7 @@ export function createArchiveReader(pool:Pick<Pool,'connect'>,key:string){
    const boundary=cursor?.through??(await db.query(
     'SELECT COALESCE(max(change_seq),0)::text AS seq FROM dialogues_live.requests WHERE owner_id=$1',[owner])).rows[0].seq;
    const rows=(await db.query(`SELECT 'M'||m.short_id AS message_id,m.role,char_length(m.text)<=100 AS exact,
+    CASE WHEN jsonb_typeof(m.source->'attachments')='array' THEN jsonb_array_length(m.source->'attachments')>0 ELSE false END AS has_attachments,
     CASE WHEN char_length(m.text)<=100 THEN m.text ELSE COALESCE(c.text,s.text) END AS text
     FROM dialogues_live.messages m JOIN dialogues_live.turns t
      ON t.owner_id=m.owner_id AND t.dialogue_id=m.dialogue_id AND t.id=m.turn_id
@@ -32,8 +33,9 @@ export function createArchiveReader(pool:Pick<Pool,'connect'>,key:string){
     WHERE m.owner_id=$1 AND m.dialogue_id=$2 AND m.change_seq<=$3
      AND (m.kind<>'final' OR NOT t.managed OR (t.final_message_id=m.id AND t.completion_seq<=$3))
     ORDER BY m.message_order,m.id`,[owner,scoped.id,boundary])).rows;
-   const items=rows.map(({message_id,role,exact,text})=>({
+   const items=rows.map(({message_id,role,exact,text,has_attachments})=>({
     type:'message_representation',message_id,role,representation:exact?'original':text?'summary':'reference',
+    ...(has_attachments?{attachments:true}:{}),
     ...(text===null?{}:{text:exact?text:contextExcerpt(text,topicLimits.message).text})
    }));
    const pages=contextPages({dialogue_id:dialogue,through_seq:boundary},items,
@@ -60,15 +62,16 @@ export function createArchiveReader(pool:Pick<Pool,'connect'>,key:string){
     WHERE m.owner_id=$1 AND m.short_id=ANY($2::bigint[]) AND ${resolvableMessage}`,[owner,numbers])).rows[0].count;
    if(found!==ids.length)fail('NOT_FOUND');
    let index=Number(cursor?.from??0),offset=cursor?.offset??0;
-   const messages:{message_id:string;text:string;offset:number;next_offset:number|null;total_chars:number}[]=[];
+   const messages:{message_id:string;text:string;offset:number;next_offset:number|null;total_chars:number;attachments?:unknown[]}[]=[];
    let responseBytes=0;
    while(index<ids.length){
-    const row=(await db.query(`SELECT substring(text FROM $3::int+1 FOR 8192) AS text,char_length(text) AS total_chars
+    const row=(await db.query(`SELECT substring(text FROM $3::int+1 FOR 8192) AS text,char_length(text) AS total_chars,source->'attachments' AS attachments
      FROM dialogues_live.messages WHERE owner_id=$1 AND short_id=$2`,[owner,numbers[index],offset])).rows[0];
     const end=offset+Array.from(row.text).length;
     if(end>row.total_chars)fail('INVALID_CURSOR');
     const next=end<row.total_chars?end:null;
-    const item={message_id:ids[index],text:row.text,offset,next_offset:next,total_chars:row.total_chars};
+    const item={message_id:ids[index],text:row.text,offset,next_offset:next,total_chars:row.total_chars,
+     ...(offset===0&&Array.isArray(row.attachments)&&row.attachments.length?{attachments:row.attachments}:{})};
     const size=bytes(item)+1;
     if(messages.length&&responseBytes+size>limits.responseBytes-1024)break;
     messages.push(item);

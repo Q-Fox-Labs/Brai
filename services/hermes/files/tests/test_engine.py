@@ -1350,6 +1350,29 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payloads,[{'id':'one','text':'  Первое\n'},{'id':'two','text':'\nВторое  '}])
         native.clear_steer_turn(turn)
 
+    async def test_dialogues_file_only_steer_keeps_original_and_artifact(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,_ctx=self.steering_runner(source)
+        runner._steer_text_with_origin=lambda text,event: 'Origin\n'+json.dumps({'message_id':event.message_id})+'\n\n'+text
+        event=SimpleNamespace(source=source,message_id='file',text='[artifactId=file-1]',
+                              media_urls=[],media_types=[],metadata={},_brai_original_text='')
+        token=native._prepared_inbound.set(None)
+        async def prepared(value):
+            native._prepared_inbound.set((native.source_of(value),'file','ticket',[{'artifactId':'file-1'}]))
+            return True
+        try:
+            with patch.object(native,'accept_event',prepared), patch.object(native,'commit_inbound',return_value=True), \
+                    patch.dict(sys.modules,{'brai_files':native}), \
+                    patch.dict(os.environ,BRAI_DIALOGUES_REQUIRED='1'):
+                self.assertTrue(await native.steer_active_input(runner,event,'session'))
+            payload=next(json.loads(line) for line in agent._pending_steer.splitlines() if line.startswith('{"id":'))
+            self.assertEqual(payload,{'id':'file','text':'','source':{'kind':'telegram','attachments':[{'artifactId':'file-1'}]}})
+            with native.inbound_handoff(source,'file'):
+                self.assertEqual(native._inbound_attachments.get(),[{'artifactId':'file-1'}])
+        finally:
+            native._prepared_inbound.reset(token)
+            native.clear_steer_turn(turn)
+
     def test_edits_belong_to_exact_active_turn_and_sender(self):
         source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
         runner,agent,turn,ctx=self.steering_runner(source)

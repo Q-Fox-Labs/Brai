@@ -140,9 +140,11 @@ export function createTopics(pool:DB){
     WHERE t.owner_id=$1 AND t.id=$2`,[owner,topic])).rows[0];
    const afterNumber=after===undefined?null:shortNumber(after,'D');
    if(after!==undefined&&!afterNumber)fail('INVALID_CURSOR');
-   const rows=(await db.query(`SELECT 'D'||d.short_id AS dialogue_id,left(d.title,128) AS title,COALESCE(s.text,recent.text) AS summary
+   const rows=(await db.query(`SELECT 'D'||d.short_id AS dialogue_id,left(d.title,128) AS title,COALESCE(s.text,recent.text) AS summary,
+    s.through_order IS NOT NULL AND EXISTS(SELECT 1 FROM dialogues_live.messages m
+     WHERE m.owner_id=d.owner_id AND m.dialogue_id=d.id AND m.message_order>s.through_order AND ${visibleMessage}) AS summary_incomplete
     FROM dialogues_live.topic_members tm JOIN dialogues_live.dialogues d ON d.owner_id=tm.owner_id AND d.id=tm.dialogue_id
-    LEFT JOIN LATERAL (SELECT text FROM dialogues_live.dialogue_summaries
+    LEFT JOIN LATERAL (SELECT text,through_order FROM dialogues_live.dialogue_summaries
      WHERE owner_id=d.owner_id AND dialogue_id=d.id ORDER BY version DESC LIMIT 1) s ON true
     LEFT JOIN LATERAL (
      SELECT string_agg(excerpt,' ' ORDER BY message_order) AS text FROM (
@@ -157,9 +159,10 @@ export function createTopics(pool:DB){
     WHERE tm.owner_id=$1 AND tm.topic_id=$2 AND ($3::bigint IS NULL OR d.short_id>$3)
     ORDER BY d.short_id LIMIT 51`,[owner,topic,afterNumber])).rows;
    const dialogues=[];
-   for(const {dialogue_id,title,summary} of rows.slice(0,50)){
+   for(const {dialogue_id,title,summary,summary_incomplete} of rows.slice(0,50)){
     const excerpt=summary?contextExcerpt(summary,topicLimits.extended):null;
-    const row={dialogue_id,title,summary:excerpt?.text??null,...(excerpt?.truncated?{summary_excerpt:true}:{})};
+    const row={dialogue_id,title,summary:excerpt?.text??null,...(excerpt?.truncated?{summary_excerpt:true}:{}),
+     ...(summary_incomplete?{summary_incomplete:true}:{})};
     if(bytes({...card,dialogues:[...dialogues,row]})>limits.responseBytes-1024)break;
     dialogues.push(row);
    }

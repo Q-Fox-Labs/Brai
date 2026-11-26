@@ -9,6 +9,7 @@ import {DialoguesFault} from '../dist/domain.js';
 import {inputExample,finishExample,toolDefinitions,agentInstructions} from '../dist/api.js';
 
 test('MCP: агент исправляет поля из отказа, повтор сохраняется один раз, примеры исполнимы',async()=>{
+ let contextDown=false;
  const logs=[],saved=[],store={
   async turnInput(owner,args){saved.push(args);return {dialogue_id:args.dialogue.id,turn_id:'test-turn',version:'1',messages:[{id:args.messages[0].id}]};},
   async turnFinish(owner,args){if(args.expected_version==='2')throw new DialoguesFault('VERSION_CONFLICT');
@@ -17,7 +18,7 @@ test('MCP: агент исправляет поля из отказа, повт�
    return {status:'completed',final:args.final};},
   async turnGet(){return {version:'1'};},async logExchange(){},
   async pull(){return {items:[],context_status:'no_updates',delivery_id:null};},
-  async pullThread(){return null;},
+  async pullThread(){if(contextDown)throw new DialoguesFault('CONTEXT_UNAVAILABLE');return null;},
   async inThread(owner,dialogue,operation){return operation();},
   async ack(){return {acknowledged:true};}
  };
@@ -79,6 +80,14 @@ test('MCP: агент исправляет поля из отказа, повт�
   const ack=await client.callTool({name:'dialogues_context_ack',arguments:{request_id:'ack-invalid',consumer_id:'reader',context_instance_id:'instance'}});
   assert.equal(JSON.parse(ack.content[0].text).field,'delivery_id');
   assert.equal(logs.at(-1).tool,'dialogues_context_ack');
+  contextDown=true;
+  const unavailable=structuredClone(inputExample);
+  unavailable.arguments.request_id='input-context-failure';
+  const partial=await call(unavailable);
+  assert.equal(partial.structuredContent.context_error.code,'CONTEXT_UNAVAILABLE');
+  assert.equal(logs.at(-1).event,'context_delivery_failed');
+  assert.equal(logs.at(-1).request_id,'input-context-failure');
+  assert.equal(logs.at(-1).input_saved,true);
   assert.doesNotMatch(JSON.stringify(logs),/PRIVATE_|synthetic-token/);
   assert.equal(toolDefinitions.length,2);
  }finally{await client.close();await listener.close();}

@@ -30,6 +30,35 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
    for(const d of ds)await enqueueDialogue(db,owner,d.id,boundary,true);
   });
  }
+ /** Возобновляет только актуальные диапазоны после подтверждённого восстановления Luna. */
+ async function recoverFailed(){
+  const due=await pool.query(`SELECT 1 FROM dialogues_live.summary_jobs j
+   WHERE j.owner_id=$1 AND j.state='failed' AND j.available_at<=now()
+    AND j.error_code IN('LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE')
+    AND NOT EXISTS(SELECT 1 FROM dialogues_live.summary_jobs active
+     WHERE active.owner_id=j.owner_id AND active.dialogue_id=j.dialogue_id AND active.state IN('queued','running'))
+    AND j.previous_version IS NOT DISTINCT FROM (SELECT s.version FROM dialogues_live.dialogue_summaries s
+     WHERE s.owner_id=j.owner_id AND s.dialogue_id=j.dialogue_id ORDER BY s.version DESC LIMIT 1)
+   LIMIT 1`,[owner]);
+  if(!due.rowCount)return;
+  try{await luna.probe({},async()=>{});}catch{return;}
+  await authorize?.();
+  await ownerTransaction(pool,owner,async db=>{
+   await db.query(`WITH candidates AS (
+    SELECT DISTINCT ON(j.dialogue_id) j.id FROM dialogues_live.summary_jobs j
+    WHERE j.owner_id=$1 AND j.state='failed' AND j.available_at<=now()
+     AND j.error_code IN('LUNA_AUTH_UNAVAILABLE','LUNA_UNAVAILABLE','LUNA_CATALOG_UNAVAILABLE')
+     AND NOT EXISTS(SELECT 1 FROM dialogues_live.summary_jobs active
+      WHERE active.owner_id=j.owner_id AND active.dialogue_id=j.dialogue_id AND active.state IN('queued','running'))
+     AND j.previous_version IS NOT DISTINCT FROM (SELECT s.version FROM dialogues_live.dialogue_summaries s
+      WHERE s.owner_id=j.owner_id AND s.dialogue_id=j.dialogue_id ORDER BY s.version DESC LIMIT 1)
+    ORDER BY j.dialogue_id,j.through_order DESC,j.created_at DESC,j.id DESC
+   )
+   UPDATE dialogues_live.summary_jobs j SET state='queued',attempts=0,available_at=now(),error_code=NULL
+   FROM candidates c WHERE j.owner_id=$1 AND j.id=c.id AND j.state='failed'`,[owner]);
+  });
+  verified=true;
+ }
  async function claim(){
   return ownerTransaction(pool,owner,async db=>{
    const job=(await db.query(`SELECT * FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND
@@ -115,7 +144,7 @@ export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof cr
    await authorize?.();
    const tryTopics=preferTopics;preferTopics=!preferTopics;
    if(tryTopics&&await maintainTopics?.())return;
-   await schedule();const job=await claim();
+   await recoverFailed();await schedule();const job=await claim();
    if(!job){if(!tryTopics)await maintainTopics?.();return;}if(!verified){try{await luna.probe(job.progress.probe_execution??{},async execution=>{job.progress={...job.progress,probe_execution:execution};await save(job,job.progress);});verified=true;}catch(e){if(e instanceof DialoguesFault&&e.code==='LUNA_BUSY'){await pool.query("UPDATE dialogues_live.summary_jobs SET state='queued',attempts=GREATEST(attempts-1,0),available_at=now()+interval '15 seconds',lease_id=NULL,lease_until=NULL,error_code=NULL WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'",[owner,job.id,job.lease_id]);return;}await pool.query("UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4 WHERE owner_id=$1 AND id=$2 AND lease_id=$3",[owner,job.id,job.lease_id,e instanceof DialoguesFault?e.code:'LUNA_PROBE_FAILED']);return;}}await execute(job);}
   finally{running=false;}
  }
