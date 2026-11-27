@@ -94,6 +94,12 @@ test('OpenRPC inventory and references match private methods', async () => {
   assert.equal(method.result.schema.$ref, '../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse');
   const reply = await handlePrivateRpc({ control:{}, authCall:async()=>({user:null}), registry:async()=>({}) }, {jsonrpc:'2.0',id:'r',method:'identity.resolve',params:{telegramId:'42'}});
   assert.deepEqual(reply.result, { user:null });
+  const sent = [];
+  const login = await handlePrivateRpc({ control:{sendLogin:async params => {sent.push(params); return {status:'sent'};}},
+    authCall:async()=>({}), registry:async()=>({}) }, {jsonrpc:'2.0',id:'login',method:'login.send-reply',
+    params:{uid:1001,telegramId:'42',privateChat:true,requestId:'r',threadId:7,messageId:'55'}});
+  assert.deepEqual(login.result, {status:'sent'});
+  assert.equal(sent[0].messageId, '55');
 });
 
 test('artifact descriptor response validates the single shared schema', async () => {
