@@ -20,37 +20,46 @@ def _streamed_batches(items, media, source, force_document):
     from files.store import delivery_plan
     from gateway.platforms.base import should_send_media_as_audio
     from gateway.run_notifications import _IMAGE_EXTS, _VIDEO_EXTS
-    animations, photos, rest = [], [], []
+    ordered = []
     for index, item in enumerate(items):
         path, voice = media[index] if index < len(media) else (item['file']['filename'], False)
         ext = Path(path).suffix.lower()
         if ext in _IMAGE_EXTS and not voice and not force_document:
             value = {**item, 'presentation': 'animation' if ext == '.gif' else 'photo'}
-            (animations if ext == '.gif' else photos).append(value)
+            ordered.append((value, False, ext != '.gif'))
+        elif item.get('presentation') == 'video_note':
+            ordered.append((item, False, False))
         elif should_send_media_as_audio(source.platform, ext, is_voice=voice):
-            rest.append(({**item, 'presentation': 'voice' if voice else 'audio'}, bool(voice)))
+            ordered.append(({**item, 'presentation': 'voice' if voice else 'audio'}, bool(voice), False))
         elif ext in _VIDEO_EXTS:
-            rest.append((item, False))
+            ordered.append((item, False, False))
         else:
-            rest.append(({**item, 'presentation': 'document'}, False))
+            ordered.append(({**item, 'presentation': 'document'}, False, False))
     batches = []
     def append_batch(batch, fallback=False):
         batches.append({'kind': batch['kind'], 'fallback': fallback, 'items': [
             {'artifact': {'artifact_id': item['file']['artifactId']},
              'caption': item.get('caption', ''), 'presentation': item['presentation']}
             for item in batch['items']]})
-    for item in animations:
-        append_batch({'kind': 'single', 'items': [item]})
-    if photos:
+    photos = []
+    def flush_photos():
+        if not photos:
+            return
         for batch in delivery_plan(photos, 'album', supports_album=True)['batches']:
             append_batch(batch)
-    for item, voice in rest:
+        photos.clear()
+    for item, voice, photo in ordered:
+        if photo:
+            photos.append(item)
+            continue
+        flush_photos()
         if voice:
             batches.append({'action': 'send_voice', 'artifact': {'artifact_id': item['file']['artifactId']},
                             'caption': item.get('caption', ''), 'is_voice': True})
         else:
             append_batch({'kind': 'single', 'items': [item]})
-    return batches, [*animations, *photos, *(item for item, voice in rest if not voice)]
+    flush_photos()
+    return batches, [item for item, voice, _ in ordered if not voice]
 
 
 def make_adapter(config, platform, peer, publish_file):
@@ -76,6 +85,13 @@ def make_adapter(config, platform, peer, publish_file):
             if brai_files.reply_mode_for_event(event) in ('video_note', 'off'):
                 return False
             return super()._wants_auto_tts(event, *args, **kwargs)
+
+        def _apply_topic_recovery(self, event):
+            actor = getattr(event.source, '_brai_actor_id', None)
+            result = super()._apply_topic_recovery(event)
+            if actor is not None:
+                event.source._brai_actor_id = actor
+            return result
 
         async def _process_message_background(self, event, session_key):
             """Следующий queued input несёт собственную квитанцию, а не контекст старой task."""

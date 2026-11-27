@@ -293,6 +293,17 @@ class Worker:
         if not callable(original):
             return
 
+        resolve_session = getattr(runner, '_hmwa_resolve_session', None)
+        if callable(resolve_session):
+            async def resolve_preserving_actor(event, source):
+                actor = getattr(source, '_brai_actor_id', None)
+                result = await resolve_session(event, source)
+                if actor is not None and result is not None:
+                    result[0]._brai_actor_id = actor
+                    event.source._brai_actor_id = actor
+                return result
+            runner._hmwa_resolve_session = resolve_preserving_actor
+
         system_prompt = getattr(runner, '_get_system_prompt_for_channel', None)
         if callable(system_prompt):
             def assignment_prompt(platform, chat_id, *, thread_id=None, parent_id=None):

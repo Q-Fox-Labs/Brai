@@ -274,6 +274,69 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.files.set_reply_mode(route, 'voice')
         self.assertTrue(adapter._wants_auto_tts(event, 'session', None, 'answer', []))
 
+    async def test_worker_commits_format_only_for_a_current_successful_delivery(self):
+        source = NS(platform='telegram', chat_id='123', thread_id='77', user_id='123',
+                    _brai_actor_id='456')
+        event = NS(source=source)
+        route = {**native.source_of(event), 'sender': '456'}
+        worker = Worker(101, 'owner', '123', None)
+        delivered = AsyncMock()
+        runner = NS(_hmwa_shape_agent_response=AsyncMock(), _hmwa_deliver_turn_response=delivered,
+                    _is_session_run_current=lambda key, generation: generation == 2,
+                    _delivery_adapter_for=lambda source: None)
+        worker._install_failure_recovery(runner)
+        warnings = ModuleType('gateway.warning_notifications')
+        warnings.diagnostic_wake_muted = lambda event: False
+        with patch.dict(sys.modules, {'gateway.warning_notifications': warnings}):
+            for generation, completed, expected in ((1, True, None), (2, False, None),
+                                                     (2, True, 'video_note')):
+                result = {'completed': completed,
+                          '_brai_reply_mode': {'source': route, 'mode': 'video_note'}}
+                await runner._hmwa_deliver_turn_response(event, source, NS(), 'session', generation,
+                                                         result, [], 'Ответ', '', False)
+                self.assertEqual(self.files.reply_mode(route), expected)
+
+    async def test_topic_recovery_preserves_authenticated_actor_at_both_copy_points(self):
+        source = NS(platform='telegram', chat_id='123', thread_id='old', user_id='123',
+                    _brai_actor_id='456')
+        def copy_source(original):
+            return NS(platform=original.platform, chat_id=original.chat_id,
+                      thread_id='new', user_id=original.user_id)
+        self.base.BasePlatformAdapter._apply_topic_recovery = lambda self, event: setattr(
+            event, 'source', copy_source(event.source))
+        adapter = self.adapter(AsyncMock())
+        event = NS(source=source)
+        adapter._apply_topic_recovery(event)
+        self.assertEqual(event.source._brai_actor_id, '456')
+        async def resolve(event, source):
+            event.source = copy_source(source)
+            return event.source, NS(), 'session'
+        worker = Worker(101, 'owner', '123', None)
+        runner = NS(_hmwa_shape_agent_response=AsyncMock(), _hmwa_resolve_session=resolve)
+        worker._install_failure_recovery(runner)
+        resolved, _, _ = await runner._hmwa_resolve_session(event, event.source)
+        self.assertEqual(resolved._brai_actor_id, '456')
+        self.assertEqual(event.source._brai_actor_id, '456')
+
+    async def test_streamed_media_keeps_notes_and_other_attachments_in_order(self):
+        from identity.adapter import _streamed_batches
+        self.base.should_send_media_as_audio = lambda platform, ext, is_voice=False: ext == '.ogg'
+        notifications = ModuleType('gateway.run_notifications')
+        notifications._IMAGE_EXTS = {'.png', '.gif'}
+        notifications._VIDEO_EXTS = {'.mp4'}
+        def item(name, presentation):
+            return {'file': {'artifactId': name, 'filename': name, 'mimeType': 'image/png' if name.endswith('.png') else 'video/mp4'},
+                    'caption': '', 'presentation': presentation}
+        items = [item('first.mp4', 'video_note'), item('a.png', 'photo'), item('b.png', 'photo'),
+                 item('voice.ogg', 'voice'), item('last.mp4', 'video_note')]
+        media = [(item['file']['filename'], item['presentation'] == 'voice') for item in items]
+        with patch.dict(sys.modules, {'gateway.run_notifications': notifications}):
+            batches, checked = _streamed_batches(items, media, NS(platform='telegram'), False)
+        self.assertEqual([batch.get('action', batch.get('kind')) for batch in batches],
+                         ['single', 'album', 'send_voice', 'single'])
+        self.assertEqual([item['file']['artifactId'] for item in checked],
+                         ['first.mp4', 'a.png', 'b.png', 'last.mp4'])
+
     async def test_overlong_reply_sends_excerpt_and_full_pdf_as_one_document(self):
         long_reply = importlib.import_module('identity.long_reply')
         sent = []

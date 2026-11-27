@@ -37,6 +37,7 @@ _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _VIDEO_NOTE = re.compile(r'\[\[audio_as_video_note\]\][ \t]*\n[ \t]*' + _MEDIA.pattern)
 _VIDEO_NOTE_MARKER = re.compile(r'\[\[audio_as_video_note\]\]')
 _REPLY_MODE = re.compile(r'\[\[brai_reply_mode:(voice|video_note|off)\]\]')
+_REPLY_ONCE = re.compile(r'\[\[brai_reply_once:(voice|video_note)\]\]')
 _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
@@ -57,7 +58,8 @@ _TECHNICAL_FAILURE = re.compile(
 def _filtered_reply_stream(callback):
     """Не выводить служебные маркеры даже при разделении между потоковыми фрагментами."""
     markers = ('[[brai_reply_mode:voice]]', '[[brai_reply_mode:video_note]]',
-               '[[brai_reply_mode:off]]', '[[audio_as_video_note]]')
+               '[[brai_reply_mode:off]]', '[[brai_reply_once:voice]]',
+               '[[brai_reply_once:video_note]]', '[[audio_as_video_note]]')
     pending = ''
 
     def send(fragment):
@@ -987,7 +989,7 @@ def conversation(agent, user_message, task_id=None):
     filtered_interim = None
     if candidate is not None and callable(interim):
         def filtered_interim(text, **kwargs):
-            visible = _VIDEO_NOTE_MARKER.sub('', _REPLY_MODE.sub('', text))
+            visible = _VIDEO_NOTE_MARKER.sub('', _REPLY_ONCE.sub('', _REPLY_MODE.sub('', text)))
             if visible.strip():
                 return interim(visible, **kwargs)
         agent.interim_assistant_callback = filtered_interim
@@ -1016,7 +1018,9 @@ def conversation(agent, user_message, task_id=None):
                 'При явной просьбе изменить формат включи в итог отдельную строку '
                 '[[brai_reply_mode:voice]], [[brai_reply_mode:video_note]] или '
                 '[[brai_reply_mode:off]] для обычного голосового, кружочка или только текста. '
-                'Для разового образца и без просьбы о смене режима эту строку не добавляй. '
+                'Для разового образца другого формата не меняй режим; добавь вместо неё '
+                '[[brai_reply_once:voice]] или [[brai_reply_once:video_note]]. '
+                'Без просьбы о смене режима или разовом образце не добавляй эти строки. '
                 'Формат действует до следующей явной просьбы. '
                 'Наличие текста определяй по правилам голосового режима и просьбе пользователя. '
                 'Для кружочка используй [[audio_as_video_note]] перед MEDIA со звуком. '
@@ -1317,7 +1321,18 @@ def final_text(text, operation):
             return ''
         text = active_sub(_REPLY_MODE, select_mode, text)
         candidate = _reply_mode_candidate.get()
-        if candidate is not None and (candidate['mode'] or candidate.get('current')) == 'video_note':
+        once = []
+        def select_once(match):
+            once.append(match.group(1))
+            return ''
+        text = active_sub(_REPLY_ONCE, select_once, text)
+        if len(set(once)) > 1 or (once and candidate is not None and candidate['mode'] is not None):
+            if candidate is not None:
+                candidate['mode'] = None
+            raise FileError('CONFLICTING_REPLY_MODES')
+        effective_mode = (once[0] if once else (candidate['mode'] or candidate.get('current'))
+                          if candidate is not None else None)
+        if effective_mode == 'video_note':
             def as_video_notes(match):
                 return ''.join('[[audio_as_video_note]]\n' + line
                                for line in match.group('files').splitlines(keepends=True))
@@ -1327,7 +1342,7 @@ def final_text(text, operation):
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
-        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _REPLY_MODE, _MEDIA):
+        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
@@ -2069,6 +2084,7 @@ def result_envelope(result, agent=None):
         guardrail = result.get('guardrail') if isinstance(result, dict) else None
         if (candidate['mode'] is not None and isinstance(result, dict)
                 and isinstance(result.get('final_response'), str) and result['final_response'].strip()
+                and not re.search(r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'[0-9a-f]{16}$', result['final_response'])
                 and not any(result.get(name) for name in ('failed', 'partial', 'error', 'interrupted'))
                 and result.get('completed') is not False
                 and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable')):

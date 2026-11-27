@@ -206,6 +206,38 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError('cancelled')
         self.assertEqual(self.store.reply_mode(route), 'voice')
 
+    def test_one_voice_sample_does_not_change_or_use_persistent_video_mode(self):
+        source = SimpleNamespace(platform='telegram', chat_id='42', thread_id='7', user_id='11')
+        route = native.source_of(SimpleNamespace(source=source))
+        self.store.set_reply_mode(route, 'video_note')
+        audio = self.input / 'sample.ogg'
+        audio.write_bytes(b'OggS sample')
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Один раз голосом'):
+                with patch('files.video_note.render_video_notes') as render:
+                    output = native.final_text(f'[[brai_reply_once:voice]]\n[[audio_as_voice]]\nMEDIA:{audio}', 'turn')
+                render.assert_not_called()
+            native.result_envelope({'final_response': output}, agent)
+        self.assertNotIn('brai_reply_once', output)
+        self.assertIn('[[audio_as_voice]]', output)
+        self.assertEqual(self.store.reply_mode(route), 'video_note')
+
+    def test_failed_video_render_does_not_commit_a_mode_switch(self):
+        source = SimpleNamespace(platform='telegram', chat_id='42', thread_id='7', user_id='11')
+        route = native.source_of(SimpleNamespace(source=source))
+        self.store.set_reply_mode(route, 'voice')
+        audio = self.input / 'sample.ogg'
+        audio.write_bytes(b'OggS sample')
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Кружочками'):
+                with patch('files.video_note.render_video_notes', side_effect=FileError('failed')):
+                    output = native.final_text(f'[[brai_reply_mode:video_note]]\n[[audio_as_video_note]]\nMEDIA:{audio}', 'turn')
+            result = native.result_envelope({'final_response': output}, agent)
+        self.assertTrue(result['brai_attachment_preparation_failed'])
+        self.assertEqual(self.store.reply_mode(route), 'voice')
+
     def test_saved_video_mode_converts_native_voice_tags_and_switches_back(self):
         source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
         route = native.source_of(SimpleNamespace(source=source))
