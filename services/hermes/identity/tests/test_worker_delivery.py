@@ -869,6 +869,20 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sent), 1)
         self.assertNotIn('reply_to_message_id', sent[0])
 
+    async def test_video_note_general_forum_topic_accepts_telegram_omitted_thread(self):
+        adapter = NS(_media_send_kwargs=lambda chat, reply, metadata: (int(reply),
+                     {'chat_id': int(chat), 'reply_to_message_id': int(reply), 'message_thread_id': None}))
+        target = native.telegram_target(adapter, '-10012', '55', {'thread_id': '1'},
+                                        exact=True, require_reply=False)
+        self.assertEqual(target['chat_id'], -10012)
+        self.assertEqual(target['reply_to_message_id'], 55)
+        with self.assertRaises(PermissionError):
+            native.telegram_target(adapter, '-10012', '55', {'thread_id': '2'},
+                                   exact=True, require_reply=False)
+        with self.assertRaises(PermissionError):
+            native.telegram_target(adapter, '123', '55', {'thread_id': '1'},
+                                   exact=True, require_reply=False)
+
     async def test_old_ingress_keeps_video_note_queued_for_compatible_ingress(self):
         from identity.delivery_journal import DeliveryJournal
         from identity.scope import input_delivery

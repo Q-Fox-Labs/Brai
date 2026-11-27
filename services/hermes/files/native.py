@@ -1532,6 +1532,11 @@ def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False, requir
     if exact:
         expected = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id') or (metadata or {}).get('direct_messages_topic_id')
         actual = target.get('message_thread_id') or target.get('direct_messages_topic_id')
+        if not require_reply and str(chat_id).startswith('-') and str(expected) == '1':
+            # Telegram represents the General forum topic by omitting its thread ID.
+            expected = None
+            if str(actual) == '1':
+                actual = None
         if (str(target['chat_id']) != str(chat_id) or str(actual or '') != str(expected or '')
                 or (require_reply and not reply_to)
                 or (reply_to and str(target.get('reply_to_message_id')) != str(reply_to))):
