@@ -907,6 +907,21 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(reference, r'^[a-f0-9]{16}$')
         self.assertIn(reference, log.output[0])
 
+    async def test_unavailable_artifact_keeps_text_for_both_outgoing_formats(self):
+        aid = str(uuid.uuid4())
+        markers = [
+            'MEDIA:artifact:' + aid,
+            'BRAI_FILES:' + json.dumps({'mode': 'album', 'items': [{'artifactId': aid}]}),
+        ]
+        for marker in markers:
+            with self.subTest(marker=marker), self.assertLogs(native.__name__, 'WARNING') as log:
+                answer = native.final_text('Готово.\n' + marker, 'turn')
+                self.assertTrue(answer.startswith('Готово.'))
+                self.assertNotIn(marker, answer)
+                self.assertIn(answer.rsplit(' ', 1)[-1], log.output[-1])
+                result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+                self.assertTrue(result['brai_attachment_preparation_failed'])
+
     async def test_delivery_history_reuses_artifact_after_temporary_copy_is_removed(self):
         with native.conversation(SimpleNamespace(session_id='test'), 'test', 'history'):
             work = Path(native.before_tool('write_file', {'path': 'result.txt'})['path'])

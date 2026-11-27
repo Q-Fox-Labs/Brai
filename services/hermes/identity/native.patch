@@ -1730,8 +1730,8 @@ diff --git a/plugins/image_gen/openai-codex/__init__.py b/plugins/image_gen/open
      ``model.base_url`` / profile override), never a default it does not belong to (#121486).
      ``(None, None)`` without a usable token."""
 +    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
-+        # The trusted relay supplies the credential. The worker carries only this marker.
-+        return "profile-image-proxy-not-a-secret", "http://127.0.0.1:18080/image"
++        from identity.images import shared_provider_credentials
++        return shared_provider_credentials()
      try:
          from agent.auxiliary_client import _resolve_codex_credential_and_base
  

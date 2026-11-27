@@ -9590,7 +9590,7 @@ diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
              return
          # "_thinking" is assistant scratch text between tool calls, never ordinary tool progress:
          # only relayed when the platform explicitly opted into thinking_progress.
-@@ -214,24 +211,6 @@
+@@ -214,24 +211,7 @@
          except Exception as err:
              logger.debug("live status update failed: %s", err)
  
@@ -9611,7 +9611,7 @@ diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
 -        except Exception as err:
 -            logger.debug("tool-progress onboarding hint failed: %s", err)
 -
--    @staticmethod
+     @staticmethod
      def _preview_cap() -> int:
          """tool_preview_length (default 40): the one-line preview budget for "all"/"new" modes."""
          from agent.display import get_tool_preview_max_len
@@ -9659,3 +9659,26 @@ diff --git a/tools/clarify_gateway.py b/tools/clarify_gateway.py
      if not entry.choices:
          return (SKIPPED if is_skip else text), None
      if entry.multi_select:
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1859,5 +1859,5 @@
+         the secondary guard — and the sole one when mid-run compression shrank the list."""
+         from gateway.run import _collect_auto_append_media_tags
+-        if "MEDIA:" in final_response:
++        if result.get("brai_attachment_preparation_failed") or "MEDIA:" in final_response:
+             return final_response
+         # Scan tool results for MEDIA:<path> tags that need to be delivered as native audio/file
+diff --git a/gateway/stream_consumer.py b/gateway/stream_consumer.py
+--- a/gateway/stream_consumer.py
++++ b/gateway/stream_consumer.py
+@@ -706,4 +706,9 @@
+             return
+         ledger = self._stream_ledger
++        if ledger and not final_raw.startswith(ledger):
++            # A file rejected during finalization may have had its hidden directive removed.
++            displayed = self._clean_for_display(ledger).rstrip()
++            if displayed and final_raw.startswith(displayed + "\n\n"):
++                ledger = displayed
+         if ledger and final_raw.startswith(ledger) and len(final_raw) > len(ledger):
+             self._accumulated += final_raw[len(ledger):]
