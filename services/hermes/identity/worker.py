@@ -224,9 +224,6 @@ class Worker:
         self.policy_ready.set()
         self.operational.clear()
         self.activation.clear()
-        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
-            from .images import install_shared_provider
-            install_shared_provider()
         configured = getattr(self.runner.config, 'platforms', {})
         config = configured.get(Platform.TELEGRAM) or PlatformConfig()
         config.enabled = True

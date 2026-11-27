@@ -1226,8 +1226,12 @@ def final_text(text, operation):
         if explicit:
             raise FileError('MIXED_FILE_SET_FORMAT')
         with files.lock('cache'):
-            value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
-                     else files.resolve(local_path(path), ['final', operation, path]))
+            try:
+                value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
+                         else files.resolve(local_path(path), ['final', operation, path]))
+            except FileNotFoundError:
+                replacements.append((match.start(), match.end(), []))
+                return match.group(0)
             index = len(items)
             items.append({'file': files.checked(value), 'caption': caption, 'presentation': presentation(value)})
         replacements.append((match.start(), match.end(), [index]))
@@ -1244,6 +1248,12 @@ def final_text(text, operation):
         label = re.sub(r'\\(.)', r'\1', match.group('label'))
         return add(match, path, label)
     active_sub(_DESCRIPTOR, descriptor, masked)
+    if any(not indexes for _, _, indexes in replacements):
+        reference = uuid.uuid4().hex[:16]
+        logging.getLogger(__name__).warning('BRAI_ATTACHMENT_MISSING reference=%s', reference)
+        for start, end, _ in sorted(replacements, reverse=True):
+            text = text[:start] + text[end:]
+        return text.rstrip() + f'\n\nНе удалось приложить файлы. Номер в журнале: {reference}'
     if not items:
         return text
     identity = key([operation, items])
@@ -1272,6 +1282,20 @@ def final_text(text, operation):
     for start, end, indexes in sorted(replacements, reverse=True):
         text = text[:start] + '\n'.join('MEDIA:' + json.dumps(paths[index], ensure_ascii=False) for index in indexes) + text[end:]
     return text
+
+
+def history_text(text):
+    """В истории сохранять ID вложения вместо временной копии для доставки."""
+    def stable(match):
+        path = next(value for value in match.groups() if value is not None)
+        files = store()
+        if Path(path).parent.parent != files.cache / '.delivery':
+            return match.group(0)
+        with files.db() as db:
+            row = db.execute('SELECT artifact FROM aliases WHERE path=?', (path,)).fetchone()
+        return 'MEDIA:artifact:' + row[0] if row else match.group(0)
+
+    return active_sub(_MEDIA, stable, text) if isinstance(text, str) else text
 
 
 def output_items(paths, captions=None):

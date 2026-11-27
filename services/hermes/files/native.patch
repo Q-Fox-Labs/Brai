@@ -1544,3 +1544,26 @@
      except subprocess.TimeoutExpired:
          return fail(f"STT command provider '{provider_name}' timed out after {timeout:g}s")
      except subprocess.CalledProcessError as exc:
+diff --git a/agent/turn_final_response.py b/agent/turn_final_response.py
+--- a/agent/turn_final_response.py
++++ b/agent/turn_final_response.py
+@@ -354,7 +354,7 @@
+     if _transformed:
+         if _promoted:
+-            final_msg["api_content"] = final_response
++            final_msg["api_content"] = brai_files.history_text(final_response)
+         else:
+-            final_msg["content"] = final_response
++            final_msg["content"] = brai_files.history_text(final_response)
+ 
+     append_message(messages, final_msg)
+diff --git a/agent/turn_finalizer.py b/agent/turn_finalizer.py
+--- a/agent/turn_finalizer.py
++++ b/agent/turn_finalizer.py
+@@ -251,4 +251,6 @@
+     # not role, so a matching verification candidate isn't dup'd.
+     if final_response and not interrupted:
++        import brai_files
++        final_response = brai_files.history_text(final_response)
+         # Some recovery/fallback paths return a real final_response without adding a closing assistant
+         # message to the transcript (e.g. the partial-stream and prior-turn-content recovery ``break`` sites

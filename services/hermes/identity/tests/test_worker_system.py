@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from identity import instructions, images
+from identity import instructions
 from identity.native_policy import dialogues_result, install_dialogues_result_budget
 from identity.skills import catalog_files
 from identity import skills as system_skills
@@ -359,17 +359,6 @@ class SystemTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'INVALID_AUDIO_ARTIFACT'):
             synthesize_file(str(source), str(output), call=broker)
         self.assertFalse(output.exists())
-
-    def test_native_image_provider_receives_only_public_relay_binding(self):
-        tool = ModuleType('tools.image_generation_tool')
-        tool._get_plugin_provider = lambda name: NS()
-        provider_module = NS(_read_codex_credential=lambda: self.fail('Shared credential read in worker'))
-        with patch.dict(sys.modules, {'tools.image_generation_tool': tool}), patch.object(
-                images.importlib, 'import_module', return_value=provider_module):
-            images.install_shared_provider()
-        token, endpoint = provider_module._read_codex_credential()
-        self.assertEqual(token, 'profile-image-proxy-not-a-secret')
-        self.assertEqual(endpoint, 'http://127.0.0.1:18080/image')
 
     def test_native_profile_separates_system_and_personal_skills_and_routes_tts(self):
         profile = {'home': '/profiles/one'}

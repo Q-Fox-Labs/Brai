@@ -1722,3 +1722,16 @@ index e9819bc..800c70d 100644
          if not transcripts or not self._should_echo_stt_transcripts() or adapter is None:
              return
          already_echoed = int(getattr(event, "_gateway_pending_stt_echoed", 0) or 0)
+diff --git a/plugins/image_gen/openai-codex/__init__.py b/plugins/image_gen/openai-codex/__init__.py
+--- a/plugins/image_gen/openai-codex/__init__.py
++++ b/plugins/image_gen/openai-codex/__init__.py
+@@ -69,6 +69,9 @@
+     the image request goes to the host the token's credential routes to (pool row /
+     ``model.base_url`` / profile override), never a default it does not belong to (#121486).
+     ``(None, None)`` without a usable token."""
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        # The trusted relay supplies the credential. The worker carries only this marker.
++        return "profile-image-proxy-not-a-secret", "http://127.0.0.1:18080/image"
+     try:
+         from agent.auxiliary_client import _resolve_codex_credential_and_base
+ 
