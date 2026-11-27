@@ -24,6 +24,16 @@ FIXTURES = {PREFIX + 'tests/fixtures/ordinary_release/plugins/platforms/telegram
 
 
 class ReleasePackageTest(unittest.TestCase):
+    def test_video_note_runtime_contains_renderer_and_image(self):
+        """Поставленный renderer получает свой скрипт и исходное изображение."""
+        component = json.loads(COMPONENT.read_text())
+        required = {'services/hermes/files/video_note.py',
+                    'services/hermes/identity/avatar/talking_orange.py',
+                    'services/hermes/identity/avatar/orange.png'}
+        self.assertTrue(required <= set(component['inputs']['runtime']))
+        self.assertTrue(required <= set(component['delivery']['files']))
+        self.assertTrue(all((ROOT / name).is_file() for name in required))
+
     def test_runtime_read_module_is_delivered_and_importable_from_package(self):
         """Установленный адаптер получает тот же opener, что проверялся из исходников."""
         component=json.loads(COMPONENT.read_text())

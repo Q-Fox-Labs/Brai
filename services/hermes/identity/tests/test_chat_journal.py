@@ -29,6 +29,8 @@ class Bot:
         return result
     async def send_media_group(self, chat_id, media):
         return self.next.pop(0)
+    async def send_video_note(self, chat_id, video_note):
+        return self.next.pop(0)
     async def edit_message_text(self, chat_id, message_id, text):
         return self.next.pop(0)
     async def do_api_request(self, endpoint, api_kwargs):
@@ -112,6 +114,15 @@ class JournalTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(rows[1]['attachments'])[0]['mimeType'], 'audio/ogg')
         finally:
             db.close()
+
+    async def test_video_note_keeps_its_type_and_artifact_reference(self):
+        files = [{'file': {'artifactId': 'video-1', 'filename': 'note.mp4', 'mimeType': 'video/mp4'}}]
+        self.bot.next = [message(23, video_note=True)]
+        with self.journal.scope(A, files):
+            await self.bot.send_video_note(123, 'synthetic video')
+        row = self.rows()[0]
+        self.assertEqual(row['kind'], 'video_note')
+        self.assertEqual(json.loads(row['attachments'])[0]['artifactId'], 'video-1')
 
     async def test_failed_foreign_bot_and_other_profile_do_not_mix(self):
         self.bot.next = [RuntimeError('refused'), message(31, 'Профиль A'), message(31, 'Профиль B')]

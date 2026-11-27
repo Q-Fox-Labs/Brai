@@ -8,12 +8,14 @@ import mimetypes
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace, ModuleType
 import unittest
 from unittest.mock import patch
 import uuid
+import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from files.store import FileStore, FileError, deliver, delivery_plan
@@ -1022,6 +1024,79 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(c[1]['chat_id'] == 123 and c[1]['message_thread_id'] == 77 for c in calls))
         self.assertEqual(adapter._bot.captions, [None, '1'])
         self.assertEqual(adapter._bot.bytes, [b'fixture-0', b'fixture-1'])
+
+    async def test_video_notes_keep_order_and_use_telegram_video_note(self):
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS speech')
+        outputs = []
+        for index in range(2):
+            path = self.input / f'part-{index}.mp4'
+            path.write_bytes(f'video-{index}'.encode())
+            outputs.append(self.store.resolve(str(path), ['video-test', index]))
+        with patch('files.video_note.render_video_notes', return_value=outputs):
+            response = native.final_text(f'Ответ\n[[audio_as_video_note]]\nMEDIA:{audio}', 'turn')
+        self.assertNotIn('audio_as_video_note', response)
+        paths = [json.loads(line.removeprefix('MEDIA:')) for line in response.splitlines() if line.startswith('MEDIA:')]
+        items, mode = native.output_items(paths)
+        self.assertEqual([item['presentation'] for item in items], ['video_note', 'video_note'])
+        self.assertEqual(mode, 'files')
+        calls = []
+
+        class Bot:
+            async def send_video_note(self, **kwargs):
+                calls.append({**kwargs, 'bytes': kwargs['video_note'].read()})
+                return SimpleNamespace(message_id=len(calls))
+
+        telegram = ModuleType('telegram')
+        for name in ['Photo', 'Video', 'Audio', 'Document']:
+            setattr(telegram, 'InputMedia' + name, object)
+        adapter = SimpleNamespace(_bot=Bot())
+        with self.store.materialize([item['file'] for item in items], 'video-test-send') as values:
+            with patch.dict(sys.modules, {'telegram': telegram}):
+                for item, value in zip(items, values):
+                    native.validate_telegram([item])
+                    await native.telegram_sender(adapter, '123', {'thread_id': '77'}, 'single',
+                                                 [{**item, 'localPath': value['localPath']}], False,
+                                                 reply_to='99')
+        self.assertEqual([call['bytes'] for call in calls], [b'video-0', b'video-1'])
+        self.assertTrue(all(call['chat_id'] == 123 and call['message_thread_id'] == 77
+                            and call['reply_to_message_id'] == 99 for call in calls))
+        self.assertTrue(all('caption' not in call and 'parse_mode' not in call for call in calls))
+
+    def test_video_note_failure_preserves_text_and_code_examples(self):
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS speech')
+        example = f'```\n[[audio_as_video_note]]\nMEDIA:{audio}\n```'
+        with patch('files.video_note.render_video_notes', side_effect=FileError('VIDEO_NOTE_RENDER_FAILED')) as render:
+            response = native.final_text(f'Ответ\n[[audio_as_video_note]]\nMEDIA:{audio}\n{example}', 'turn')
+        render.assert_called_once()
+        self.assertIn('Ответ', response)
+        self.assertIn(example, response)
+        self.assertIn('Не удалось приложить файлы', response)
+
+    def test_long_video_note_preserves_every_audio_sample(self):
+        from files.video_note import render_video_notes
+        audio = self.input / 'long.wav'
+        with wave.open(str(audio), 'wb') as stream:
+            stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+            stream.writeframes(b'\0\0' * (61 * 16000))
+        source = self.store.resolve(str(audio), ['test', 'long-audio'])
+        original_run = subprocess.run
+        part_frames = []
+
+        def run(command, **kwargs):
+            if command[0] == 'ffmpeg':
+                return original_run(command, **kwargs)
+            with wave.open(command[3], 'rb') as stream:
+                part_frames.append(stream.getnframes())
+            Path(command[command.index('--output') + 1]).write_bytes(b'video')
+            return SimpleNamespace(returncode=0)
+
+        with patch('files.video_note.subprocess.run', side_effect=run):
+            videos = render_video_notes(self.store, source, 'long-turn', python='synthetic-python')
+        self.assertEqual(len(videos), 2)
+        self.assertEqual(sum(part_frames), 61 * 16000)
+        self.assertTrue(all(frames < 60 * 16000 for frames in part_frames))
 
     async def test_oversized_caption_is_sent_as_one_pdf_before_the_attachment(self):
         item = self.items(1)[0]

@@ -21,7 +21,7 @@ from .ordinary_admission import group_chat_id, message_thread
 _scope = ContextVar('brai_telegram_journal_scope', default=None)
 _log = logging.getLogger(__name__)
 _METHODS = ('send_message', 'edit_message_text', 'edit_message_caption', 'send_photo',
-            'send_audio', 'send_voice', 'send_video', 'send_animation', 'send_document',
+            'send_audio', 'send_voice', 'send_video', 'send_video_note', 'send_animation', 'send_document',
             'send_media_group', 'delete_message', 'do_api_request')
 
 
@@ -305,7 +305,7 @@ class IdentityJournal:
             thread = active[4]
         if thread == '1':
             thread = ''
-        kind = next((key for key in ('photo', 'voice', 'audio', 'video', 'animation', 'document',
+        kind = next((key for key in ('photo', 'voice', 'audio', 'video', 'video_note', 'animation', 'document',
                                      'sticker', 'location', 'contact', 'poll')
                      if getattr(message, key, None)), 'text')
         text = getattr(message, 'text', None)
@@ -407,7 +407,7 @@ class IdentityJournal:
                             continue
                         refs = []
                         media = any(getattr(message, key, None) for key in
-                                    ('photo', 'voice', 'audio', 'video', 'animation', 'document'))
+                                    ('photo', 'voice', 'audio', 'video', 'video_note', 'animation', 'document'))
                         if media and active and active[0] is self and active[2]:
                             key = (chat, str(message.message_id))
                             if key not in active[3]:

@@ -131,7 +131,7 @@ export function createTelegramChatRead({ root, uid, snapshot }) {
       } catch { /* Файл ещё публикуется; следующая свежая страница повторит чтение. */ }
     }
     for (const message of page.messages ?? []) {
-      message.attachmentState = message.attachments.length ? 'ready' : ['photo','voice','audio','video','animation','document','sticker'].includes(message.messageType) ? 'pending' : 'none';
+      message.attachmentState = message.attachments.length ? 'ready' : ['photo','voice','audio','video','video_note','animation','document','sticker'].includes(message.messageType) ? 'pending' : 'none';
       delete message.chat; delete message.thread;
     }
     while (Buffer.byteLength(JSON.stringify(page)) > 895000 && page.messages?.length > 1) {
