@@ -4,6 +4,7 @@ import ast
 import asyncio
 import contextlib
 import importlib.util
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -879,8 +880,9 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         retry_id = delivery_id('unavailable-private-video')
         outbox.enqueue(retry_id, resolver.ledger.owner(owner),
                        {**body, 'operatorAssignmentId': 'video-note:' + retry_id})
-        resolver._account = AsyncMock(side_effect=[owner, RpcError(-32000, 'Auth unavailable'), owner, owner])
-        with patch.dict(sys.modules, {'telegram': telegram}):
+        resolver._account = runtime.Resolver._account.__get__(resolver)
+        broker = AsyncMock(side_effect=[owner, PermissionError('Broker rejected request'), owner, owner])
+        with patch.dict(sys.modules, {'telegram': telegram}), patch.object(runtime, 'broker_call', broker):
             await outbox.flush_owner(resolver.ledger.owner(owner))
             self.assertIsNone(outbox.result(retry_id))
             self.assertEqual(len(sent), 1)
@@ -905,6 +907,27 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             native.telegram_target(adapter, '123', '55', {'thread_id': '1'},
                                    exact=True, require_reply=False)
+
+    async def test_private_topic_defers_authorization_before_any_send(self):
+        from identity.reply_outbox import DeliveryDeferred
+        async def retry(send, metadata, target, anchor, **kwargs):
+            try:
+                return await send(target)
+            except Exception as error:
+                raise RuntimeError('wrapped topic error') from error
+        adapter = NS(_bot=NS(send_video_note=AsyncMock()),
+                     _brai_private_topic_route=lambda metadata, target: True,
+                     _brai_send_with_private_topic_retry=retry)
+        telegram = ModuleType('telegram')
+        for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument'):
+            setattr(telegram, name, NS)
+        before = AsyncMock(side_effect=DeliveryDeferred('Auth unavailable'))
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            with self.assertRaises(DeliveryDeferred):
+                await native.telegram_sender(adapter, '123', {'thread_id': '77'}, 'single',
+                    [{'presentation': 'video_note', 'caption': '', 'readHandle': BytesIO(b'video')}], False,
+                    strict=True, before_send=before, require_reply=False)
+        adapter._bot.send_video_note.assert_not_awaited()
 
     async def test_old_ingress_keeps_video_note_queued_for_compatible_ingress(self):
         from identity.delivery_journal import DeliveryJournal

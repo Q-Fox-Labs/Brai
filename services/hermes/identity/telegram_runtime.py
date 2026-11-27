@@ -1025,6 +1025,10 @@ class Resolver:
                 except (ConnectionError, TimeoutError, RpcError) as error:
                     # No Telegram attempt has started; keep the output for a later retry.
                     raise DeliveryDeferred('Video note authorization unavailable') from error
+                except PermissionError as error:
+                    if str(error) in ('Broker unavailable', 'Broker rejected request'):
+                        raise DeliveryDeferred('Video note authorization unavailable') from error
+                    raise
                 if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
                     raise PermissionError('Reply owner binding changed')
                 self.authorize_delivery(profile, body['action'], payload)

@@ -1636,6 +1636,8 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
         positions = [file.tell() for file in sources] if anchored else []
         album = kind == 'album'
 
+        deferred = []
+
         async def send_media(options):
             if options is not target:
                 for file, position in zip(sources, positions):
@@ -1649,7 +1651,13 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
                     from types import SimpleNamespace
                     media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
             if options is target and before_send is not None:
-                await before_send()
+                try:
+                    await before_send()
+                except Exception as error:
+                    from identity.reply_outbox import DeliveryDeferred
+                    if isinstance(error, DeliveryDeferred):
+                        deferred.append(error)
+                    raise
             if album:
                 return await bot.send_media_group(**options, media=media)
             field = items[0]['presentation']
@@ -1659,7 +1667,12 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
                                                       caption=media[0].caption,
                                                       parse_mode='MarkdownV2' if media[0].caption else None)
 
-        result = await send(send_media, batch=album)
+        try:
+            result = await send(send_media, batch=album)
+        except Exception:
+            if deferred:
+                raise deferred[0]
+            raise
         if not album:
             result = [result]
     if strict:
