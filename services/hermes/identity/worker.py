@@ -396,7 +396,8 @@ class Worker:
                     and result.get('completed') is not False
                     and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable'))
                 current = getattr(runner, '_is_session_run_current', None)
-                if event._brai_successful_turn and (not callable(current) or current(session_key, generation)):
+                if (event._brai_successful_turn and result.get('_brai_reply_mode')
+                        and (not callable(current) or current(session_key, generation))):
                     import brai_files
                     brai_files.commit_reply_mode(result, event)
                 if (continuation_turn.get() and isinstance(result, dict)

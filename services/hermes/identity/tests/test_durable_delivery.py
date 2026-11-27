@@ -330,6 +330,11 @@ class FailedTurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         from gateway.session import SessionSource
         from identity.scope import input_delivery, prepared_response, prepared_voice
         from identity.adapter import make_adapter
+        files = ModuleType('brai_files')
+        files.reply_mode_for_event = lambda event: None
+        file_port = patch.dict(sys.modules, {'brai_files': files})
+        file_port.start()
+        self.addCleanup(file_port.stop)
         class Base:
             def __init__(self, config):
                 pass
