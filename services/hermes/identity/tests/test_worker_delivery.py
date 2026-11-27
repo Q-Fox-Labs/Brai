@@ -876,6 +876,17 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             await outbox.flush_owner(resolver.ledger.owner(owner))
         self.assertEqual(outbox.result(revoked_id)['error_kind'], 'forbidden')
         self.assertEqual(len(sent), 1)
+        retry_id = delivery_id('unavailable-private-video')
+        outbox.enqueue(retry_id, resolver.ledger.owner(owner),
+                       {**body, 'operatorAssignmentId': 'video-note:' + retry_id})
+        resolver._account = AsyncMock(side_effect=[owner, RpcError(-32000, 'Auth unavailable'), owner, owner])
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            await outbox.flush_owner(resolver.ledger.owner(owner))
+            self.assertIsNone(outbox.result(retry_id))
+            self.assertEqual(len(sent), 1)
+            await outbox.flush_owner(resolver.ledger.owner(owner))
+        self.assertEqual(outbox.result(retry_id)['message_id'], '42')
+        self.assertEqual(len(sent), 2)
 
     async def test_video_note_general_forum_topic_accepts_telegram_omitted_thread(self):
         adapter = NS(_media_send_kwargs=lambda chat, reply, metadata: (int(reply),
