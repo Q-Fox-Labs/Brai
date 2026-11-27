@@ -34,6 +34,7 @@ _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _VIDEO_NOTE = re.compile(r'\[\[audio_as_video_note\]\][ \t]*\n[ \t]*' + _MEDIA.pattern)
+_VIDEO_NOTE_MARKER = re.compile(r'\[\[audio_as_video_note\]\]')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
 _ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы. Номер в журнале: '
@@ -1207,7 +1208,7 @@ def final_text(text, operation):
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
-        for pattern in (_SET, _VIDEO_NOTE, _MEDIA):
+        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
@@ -1270,6 +1271,9 @@ def _stage_final_text(text, operation):
         return ' ' * (match.end() - match.start())
 
     masked = active_sub(_VIDEO_NOTE, add_video_note, masked)
+    def invalid_video_note(_match):
+        raise FileError('VIDEO_NOTE_INVALID_MARKER')
+    active_sub(_VIDEO_NOTE_MARKER, invalid_video_note, masked)
     active_sub(_MEDIA, lambda match: add(match, next(v for v in match.groups() if v is not None)), masked)
     def descriptor(match):
         path = match.group('angle') or match.group('plain')

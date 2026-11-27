@@ -4,6 +4,7 @@ import ast
 import asyncio
 import contextlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -700,6 +701,48 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sent[-1][2]['message_thread_id'], 77)
         self.assertEqual(len(sent), 3)
         self.assertEqual(result.message_id, '201')
+
+    async def test_video_note_crosses_owner_boundary_to_the_original_topic(self):
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS speech')
+        video = self.input / 'note.mp4'
+        video.write_bytes(b'synthetic video')
+        artifact = self.files.resolve(str(video), ['test', 'video-note'])
+        with patch('files.video_note.render_video_notes', return_value=[artifact]):
+            response = native.final_text(f'Ответ\n[[audio_as_video_note]]\nMEDIA:{audio}', 'turn')
+        paths = [json.loads(line.removeprefix('MEDIA:')) for line in response.splitlines() if line.startswith('MEDIA:')]
+        items, mode = native.output_items(paths)
+        sent = []
+
+        async def send_video_note(**values):
+            sent.append((values['video_note'].read(), values))
+            return NS(message_id=42)
+
+        root_adapter = NS(platform='telegram', _bot=NS(send_video_note=send_video_note))
+        resolver = runtime.Resolver(root_adapter)
+        resolver.turns[101] = {'id': 'turn', 'route': ('123', '77'), 'replyTo': '1'}
+        resolver.ledger.admit(self.profile, ('123', '77'), {'thread_id': '77'}, '1')
+
+        async def deliver(owner, action, payload):
+            return await resolver.deliver(self.profile, owner, action, payload)
+
+        async def broker(method, params, **kwargs):
+            if method == 'ingress.artifact':
+                return self.files.fetch(params['artifactId'])
+            return {'suppressFinal': False}
+
+        telegram = ModuleType('telegram')
+        for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument'):
+            setattr(telegram, name, NS)
+        worker = self.adapter(deliver)
+        with patch.object(runtime, 'broker_call', broker), patch.dict(sys.modules, {'telegram': telegram}):
+            result = await native.send_set(worker, '123', items, mode, {'thread_id': '77'})
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.message_id, '42')
+        self.assertEqual(sent[0][0], b'synthetic video')
+        self.assertEqual(sent[0][1]['message_thread_id'], 77)
+        self.assertEqual(sent[0][1]['reply_to_message_id'], 1)
+        self.assertNotIn('caption', sent[0][1])
 
     async def test_unknown_voice_outcome_never_becomes_text_success(self):
         path = self.input / 'speech.ogg'

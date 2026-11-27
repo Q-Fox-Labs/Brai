@@ -1074,19 +1074,30 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(example, response)
         self.assertIn('Не удалось приложить файлы', response)
 
+    def test_video_note_marker_without_audio_is_not_shown_as_a_success(self):
+        response = native.final_text('Ответ\n[[audio_as_video_note]]', 'turn')
+        self.assertIn('Ответ', response)
+        self.assertNotIn('audio_as_video_note', response)
+        self.assertIn('Не удалось приложить файлы', response)
+
     def test_long_video_note_preserves_every_audio_sample(self):
         from files.video_note import render_video_notes
         audio = self.input / 'long.wav'
         with wave.open(str(audio), 'wb') as stream:
             stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
-            stream.writeframes(b'\0\0' * (61 * 16000))
+            stream.writeframes(b'\x00\x40' * (40 * 16000) + b'\0\0' * 16000
+                               + b'\x00\x40' * (20 * 16000))
         source = self.store.resolve(str(audio), ['test', 'long-audio'])
         original_run = subprocess.run
         part_frames = []
 
         def run(command, **kwargs):
-            if command[0] == 'ffmpeg':
+            if command[0] == '/usr/bin/ffmpeg':
                 return original_run(command, **kwargs)
+            if command[0] == '/usr/bin/ffprobe':
+                return SimpleNamespace(stdout=json.dumps({'format': {'duration': '59'}, 'streams': [
+                    {'codec_type': 'video', 'codec_name': 'h264', 'width': 900, 'height': 900},
+                    {'codec_type': 'audio', 'codec_name': 'aac'}]}).encode())
             with wave.open(command[3], 'rb') as stream:
                 part_frames.append(stream.getnframes())
             Path(command[command.index('--output') + 1]).write_bytes(b'video')
@@ -1097,6 +1108,27 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(videos), 2)
         self.assertEqual(sum(part_frames), 61 * 16000)
         self.assertTrue(all(frames < 60 * 16000 for frames in part_frames))
+        self.assertTrue(40 * 16000 <= part_frames[0] <= 41 * 16000)
+
+    def test_video_note_rejects_an_invalid_render_before_publication(self):
+        from files.video_note import render_video_notes
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS speech')
+        source = self.store.resolve(str(audio), ['test', 'audio'])
+        initial_published = len(self.backend.remote)
+
+        def run(command, **kwargs):
+            if command[0] == '/usr/bin/ffprobe':
+                return SimpleNamespace(stdout=json.dumps({'format': {'duration': '61'}, 'streams': [
+                    {'codec_type': 'video', 'codec_name': 'h264', 'width': 900, 'height': 900},
+                    {'codec_type': 'audio', 'codec_name': 'aac'}]}).encode())
+            Path(command[command.index('--output') + 1]).write_bytes(b'video')
+            return SimpleNamespace(returncode=0)
+
+        with patch('files.video_note._audio_parts', return_value=[audio]), patch('files.video_note.subprocess.run', side_effect=run):
+            with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_INVALID_OUTPUT'):
+                render_video_notes(self.store, source, 'turn', python='synthetic-python')
+        self.assertEqual(len(self.backend.remote), initial_published)
 
     async def test_oversized_caption_is_sent_as_one_pdf_before_the_attachment(self):
         item = self.items(1)[0]
