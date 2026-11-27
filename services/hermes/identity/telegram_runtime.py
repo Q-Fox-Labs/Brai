@@ -1019,6 +1019,10 @@ class Resolver:
                     or body['action'] != 'send_file_set' or not callable(begin_attempt)):
                 raise PermissionError('Invalid video note delivery')
             async def before_send():
+                active = await self._account(profile, profile['telegramId'] if group_chat_id(route[0]) else route[0])
+                if any(active.get(key) != profile.get(key) for key in ('role', 'generation')):
+                    raise PermissionError('Reply owner binding changed')
+                self.authorize_delivery(profile, body['action'], payload)
                 current()
                 begin_attempt()
 

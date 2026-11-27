@@ -868,6 +868,14 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outbox.result(ident)['message_id'], '42')
         self.assertEqual(len(sent), 1)
         self.assertNotIn('reply_to_message_id', sent[0])
+        revoked_id = delivery_id('revoked-private-video')
+        revoked = {**body, 'operatorAssignmentId': 'video-note:' + revoked_id}
+        outbox.enqueue(revoked_id, resolver.ledger.owner(owner), revoked)
+        resolver._account = AsyncMock(side_effect=[owner, {**owner, 'generation': 1}])
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            await outbox.flush_owner(resolver.ledger.owner(owner))
+        self.assertEqual(outbox.result(revoked_id)['error_kind'], 'forbidden')
+        self.assertEqual(len(sent), 1)
 
     async def test_video_note_general_forum_topic_accepts_telegram_omitted_thread(self):
         adapter = NS(_media_send_kwargs=lambda chat, reply, metadata: (int(reply),
