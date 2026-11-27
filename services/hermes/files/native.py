@@ -1546,13 +1546,13 @@ def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False, requir
     return target
 
 
-def verify_telegram_target(message, target):
+def verify_telegram_target(message, target, *, general_forum=None):
     """Require the Bot API receipt to name the same chat and explicit topic."""
     chat_id = getattr(message, 'chat_id', None)
     topic = target.get('message_thread_id') or target.get('direct_messages_topic_id')
     actual = (getattr(message, 'message_thread_id', None)
               or getattr(getattr(message, 'direct_messages_topic', None), 'topic_id', None))
-    if topic is None and actual == 1:
+    if topic is None and actual == 1 and general_forum is not False:
         actual = None
     if chat_id != target['chat_id'] or actual != topic:
         raise FileError('DELIVERY_ROUTE_UNCONFIRMED')
@@ -1663,8 +1663,10 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
         if not album:
             result = [result]
     if strict:
+        expected = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id') or (metadata or {}).get('direct_messages_topic_id')
+        general_forum = (str(chat_id).startswith('-') and str(expected) == '1') if not require_reply else None
         for message in result:
-            verify_telegram_target(message, target)
+            verify_telegram_target(message, target, general_forum=general_forum)
     return [getattr(message, 'message_id', None) for message in result]
 
 

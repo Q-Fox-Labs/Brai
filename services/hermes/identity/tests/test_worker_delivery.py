@@ -884,6 +884,10 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                                         exact=True, require_reply=False)
         self.assertEqual(target['chat_id'], -10012)
         self.assertEqual(target['reply_to_message_id'], 55)
+        native.verify_telegram_target(NS(chat_id=-10012, message_thread_id=1), target, general_forum=True)
+        with self.assertRaises(native.FileError):
+            native.verify_telegram_target(NS(chat_id=123, message_thread_id=1), {'chat_id': 123},
+                                          general_forum=False)
         with self.assertRaises(PermissionError):
             native.telegram_target(adapter, '-10012', '55', {'thread_id': '2'},
                                    exact=True, require_reply=False)
