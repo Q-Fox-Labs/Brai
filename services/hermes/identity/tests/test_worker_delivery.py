@@ -858,8 +858,17 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_kind, 'delivery_pending')
         self.assertEqual(peer.call.await_args.args[0], 'send_video_note')
         self.assertEqual(len(journal.pending_outputs()), 1)
+        journal.queue_output('3' * 64, 'send', {'payload': {'chat_id': '123', 'content': 'ordinary'},
+                                                'scope_id': 'scope', 'input_delivery_id': ident})
         worker = Worker(101, 'owner', '123', None)
         worker.delivery_journal = journal
+        async def old_ingress(method, params):
+            if method == 'send_video_note':
+                raise RpcError(-32601, 'Method not found')
+            return {'success': True, 'message_id': '41'}
+        worker.peer = NS(call=AsyncMock(side_effect=old_ingress))
+        self.assertEqual(await worker.flush_outputs('owner'), {'sent': 1})
+        self.assertEqual(len(journal.pending_outputs()), 1)
         worker.peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': '42'}))
         self.assertEqual(await worker.flush_outputs('owner'), {'sent': 1})
         self.assertEqual(worker.peer.call.await_args.args[0], 'send_video_note')

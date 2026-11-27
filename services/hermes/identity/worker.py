@@ -1151,8 +1151,15 @@ class Worker:
         sent = 0
         async with self.output_lock:
             for row in self.delivery_journal.pending_outputs():
-                value = await self.peer.call(delivery_method(row['action'], row['payload'].get('payload')),
-                                             {'action': row['action'], **row['payload'], 'delivery_id': row['id']})
+                method = delivery_method(row['action'], row['payload'].get('payload'))
+                try:
+                    value = await self.peer.call(method,
+                                                 {'action': row['action'], **row['payload'], 'delivery_id': row['id']})
+                except RpcError as error:
+                    if method == 'send_video_note' and error.code == -32601:
+                        # Older ingress cannot deliver this item; do not block ordinary replies.
+                        continue
+                    raise
                 if value.get('success') and value.get('message_id'):
                     self.delivery_journal.output_state(row['id'], 'sent', value)
                     sent += 1

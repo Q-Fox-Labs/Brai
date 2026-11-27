@@ -128,6 +128,44 @@ class TopicNamingTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_video_note_outbox_is_at_most_once_and_rollback_does_not_block(self):
+        owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        resolver._account = AsyncMock(return_value=owner)
+        resolver.authorize_delivery = lambda *args: None
+        key = resolver.ledger.owner(owner)
+        payload = {'chat_id': '123', 'metadata': {}, 'kind': 'single', 'fallback': False,
+                   'items': [{'artifact': {'artifact_id': 'sample'}, 'caption': '', 'presentation': 'video_note'}]}
+        ident = delivery_id('queued-video')
+        body = {'profile': owner, 'generation': 0, 'action': 'send_file_set', 'payload': payload,
+                'operatorAssignmentId': 'video-note:' + ident, 'videoNoteDelivery': True}
+        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply, retry_unknown=True)
+        outbox.enqueue(ident, key, body)
+        async def send_once(*args, before_send, before_retry):
+            await before_send()
+            raise TimeoutError('Telegram outcome unknown')
+        resolver._deliver_route = AsyncMock(side_effect=send_once)
+        await outbox.flush_owner(key)
+        self.assertEqual(outbox.result(ident)['error_kind'], 'delivery_unknown')
+        await outbox.flush_owner(key)
+        resolver._deliver_route.assert_awaited_once()
+
+        # Old ingress does not recognise videoNoteDelivery and rejects the unknown
+        # presentation before sending. Its existing assignment branch must advance.
+        old_id, next_id = delivery_id('rollback-video'), delivery_id('ordinary-after-rollback')
+        old_body = {**body, 'operatorAssignmentId': 'video-note:' + old_id}
+        async def old_delivery(saved, **kwargs):
+            if 'operatorAssignmentId' in saved:
+                raise ValueError('Unknown presentation')
+            return {'success': True, 'message_id': '57'}
+        old_outbox = ReplyOutbox(resolver.ledger.db, old_delivery, retry_unknown=True)
+        old_outbox.enqueue(old_id, key, old_body)
+        old_outbox.enqueue(next_id, key, {'action': 'send'})
+        await old_outbox.flush_owner(key)
+        self.assertEqual(old_outbox.result(old_id)['error_kind'], 'preparation_failed')
+        self.assertTrue(old_outbox.result(next_id)['success'])
+
     async def test_login_reply_is_suppressed_after_restart_without_a_fake_delivery(self):
         owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
         route = ('123', '77')

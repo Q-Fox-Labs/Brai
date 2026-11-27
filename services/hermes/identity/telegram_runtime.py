@@ -917,6 +917,13 @@ class Resolver:
         if ident is None:
             # Предупреждение актуально только сейчас и не должно попасть в outbox.
             return await self._deliver_saved_reply(body)
+        if (action == 'send_file_set' and any(item.get('presentation') == 'video_note'
+                for item in payload.get('items', []))):
+            # Older ingress treats this reserved non-UUID assignment as a terminal
+            # failure, so a queued video note cannot stall its ordinary outbox.
+            # Assignment identifiers are canonical UUIDs; this namespace cannot collide.
+            body['operatorAssignmentId'] = 'video-note:' + ident
+            body['videoNoteDelivery'] = True
         key = self.ledger.owner(profile)
         auth, source, grouped, route, metadata, values, anchor = (details[name] for name in
             ('auth', 'source', 'grouped', 'route', 'metadata', 'values', 'anchor'))
@@ -1006,6 +1013,21 @@ class Resolver:
         def current():
             self._chat_generation(profile, route, body['generation'])
         current.generation = body['generation']
+        if body.get('videoNoteDelivery') is True:
+            ident = body.get('operatorAssignmentId')
+            if (not isinstance(ident, str) or not re.fullmatch(r'video-note:[0-9a-f]{64}', ident)
+                    or body['action'] != 'send_file_set' or not callable(begin_attempt)):
+                raise PermissionError('Invalid video note delivery')
+            async def before_send():
+                current()
+                begin_attempt()
+
+            async def before_retry():
+                # The first API call may already have succeeded; never send twice.
+                raise PermissionError('Video note retry withheld')
+
+            return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current,
+                                             before_send=before_send, before_retry=before_retry)
         if 'operatorAssignmentId' in body:
             from telegram.error import BadRequest, Forbidden
             from .reply_outbox import DeliveryDeferred
