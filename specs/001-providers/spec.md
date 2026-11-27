@@ -1,11 +1,11 @@
 # Спецификация providers
 
-**Состояние:** целевая спецификация; экспериментальный v0 реализуется по CONTRACT.md, live-приёмка ещё не завершена.
+**Состояние:** целевая спецификация; экспериментальный v0 реализуется по `services/providers/CONTRACT.md`, live-приёмка ещё не завершена.
 **Дата:** 2026-10-19.
 **Владелец:** `services/providers`.
 
 Этот документ задаёт проект сервиса и этапы его реализации. Наличие описанной
-операции не означает, что она уже доступна. Реальный `CONTRACT.md`, AsyncAPI
+операции не означает, что она уже доступна. Реальный `services/providers/CONTRACT.md`, AsyncAPI
 и JSON Schema Draft-07 появляются вместе с соответствующей реализацией и
 перечисляют только работающие операции. Задачи и разрешения на выполнение
 ведутся отдельно в учёте проекта.
@@ -263,7 +263,7 @@ Core NATS не хранит сообщения и не обещает replay п�
 
 ## 8. Артефакты и путь файлов
 
-Контракт соседа — [artifacts](../artifacts/CONTRACT.md). Метаданные идут по
+Контракт соседа — [artifacts](../../services/artifacts/CONTRACT.md). Метаданные идут по
 NATS, байты — по HTTP. Чужие таблицы и каталоги файлов не используются.
 
 ### Принятый файловый профиль v1
@@ -274,7 +274,7 @@ Decide/Chat/Image. Выход — один PNG1024×1024 от Google Gemini2.5 F
 будущих отдельно принятых профилей. Pending bytes находятся в собственном
 PG journal (≤32MiB, два слота, TTL24h); replay/startup возобновляют только
 сохранение прежних bytes/requestId. Фактические DTO и лимиты — в
-[CONTRACT](CONTRACT.md#v1-текстовые-артефакты-и-один-image-output).
+[CONTRACT](../../services/providers/CONTRACT.md#v1-текстовые-артефакты-и-один-image-output).
 
 ### Вход
 
@@ -369,7 +369,7 @@ Admission, очередь, число внешних обращений, вхо�
 
 ## 10. История и уведомления
 
-[History](../history/CONTRACT.md) получает безопасный итог операции: ID,
+[History](../../services/history/CONTRACT.md) получает безопасный итог операции: ID,
 владелец/область, модель, длительность, outcome, usage и безопасный код отказа.
 Текста, tool arguments/results, файлов, URL, API-ключей и произвольных параметров
 в событиях нет. Основной учёт операций и расходов не зависит от History.
@@ -384,7 +384,7 @@ Admission, очередь, число внешних обращений, вхо�
 публикации после операции, как в Local AI. Пропуск фиксируется метрикой и не
 меняет итог. Контракт не обещает её долговечную доставку.
 
-[Alerts](../alerts/CONTRACT.md) получает только проблемы реальных операций.
+[Alerts](../../services/alerts/CONTRACT.md) получает только проблемы реальных операций.
 Startup, health polling и пустые очереди молчат. Продолжающийся сбой объединяется
 в эпизод, восстановление закрывает его без нового сообщения. Надёжная доставка
 уведомлений использует ограниченный outbox источника и существующий ingest
@@ -409,7 +409,7 @@ JetStream; повтор сохраняет ID/содержимое и никог
 журнал операций. Сервисная аутентификация и разрешённая область задаются сервером;
 недоверенный заголовок owner не считается авторизацией. Требуется доказанная
 связь client request ID с operation ID и безопасное сопоставление результата.
-Принятый профиль — встроенный fetch Node24; точная [матрица HTTP](HTTP.md)
+Принятый профиль — встроенный fetch Node24; точная [матрица HTTP](../../services/providers/HTTP.md)
 фиксирует поля и собственный owner-scoped GET /v1/operations/{UUID} для recovery.
 
 HTTP не является альтернативной межсервисной шиной Brai: NATS остаётся основным
@@ -445,9 +445,9 @@ LiteLLM должна содержать TypeSafe и нужные stream/tool/fil
 
 ## Источники и соседние контракты
 
-- [Local AI](../local-ai/CONTRACT.md), [Артефакты](../artifacts/CONTRACT.md),
-  [История](../history/CONTRACT.md), [Alerts](../alerts/CONTRACT.md),
-  [архитектура Agent](../agent/ARCHITECTURE.md).
+- [Local AI](../../services/local-ai/CONTRACT.md), [Артефакты](../../services/artifacts/CONTRACT.md),
+  [История](../../services/history/CONTRACT.md), [Alerts](../../services/alerts/CONTRACT.md),
+  [архитектура Agent](../../services/agent/ARCHITECTURE.md).
 - [LiteLLM: конфигурация](https://docs.litellm.ai/docs/proxy/configs),
   [Decisions](https://docs.litellm.ai/docs/decisions),
   [streaming](https://docs.litellm.ai/docs/completion/stream),

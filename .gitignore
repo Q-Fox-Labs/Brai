@@ -3,7 +3,19 @@
 .secrets/
 .env
 .env.*
-.agents/
+# Личные настройки агентов остаются вне Git; штатные навыки Spec Kit входят в проект.
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/speckit-analyze/
+!.agents/skills/speckit-checklist/
+!.agents/skills/speckit-clarify/
+!.agents/skills/speckit-constitution/
+!.agents/skills/speckit-converge/
+!.agents/skills/speckit-implement/
+!.agents/skills/speckit-plan/
+!.agents/skills/speckit-specify/
+!.agents/skills/speckit-tasks/
 .aws/
 .codex/
 tmp/
