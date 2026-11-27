@@ -695,6 +695,13 @@ export function respondControl(msg, result) {
 }
 
 /** Собрать NATS, доставку Telegram и закрытый сокет памяти. */
+/** Собрать запрос Telegram, сохранив тему и привязку к исходному сообщению. */
+export function telegramMessagePayload({ telegramId, message, threadId, entities, replyMarkup, replyToMessageId }) {
+  return { chat_id: telegramId, text: message, ...(threadId === undefined ? {} : { message_thread_id: threadId }),
+    ...(replyToMessageId === undefined ? {} : { reply_parameters: { message_id: replyToMessageId } }),
+    ...(entities === undefined ? {} : { entities }), ...(replyMarkup === undefined ? {} : { reply_markup: replyMarkup }) };
+}
+
 export async function startControl(config, adapters = {}) {
   const { connect, credsAuthenticator } = await import('nats');
   const n = config.nats;
@@ -715,7 +722,7 @@ export async function startControl(config, adapters = {}) {
   const telegramSend = async ({ telegramId, message, threadId, entities, replyMarkup, replyToMessageId }) => {
     const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: telegramId, text: message, ...(threadId === undefined ? {} : { message_thread_id: threadId }), ...(replyToMessageId === undefined ? {} : { reply_parameters: { message_id: replyToMessageId } }), ...(entities === undefined ? {} : { entities }), ...(replyMarkup === undefined ? {} : { reply_markup: replyMarkup }) }), signal: AbortSignal.timeout(10000),
+      body: JSON.stringify(telegramMessagePayload({ telegramId, message, threadId, replyToMessageId, entities, replyMarkup })), signal: AbortSignal.timeout(10000),
     });
     if (response.status >= 500 || response.status === 429) return {};
     const value = await response.json();

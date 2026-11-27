@@ -125,16 +125,22 @@ class LoginDeliveryState:
         self.db.execute('PRAGMA journal_mode=DELETE')
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute("CREATE TABLE IF NOT EXISTS login_receipts (request_id TEXT PRIMARY KEY, outcome TEXT NOT NULL CHECK(outcome IN ('sent','failed','unknown')))")
+        self.db.execute('CREATE TABLE IF NOT EXISTS login_delivery_bindings (binding TEXT PRIMARY KEY, request_id TEXT NOT NULL)')
 
     def lookup(self, request_id):
         """Прочитать прежний исход без повторной отправки, включая после перезапуска."""
         row = self.db.execute('SELECT outcome FROM login_receipts WHERE request_id=?', (request_id,)).fetchone()
         return row[0] if row else None
 
-    def claim(self, request_id):
+    def claim(self, request_id, binding=None):
         """Зафиксировать unknown до network write; существующий receipt не захватывается повторно."""
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            if binding is not None:
+                row = self.db.execute('SELECT request_id FROM login_delivery_bindings WHERE binding=?', (binding,)).fetchone()
+                if row is not None and row[0] != request_id:
+                    raise PermissionError('Login delivery binding changed')
+                self.db.execute('INSERT OR IGNORE INTO login_delivery_bindings VALUES (?,?)', (binding, request_id))
             previous = self.lookup(request_id)
             if previous is not None:
                 self.db.execute('COMMIT')
@@ -173,6 +179,13 @@ def login_request_id(uid, profile, chat_id, input_id):
     binding = {'uid': uid, 'userId': profile['userId'], 'profileId': profile['profileId'],
                'telegramId': str(profile['telegramId']), 'chatId': str(chat_id), 'inputId': input_id}
     return 'telegram-login:' + hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def login_delivery_binding(uid, profile, chat_id, delivery_id):
+    """Закрепить квитанцию за допущенным входом без хранения текста или кода."""
+    binding = {'uid': uid, 'userId': profile['userId'], 'profileId': profile['profileId'],
+               'telegramId': str(profile['telegramId']), 'chatId': str(chat_id), 'deliveryId': delivery_id}
+    return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 class ControlPort:
@@ -604,6 +617,26 @@ class Broker:
             return await self.resolve_known(params['telegramId'])
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
+        if method == 'ingress.login-receipt' and ingress:
+            profile = await self.resolve(params['telegramId'])
+            if profile['uid'] != params['uid'] or str(params['chatId']) != str(params['telegramId']):
+                raise PermissionError('Login receipt binding changed')
+            async with self.login_locks.setdefault(params['uid'], asyncio.Lock()):
+                state = self.delivery_state()
+                binding = login_delivery_binding(params['uid'], profile, params['chatId'], params['deliveryId'])
+                row = state.db.execute('SELECT request_id FROM login_delivery_bindings WHERE binding=?', (binding,)).fetchone()
+                request_id = row[0] if row else (login_request_id(params['uid'], profile, params['chatId'], params['inputId'])
+                                                  if 'inputId' in params else None)
+                outcome = state.lookup(request_id) if request_id else None
+            return {'sent': outcome == 'sent', 'unknown': outcome == 'unknown'}
+        if method == 'ingress.bind-delivery' and ingress:
+            turn = self.turns.get(params['uid'])
+            if not turn or turn['turnId'] != params['turnId'] or turn['inputId'] != params['inputId']:
+                raise PermissionError('Delivery input changed')
+            if turn.get('deliveryId') not in (None, params['deliveryId']):
+                raise PermissionError('Delivery binding changed')
+            turn['deliveryId'] = params['deliveryId']
+            return {'bound': True}
         if method == 'ingress.topic-suggestion' and ingress:
             profile = await self.resolve(params['telegramId'])
             if profile['profileId'] != params['profileId']:
@@ -866,7 +899,9 @@ class Broker:
                     await self.authorize(peer_uid)
                     # AIDEV-NOTE: Unknown фиксируется до записи в control. Обрыв/отмена
                     # не дают автоматического разрешения отправить тот же код ещё раз.
-                    claimed, receipt['outcome'] = self.delivery_state().claim(receipt['requestId'])
+                    binding = (login_delivery_binding(peer_uid, {**profile, 'telegramId': turn['telegramId']}, turn['chatId'], turn['deliveryId'])
+                               if turn.get('deliveryId') else None)
+                    claimed, receipt['outcome'] = self.delivery_state().claim(receipt['requestId'], binding)
                     if claimed and self.turns.get(peer_uid) is turn:
                         try:
                             result = await self.control.call('login.send', {'uid': peer_uid,
@@ -1021,6 +1056,8 @@ PARAMETERS = {
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'accountAnswer', 'expectedUid', 'accountRefused'}),
     'ingress.status': ({'uid', 'turnId'}, {'inputId'}),
+    'ingress.login-receipt': ({'uid', 'telegramId', 'chatId', 'deliveryId'}, {'inputId'}),
+    'ingress.bind-delivery': ({'uid', 'turnId', 'inputId', 'deliveryId'}, set()),
     'ingress.close': ({'uid', 'turnId'}, {'questionMessageId', 'inputId', 'accountOfferId'}),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
@@ -1108,6 +1145,8 @@ def validate_params(method, params):
     if 'inputId' in params and (not isinstance(params['inputId'], str) or len(params['inputId']) != 64
             or any(character not in '0123456789abcdef' for character in params['inputId'])):
         raise ValueError('Invalid input identity')
+    if 'deliveryId' in params and (not isinstance(params['deliveryId'], str) or not re.fullmatch(r'[0-9a-f]{64}', params['deliveryId'])):
+        raise ValueError('Invalid delivery identity')
     if 'turnId' in params and len(params['turnId']) > 128:
         raise ValueError('Invalid turn')
     if 'requestId' in params and len(params['requestId']) > 256:

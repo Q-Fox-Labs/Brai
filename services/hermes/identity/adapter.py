@@ -469,7 +469,8 @@ def make_adapter(config, platform, peer, publish_file):
                     # logical output for the same failed transport attempt.
                     value = {**value, 'retryable': False, 'error_kind': 'delivery_pending'}
                 fields = ('success', 'message_id', 'error', 'raw_response', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind')
-                result = SendResult(**{key: value[key] for key in fields if key in value})
+                result = (SendResult(success=True) if value.get('error_kind') == 'login_reply_suppressed'
+                          else SendResult(**{key: value[key] for key in fields if key in value}))
                 if pending and result.success and result.message_id:
                     pending[0].delivered(pending[1], result.message_id)
                 return result

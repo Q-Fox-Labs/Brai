@@ -727,6 +727,56 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(status, {"suppressFinal": True, "needsAccountConsent": False})
 
+    async def test_login_receipt_is_bound_to_original_input_and_survives_close(self):
+        self.control.role = 'creator'
+        params = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
+                  'turnId': 'receipt', 'inputId': 'a' * 64, 'messageId': '55', 'threadId': 73}
+        await self.broker.call(INGRESS_UID, 'ingress.admit', params)
+        await self.broker.call(INGRESS_UID, 'ingress.bind-delivery', {'uid': WORKER_UID, 'turnId': 'receipt',
+            'inputId': 'a' * 64, 'deliveryId': 'c' * 64})
+        lookup = {'uid': WORKER_UID, 'telegramId': '111222', 'chatId': '111222', 'deliveryId': 'c' * 64}
+        self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.login-receipt', lookup), {'sent': False, 'unknown': False})
+        await self.broker.call(WORKER_UID, 'login.send', {})
+        sent = [p for method, p, _ in self.control.calls if method == 'login.send'][-1]
+        self.assertEqual((sent['messageId'], sent['threadId']), ('55', 73))
+        await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': 'receipt'})
+        self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.login-receipt', lookup), {'sent': True, 'unknown': False})
+        self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.login-receipt', {**lookup, 'deliveryId': 'd' * 64}), {'sent': False, 'unknown': False})
+        import sqlite3
+        snapshot = sqlite3.connect(':memory:')
+        self.addCleanup(snapshot.close)
+        self.broker.delivery_state().db.backup(snapshot)
+        self.assertEqual(snapshot.execute('SELECT count(*) FROM login_delivery_bindings').fetchone()[0], 1)
+        self.assertEqual(snapshot.execute('SELECT outcome FROM login_receipts').fetchone()[0], 'sent')
+        with self.assertRaises(PermissionError):
+            await self.broker.call(INGRESS_UID, 'ingress.login-receipt', {**lookup, 'chatId': '999'})
+
+    async def test_login_receipt_waits_for_inflight_code_send(self):
+        self.control.role = 'creator'
+        params = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
+                  'turnId': 'inflight', 'inputId': 'a' * 64}
+        await self.broker.call(INGRESS_UID, 'ingress.admit', params)
+        await self.broker.call(INGRESS_UID, 'ingress.bind-delivery', {'uid': WORKER_UID, 'turnId': 'inflight',
+            'inputId': 'a' * 64, 'deliveryId': 'c' * 64})
+        started, release = asyncio.Event(), asyncio.Event()
+        original = self.control.call
+        async def control(method, params, timeout=35):
+            if method == 'login.send':
+                started.set()
+                await release.wait()
+                return {'status': 'sent'}
+            return await original(method, params, timeout=timeout)
+        self.control.call = control
+        sending = asyncio.create_task(self.broker.call(WORKER_UID, 'login.send', {}))
+        await started.wait()
+        lookup = asyncio.create_task(self.broker.call(INGRESS_UID, 'ingress.login-receipt',
+            {'uid': WORKER_UID, 'telegramId': '111222', 'chatId': '111222', 'deliveryId': 'c' * 64}))
+        await asyncio.sleep(0)
+        self.assertFalse(lookup.done())
+        release.set()
+        await sending
+        self.assertEqual(await lookup, {'sent': True, 'unknown': False})
+
     async def test_login_refuses_non_creator_without_issuing_a_code(self):
         await self.broker.call(INGRESS_UID, 'ingress.admit', {
             'telegramId':'111222', 'chatId':'111222', 'privateChat':True, 'turnId':'role-denied',

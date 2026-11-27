@@ -548,6 +548,26 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         finally:
             input_delivery.reset(token)
 
+    async def test_login_suppression_finishes_worker_output_without_fabricating_receipt(self):
+        from identity.delivery_journal import DeliveryJournal, delivery_id
+        from identity.scope import input_delivery
+        peer = NS(call=AsyncMock(return_value={'success': False, 'retryable': False,
+                                               'error_kind': 'login_reply_suppressed'}))
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, None)
+        journal = DeliveryJournal(self.root / 'login-suppressed.sqlite3', 'owner')
+        adapter._brai_delivery_journal = journal
+        input_id = delivery_id('login-input')
+        journal.begin_input(input_id, delivery_id('login-bytes'))
+        token = input_delivery.set(input_id)
+        try:
+            result = await adapter.send('123', 'warning', reply_to='55', metadata={'thread_id': '77'})
+            self.assertTrue(result.success)
+            self.assertIsNone(getattr(result, 'message_id', None))
+            self.assertEqual(journal.pending_outputs(), [])
+            self.assertEqual(peer.call.await_count, 1)
+        finally:
+            input_delivery.reset(token)
+
     async def test_durable_input_has_one_delivery_owner_without_disabling_legacy(self):
         from identity.scope import input_delivery
         adapter = make_adapter(NS(typing_indicator=True), 'telegram', NS(), None)

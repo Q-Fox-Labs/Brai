@@ -128,6 +128,111 @@ class TopicNamingTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_login_reply_is_suppressed_after_restart_without_a_fake_delivery(self):
+        owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
+        route = ('123', '77')
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        resolver.ledger.admit(owner, route, {'thread_id': '77'}, '55')
+        message = {'message_id': 55, 'text': 'пришли код', 'message_thread_id': 77,
+                   'is_topic_message': True, 'chat': {'id': 123, 'type': 'private'}}
+        source = {'chat': '123', 'actor_id': '123', 'chat_generation': 0, 'state': 'accepted',
+                  'auth_author': '123', 'auth_role': 'creator', 'auth_generation': 0,
+                  'payload': json.dumps({'message': message})}
+        resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: source))
+        deliver = resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        resolver._account = AsyncMock(return_value=owner)
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        warning = '⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение.'
+        payload = {'chat_id': '123', 'content': warning, 'reply_to': '55', 'metadata': {'thread_id': '77'}}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': True})) as broker:
+            result = await resolver.durable_reply(owner, 'owner', 'send', payload,
+                delivery_id('login-output'), delivery_id('login-input'))
+        self.assertEqual(result, {'success': False, 'retryable': False, 'error_kind': 'login_reply_suppressed'})
+        self.assertEqual(resolver.reply_outbox.result(delivery_id('login-output')), result)
+        self.assertEqual(broker.await_args.args[0], 'ingress.login-receipt')
+        deliver.assert_not_awaited()
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': True})) as broker:
+            result = await resolver.durable_reply(owner, 'owner', 'send', {**payload, 'content': 'Не удалось проверить X'},
+                delivery_id('real-error'), delivery_id('login-input'))
+        self.assertEqual(result, {'success': True, 'message_id': '56'})
+        broker.assert_not_awaited()
+        deliver.reset_mock()
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': False})):
+            result = await resolver.durable_reply(owner, 'owner', 'send', payload,
+                delivery_id('normal-output'), delivery_id('normal-input'))
+        self.assertEqual(result, {'success': True, 'message_id': '56'})
+        deliver.assert_awaited_once()
+
+    async def test_queued_warning_rechecks_login_receipt_before_retry(self):
+        owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        resolver.ledger.admit(owner, ('123', '77'), {'thread_id': '77'}, '55')
+        source = {'chat': '123', 'actor_id': '123', 'chat_generation': 0, 'state': 'accepted',
+                  'auth_author': '123', 'auth_role': 'creator', 'auth_generation': 0,
+                  'payload': json.dumps({'message': {'message_id': 55, 'text': 'пришли код',
+                    'message_thread_id': 77, 'is_topic_message': True, 'chat': {'id': 123, 'type': 'private'}}})}
+        resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: source))
+        resolver._account = AsyncMock(return_value=owner)
+        resolver._deliver_route = AsyncMock(return_value={'success': False, 'retryable': True})
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        ident = delivery_id('pending-warning')
+        payload = {'chat_id': '123', 'content': '⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение.',
+                   'reply_to': '55', 'metadata': {'thread_id': '77'}}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': False})):
+            await resolver.durable_reply(owner, 'owner', 'send', payload, ident, delivery_id('pending-input'))
+        self.assertEqual(resolver._deliver_route.await_count, 1)
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': True})):
+            await resolver.reply_outbox.flush()
+        self.assertEqual(resolver._deliver_route.await_count, 1)
+        self.assertEqual(resolver.reply_outbox.result(ident)['error_kind'], 'login_reply_suppressed')
+
+    async def test_unknown_login_receipt_does_not_claim_code_was_not_sent(self):
+        owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        resolver.ledger.admit(owner, ('123', ''), {}, '55')
+        resolver._account = AsyncMock(return_value=owner)
+        resolver._deliver_route = AsyncMock(return_value={'success': True, 'message_id': '56'})
+        body = {'profile': owner, 'generation': 0, 'action': 'send', 'loginDeliveryId': 'a' * 64,
+                'payload': {'chat_id': '123', 'metadata': {}, 'reply_to': '55',
+                    'content': '⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение.'}}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': False, 'unknown': True})):
+            await resolver._deliver_saved_reply(body)
+        self.assertIn('Не удалось подтвердить отправку кода', resolver._deliver_route.await_args.args[2]['content'])
+
+    async def test_queued_media_warning_keeps_input_binding_after_turn_is_lost(self):
+        from identity.scope import request_scope
+        owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
+        resolver = runtime.Resolver(NS())
+        self.addCleanup(resolver.ledger.close)
+        resolver.ledger.admit(owner, ('123', '77'), {'thread_id': '77'}, '55')
+        source_id, output_id = delivery_id('media-input'), delivery_id('media-output')
+        source = {'chat': '123', 'actor_id': '123', 'chat_generation': 0, 'state': 'accepted',
+                  'auth_author': '123', 'auth_role': 'creator', 'auth_generation': 0,
+                  'payload': json.dumps({'message': {'message_id': 55, 'caption': 'код', 'document': {},
+                    'message_thread_id': 77, 'is_topic_message': True, 'chat': {'id': 123, 'type': 'private'}}})}
+        resolver.mirror = NS(inbox=NS(delivery_source=lambda *args: source))
+        resolver._account = AsyncMock(return_value=owner)
+        resolver.deliver = AsyncMock(return_value={'success': False, 'retryable': True})
+        resolver.reply_outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        resolver.turns[101] = {'id': 'turn', 'route': ('123', '77'), 'inputId': 'a' * 64,
+                               'delivery': {'delivery_id': source_id}}
+        payload = {'chat_id': '123', 'content': '⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение.',
+                   'reply_to': '55', 'metadata': {'thread_id': '77'}}
+        token = request_scope.set('turn')
+        try:
+            with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': False, 'unknown': False})):
+                await resolver.durable_reply(owner, 'owner', 'send', payload, output_id, source_id)
+        finally:
+            request_scope.reset(token)
+        resolver.turns.clear()
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'sent': True, 'unknown': False})):
+            result = await resolver.durable_reply(owner, 'owner', 'send', payload, output_id, source_id)
+        self.assertEqual(result['error_kind'], 'login_reply_suppressed')
+        self.assertEqual(resolver.deliver.await_count, 1)
+
     async def test_restored_profile_reply_uses_canonical_owner_and_reaches_transport(self):
         resolver = runtime.Resolver(NS())
         self.addCleanup(resolver.ledger.close)

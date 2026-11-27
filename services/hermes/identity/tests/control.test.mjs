@@ -2,7 +2,7 @@
 // ABOUTME: Порты заменены фикстурами; реальный транспорт проверяется отдельно.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Control } from '../control.mjs';
+import { Control, telegramMessagePayload } from '../control.mjs';
 
 const profile = { userId: 'u1', profileId: 'p1', telegramId: '42', memoryEpoch: 'epoch-1', status: 'active' };
 const registry = async () => ({ version: 1, profiles: { '1001': profile } });
@@ -106,6 +106,18 @@ test('linked account receives its own login code after Auth confirms canonical o
   const foreign = setup({ authCall: async () => ({ user: { id: 'other', profileId: 'other', telegramId: '84', status: 'active' } }) });
   assert.deepEqual(await foreign.control.sendLogin({ uid: 1001, telegramId: '84', privateChat: true, requestId: 'foreign' }), { status: 'denied' });
   assert.equal(foreign.calls.length, 0);
+});
+
+test('login replies to the trusted request in its original topic', async () => {
+  const { control, calls } = setup({}, 'creator');
+  assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true,
+    requestId: 'request', threadId: 7, messageId: '55' }), { status: 'sent' });
+  assert.equal(calls[2].threadId, 7);
+  assert.equal(calls[2].replyToMessageId, 55);
+  assert.deepEqual(telegramMessagePayload(calls[2]), {chat_id: '42', text: calls[2].message,
+    message_thread_id: 7, reply_parameters: {message_id: 55}});
+  assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true,
+    requestId: 'request2', messageId: '0' }), { status: 'denied' });
 });
 
 test('link offer returns labels and a public bot URL without delivering or issuing anything', async () => {

@@ -748,6 +748,13 @@ class Resolver:
                     binding = await self.mirror.before_delivery(event)
                     turn = self.turns.get(profile['uid'])
                     if turn is not None and binding and 'delivery_id' in binding:
+                        if not group_chat_id(turn['route'][0]):
+                            if turn.get('messageId') != str(event.message_id):
+                                raise PermissionError('Delivery input changed')
+                            confirmed = await broker_call('ingress.bind-delivery', {'uid': profile['uid'],
+                                'turnId': turn['id'], 'inputId': turn['inputId'], 'deliveryId': binding['delivery_id']})
+                            if not isinstance(confirmed, dict) or confirmed.get('bound') is not True:
+                                raise PermissionError('Delivery binding unavailable')
                         turn['delivery'] = binding
                     return binding
                 bridge.before_delivery = before_delivery
@@ -864,7 +871,7 @@ class Resolver:
             self.ledger.record(profile, route, anchor, outgoing=False)
             values['reply_to'] = anchor
         body = {'profile': profile, 'action': action, 'payload': values, 'generation': source['chat_generation']}
-        return body, {'auth': auth, 'source': source, 'grouped': grouped, 'route': route,
+        return body, {'auth': auth, 'source': source, 'original': original, 'grouped': grouped, 'route': route,
                       'metadata': metadata, 'values': values, 'anchor': anchor}
 
     async def authorize_recovery(self, profile, owner, source_id, chat_id, thread_id):
@@ -890,6 +897,23 @@ class Resolver:
         if body is None:
             return details['pending']
         profile = body['profile']
+        silence_warning = '⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение.'
+        if (not details['grouped'] and action == 'send'
+                and payload.get('content', '').strip() == silence_warning):
+            turn = self.turns.get(profile['uid'])
+            input_id = None
+            if (turn and request_scope.get() == turn['id'] and turn['route'] == details['route']
+                    and (turn.get('delivery') or {}).get('delivery_id') == source_id):
+                input_id = turn.get('inputId')
+            original = details['original']
+            if input_id is None and isinstance(original.get('text'), str) and original.get('message_id'):
+                # AIDEV-NOTE: После перезапуска проверяем тот же текстовый input по исходному Telegram Update.
+                origin = {'messageId': str(original['message_id']), 'text': original['text'], 'inputs': []}
+                input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
+                    separators=(',', ':')).encode()).hexdigest()
+            body['loginDeliveryId'] = source_id
+            if input_id:
+                body['loginInputId'] = input_id
         if ident is None:
             # Предупреждение актуально только сейчас и не должно попасть в outbox.
             return await self._deliver_saved_reply(body)
@@ -906,6 +930,8 @@ class Resolver:
                     or (grouped and saved_profile.get('telegramId') != profile['telegramId'])
                     or (saved_profile.get('role'), saved_profile.get('generation')) != auth[1:]
                     or saved.get('action') != action or saved.get('generation') != source['chat_generation']):
+                return False
+            if 'loginDeliveryId' in saved and saved['loginDeliveryId'] != body.get('loginDeliveryId'):
                 return False
             old_values = dict(saved['payload'])
             old_metadata = old_values.pop('metadata')
@@ -964,6 +990,19 @@ class Resolver:
             raise PermissionError('Reply owner binding changed')
         self._chat_generation(profile, route, body['generation'])
         self.authorize_delivery(profile, body['action'], payload)
+        if 'loginDeliveryId' in body:
+            try:
+                receipt = await broker_call('ingress.login-receipt', {'uid': profile['uid'],
+                    'telegramId': route[0], 'chatId': route[0], 'deliveryId': body['loginDeliveryId'],
+                    **({'inputId': body['loginInputId']} if 'loginInputId' in body else {})})
+                if not isinstance(receipt, dict) or type(receipt.get('sent')) is not bool:
+                    raise ValueError('Login receipt unavailable')
+            except (ConnectionError, TimeoutError, RpcError, ValueError):
+                return {'success': False, 'retryable': True, 'error_kind': 'login_receipt_unavailable'}
+            if receipt['sent']:
+                return {'success': False, 'retryable': False, 'error_kind': 'login_reply_suppressed'}
+            if receipt.get('unknown') is True:
+                payload = {**payload, 'content': '⚠️ Не удалось подтвердить отправку кода. Проверьте, пришло ли сообщение с кодом.'}
         def current():
             self._chat_generation(profile, route, body['generation'])
         current.generation = body['generation']
