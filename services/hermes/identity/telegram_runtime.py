@@ -1027,7 +1027,8 @@ class Resolver:
                 raise PermissionError('Video note retry withheld')
 
             return await self._deliver_route(profile, body['action'], payload, route, metadata, None, current,
-                                             before_send=before_send, before_retry=before_retry)
+                                             before_send=before_send, before_retry=before_retry,
+                                             require_reply=False)
         if 'operatorAssignmentId' in body:
             from telegram.error import BadRequest, Forbidden
             from .reply_outbox import DeliveryDeferred
@@ -1350,7 +1351,7 @@ class Resolver:
         return await self._deliver_route(profile, action, payload, route, metadata, turn, current)
 
     async def _deliver_route(self, profile, action, payload, route, metadata, turn, current, *,
-                             before_send=None, before_retry=None):
+                             before_send=None, before_retry=None, require_reply=True):
         """Отправить в уже проверенный маршрут и сохранить только фактические квитанции."""
         uid = profile['uid']
         input_id = turn.get('inputId') if turn else None
@@ -1403,7 +1404,7 @@ class Resolver:
                 anchor = payload.get('reply_to') or metadata.get('telegram_reply_to_message_id')
                 private_topic = (route[1] and metadata.get('telegram_dm_topic_reply_fallback')
                                  and callable(getattr(self.adapter, '_brai_send_with_private_topic_retry', None)))
-                parameters = {'strict': True, 'before_send': before_send} if before_send is not None else {}
+                parameters = {'strict': True, 'before_send': before_send, 'require_reply': require_reply} if before_send is not None else {}
                 if private_topic and anchor and (before_retry is not None
                         or self.ledger.owns(profile, route, anchor, outgoing=False)):
                     async def check_retry():

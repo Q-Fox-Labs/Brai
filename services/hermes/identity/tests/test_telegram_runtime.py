@@ -142,7 +142,8 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 'operatorAssignmentId': 'video-note:' + ident, 'videoNoteDelivery': True}
         outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply, retry_unknown=True)
         outbox.enqueue(ident, key, body)
-        async def send_once(*args, before_send, before_retry):
+        async def send_once(*args, before_send, before_retry, require_reply):
+            self.assertFalse(require_reply)
             await before_send()
             raise TimeoutError('Telegram outcome unknown')
         resolver._deliver_route = AsyncMock(side_effect=send_once)

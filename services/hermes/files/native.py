@@ -1518,7 +1518,7 @@ def telegram_format(adapter, text):
     return formatter(text)
 
 
-def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False):
+def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False, require_reply=True):
     target = {'chat_id': int(chat_id)}
     routing = getattr(adapter, '_media_send_kwargs', None)
     if callable(routing):
@@ -1533,9 +1533,11 @@ def telegram_target(adapter, chat_id, reply_to, metadata, *, exact=False):
         expected = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id') or (metadata or {}).get('direct_messages_topic_id')
         actual = target.get('message_thread_id') or target.get('direct_messages_topic_id')
         if (str(target['chat_id']) != str(chat_id) or str(actual or '') != str(expected or '')
-                or not reply_to or str(target.get('reply_to_message_id')) != str(reply_to)):
+                or (require_reply and not reply_to)
+                or (reply_to and str(target.get('reply_to_message_id')) != str(reply_to))):
             raise PermissionError('Operator assignment Telegram route changed')
-        target['allow_sending_without_reply'] = False
+        if reply_to:
+            target['allow_sending_without_reply'] = False
     return target
 
 
@@ -1552,12 +1554,12 @@ def verify_telegram_target(message, target):
 
 
 async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None, *, strict=False,
-                          before_send=None, before_retry=None, topic_anchor=None):
+                          before_send=None, before_retry=None, topic_anchor=None, require_reply=True):
     """Deliver media once, with an anchored retry after a confirmed topic refusal."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
     from contextlib import ExitStack
     bot = adapter._bot
-    target = telegram_target(adapter, chat_id, reply_to, metadata, exact=strict)
+    target = telegram_target(adapter, chat_id, reply_to, metadata, exact=strict, require_reply=require_reply)
     retry = getattr(adapter, '_brai_send_with_private_topic_retry', None)
     private_topic = callable(retry) and adapter._brai_private_topic_route(metadata, target)
     anchored = (private_topic and before_retry is not None and topic_anchor is not None

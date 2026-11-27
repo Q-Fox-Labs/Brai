@@ -837,6 +837,38 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RpcError):
             await bridge.send_video_note('send_file_set', {**payload, 'kind': 'album'})
 
+    async def test_durable_video_note_reaches_private_chat_without_reply_anchor(self):
+        from identity.delivery_journal import delivery_id
+        from identity.reply_outbox import ReplyOutbox
+        video = self.input / 'note.mp4'
+        video.write_bytes(b'synthetic video')
+        artifact = self.files.resolve(str(video), ['test', 'durable-video-note'])
+        sent = []
+        async def send_video_note(**values):
+            sent.append(values)
+            return NS(message_id=42, chat_id=123, message_thread_id=None)
+        owner = {**self.profile, 'role': 'creator', 'generation': 0}
+        resolver = runtime.Resolver(NS(platform='telegram', _bot=NS(send_video_note=send_video_note)))
+        self.addCleanup(resolver.ledger.close)
+        resolver._account = AsyncMock(return_value=owner)
+        resolver.ledger.admit(owner, ('123', ''), {}, '1')
+        ident = delivery_id('durable-private-video')
+        body = {'profile': owner, 'generation': 0, 'action': 'send_file_set',
+                'operatorAssignmentId': 'video-note:' + ident, 'videoNoteDelivery': True,
+                'payload': {'chat_id': '123', 'metadata': {}, 'kind': 'single', 'fallback': False,
+                            'items': [{'artifact': {'artifact_id': artifact['artifactId']},
+                                       'caption': '', 'presentation': 'video_note'}]}}
+        outbox = ReplyOutbox(resolver.ledger.db, resolver._deliver_saved_reply)
+        outbox.enqueue(ident, resolver.ledger.owner(owner), body)
+        telegram = ModuleType('telegram')
+        for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument'):
+            setattr(telegram, name, NS)
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            await outbox.flush_owner(resolver.ledger.owner(owner))
+        self.assertEqual(outbox.result(ident)['message_id'], '42')
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn('reply_to_message_id', sent[0])
+
     async def test_old_ingress_keeps_video_note_queued_for_compatible_ingress(self):
         from identity.delivery_journal import DeliveryJournal
         from identity.scope import input_delivery
