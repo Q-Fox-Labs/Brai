@@ -1232,7 +1232,7 @@ def _stage_final_text(text, operation):
             if (not isinstance(item, dict) or set(item) - {'artifactId', 'caption', 'presentation'}
                     or not isinstance(item.get('artifactId'), str) or not isinstance(item.get('caption', ''), str)
                     or ('presentation' in item and item['presentation'] not in
-                        ('photo', 'video', 'audio', 'document', 'voice', 'animation'))):
+                        ('photo', 'video', 'video_note', 'audio', 'document', 'voice', 'animation'))):
                 raise FileError('INVALID_FILE_SET')
             with files.lock('cache'):
                 value = files.fetch(item['artifactId'])
@@ -1485,6 +1485,8 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             if album:
                 return await bot.send_media_group(**options, media=media)
             field = items[0]['presentation']
+            if field == 'video_note':
+                return await bot.send_video_note(**options, video_note=media[0].media)
             return await getattr(bot, 'send_' + field)(**options, **{field: media[0].media},
                                                       caption=media[0].caption,
                                                       parse_mode='MarkdownV2' if media[0].caption else None)
@@ -1893,7 +1895,7 @@ def text_chunks(text, maximum):
 
 def validate_telegram(items):
     """Проверить совместимость ВСЕХ элементов с Bot API до первой отправки."""
-    allowed = {'photo': {'image/jpeg', 'image/png'}, 'video': {'video/mp4'},
+    allowed = {'photo': {'image/jpeg', 'image/png'}, 'video': {'video/mp4'}, 'video_note': {'video/mp4'},
                'audio': {'audio/mpeg', 'audio/mp4', 'audio/x-m4a'},
                'voice': {'audio/ogg', 'audio/opus', 'audio/mpeg', 'audio/mp4'},
                'animation': {'image/gif', 'video/mp4'}, 'document': None}
@@ -1905,6 +1907,8 @@ def validate_telegram(items):
             raise FileError('CHANNEL_FILE_TOO_LARGE')
         if not isinstance(item.get('caption', ''), str):
             raise FileError('INVALID_CAPTION')
+        if kind == 'video_note' and item.get('caption'):
+            raise FileError('VIDEO_NOTE_CAPTION_UNSUPPORTED')
 
 
 def result_envelope(result, agent=None):

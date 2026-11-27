@@ -4,7 +4,7 @@ import { subjects, validateRequest, validateResponse } from '../../artifacts/con
 
 const itemSchema = { type: 'object', additionalProperties: false, required: ['artifactId'], properties: {
   artifactId: { type: 'string', format: 'uuid' }, caption: { type: 'string', maxLength: 65536 },
-  presentation: { enum: ['photo', 'video', 'audio', 'document', 'voice', 'animation'] },
+  presentation: { enum: ['photo', 'video', 'video_note', 'audio', 'document', 'voice', 'animation'] },
 } };
 export const fileMetadataTools = [
   { name: 'files_prepare', description: 'Подготовить упорядоченный набор Artifacts для выдачи: files или album. Вставь возвращённый deliveryMarker отдельной строкой в ответ; подписи и порядок сохранятся во всех каналах.', inputSchema: {

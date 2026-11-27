@@ -1166,7 +1166,7 @@ def validate_params(method, params):
         for item in items:
             if (not isinstance(item, dict) or 'artifactId' not in item or set(item) - {'artifactId', 'caption', 'presentation'}
                     or 'caption' in item and (not isinstance(item['caption'], str) or len(item['caption']) > 65536)
-                    or 'presentation' in item and item['presentation'] not in ('photo', 'video', 'audio', 'document', 'voice', 'animation')):
+                    or 'presentation' in item and item['presentation'] not in ('photo', 'video', 'video_note', 'audio', 'document', 'voice', 'animation')):
                 raise ValueError('Invalid file item')
             uuid.UUID(item['artifactId'])
 

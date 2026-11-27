@@ -283,7 +283,7 @@ class Bridge:
             for item in items:
                 if (not isinstance(item, dict) or set(item) != {'artifact', 'caption', 'presentation'}
                         or not isinstance(item['caption'], str) or len(item['caption']) > 65536
-                        or item['presentation'] not in ('photo', 'video', 'audio', 'voice', 'animation', 'document')
+                        or item['presentation'] not in ('photo', 'video', 'video_note', 'audio', 'voice', 'animation', 'document')
                         or not isinstance(item['artifact'], dict) or set(item['artifact']) != {'artifact_id'}
                         or not isinstance(item['artifact']['artifact_id'], str) or not item['artifact']['artifact_id']):
                     raise RpcError(-32602, 'Invalid file item')
