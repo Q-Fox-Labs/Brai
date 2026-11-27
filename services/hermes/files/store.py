@@ -14,7 +14,6 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
-import tempfile
 import threading
 import uuid
 
@@ -55,6 +54,8 @@ class FileStore:
         self.cache.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.root.resolve() != self.root or self.cache.resolve() != self.cache:
             raise FileError("UNSAFE_FILES_ROOT")
+        root_info = self.root.stat(follow_symlinks=False)
+        self._reply_root_identity = (root_info.st_dev, root_info.st_ino)
         self.work = self.root / "work"
         self.work.mkdir(mode=0o700, exist_ok=True)
         self.read_roots = tuple(Path(p).resolve() for p in (*read_roots, self.work, self.cache))
@@ -116,22 +117,38 @@ class FileStore:
                 raise FileError("OWNER_MISMATCH")
             db.execute("INSERT OR IGNORE INTO settings VALUES (?)", (owner,))
 
+    @contextmanager
+    def _reply_directory(self):
+        """Закрепить исходный каталог профиля для всех операций с настройкой."""
+        try:
+            directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as error:
+            raise FileError('REPLY_MODE_DIRECTORY_INVALID') from error
+        try:
+            info = os.fstat(directory)
+            if (info.st_dev, info.st_ino) != self._reply_root_identity:
+                raise FileError('REPLY_MODE_DIRECTORY_INVALID')
+            yield directory
+        finally:
+            os.close(directory)
+
     def reply_mode(self, source):
         """Вернуть сохранённый режим конкретного участника, чата и темы."""
-        path = self.root / ('reply-mode-' + key(source) + '.json')
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            return None
-        except OSError as error:
-            raise FileError('INVALID_REPLY_MODE') from error
-        try:
-            with os.fdopen(fd, 'r', encoding='utf-8') as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise FileError('INVALID_REPLY_MODE')
-                value = json.load(handle)
-        except (OSError, ValueError, UnicodeError) as error:
-            raise FileError('INVALID_REPLY_MODE') from error
+        name = 'reply-mode-' + key(source) + '.json'
+        with self._reply_directory() as directory:
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                raise FileError('INVALID_REPLY_MODE') from error
+            try:
+                with os.fdopen(fd, 'r', encoding='utf-8') as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        raise FileError('INVALID_REPLY_MODE')
+                    value = json.load(handle)
+            except (OSError, ValueError, UnicodeError) as error:
+                raise FileError('INVALID_REPLY_MODE') from error
         if (not isinstance(value, dict) or set(value) != {'version', 'owner', 'mode'}
                 or type(value['version']) is not int or value['version'] != 1
                 or value['owner'] != self.owner or value['mode'] not in ('voice', 'video_note', 'off')):
@@ -143,23 +160,40 @@ class FileStore:
         if mode not in ('voice', 'video_note', 'off'):
             raise FileError('INVALID_REPLY_MODE')
         identity = key(source)
-        target = self.root / ('reply-mode-' + identity + '.json')
-        with self.lock(['reply-mode', identity]):
-            fd, temporary = tempfile.mkstemp(prefix='.reply-mode-', dir=self.root)
+        target = 'reply-mode-' + identity + '.json'
+        temporary = '.reply-mode-' + uuid.uuid4().hex
+        with self._reply_directory() as directory:
+            lock_name = 'lock-' + key(['reply-mode', identity])
             try:
-                with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                    json.dump({'version': 1, 'owner': self.owner, 'mode': mode}, handle, ensure_ascii=False)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, target)
-                directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+                lock_fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                  0o600, dir_fd=directory)
+            except OSError as error:
+                raise FileError('REPLY_MODE_LOCK_INVALID') from error
+            try:
+                info = os.fstat(lock_fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise FileError('REPLY_MODE_LOCK_INVALID')
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                replaced = False
                 try:
+                    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=directory)
+                    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                        json.dump({'version': 1, 'owner': self.owner, 'mode': mode}, handle, ensure_ascii=False)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(temporary, target, src_dir_fd=directory, dst_dir_fd=directory)
+                    replaced = True
                     os.fsync(directory)
+                except OSError as error:
+                    raise FileError('REPLY_MODE_COMMIT_UNKNOWN' if replaced else 'REPLY_MODE_WRITE_FAILED') from error
                 finally:
-                    os.close(directory)
+                    try:
+                        os.unlink(temporary, dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
             finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+                os.close(lock_fd)
 
     @contextmanager
     def db(self):

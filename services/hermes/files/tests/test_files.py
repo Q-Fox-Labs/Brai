@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import mimetypes
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -330,6 +331,52 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                           ['voice', 'video_note'] * 6))
         self.assertIn(self.store.reply_mode(source), ('voice', 'video_note'))
         self.assertEqual(outside.read_text(), 'untouched')
+
+    def test_reply_mode_rejects_fifo_and_replaced_profile_root(self):
+        from files.store import key
+        source = {'platform': 'telegram', 'chat': '42', 'sender': '11'}
+        root = self.root / 'state'
+        target = root / ('reply-mode-' + key(source) + '.json')
+        os.mkfifo(target)
+        with self.assertRaises(FileError):
+            self.store.reply_mode(source)
+        target.unlink()
+        self.store.set_reply_mode(source, 'voice')
+        root.rename(self.root / 'original-state')
+        root.mkdir()
+        with self.assertRaises(FileError):
+            self.store.reply_mode(source)
+        with self.assertRaises(FileError):
+            self.store.set_reply_mode(source, 'video_note')
+        self.assertEqual(list(root.iterdir()), [])
+
+    def test_reply_mode_lock_symlink_and_write_failures_are_not_silent(self):
+        import stat
+        from files.store import key
+        source = {'platform': 'telegram', 'chat': '42', 'sender': '11'}
+        identity = key(source)
+        lock = self.root / 'state' / ('lock-' + key(['reply-mode', identity]))
+        outside = self.root / 'outside-lock'
+        outside.write_text('untouched')
+        lock.symlink_to(outside)
+        with self.assertRaisesRegex(FileError, 'REPLY_MODE_LOCK_INVALID'):
+            self.store.set_reply_mode(source, 'voice')
+        self.assertEqual(outside.read_text(), 'untouched')
+        lock.unlink()
+        self.store.set_reply_mode(source, 'voice')
+        with patch('files.store.os.replace', side_effect=OSError('synthetic')):
+            with self.assertRaisesRegex(FileError, 'REPLY_MODE_WRITE_FAILED'):
+                self.store.set_reply_mode(source, 'video_note')
+        self.assertEqual(self.store.reply_mode(source), 'voice')
+        fsync = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('synthetic directory sync failure')
+            return fsync(fd)
+        with patch('files.store.os.fsync', side_effect=fail_directory):
+            with self.assertRaisesRegex(FileError, 'REPLY_MODE_COMMIT_UNKNOWN'):
+                self.store.set_reply_mode(source, 'video_note')
+        self.assertEqual(self.store.reply_mode(source), 'video_note')
 
     def test_text_only_mode_survives_a_new_session(self):
         source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
