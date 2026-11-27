@@ -9,7 +9,7 @@ import ts from "typescript";
 const path = new URL("../server/admin-download.ts", import.meta.url), require = createRequire(path);
 const output = ts.transpileModule(readFileSync(path, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 class GatewayError extends Error { constructor(_status: number, code: string) { super(code); } }
-const mod = { exports: {} as { adminDownload: (value: unknown, id: string, signal: AbortSignal, preview?: boolean, range?: string | null) => Promise<Response> } };
+const mod = { exports: {} as { adminDownload: (value: unknown, id: string, signal: AbortSignal, preview?: boolean, range?: string | null, ifRange?: string | null) => Promise<Response> } };
 new Function("require", "module", "exports", output)((name: string) => name === "./gateway" ? { GatewayError } : require(name), mod, mod.exports);
 const id = "11111111-1111-4111-8111-111111111111";
 test("64 MiB download streams bounded chunks with exact target and digest", async () => {
@@ -83,10 +83,32 @@ test("media seeking reads only the normalized range from Artifacts", async () =>
    const before=reads,response=await mod.exports.adminDownload(descriptor,id,new AbortController().signal,true,range);
    assert.equal(response.status,416);assert.equal(response.headers.get("content-range"),"bytes */10");assert.equal(reads,before);
   }
-  const download=await mod.exports.adminDownload(descriptor,id,new AbortController().signal,false,"bytes=2-5");
-  assert.equal(download.status,200);assert.equal(await download.text(),"0123456789");
+  const initial = await mod.exports.adminDownload(descriptor, id, new AbortController().signal);
+  const etag = initial.headers.get("etag");
+  assert.equal(initial.status, 200);
+  assert.equal(initial.headers.get("accept-ranges"), "bytes");
+  assert.equal(etag, `"${descriptor.sha256}"`);
+  const prefix = (await initial.text()).slice(0, 4);
+  const resumed = await mod.exports.adminDownload(descriptor, id, new AbortController().signal, false, "bytes=4-", etag);
+  assert.equal(resumed.status, 206);
+  assert.equal(resumed.headers.get("content-range"), "bytes 4-9/10");
+  assert.equal(resumed.headers.get("etag"), etag);
+  assert.match(resumed.headers.get("content-disposition")!, /^attachment;/);
+  assert.equal(createHash("sha256").update(prefix + await resumed.text()).digest("hex"), descriptor.sha256);
+  for (const validator of ['"old"', `W/${etag}`]) {
+   const download = await mod.exports.adminDownload(descriptor, id, new AbortController().signal, false, "bytes=4-", validator);
+   assert.equal(download.status, 200);
+   assert.equal(await download.text(), "0123456789");
+  }
   const bad=await mod.exports.adminDownload({...descriptor,sha256:"0".repeat(64)},id,new AbortController().signal,true,"bytes=0-");
   await assert.rejects(bad.text(),/ARTIFACT_INTEGRITY/);
+  globalThis.fetch = (async (_url, options) => {
+   assert.equal(new Headers(options?.headers).get("range"), null);
+   return new Response("0X23456789");
+  }) as typeof fetch;
+  const corruptResume = await mod.exports.adminDownload(descriptor, id, new AbortController().signal, false, "bytes=4-", etag);
+  assert.equal(corruptResume.status, 206);
+  await assert.rejects(corruptResume.text(), /ARTIFACT_INTEGRITY/);
 
   for (const invalid of [
    new Response(bytes),

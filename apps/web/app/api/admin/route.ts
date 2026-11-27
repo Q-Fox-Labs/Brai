@@ -60,7 +60,7 @@ async function handle(request: Request) {
     if (artifact?.ownerId !== input.userId || artifact?.status !== "ready") throw new GatewayError(503, "SOURCE_UNAVAILABLE");
     if (typeof artifact.sizeBytes === "number" && artifact.sizeBytes > 2 * 1024 ** 3) throw new GatewayError(413, "PAYLOAD_TOO_LARGE");
    }
-   return await adminDownload(result.body, input.artifactId, request.signal, preview === "1", request.headers.get("range"));
+   return await adminDownload(result.body, input.artifactId, request.signal, preview === "1", request.headers.get("range"), request.headers.get("if-range"));
   }
   return authResponse(result);
  } catch (error) { return failure(error instanceof GatewayError ? error : new GatewayError(503, "ADMIN_UNAVAILABLE")); }
