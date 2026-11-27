@@ -255,7 +255,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             bridge.sent.add((('123', '77'), str(message_id)))
         class Peer:
             async def call(self, method, params):
-                return await bridge.send(**params)
+                return await getattr(bridge, method)(**params)
         async def publish_file(path):
             return {'artifact_id': self.files.publish(path, 'ipc-publish')['artifactId']}
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
@@ -820,6 +820,50 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0][1]['message_thread_id'], 77)
         self.assertEqual(sent[0][1]['reply_to_message_id'], 1)
         self.assertNotIn('caption', sent[0][1])
+
+    async def test_video_note_uses_additive_method_and_old_send_rejects_it(self):
+        sent = AsyncMock(return_value={'success': True, 'message_id': '42'})
+        bridge = Bridge('owner', '123', 101, '/unused', sent, None)
+        bridge.routes.add(('123', '77'))
+        payload = {'chat_id': '123', 'metadata': {'thread_id': '77'}, 'kind': 'single',
+                   'fallback': False, 'items': [{'artifact': {'artifact_id': 'synthetic'},
+                                                'caption': '', 'presentation': 'video_note'}]}
+        with self.assertRaises(RpcError):
+            await bridge.send('send_file_set', payload)
+        sent.assert_not_awaited()
+        receipt = await bridge.send_video_note('send_file_set', payload)
+        self.assertTrue(receipt['success'])
+        self.assertEqual(sent.await_count, 1)
+        with self.assertRaises(RpcError):
+            await bridge.send_video_note('send_file_set', {**payload, 'kind': 'album'})
+
+    async def test_old_ingress_keeps_video_note_queued_for_compatible_ingress(self):
+        from identity.delivery_journal import DeliveryJournal
+        from identity.scope import input_delivery
+        peer = NS(call=AsyncMock(side_effect=RpcError(-32601, 'Method not found')))
+        adapter = make_adapter(NS(typing_indicator=True), 'telegram', peer, None)
+        journal = DeliveryJournal(self.root / 'delivery.sqlite3', 'owner')
+        ident, digest = '1' * 64, '2' * 64
+        journal.begin_input(ident, digest)
+        adapter._brai_delivery_journal = journal
+        payload = {'chat_id': '123', 'metadata': {'thread_id': '77'}, 'kind': 'single',
+                   'fallback': False, 'items': [{'artifact': {'artifact_id': 'synthetic'},
+                                                'caption': '', 'presentation': 'video_note'}]}
+        token = input_delivery.set(ident)
+        try:
+            result = await adapter._action('send_file_set', payload)
+        finally:
+            input_delivery.reset(token)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_kind, 'delivery_pending')
+        self.assertEqual(peer.call.await_args.args[0], 'send_video_note')
+        self.assertEqual(len(journal.pending_outputs()), 1)
+        worker = Worker(101, 'owner', '123', None)
+        worker.delivery_journal = journal
+        worker.peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': '42'}))
+        self.assertEqual(await worker.flush_outputs('owner'), {'sent': 1})
+        self.assertEqual(worker.peer.call.await_args.args[0], 'send_video_note')
+        self.assertEqual(journal.pending_outputs(), [])
 
     async def test_unknown_voice_outcome_never_becomes_text_success(self):
         path = self.input / 'speech.ogg'

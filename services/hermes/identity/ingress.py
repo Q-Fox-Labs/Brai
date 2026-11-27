@@ -58,7 +58,7 @@ class Bridge:
                 writer.close()
                 await writer.wait_closed()
                 raise PermissionError('Unexpected worker UID')
-            peer = Peer(reader, writer, {'send': self.send, 'turn_ended': self.turn_ended,
+            peer = Peer(reader, writer, {'send': self.send, 'send_video_note': self.send_video_note, 'turn_ended': self.turn_ended,
                              'telegram_api': self.call_telegram_api, 'telegram_topic_rename': self.call_telegram_topic_rename,
                              'chat_states': self.read_chat_states,
                              'recovery.check': self.check_recovery})
@@ -233,6 +233,18 @@ class Bridge:
 
     async def send(self, action, payload, scope_id=UNSCOPED, delivery_id=None, input_delivery_id=None):
         """Доставить только в разрешённый исходный chat/thread и вернуть реальный результат."""
+        return await self._send(action, payload, scope_id, delivery_id, input_delivery_id, video_note=False)
+
+    async def send_video_note(self, action, payload, scope_id=UNSCOPED, delivery_id=None, input_delivery_id=None):
+        """Добавочный метод не меняет семантику старого send при смешанных версиях."""
+        items = payload.get('items') if isinstance(payload, dict) else None
+        if (action != 'send_file_set' or not isinstance(payload, dict) or payload.get('kind') != 'single'
+                or not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict)
+                or items[0].get('presentation') != 'video_note'):
+            raise RpcError(-32602, 'Invalid video note')
+        return await self._send(action, payload, scope_id, delivery_id, input_delivery_id, video_note=True)
+
+    async def _send(self, action, payload, scope_id, delivery_id, input_delivery_id, *, video_note):
         if action not in _ACTIONS or not isinstance(payload, dict):
             raise RpcError(-32602, 'Unsupported action')
         if self.require_scope and scope_id is UNSCOPED:
@@ -284,7 +296,8 @@ class Bridge:
             for item in items:
                 if (not isinstance(item, dict) or set(item) != {'artifact', 'caption', 'presentation'}
                         or not isinstance(item['caption'], str) or len(item['caption']) > 65536
-                        or item['presentation'] not in ('photo', 'video', 'video_note', 'audio', 'voice', 'animation', 'document')
+                        or item['presentation'] not in (('video_note',) if video_note else
+                                                       ('photo', 'video', 'audio', 'voice', 'animation', 'document'))
                         or not isinstance(item['artifact'], dict) or set(item['artifact']) != {'artifact_id'}
                         or not isinstance(item['artifact']['artifact_id'], str) or not item['artifact']['artifact_id']):
                     raise RpcError(-32602, 'Invalid file item')

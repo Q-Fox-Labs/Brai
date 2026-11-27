@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from contextlib import contextmanager
 from pathlib import Path
-from .adapter import make_adapter
+from .adapter import delivery_method, make_adapter
 from .ipc import MAX_FRAME, Peer, RpcError, peer_uid
 
 
@@ -1151,7 +1151,8 @@ class Worker:
         sent = 0
         async with self.output_lock:
             for row in self.delivery_journal.pending_outputs():
-                value = await self.peer.call('send', {'action': row['action'], **row['payload'], 'delivery_id': row['id']})
+                value = await self.peer.call(delivery_method(row['action'], row['payload'].get('payload')),
+                                             {'action': row['action'], **row['payload'], 'delivery_id': row['id']})
                 if value.get('success') and value.get('message_id'):
                     self.delivery_journal.output_state(row['id'], 'sent', value)
                     sent += 1

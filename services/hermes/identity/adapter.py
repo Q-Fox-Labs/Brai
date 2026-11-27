@@ -15,6 +15,15 @@ from .scope import (delivery_scope, input_delivery, ephemeral_input, final_text_
 from .telegram_proxy import BotProxy
 
 
+def delivery_method(action, payload):
+    """Кружочек использует новый метод; старый ingress не получает неизвестный тип."""
+    items = payload.get('items', []) if isinstance(payload, dict) else []
+    if action == 'send_file_set' and isinstance(items, list) and any(
+            isinstance(item, dict) and item.get('presentation') == 'video_note' for item in items):
+        return 'send_video_note'
+    return 'send'
+
+
 def _streamed_batches(items, media, source, force_document):
     """Сохранить native типы и порядок явно запрошенных потоковых файлов."""
     from files.store import delivery_plan
@@ -480,7 +489,8 @@ def make_adapter(config, platform, peer, publish_file):
                     # Edit/delete/draft либо иной content разрывает соседство ответов.
                     self._brai_last_outputs.pop(route, None)
                 if value is None:
-                    value = await peer.call('send', {'action': name, **wire, **({'delivery_id': ident} if ident else {})})
+                    value = await peer.call(delivery_method(name, payload),
+                                            {'action': name, **wire, **({'delivery_id': ident} if ident else {})})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
                     raise ValueError('invalid send result')
                 if ident and not reused and value.get('success') and value.get('message_id'):
