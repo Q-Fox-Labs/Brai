@@ -70,6 +70,13 @@ def make_adapter(config, platform, peer, publish_file):
             self._interactive_actor = ContextVar('brai_identity_interactive_actor', default=None)
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
+        def _wants_auto_tts(self, event, *args, **kwargs):
+            # Native voice-input fallback must not send a voice bubble in a video-note or text-only mode.
+            import brai_files
+            if brai_files.reply_mode_for_event(event) in ('video_note', 'off'):
+                return False
+            return super()._wants_auto_tts(event, *args, **kwargs)
+
         async def _process_message_background(self, event, session_key):
             """Следующий queued input несёт собственную квитанцию, а не контекст старой task."""
             external = not getattr(event, 'internal', False)

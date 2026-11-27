@@ -148,6 +148,186 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError('fixture failure')
         self.assertEqual(agent.ephemeral_system_prompt, 'owner policy')
 
+    def test_reply_mode_survives_restart_and_is_scoped_to_the_conversation(self):
+        source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
+        agent = SimpleNamespace(session_id='first-session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Включи кружочки'):
+                output = native.final_text('[[brai_reply_mode:video_note]]\nГотово', 'turn-1')
+            native.result_envelope({'final_response': output}, agent)
+        self.assertEqual(output.strip(), 'Готово')
+        restarted = FileStore(self.root / 'state', self.cache, 'owner', self.backend, [self.input])
+        route = native.source_of(SimpleNamespace(source=source))
+        self.assertEqual(restarted.reply_mode(route), 'video_note')
+        for changed in ({'thread': '8'}, {'sender': '12'}, {'chat': '43'}, {'account': 'instance-1:other'}):
+            self.assertIsNone(restarted.reply_mode({**route, **changed}))
+        second = SimpleNamespace(session_id='new-session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '2'):
+            with native.conversation(second, 'Следующий вопрос'):
+                self.assertIn('Сейчас: кружочек с апельсином', second.ephemeral_system_prompt)
+                output = native.final_text('[[brai_reply_mode:voice]]\nГотово', 'turn-2')
+            native.result_envelope({'final_response': output}, second)
+        self.assertEqual(restarted.reply_mode(route), 'voice')
+
+    def test_linked_accounts_in_one_group_keep_distinct_reply_modes(self):
+        first = SimpleNamespace(platform='telegram', profile='dev', chat_id='-42', thread_id='7',
+                                user_id='123', _brai_actor_id='123')
+        second = SimpleNamespace(platform='telegram', profile='dev', chat_id='-42', thread_id='7',
+                                 user_id='123', _brai_actor_id='456')
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(first, '1'):
+            with native.conversation(agent, 'Кружочки'):
+                output = native.final_text('[[brai_reply_mode:video_note]]\nГотово', 'turn')
+            native.result_envelope({'final_response': output}, agent)
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(second, '2'):
+            with native.conversation(agent, 'Вопрос'):
+                self.assertIn('Сейчас: определяется историей беседы', agent.ephemeral_system_prompt)
+                self.assertNotIn('Сейчас: кружочек с апельсином', agent.ephemeral_system_prompt)
+            native.result_envelope({'final_response': 'Ответ'}, agent)
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(first, '3'):
+            with native.conversation(agent, 'Вопрос'):
+                self.assertIn('Сейчас: кружочек с апельсином', agent.ephemeral_system_prompt)
+            native.result_envelope({'final_response': 'Ответ'}, agent)
+
+    def test_failed_or_cancelled_turn_does_not_change_reply_mode(self):
+        source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
+        route = native.source_of(SimpleNamespace(source=source))
+        self.store.set_reply_mode(route, 'voice')
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Включи кружочки'):
+                output = native.final_text('[[brai_reply_mode:video_note]]\nОтвет', 'turn')
+            native.result_envelope({'final_response': output, 'interrupted': True}, agent)
+        self.assertEqual(self.store.reply_mode(route), 'voice')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '2'):
+            with self.assertRaises(RuntimeError):
+                with native.conversation(agent, 'Включи кружочки'):
+                    native.final_text('[[brai_reply_mode:video_note]]\nОтвет', 'turn-2')
+                    raise RuntimeError('cancelled')
+        self.assertEqual(self.store.reply_mode(route), 'voice')
+
+    def test_saved_video_mode_converts_native_voice_tags_and_switches_back(self):
+        source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
+        route = native.source_of(SimpleNamespace(source=source))
+        self.store.set_reply_mode(route, 'video_note')
+        audio_a, audio_b, video = (self.input / name for name in ('a.ogg', 'b.ogg', 'note.mp4'))
+        audio_a.write_bytes(b'OggS a')
+        audio_b.write_bytes(b'OggS b')
+        video.write_bytes(b'video')
+        artifact = self.store.resolve(str(video), ['test', 'note'])
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Вопрос'):
+                with patch('files.video_note.render_video_notes', return_value=[artifact]) as render:
+                    output = native.final_text(f'[[audio_as_voice]]\nMEDIA:{audio_a}\nMEDIA:{audio_b}', 'turn')
+                self.assertEqual(render.call_count, 2)
+            native.result_envelope({'final_response': output}, agent)
+        paths = [json.loads(line.removeprefix('MEDIA:')) for line in output.splitlines() if line.startswith('MEDIA:')]
+        items, _ = native.output_items(paths)
+        self.assertEqual([item['presentation'] for item in items], ['video_note', 'video_note'])
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '2'):
+            with native.conversation(agent, 'Теперь голосом'):
+                with patch('files.video_note.render_video_notes') as render:
+                    output = native.final_text(f'[[brai_reply_mode:voice]]\n[[audio_as_voice]]\nMEDIA:{audio_a}', 'turn-2')
+                render.assert_not_called()
+            native.result_envelope({'final_response': output}, agent)
+        self.assertEqual(self.store.reply_mode(route), 'voice')
+
+    def test_reply_mode_is_preserved_by_sqlite_backup_and_restore(self):
+        source = {'platform': 'telegram', 'account': 'instance-1:dev', 'chat': '42', 'thread': '7', 'sender': '11'}
+        self.store.set_reply_mode(source, 'video_note')
+        restored_root = self.root / 'restored'
+        restored_root.mkdir()
+        with sqlite3.connect(self.root / 'state' / 'files.sqlite') as source_db:
+            with sqlite3.connect(restored_root / 'files.sqlite') as backup_db:
+                source_db.backup(backup_db)
+        restored = FileStore(restored_root, self.root / 'restored-cache', 'owner', self.backend, [self.input])
+        self.assertEqual(restored.reply_mode(source), 'video_note')
+
+    def test_worker_commits_mode_only_at_delivery_for_matching_authenticated_actor(self):
+        source = SimpleNamespace(platform='telegram', chat_id='1', thread_id='', user_id='2',
+                                 _brai_actor_id='3')
+        event = SimpleNamespace(source=source)
+        route = {**native.source_of(event), 'sender': '3'}
+        agent = SimpleNamespace(session_id='s', ephemeral_system_prompt='')
+        with patch.dict('os.environ', {'BRAI_IDENTITY_MODE': 'worker'}), \
+             patch('identity.instructions.system_context', return_value=''), \
+             patch('identity.instructions.without_legacy_dialogues', side_effect=lambda value: value), \
+             patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Кружочки'):
+                output = native.final_text('[[brai_reply_mode:video_note]]\nГотово', 'turn')
+            result = native.result_envelope({'final_response': output, 'completed': True}, agent)
+        self.assertIsNone(self.store.reply_mode(route))
+        wrong = SimpleNamespace(source=SimpleNamespace(platform='telegram', chat_id='1',
+                                                        thread_id='', user_id='2', _brai_actor_id='4'))
+        native.commit_reply_mode(dict(result), wrong)
+        self.assertIsNone(self.store.reply_mode(route))
+        native.commit_reply_mode(result, event)
+        self.assertEqual(self.store.reply_mode(route), 'video_note')
+        self.assertNotIn('_brai_reply_mode', result)
+
+    def test_old_file_database_gains_reply_modes_without_losing_data(self):
+        source = {'platform': 'telegram', 'account': 'instance:dev', 'chat': '42', 'thread': '7', 'sender': '11'}
+        with self.store.db() as db:
+            db.execute('DROP TABLE reply_modes')
+            db.execute('INSERT INTO tasks VALUES (?,?)', ('existing-task', 'existing-operation'))
+        upgraded = FileStore(self.root / 'state', self.cache, 'owner', self.backend, [self.input])
+        self.assertIsNone(upgraded.reply_mode(source))
+        upgraded.set_reply_mode(source, 'voice')
+        with upgraded.db() as db:
+            self.assertEqual(db.execute('SELECT operation FROM tasks WHERE identity=?', ('existing-task',)).fetchone()[0],
+                             'existing-operation')
+        self.assertEqual(upgraded.reply_mode(source), 'voice')
+
+    def test_text_only_mode_survives_a_new_session(self):
+        source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
+        route = native.source_of(SimpleNamespace(source=source))
+        self.store.set_reply_mode(route, 'video_note')
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Теперь только текст'):
+                output = native.final_text('[[brai_reply_mode:off]]\nХорошо', 'turn')
+            native.result_envelope({'final_response': output}, agent)
+        self.assertEqual(self.store.reply_mode(route), 'off')
+        agent = SimpleNamespace(session_id='new-session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '2'):
+            with native.conversation(agent, 'Следующий вопрос'):
+                self.assertIn('Сейчас: только текст', agent.ephemeral_system_prompt)
+
+    def test_streaming_hides_fragmented_internal_markers_and_preserves_callbacks(self):
+        source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
+        streamed, interim = [], []
+        def stream(value):
+            streamed.append(value)
+        def interim_callback(value, **kwargs):
+            interim.append((value, kwargs))
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='',
+                                stream_delta_callback=stream, interim_assistant_callback=interim_callback)
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Кружочки'):
+                for fragment in ('Привет ', '[[br', 'ai_reply_mode:vid', 'eo_note]]',
+                                 '[[audio_as_', 'video_note]]', 'мир'):
+                    agent.stream_delta_callback(fragment)
+                agent.stream_delta_callback(None)
+                agent.interim_assistant_callback('Текст [[brai_reply_mode:voice]]', already_streamed=False)
+                self.assertEqual(''.join(part for part in streamed if part is not None), 'Привет мир')
+                self.assertEqual(interim, [('Текст ', {'already_streamed': False})])
+            native.result_envelope({'final_response': 'Ответ'}, agent)
+        self.assertIs(agent.stream_delta_callback, stream)
+        self.assertIs(agent.interim_assistant_callback, interim_callback)
+
+    def test_conflicting_mode_markers_do_not_change_preference(self):
+        source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
+        route = native.source_of(SimpleNamespace(source=source))
+        self.store.set_reply_mode(route, 'voice')
+        agent = SimpleNamespace(session_id='session', ephemeral_system_prompt='')
+        with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
+            with native.conversation(agent, 'Переключи режим'):
+                output = native.final_text('[[brai_reply_mode:video_note]]\n[[brai_reply_mode:off]]\nОтвет', 'turn')
+            native.result_envelope({'final_response': output}, agent)
+        self.assertEqual(self.store.reply_mode(route), 'voice')
+        self.assertNotIn('brai_reply_mode:', output)
+
     def test_failure_footer_reports_issue_without_technical_details(self):
         for header in (
             '⚠️ Проверка изменений файлов: 1 правок файлов в этом ходе НЕ УДАЛИСЬ.',
@@ -1079,6 +1259,21 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Ответ', response)
         self.assertNotIn('audio_as_video_note', response)
         self.assertIn('Не удалось приложить файлы', response)
+
+    def test_mixed_video_notes_preserve_original_attachment_order(self):
+        first = self.input / 'first.ogg'
+        second = self.input / 'second.ogg'
+        video = self.input / 'note.mp4'
+        first.write_bytes(b'OggS first')
+        second.write_bytes(b'OggS second')
+        video.write_bytes(b'video')
+        artifact = self.store.resolve(str(video), ['test', 'note'])
+        with patch('files.video_note.render_video_notes', return_value=[artifact]):
+            response = native.final_text(f'MEDIA:{first}\n[[audio_as_video_note]]\nMEDIA:{second}', 'turn')
+        paths = [json.loads(line.removeprefix('MEDIA:')) for line in response.splitlines() if line.startswith('MEDIA:')]
+        items, _ = native.output_items(paths)
+        self.assertEqual([item['presentation'] for item in items], ['voice', 'video_note'])
+        self.assertEqual([item['file']['filename'] for item in items], ['first.ogg', 'note.mp4'])
 
     def test_long_video_note_preserves_every_audio_sample(self):
         from files.video_note import render_video_notes

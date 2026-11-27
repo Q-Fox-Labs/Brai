@@ -367,7 +367,10 @@ class Worker:
             original_voice_check = getattr(runner, '_should_send_voice_reply', None)
             if callable(original_voice_check):
                 def voice_check(event, *args, **kwargs):
-                    return False if getattr(event, '_brai_voice_done', False) else original_voice_check(event, *args, **kwargs)
+                    import brai_files
+                    if getattr(event, '_brai_voice_done', False) or brai_files.reply_mode_for_event(event) in ('video_note', 'off'):
+                        return False
+                    return original_voice_check(event, *args, **kwargs)
                 runner._should_send_voice_reply = voice_check
             async def deliver(event, source, entry, session_key, generation, result, *args, **kwargs):
                 from .scope import continuation_turn, input_delivery, operator_assignment, prepared_response
@@ -381,6 +384,10 @@ class Worker:
                     and not any(result.get(key) for key in ('failed', 'partial', 'error', 'interrupted'))
                     and result.get('completed') is not False
                     and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable'))
+                current = getattr(runner, '_is_session_run_current', None)
+                if event._brai_successful_turn and (not callable(current) or current(session_key, generation)):
+                    import brai_files
+                    brai_files.commit_reply_mode(result, event)
                 if (continuation_turn.get() and isinstance(result, dict)
                         and (result.get('failed') or (result.get('partial') and result.get('error'))
                              or (isinstance(guardrail, dict)
@@ -422,7 +429,10 @@ class Worker:
                     saved_response = response or footer
                     preview = await adapter._preview_prepared_response(saved_response, event, session_key,
                         streamed=streaming_result, media=streaming_media)
-                    self.delivery_journal.save_response(session_key, ident, saved_response, fields, source.to_dict(), preview)
+                    saved_source = source.to_dict()
+                    if getattr(source, '_brai_actor_id', None):
+                        saved_source['brai_actor_id'] = source._brai_actor_id
+                    self.delivery_journal.save_response(session_key, ident, saved_response, fields, saved_source, preview)
                     prepared_response.set((session_key, ident, saved_response))
                     if streaming_result:
                         event._brai_streamed_response = True
@@ -711,6 +721,9 @@ class Worker:
             if not isinstance(saved.get('source'), dict):
                 continue
             source = SessionSource.from_dict(saved['source'])
+            actor = saved['source'].get('brai_actor_id')
+            if isinstance(actor, str) and actor.isascii() and actor.isdecimal() and int(actor) > 0:
+                source._brai_actor_id = actor
             task = getattr(adapter, '_session_tasks', {}).get(key)
             if ((task is not None and not task.done()) or runner._is_session_running(key)
                     or not self.route_allowed(source, recovery=True)
@@ -1176,6 +1189,10 @@ class Worker:
         if guest_mode() and str(event.get('text', '')).lstrip().startswith('/') and str(event.get('text', '')).split()[0].split('@')[0] not in ('/stop', '/cancel'):
             raise RpcError(-32603, 'Эта команда недоступна для гостя')
         source = SessionSource.from_dict(event['source'])
+        actor = event['source'].get('brai_actor_id', str(source.user_id))
+        if not isinstance(actor, str) or not actor.isascii() or not actor.isdecimal() or int(actor) <= 0:
+            raise RpcError(-32602, 'Invalid Telegram actor')
+        source._brai_actor_id = actor
         if self.operator_route == self._chat_route(source) and not _cancel_control:
             return {'accepted': False, 'turn_id': None}
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:

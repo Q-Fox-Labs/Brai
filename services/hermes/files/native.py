@@ -27,6 +27,7 @@ _operation = ContextVar('brai_file_operation', default=None)
 _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _conversation_source = ContextVar('brai_file_conversation_source', default=None)
+_reply_mode_candidate = ContextVar('brai_reply_mode_candidate', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inbound_attachments = ContextVar('brai_file_inbound_attachments', default=())
 _VOICE_RETRY_ADMISSION = object()
@@ -35,6 +36,8 @@ _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _VIDEO_NOTE = re.compile(r'\[\[audio_as_video_note\]\][ \t]*\n[ \t]*' + _MEDIA.pattern)
 _VIDEO_NOTE_MARKER = re.compile(r'\[\[audio_as_video_note\]\]')
+_REPLY_MODE = re.compile(r'\[\[brai_reply_mode:(voice|video_note|off)\]\]')
+_VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
 _ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы. Номер в журнале: '
@@ -49,6 +52,33 @@ _TECHNICAL_FAILURE = re.compile(
     r'TEMPORARY_WORKDIR_REQUIRED|ARTIFACT_DIRECTORY_REQUIRED|FILE_SCOPE_DENIED)\b|'
     r'\b(?:exit[_ ]code|код выхода)\s*[:=—-]?\s*[1-9]\d*\b)'
 )
+
+
+def _filtered_reply_stream(callback):
+    """Не выводить служебные маркеры даже при разделении между потоковыми фрагментами."""
+    markers = ('[[brai_reply_mode:voice]]', '[[brai_reply_mode:video_note]]',
+               '[[brai_reply_mode:off]]', '[[audio_as_video_note]]')
+    pending = ''
+
+    def send(fragment):
+        nonlocal pending
+        if fragment is None:
+            if pending in ('[', '[['):
+                callback(pending)
+            pending = ''
+            return callback(None)
+        text = pending + fragment
+        for marker in markers:
+            text = text.replace(marker, '')
+        length = max((size for marker in markers for size in range(1, len(marker))
+                      if text.endswith(marker[:size])), default=0)
+        pending = text[-length:] if length else ''
+        visible = text[:-length] if length else text
+        if visible:
+            return callback(visible)
+
+    return send
+
 
 def register_telegram_observer(observer):
     """Подключить наблюдателя Telegram к общей файловой границе текущего gateway."""
@@ -100,6 +130,26 @@ def source_of(event):
     return {'platform': str(getattr(s.platform, 'value', s.platform)),
             'account': store().account + ':' + str(getattr(s, 'profile', '') or ''),
             'chat': str(s.chat_id or ''), 'thread': str(s.thread_id or ''), 'sender': str(s.user_id or '')}
+
+
+def reply_mode_for_event(event):
+    """Look up the human's format without changing the native workspace identity."""
+    route = source_of(event)
+    if route['platform'] != 'telegram':
+        return None
+    route['sender'] = str(getattr(event.source, '_brai_actor_id', None) or route['sender'])
+    return store().reply_mode(route)
+
+
+def commit_reply_mode(result, event):
+    """Commit only the completed worker result bound to the authenticated source."""
+    candidate = result.pop('_brai_reply_mode', None) if isinstance(result, dict) else None
+    if not isinstance(candidate, dict) or set(candidate) != {'source', 'mode'}:
+        return
+    route = source_of(event)
+    route['sender'] = str(getattr(event.source, '_brai_actor_id', None) or route['sender'])
+    if route['platform'] == 'telegram' and candidate['source'] == route:
+        store().set_reply_mode(route, candidate['mode'])
 
 
 def batch_key(event, group):
@@ -905,10 +955,12 @@ def conversation(agent, user_message, task_id=None):
     inbound = _inbound.get()
     session = str(getattr(agent, 'session_id', '') or '')
     source = inbound[0] if inbound is not None else _conversation_source.get()
+    route = None
     if source is not None and session and getattr(source, 'user_id', None):
         # The gateway supplies this identity after authentication; model arguments cannot select it.
         event = type('ConversationSource', (), {'source': source})()
-        store().bind_workspace(operation, ['conversation', source_of(event), session])
+        route = source_of(event)
+        store().bind_workspace(operation, ['conversation', route, session])
     try:
         agent._brai_workspace = str(store().workspace(operation))
         task = str(task_id or getattr(agent, 'session_id', '') or operation)
@@ -919,8 +971,31 @@ def conversation(agent, user_message, task_id=None):
             db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
         raise
     token = _operation.set(operation)
+    previous_candidate = _reply_mode_candidate.get()
+    if previous_candidate is not getattr(agent, '_brai_reply_mode_candidate', None):
+        previous_candidate = None
+    candidate = None
+    if inbound is not None and route and route['platform'] == 'telegram':
+        actor = getattr(source, '_brai_actor_id', None) or route['sender']
+        candidate = {'source': {**route, 'sender': str(actor)}, 'mode': None, 'previous': previous_candidate}
+    if candidate is not None:
+        agent._brai_reply_mode_candidate = candidate
+    mode_token = _reply_mode_candidate.set(candidate)
+    stream = getattr(agent, 'stream_delta_callback', None)
+    interim = getattr(agent, 'interim_assistant_callback', None)
+    filtered_stream = _filtered_reply_stream(stream) if candidate is not None and callable(stream) else None
+    filtered_interim = None
+    if candidate is not None and callable(interim):
+        def filtered_interim(text, **kwargs):
+            visible = _VIDEO_NOTE_MARKER.sub('', _REPLY_MODE.sub('', text))
+            if visible.strip():
+                return interim(visible, **kwargs)
+        agent.interim_assistant_callback = filtered_interim
+    if filtered_stream is not None:
+        agent.stream_delta_callback = filtered_stream
     admission_token = source_token = None
     previous_prompt = getattr(agent, 'ephemeral_system_prompt', None)
+    completed = False
     try:
         shared_context = ''
         effective_prompt = previous_prompt
@@ -929,7 +1004,24 @@ def conversation(agent, user_message, task_id=None):
             shared_context = system_context()
             effective_prompt = without_legacy_dialogues(previous_prompt)
         # API-only context: keep the user's persisted text and the shared process environment unchanged.
-        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + (
+        mode_prompt = ''
+        if candidate is not None:
+            mode = store().reply_mode(candidate['source'])
+            candidate['current'] = mode
+            descriptions = {'voice': 'обычное голосовое',
+                            'video_note': 'кружочек с апельсином', 'off': 'только текст'}
+            current = descriptions.get(mode, 'определяется историей беседы')
+            mode_prompt = (
+                '\n\n[Формат ответа текущей беседы] Сейчас: ' + current + '. '
+                'При явной просьбе изменить формат включи в итог отдельную строку '
+                '[[brai_reply_mode:voice]], [[brai_reply_mode:video_note]] или '
+                '[[brai_reply_mode:off]] для обычного голосового, кружочка или только текста. '
+                'Для разового образца и без просьбы о смене режима эту строку не добавляй. '
+                'Формат действует до следующей явной просьбы. '
+                'Наличие текста определяй по правилам голосового режима и просьбе пользователя. '
+                'Для кружочка используй [[audio_as_video_note]] перед MEDIA со звуком. '
+                'Правила озвучки находятся в policies/LOCAL_VOICE.md из системного INDEX.md.\n')
+        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + mode_prompt + (
             '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
             + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
             'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '
@@ -952,8 +1044,19 @@ def conversation(agent, user_message, task_id=None):
         source_token = _conversation_source.set(source)
         agent._brai_delegation_turn_started = time.time()
         yield prepared
+        completed = True
     finally:
         agent.ephemeral_system_prompt = previous_prompt
+        if filtered_stream is not None and getattr(agent, 'stream_delta_callback', None) is filtered_stream:
+            agent.stream_delta_callback = stream
+        if filtered_interim is not None and getattr(agent, 'interim_assistant_callback', None) is filtered_interim:
+            agent.interim_assistant_callback = interim
+        _reply_mode_candidate.reset(mode_token)
+        if not completed and candidate is not None and getattr(agent, '_brai_reply_mode_candidate', None) is candidate:
+            if candidate['previous'] is None:
+                del agent._brai_reply_mode_candidate
+            else:
+                agent._brai_reply_mode_candidate = candidate['previous']
         if source_token is not None:
             _conversation_source.reset(source_token)
         if admission_token is not None:
@@ -1203,12 +1306,28 @@ def final_text(text, operation):
         return text
     text = _public_response_text(text)
     try:
+        def select_mode(match):
+            candidate = _reply_mode_candidate.get()
+            if candidate is not None:
+                mode = match.group(1)
+                if candidate['mode'] is not None and candidate['mode'] != mode:
+                    candidate['mode'] = None
+                    raise FileError('CONFLICTING_REPLY_MODES')
+                candidate['mode'] = mode
+            return ''
+        text = active_sub(_REPLY_MODE, select_mode, text)
+        candidate = _reply_mode_candidate.get()
+        if candidate is not None and (candidate['mode'] or candidate.get('current')) == 'video_note':
+            def as_video_notes(match):
+                return ''.join('[[audio_as_video_note]]\n' + line
+                               for line in match.group('files').splitlines(keepends=True))
+            text = active_sub(_VOICE_BLOCK, as_video_notes, text)
         return _stage_final_text(text, operation)
     except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
-        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _MEDIA):
+        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _REPLY_MODE, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
@@ -1288,6 +1407,11 @@ def _stage_final_text(text, operation):
     active_sub(_DESCRIPTOR, descriptor, masked)
     if not items:
         return text
+    order = [index for _, _, indexes in sorted(replacements) for index in indexes]
+    positions = {old: new for new, old in enumerate(order)}
+    items = [items[index] for index in order]
+    replacements = [(start, end, [positions[index] for index in indexes])
+                    for start, end, indexes in replacements]
     # Явный набор и обычный MEDIA могут содержать те же файлы в одном ходе,
     # но не должны перезаписывать правила доставки друг друга.
     identity = key([operation, items, 'explicit', mode]) if explicit else key([operation, items])
@@ -1936,6 +2060,22 @@ def validate_telegram(items):
 
 def result_envelope(result, agent=None):
     """CLI/API и дочерний агент получают стабильные IDs и состав, а не один временный path."""
+    candidate = getattr(agent, '_brai_reply_mode_candidate', None)
+    if candidate is not None:
+        if candidate['previous'] is None:
+            del agent._brai_reply_mode_candidate
+        else:
+            agent._brai_reply_mode_candidate = candidate['previous']
+        guardrail = result.get('guardrail') if isinstance(result, dict) else None
+        if (candidate['mode'] is not None and isinstance(result, dict)
+                and isinstance(result.get('final_response'), str) and result['final_response'].strip()
+                and not any(result.get(name) for name in ('failed', 'partial', 'error', 'interrupted'))
+                and result.get('completed') is not False
+                and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable')):
+            if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+                result = {**result, '_brai_reply_mode': {'source': candidate['source'], 'mode': candidate['mode']}}
+            else:
+                store().set_reply_mode(candidate['source'], candidate['mode'])
     if not isinstance(result, dict):
         return result
     response = result.get('final_response', '')

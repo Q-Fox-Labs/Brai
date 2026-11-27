@@ -141,7 +141,9 @@
             ],
             "properties": {
               "source": {
-                "type": "object"
+                "type": "object",
+                "description": "Trusted ingress source. Optional brai_actor_id preserves the authenticated Telegram sender when the worker uses a canonical profile identity; older events omit it.",
+                "properties": {"brai_actor_id": {"type": "string", "pattern": "^[0-9]+$"}}
               },
               "message_id": {
                 "type": "string",

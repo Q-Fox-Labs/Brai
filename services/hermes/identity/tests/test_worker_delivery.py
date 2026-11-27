@@ -260,6 +260,20 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
             return {'artifact_id': self.files.publish(path, 'ipc-publish')['artifactId']}
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
 
+    async def test_native_auto_voice_respects_the_selected_actor_format(self):
+        self.base.BasePlatformAdapter._wants_auto_tts = lambda self, event, *args: True
+        adapter = self.adapter(AsyncMock())
+        source = NS(platform='telegram', chat_id='123', thread_id='77', user_id='123',
+                    _brai_actor_id='456')
+        event = NS(source=source)
+        route = {**native.source_of(event), 'sender': '456'}
+        self.assertTrue(adapter._wants_auto_tts(event, 'session', None, 'answer', []))
+        for mode in ('video_note', 'off'):
+            self.files.set_reply_mode(route, mode)
+            self.assertFalse(adapter._wants_auto_tts(event, 'session', None, 'answer', []))
+        self.files.set_reply_mode(route, 'voice')
+        self.assertTrue(adapter._wants_auto_tts(event, 'session', None, 'answer', []))
+
     async def test_overlong_reply_sends_excerpt_and_full_pdf_as_one_document(self):
         long_reply = importlib.import_module('identity.long_reply')
         sent = []

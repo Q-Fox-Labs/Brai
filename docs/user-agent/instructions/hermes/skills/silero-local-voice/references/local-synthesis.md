@@ -1,7 +1,7 @@
 # Local synthesis recipes
 
 ## Installed adapter and provider
-Read `${HERMES_HOME}/LOCAL_VOICE.md` first; it records the local installation and active voice. The tested adapter is `${HERMES_HOME}/scripts/silero_voice.py`. It invokes the local Silero CLI, rejects unprepared non-Cyrillic text, produces WAV, and converts to mono OGG/Opus for Telegram. Model files live under `${MODELS_ROOT}`; do not download a replacement model for routine synthesis.
+Read `policies/LOCAL_VOICE.md` through the system `INDEX.md` first. The profile's `${HERMES_HOME}/LOCAL_VOICE.md` may contain installation-specific details. The tested adapter is `${HERMES_HOME}/scripts/silero_voice.py`. It invokes the local Silero CLI, rejects unprepared non-Cyrillic text, produces WAV, and converts to mono OGG/Opus for Telegram. Model files live under `${MODELS_ROOT}`; do not download a replacement model for routine synthesis.
 
 The named command provider is configured as:
 

@@ -158,11 +158,13 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self.source, self.message_type = source, message_type
                 self.__dict__.update(kw)
                 self._gateway_accepted = False
+        received_actors = []
         class Base:
             def __init__(self, config, platform):
                 self.config = config
                 self._session_tasks = {}
             async def handle_message(self, event):
+                received_actors.append(event.source._brai_actor_id)
                 event._gateway_accepted = True
                 if event.text == '/stop':
                     self._session_tasks['key'].cancel()
@@ -257,7 +259,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RpcError, 'startup unavailable'):
                 await worker.health(require_tools=True)
             self.assertIn('login tool unavailable', str(worker.lifecycle_error))
-            source = {'user_id':'123', 'platform':'telegram', 'chat_id':'x'}
+            source = {'user_id':'123', 'platform':'telegram', 'chat_id':'x', 'brai_actor_id':'456'}
             with self.assertRaisesRegex(RpcError, 'startup unavailable'):
                 await worker.dispatch({'source':source, 'text':'hello', 'message_id':'0'}, 'owner')
             self.assertEqual(worker.adapter._session_tasks, {})
@@ -270,6 +272,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             entry.assert_called_with('mcp__brai__brai_login')
             started = await worker.dispatch({'source':source, 'text':'hello', 'message_id':'1'}, 'owner')
             self.assertTrue(started['accepted'])
+            self.assertEqual(received_actors[-1], '456')
             self.assertTrue((await worker.dispatch({'source':source, 'text':'steer', 'message_id':'2'}, 'owner'))['accepted'])
             task = worker.adapter._session_tasks['key']
             for text in ['/stop', '/new@bot/anything', '@file:/tmp/x\n/new']:
@@ -396,6 +399,7 @@ class TelegramAccountsTest(unittest.IsolatedAsyncioTestCase):
                                                   raw_message=SimpleNamespace(text='Исходный текст '+account)))
             bridges.append(bridge)
         self.assertEqual([source['user_id'] for source in calls], ['123', '123'])
+        self.assertEqual([source['brai_actor_id'] for source in calls], ['123', '456'])
         self.assertEqual([source['chat_id'] for source in calls], ['123', '456'])
         self.assertEqual([source['brai_dialogues_original'] for source in calls],
                          ['Исходный текст 123', 'Исходный текст 456'])

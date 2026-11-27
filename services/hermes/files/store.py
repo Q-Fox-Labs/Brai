@@ -98,6 +98,7 @@ class FileStore:
                 CREATE TABLE IF NOT EXISTS cleanup_scopes (operation TEXT NOT NULL, scope TEXT NOT NULL, PRIMARY KEY(operation,scope));
                 CREATE TABLE IF NOT EXISTS workspace_bindings (operation TEXT PRIMARY KEY, workspace TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS conversation_workspaces (workspace TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS reply_modes (source TEXT PRIMARY KEY, mode TEXT NOT NULL);
             """
             # Декларации схемы не меняются; граница транзакции задаётся отдельно.
             # executescript() здесь нельзя: он неявно завершает текущий BEGIN.
@@ -114,6 +115,22 @@ class FileStore:
             if owners and owners != [owner]:
                 raise FileError("OWNER_MISMATCH")
             db.execute("INSERT OR IGNORE INTO settings VALUES (?)", (owner,))
+
+    def reply_mode(self, source):
+        """Вернуть сохранённый режим конкретного участника, чата и темы."""
+        with self.db() as db:
+            row = db.execute('SELECT mode FROM reply_modes WHERE source=?', (key(source),)).fetchone()
+        if row and row['mode'] not in ('voice', 'video_note', 'off'):
+            raise FileError('INVALID_REPLY_MODE')
+        return row['mode'] if row else None
+
+    def set_reply_mode(self, source, mode):
+        """Сохранить подтверждённый формат ответа для одного источника."""
+        if mode not in ('voice', 'video_note', 'off'):
+            raise FileError('INVALID_REPLY_MODE')
+        with self.db() as db:
+            db.execute('INSERT INTO reply_modes(source,mode) VALUES(?,?) '
+                       'ON CONFLICT(source) DO UPDATE SET mode=excluded.mode', (key(source), mode))
 
     @contextmanager
     def db(self):
