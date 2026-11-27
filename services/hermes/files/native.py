@@ -1230,7 +1230,9 @@ def _stage_final_text(text, operation):
         mode = data['mode']
         for item in data['items']:
             if (not isinstance(item, dict) or set(item) - {'artifactId', 'caption', 'presentation'}
-                    or not isinstance(item.get('artifactId'), str) or not isinstance(item.get('caption', ''), str)):
+                    or not isinstance(item.get('artifactId'), str) or not isinstance(item.get('caption', ''), str)
+                    or ('presentation' in item and item['presentation'] not in
+                        ('photo', 'video', 'audio', 'document', 'voice', 'animation'))):
                 raise FileError('INVALID_FILE_SET')
             with files.lock('cache'):
                 value = files.fetch(item['artifactId'])

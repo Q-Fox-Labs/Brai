@@ -9538,7 +9538,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
                  break
 +            if session.exited and session.exit_code and logger.isEnabledFor(logging.WARNING):
 +                async with self._completion_event_scope(watcher):
-+                    logger.warning("BACKGROUND_FAILURE reference=%s output=%s", session_id.removeprefix("proc_"), self._redacted_output_tail(session, 1000))
++                    logger.warning("BACKGROUND_FAILURE reference=%s exit=%s", session_id.removeprefix("proc_"), session.exit_code)
              if silent:
                  # Still wait for the process to exit so we can log it, but don't push any messages.
                  if session.exited:
@@ -9685,10 +9685,13 @@ diff --git a/gateway/stream_consumer.py b/gateway/stream_consumer.py
 diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
 --- a/gateway/platforms/base.py
 +++ b/gateway/platforms/base.py
-@@ -3380,4 +3380,6 @@
+@@ -3380,6 +3380,8 @@
          spans.extend(m.span() for m in re.finditer(
              r"\[\[(?:audio_as_voice|as_document)\]\]", masked))
 +        spans.extend(m.span() for m in re.finditer(
 +            r"""(?m)^BRAI_FILES:[^\n]*|(?<!\w)MEDIA:[ \t]*["']?artifact:[^\s<>"']*["']?""", masked))
          # Local Markdown destinations are not usable links in chat. Show their label only.
          for match in re.finditer(
+-                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:file://)?/[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:file://)?/[^\n)]*(?:\)|\Z))', masked):
++                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:artifact:|(?:file://)?/)[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:artifact:|(?:file://)?/)[^\n)]*(?:\)|\Z))', masked):
+             spans.extend([(match.start(), match.start("label")), (match.end("label"), match.end())])
