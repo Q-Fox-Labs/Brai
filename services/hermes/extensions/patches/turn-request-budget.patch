@@ -291,10 +291,10 @@ diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
-@@ -0,0 +1,393 @@
-+# ABOUTME: Ограничивает дополнительные физические запросы одним пользовательским ходом.
+@@ -0,0 +1,401 @@
++# ABOUTME: Ограничивает дополнительные запросы каждого агента в пользовательском ходе.
 +# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
-+"""Общий бюджет Hermes: две дополнительные попытки, включая сжатие истории."""
++"""Бюджет агента: две дополнительные попытки, включая сжатие истории."""
 +
 +from __future__ import annotations
 +
@@ -331,7 +331,7 @@ new file mode 100644
 +
 +
 +class TurnRequestBudget:
-+    """Владеть двумя дополнительными запросами на весь ход, включая worker threads."""
++    """Владеть двумя дополнительными запросами агента, включая worker threads."""
 +
 +    def __init__(self):
 +        self.turn_id = uuid.uuid4().hex
@@ -340,6 +340,7 @@ new file mode 100644
 +        self.physical = 0
 +        self.lanes = {}
 +        self.deadlines = {}
++        self.children = {}
 +
 +    def start(self, metadata):
 +        """Учесть физический вызов до обращения к провайдеру."""
@@ -674,12 +675,19 @@ new file mode 100644
 +
 +
 +def turn_budget(function):
-+    """Создать новый бюджет только на самостоятельный вход пользовательского хода."""
++    """Дать самостоятельному помощнику свой бюджет; остальные вложенные вызовы разделяют текущий."""
 +    @wraps(function)
 +    def invoke(*args, **kwargs):
-+        if _current.get() is not None:
++        agent = args[0] if args else kwargs.get("agent")
++        current = _current.get()
++        if current is not None and (not getattr(agent, "_subagent_id", None) or getattr(current, "owner", None) is agent):
 +            return function(*args, **kwargs)
-+        token = _current.set(TurnRequestBudget())
++        budget = TurnRequestBudget()
++        if current is not None:
++            with current.lock:
++                budget = current.children.setdefault(id(agent), budget)
++        budget.owner = agent
++        token = _current.set(budget)
 +        try:
 +            return function(*args, **kwargs)
 +        finally:

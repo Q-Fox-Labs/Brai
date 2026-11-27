@@ -92,6 +92,84 @@ class PortableTurnBudgetTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=1) as pool:
             self.assertIs(pool.submit(contextvars.copy_context().run, nested).result(), self.state)
 
+    def test_parallel_helpers_have_independent_retry_budgets(self):
+        parent = self.state.start({'api_request_id': 'parent:1'})
+        barrier = threading.Barrier(3)
+
+        @self.budget.turn_budget
+        def helper(agent):
+            budget = self.budget._current.get()
+            first = budget.start({'api_request_id': agent.name + ':1'})
+            barrier.wait(timeout=5)
+            first.finish(failed=True)
+            self.assertTrue(budget.start({'api_request_id': agent.name + ':2'}).is_retry)
+            return budget
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tasks = [pool.submit(contextvars.copy_context().run, helper,
+                                 types.SimpleNamespace(_subagent_id=f'sa-{i}', name=f'helper-{i}'))
+                     for i in range(2)]
+            barrier.wait(timeout=5)
+            parent.finish()
+            budgets = [task.result() for task in tasks]
+        self.assertIsNot(budgets[0], budgets[1])
+        self.assertTrue(all(budget is not self.state for budget in budgets))
+        self.assertEqual([budget.spent for budget in budgets], [1, 1])
+        self.assertEqual(self.state.spent, 0)
+        self.assertFalse(self.state.start({'api_request_id': 'parent:2'}).is_retry)
+
+    def test_same_helper_reentry_keeps_retry_budget(self):
+        agent = types.SimpleNamespace(_subagent_id='sa-0')
+
+        @self.budget.turn_budget
+        def run(agent, recurse=False):
+            budget = self.budget._current.get()
+            return (budget, run(agent) if recurse else budget)
+
+        outer, (inner, _) = run(agent, recurse=True)
+        self.assertIs(outer, inner)
+        self.assertIsNot(outer, self.state)
+
+    def test_helper_schema_retry_keeps_previous_budget(self):
+        agent = types.SimpleNamespace(_subagent_id='sa-0')
+
+        @self.budget.turn_budget
+        def run(agent, exhaust=False):
+            budget = self.budget._current.get()
+            if exhaust:
+                for request in ('1', '1'):
+                    budget.start({'api_request_id': request}).finish(failed=True)
+                budget.start({'api_request_id': '2'}).finish()
+            else:
+                correction = budget.start({'api_request_id': '3'})
+                self.assertFalse(correction.is_retry)
+                correction.finish(failed=True)
+                with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                    budget.start({'api_request_id': '4'})
+            return budget
+
+        first = run(agent, exhaust=True)
+        second = run(agent)
+        self.assertIs(first, second)
+        self.assertEqual(self.state.spent, 0)
+
+    def test_helper_retries_are_limited_and_parent_context_is_restored(self):
+        agent = types.SimpleNamespace(_subagent_id='sa-0')
+        callback = Mock(side_effect=ConnectionError('synthetic'))
+
+        @self.budget.turn_budget
+        def helper(agent):
+            budget = self.budget._current.get()
+            for request_id in ('1', '1', '2', '3'):
+                with self.assertRaises((ConnectionError, self.budget.TurnRequestBudgetExhausted)):
+                    self.budget.physical_callback(callback, {'api_request_id': request_id})({})
+            return budget.spent
+
+        self.assertEqual(helper(agent=agent), 2)
+        self.assertEqual(callback.call_count, 3)
+        self.assertIs(self.budget._current.get(), self.state)
+        self.assertEqual(self.state.spent, 0)
+
     def test_internal_summary_text_does_not_count_as_delivered_answer(self):
         attempt = self.state.start({'call_role': 'auxiliary:compression', 'api_request_id': 'summary'})
         attempt.observe({'type': 'response.output_text.delta', 'delta': 'internal draft'})
