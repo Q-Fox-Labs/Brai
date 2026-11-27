@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import { adminAction } from "./admin.js";
-import { lifecycleWorker } from "./lifecycle.js";
+import { lifecycleReadiness, lifecycleWorker } from "./lifecycle.js";
 import { issueCode } from "./login-code.js";
 import { getIdentity, issueTelegramLink, profileReady, provision, redeemInvite, redeemTelegramLink, resolveTelegram, unlinkTelegram } from "./identity.js";
 
@@ -14,7 +14,10 @@ const adminTelegramId=z.string().regex(/^[1-9][0-9]{0,19}$/);
 const role=z.enum(["creator","admin","user","guest"]), inviteRole=z.enum(["user","guest"]), status=z.enum(["provisioning","active","blocked"]);
 const headersSchema=z.strictObject({cookie:z.string().max(16384).optional(),origin:z.string().max(16384).optional(),"user-agent":z.string().max(16384).optional(),"x-forwarded-for":z.string().max(16384).optional(),"sec-fetch-site":z.string().max(16384).optional()});
 const trusted={
- "lifecycle-claim":z.strictObject({workerId:id,rolePolicyVersion:z.literal(1).optional()}),
+ "lifecycle-claim":z.union([
+  z.strictObject({workerId:id,rolePolicyVersion:z.literal(1).optional()}),
+  z.strictObject({checkAvailability:z.literal(true)}),
+ ]),
  "lifecycle-renew":z.strictObject({operationId:id,leaseToken:id}),
  "lifecycle-complete":z.strictObject({operationId:id,leaseToken:id,success:z.boolean(),errorCode:z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).optional()}),
  "telegram-resolve":z.strictObject({telegramId}),
@@ -56,7 +59,10 @@ export async function v2(operation:string,input:unknown,cfg:Config,pool:Pool,han
  if(operation==="telegram-link-redeem"){const data=parse(trusted[operation],input);return {user:await redeemTelegramLink(pool,cfg.secret,data.telegramId,data.code)};}
  if(operation==="telegram-unlink"){const data=parse(trusted[operation],input);return {unlinked:await unlinkTelegram(pool,data.telegramId,data.targetTelegramId)};}
  if(operation==="identity-get"){const data=parse(trusted[operation],input);return getIdentity(pool,data.userId);}
- if(operation==="lifecycle-claim")return lifecycleWorker(pool,"claim",parse(trusted[operation],input));
+ if(operation==="lifecycle-claim"){
+  const data=parse(trusted[operation],input);
+  return "checkAvailability" in data?lifecycleReadiness(pool):lifecycleWorker(pool,"claim",data);
+ }
  if(operation==="lifecycle-renew")return lifecycleWorker(pool,"renew",parse(trusted[operation],input));
  if(operation==="lifecycle-complete")return lifecycleWorker(pool,"complete",parse(trusted[operation],input));
  if(operation==="telegram-resolve"){const data=parse(trusted[operation],input);return {user:await resolveTelegram(pool,data.telegramId)};}

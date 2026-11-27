@@ -17,6 +17,10 @@ class LifecycleLeaseLost(PermissionError):
     """Auth отозвал право продолжать эту операцию подготовки."""
 
 
+class LifecycleLeaseUnknown(RuntimeError):
+    """Auth не подтвердил аренду из-за неопределённого исхода запроса."""
+
+
 async def terminate(child):
     """Дать entrypoint закрыть Ansible-группу; затем завершить свой процесс."""
     if child.returncode is not None:
@@ -43,14 +47,24 @@ class LifecycleRunner:
         self.interval, self.renew_interval = interval, renew_interval
         self.worker_id = 'broker-' + uuid.uuid4().hex
 
-    async def renew(self, operation):
-        """Отказ или недоступность Auth означают потерю права продолжать работу."""
-        while True:
-            await asyncio.sleep(self.renew_interval)
+    async def check_lease(self, operation):
+        """Отличить явный отзыв аренды от отказа транспорта или неожиданного ответа."""
+        try:
             reply = await self.control.call('identity.lifecycle-renew', {
                 'operationId': operation['id'], 'leaseToken': operation['leaseToken']}, timeout=12)
-            if reply.get('accepted') is not True:
-                raise LifecycleLeaseLost('Lifecycle lease lost')
+        except Exception as error:
+            raise LifecycleLeaseUnknown('Lifecycle lease outcome unknown') from error
+        accepted = reply.get('accepted') if isinstance(reply, dict) else None
+        if accepted is False:
+            raise LifecycleLeaseLost('Lifecycle lease lost')
+        if accepted is not True:
+            raise LifecycleLeaseUnknown('Lifecycle lease outcome unknown')
+
+    async def renew(self, operation):
+        """Прерывать собственную работу, когда Auth перестал подтверждать аренду."""
+        while True:
+            await asyncio.sleep(self.renew_interval)
+            await self.check_lease(operation)
 
     async def execute(self, operation):
         """Ограничить длительность и передать user только через stdin root entrypoint."""
@@ -80,10 +94,7 @@ class LifecycleRunner:
             if receipt != {'rolePolicyVersion': 1, 'role': operation['user']['role']}:
                 raise ValueError('Unconfirmed runtime policy')
             # AIDEV-NOTE: Повторная проверка закрывает окно между health и завершением.
-            renewed = await self.control.call('identity.lifecycle-renew', {
-                'operationId': operation['id'], 'leaseToken': operation['leaseToken']}, timeout=12)
-            if renewed.get('accepted') is not True:
-                raise LifecycleLeaseLost('Lifecycle lease lost')
+            await self.check_lease(operation)
             return True
         finally:
             renewal.cancel()
@@ -102,6 +113,10 @@ class LifecycleRunner:
             error_code = None if success else 'PROFILE_FAILED'
         except asyncio.CancelledError:
             raise
+        except LifecycleLeaseUnknown:
+            # Дочерний процесс остановлен. Auth сам выдаст новую аренду после истечения прежней.
+            logger.warning('Profile lifecycle lease unconfirmed: operation=%s', operation['id'])
+            return False
         except LifecycleLeaseLost:
             # Отменённая операция освобождает собственный lease после остановки child.
             await self.control.call('identity.lifecycle-complete', {

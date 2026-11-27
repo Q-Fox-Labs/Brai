@@ -68,6 +68,23 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control.calls[-1][1]['errorCode'], 'PROFILE_TIMEOUT')
         self.assertNotIn('private token', '\n'.join(captured.output))
 
+    async def test_final_lease_timeout_does_not_mark_successful_worker_failed(self):
+        class TimeoutControl(Control):
+            async def call(self, method, params, timeout=12):
+                if method == 'identity.lifecycle-renew':
+                    self.calls.append((method, params))
+                    raise TimeoutError('private token')
+                return await super().call(method, params, timeout)
+
+        control = TimeoutControl()
+        script = 'print(\'{"rolePolicyVersion":1,"role":"user"}\')'
+        runner = LifecycleRunner(control, [sys.executable, '-c', script])
+        with self.assertLogs('identity.lifecycle', level='WARNING') as captured:
+            self.assertFalse(await runner.once())
+        self.assertEqual([method for method, _ in control.calls],
+                         ['identity.lifecycle-claim', 'identity.lifecycle-renew'])
+        self.assertNotIn('private token', '\n'.join(captured.output))
+
     async def test_missing_entrypoint_has_distinct_failure(self):
         control = Control()
         runner = LifecycleRunner(control, ['/nonexistent/brai-lifecycle-test'])

@@ -9,6 +9,7 @@
   ],
   "executableSources": [
     "services/auth/src/bootstrap.ts",
+    "services/auth/src/bootstrap-first-profile.ts",
     "services/auth/src/health.ts",
     "services/auth/src/import-identities.ts",
     "services/auth/src/main.ts",
@@ -28,6 +29,8 @@
       "services/auth/src/admin.ts",
       "services/auth/src/auth.ts",
       "services/auth/src/bootstrap.ts",
+      "services/auth/src/owner-bootstrap.ts",
+      "services/auth/src/bootstrap-first-profile.ts",
       "services/auth/src/bridge.ts",
       "services/auth/src/config.ts",
       "services/auth/src/email.ts",
@@ -97,6 +100,7 @@
     ],
     "entrypoints": [
       "services/auth/dist/bootstrap.js",
+      "services/auth/dist/bootstrap-first-profile.js",
       "services/auth/dist/import-identities.js",
       "services/auth/dist/provision-identities.js",
       "services/auth/dist/ready-profiles.js",
