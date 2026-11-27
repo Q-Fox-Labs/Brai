@@ -61,14 +61,20 @@ test("preview permits only passive media MIME and keeps active documents as down
  } finally { globalThis.fetch = previousFetch; if (previousBase === undefined) delete process.env.WEB_ADMIN_ARTIFACTS_BASE_URL; else process.env.WEB_ADMIN_ARTIFACTS_BASE_URL = previousBase; }
 });
 
-test("media byte ranges allow seeking, retain exact bytes and verify the whole source", async () => {
+test("media seeking reads only the normalized range from Artifacts", async () => {
  const previousFetch=globalThis.fetch, previousBase=process.env.WEB_ADMIN_ARTIFACTS_BASE_URL;
  const bytes=Buffer.from("0123456789"), descriptor={artifactId:id,filename:"clip.mp4",mimeType:"video/mp4",sizeBytes:10,sha256:createHash("sha256").update(bytes).digest("hex")};
  let reads=0;
  try {
   process.env.WEB_ADMIN_ARTIFACTS_BASE_URL="http://artifacts.test";
-  globalThis.fetch=(async()=>{reads++;return new Response(new ReadableStream({start(c){c.enqueue(bytes.subarray(0,3));c.enqueue(bytes.subarray(3,7));c.enqueue(bytes.subarray(7));c.close();}}));}) as typeof fetch;
-  for(const [range,content,header] of [["bytes=2-5","2345","bytes 2-5/10"],["bytes=7-","789","bytes 7-9/10"],["bytes=-3","789","bytes 7-9/10"],["bytes=8-99","89","bytes 8-9/10"]]) {
+  globalThis.fetch=(async(_url,options)=>{
+   reads++;
+   const range = new Headers(options?.headers).get("range");
+   if (!range) return new Response(bytes);
+   const [start, end] = range.slice(6).split("-").map(Number);
+   return new Response(bytes.subarray(start,end+1), {status:206, headers:{"Content-Range":`bytes ${start}-${end}/10`}});
+  }) as typeof fetch;
+  for(const [range,content,header] of [["bytes=2-5","2345","bytes 2-5/10"],["bytes=7-","789","bytes 7-9/10"],["bytes=-3","789","bytes 7-9/10"],["bytes=8-99","89","bytes 8-9/10"],["bytes=0-","0123456789","bytes 0-9/10"]]) {
    const response=await mod.exports.adminDownload(descriptor,id,new AbortController().signal,true,range);
    assert.equal(response.status,206);assert.equal(response.headers.get("content-range"),header);
    assert.equal(response.headers.get("content-length"),String(content.length));assert.equal(await response.text(),content);
@@ -79,7 +85,19 @@ test("media byte ranges allow seeking, retain exact bytes and verify the whole s
   }
   const download=await mod.exports.adminDownload(descriptor,id,new AbortController().signal,false,"bytes=2-5");
   assert.equal(download.status,200);assert.equal(await download.text(),"0123456789");
-  const bad=await mod.exports.adminDownload({...descriptor,sha256:"0".repeat(64)},id,new AbortController().signal,true,"bytes=2-5");
+  const bad=await mod.exports.adminDownload({...descriptor,sha256:"0".repeat(64)},id,new AbortController().signal,true,"bytes=0-");
   await assert.rejects(bad.text(),/ARTIFACT_INTEGRITY/);
+
+  for (const invalid of [
+   new Response(bytes),
+   new Response("2345", {status:206, headers:{"Content-Range":"bytes 2-5/11"}}),
+   new Response("2345", {status:206, headers:{"Content-Range":"bytes 2-5/10","Content-Encoding":"gzip"}}),
+  ]) {
+   globalThis.fetch=(async()=>invalid) as typeof fetch;
+   await assert.rejects(mod.exports.adminDownload(descriptor,id,new AbortController().signal,true,"bytes=2-5"), /ARTIFACT_UNAVAILABLE/);
+  }
+  globalThis.fetch=(async()=>new Response("234",{status:206,headers:{"Content-Range":"bytes 2-5/10"}})) as typeof fetch;
+  const short=await mod.exports.adminDownload(descriptor,id,new AbortController().signal,true,"bytes=2-5");
+  await assert.rejects(short.text(),/ARTIFACT_INTEGRITY/);
  } finally {globalThis.fetch=previousFetch;if(previousBase===undefined)delete process.env.WEB_ADMIN_ARTIFACTS_BASE_URL;else process.env.WEB_ADMIN_ARTIFACTS_BASE_URL=previousBase;}
 });

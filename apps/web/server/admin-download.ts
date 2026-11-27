@@ -1,9 +1,9 @@
 // ABOUTME: Передаёт файл выбранного пользователя из доверенного Artifacts в браузер потоком.
-// ABOUTME: Принимает только проверенный bridge descriptor; адрес и заголовки клиента не передаются upstream.
+// ABOUTME: Использует проверенный descriptor и передаёт источнику только нормализованный диапазон.
 import { createHash } from "node:crypto";
 import { GatewayError } from "./gateway";
 type Descriptor = { artifactId: string; filename: string; mimeType: string; sizeBytes: number; sha256: string };
-/** Проверяет descriptor и ограничивает поток размером и контрольной суммой владельца. */
+/** Ограничивает выдачу опубликованным файлом и сверяет SHA-256 при полном чтении. */
 export async function adminDownload(value: unknown, artifactId: unknown, signal: AbortSignal, preview = false, rangeHeader: string | null = null): Promise<Response> {
  const file = value as Partial<Descriptor> | null;
  if (!file || typeof artifactId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artifactId) || file.artifactId !== artifactId || typeof file.filename !== "string" || typeof file.mimeType !== "string" || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes! < 0 || file.sizeBytes! > 2 * 1024 ** 3 || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) throw new GatewayError(502, "BAD_REPLY");
@@ -23,33 +23,41 @@ export async function adminDownload(value: unknown, artifactId: unknown, signal:
  let base: URL;
  try { base = new URL(process.env.WEB_ADMIN_ARTIFACTS_BASE_URL ?? ""); } catch { throw new GatewayError(503, "ARTIFACTS_NOT_CONFIGURED"); }
  if (!/^https?:$/.test(base.protocol) || base.username || base.password || base.pathname !== "/" || base.search || base.hash) throw new GatewayError(503, "ARTIFACTS_NOT_CONFIGURED");
- const upstream = await fetch(new URL(`/files/${artifactId}`, base), { redirect: "error", signal, cache: "no-store", headers: { "Accept-Encoding": "identity" } });
- if (upstream.status !== 200 || !upstream.body || (upstream.headers.has("content-length") && upstream.headers.get("content-length") !== String(file.sizeBytes))) { await upstream.body?.cancel().catch(() => {}); throw new GatewayError(503, "ARTIFACT_UNAVAILABLE"); }
- const reader = upstream.body.getReader(), hash = createHash("sha256");
+ const byteCount = range ? range.end - range.start + 1 : file.sizeBytes!;
+ const contentRange = range ? `bytes ${range.start}-${range.end}/${file.sizeBytes}` : null;
+ const headers = { "Accept-Encoding": "identity", ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) };
+ const upstream = await fetch(new URL(`/files/${artifactId}`, base), { redirect: "error", signal, cache: "no-store", headers });
+ if (upstream.status !== (range ? 206 : 200) || !upstream.body ||
+     upstream.headers.get("content-range") !== contentRange ||
+     (upstream.headers.get("content-encoding") ?? "identity") !== "identity" ||
+     (upstream.headers.get("content-length") ?? String(byteCount)) !== String(byteCount)) {
+  await upstream.body?.cancel().catch(() => {});
+  throw new GatewayError(503, "ARTIFACT_UNAVAILABLE");
+ }
+ const reader = upstream.body.getReader();
+ // Частичный ответ опирается на проверку SHA-256 при публикации неизменяемого файла Artifacts.
+ const hash = byteCount === file.sizeBytes ? createHash("sha256") : null;
  let size = 0, finished = false;
  let finalChunk: Uint8Array | null = null;
  const body = new ReadableStream<Uint8Array>({
   async pull(controller) {
    try {
-    // AIDEV-NOTE: Range выдаём из полного проверяемого потока: частичный upstream
-    // не позволяет сверить SHA-256 оригинала. Пропущенные байты не храним в памяти.
     while (true) {
      const part = await reader.read();
      if (part.done) {
       finished = true;
-      if (size !== file.sizeBytes || hash.digest("hex") !== file.sha256) throw new Error("ARTIFACT_INTEGRITY");
+      if (size !== byteCount || (hash && hash.digest("hex") !== file.sha256)) throw new Error("ARTIFACT_INTEGRITY");
       if (finalChunk) controller.enqueue(finalChunk);
       controller.close(); reader.releaseLock(); return;
      }
-     const offset = size;
-     size += part.value.byteLength;
-     if (size > file.sizeBytes!) throw new Error("ARTIFACT_SIZE");
-     hash.update(part.value);
-     const chunk = range ? part.value.subarray(Math.max(0, range.start - offset), Math.max(0, Math.min(part.value.byteLength, range.end + 1 - offset))) : part.value;
+     const chunk = part.value;
+     size += chunk.byteLength;
+     if (size > byteCount) throw new Error("ARTIFACT_SIZE");
+     hash?.update(chunk);
      if (chunk.byteLength) {
       // Последние байты удерживаем до сверки: Content-Length не должен позволить
-      // браузеру завершить файл раньше проверки размера и SHA-256.
-      if (size >= (range ? range.end + 1 : file.sizeBytes!)) { finalChunk = chunk; continue; }
+      // браузеру завершить ответ раньше проверки размера и, при полном чтении, SHA-256.
+      if (size === byteCount) { finalChunk = chunk; continue; }
       controller.enqueue(chunk); return;
      }
     }
@@ -59,5 +67,5 @@ export async function adminDownload(value: unknown, artifactId: unknown, signal:
  });
  const name = file.filename.replace(/[\u0000-\u001f\u007f/\\]/g, "_").slice(0, 180).toWellFormed() || "download";
  const encoded = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
- return new Response(body, { status: range ? 206 : 200, headers: { "Content-Length": String(range ? range.end - range.start + 1 : file.sizeBytes), ...(inline ? { "Accept-Ranges": "bytes" } : {}), ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${file.sizeBytes}` } : {}), "Content-Type": inline ? mime : "application/octet-stream", "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="download"; filename*=UTF-8''${encoded}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin" } });
+ return new Response(body, { status: range ? 206 : 200, headers: { "Content-Length": String(byteCount), ...(inline ? { "Accept-Ranges": "bytes" } : {}), ...(contentRange ? { "Content-Range": contentRange } : {}), "Content-Type": inline ? mime : "application/octet-stream", "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="download"; filename*=UTF-8''${encoded}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin" } });
 }
