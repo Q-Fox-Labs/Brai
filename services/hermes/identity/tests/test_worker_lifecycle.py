@@ -657,28 +657,6 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         await stopping
         self.assertTrue(self.finalized.is_set())
 
-    async def test_private_plugin_profile_exists_before_images_discovery_and_is_not_reset(self):
-        attach = AsyncMock()
-        def discover():
-            profile = sys.modules.get('_brai_identity_human')
-            self.assertIsNotNone(profile)
-            self.assertEqual(profile.telegram_id, '123')
-            self.assertIs(profile.game_core_enabled, False)
-            self.assertFalse(hasattr(profile, 'call'))
-            profile.attach = attach
-            self.calls.append('plugin_discovery')
-        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules):
-            with patch('identity.native_policy.revalidate_startup'), patch('identity.native_policy.install', side_effect=lambda **_kwargs: self.calls.append('role_policy')), patch('identity.images.install_shared_provider', side_effect=discover):
-                worker = await self.worker()
-            try:
-                self.assertIs(sys.modules['_brai_identity_human'].attach, attach)
-                await worker.health(require_tools=True)
-                attach.assert_awaited_once_with(worker.adapter)
-                self.assertLess(self.calls.index('role_policy'), self.calls.index('plugin_discovery'))
-                self.assertLess(self.calls.index('plugin_discovery'), self.calls.index('native_start'))
-            finally:
-                await worker.stop_runtime()
-
     async def test_private_plugin_attaches_before_operational_ready(self):
         worker = await self.worker()
         attach = AsyncMock()
@@ -698,7 +676,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(managed_stt=managed_stt), patch.dict(
                     os.environ, {'BRAI_IDENTITY_MODE': 'worker'}), patch.dict(sys.modules), patch.object(
                     native_policy, 'install', return_value=managed_stt), patch.object(
-                    native_policy, 'revalidate_startup'), patch('identity.images.install_shared_provider'):
+                    native_policy, 'revalidate_startup'):
                 worker = await self.worker()
                 try:
                     self.assertIs(getattr(worker.runner.config, 'stt_enabled', False), managed_stt)

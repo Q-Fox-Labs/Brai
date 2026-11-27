@@ -896,6 +896,51 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             self.store.cleanup(channel)
             self.assertEqual(Path(self.store.fetch(aid)['localPath']).read_text(), channel)
 
+    async def test_missing_delivery_path_preserves_answer_and_logs_reference(self):
+        missing = self.cache / '.delivery' / 'absent' / 'image.png'
+        with self.assertLogs(native.__name__, 'WARNING') as log:
+            answer = native.final_text(f'Готово.\nMEDIA:"{missing}"', 'turn')
+        self.assertTrue(answer.startswith('Готово.'))
+        self.assertNotIn(str(missing), answer)
+        self.assertNotIn('MEDIA:', answer)
+        reference = answer.rsplit(' ', 1)[-1]
+        self.assertRegex(reference, r'^[a-f0-9]{16}$')
+        self.assertIn(reference, log.output[0])
+
+    async def test_unavailable_artifact_keeps_text_for_both_outgoing_formats(self):
+        aid = str(uuid.uuid4())
+        markers = [
+            'MEDIA:artifact:' + aid,
+            'BRAI_FILES:' + json.dumps({'mode': 'album', 'items': [{'artifactId': aid}]}),
+            'BRAI_FILES:{oops}',
+            'BRAI_FILES:{"mode":"album","items":[{}]}',
+            'BRAI_FILES:{"mode":"album","items":[null]}',
+        ]
+        for marker in markers:
+            with self.subTest(marker=marker), self.assertLogs(native.__name__, 'WARNING') as log:
+                answer = native.final_text('Готово.\n' + marker, 'turn')
+                self.assertTrue(answer.startswith('Готово.'))
+                self.assertNotIn(marker, answer)
+                self.assertIn(answer.rsplit(' ', 1)[-1], log.output[-1])
+                result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+                self.assertTrue(result['brai_attachment_preparation_failed'])
+
+    async def test_delivery_history_reuses_artifact_after_temporary_copy_is_removed(self):
+        with native.conversation(SimpleNamespace(session_id='test'), 'test', 'history'):
+            work = Path(native.before_tool('write_file', {'path': 'result.txt'})['path'])
+            work.write_text('result')
+            answer = native.final_text(f'MEDIA:"{work}"', 'first')
+            path = json.loads(answer.removeprefix('MEDIA:'))
+            items, _ = native.output_items([path])
+            aid = items[0]['file']['artifactId']
+            history = native.history_text(answer)
+            self.assertEqual(history, 'MEDIA:artifact:' + aid)
+            native.release_set(items[0]['_setId'])
+            self.assertFalse(Path(path).exists())
+            again = native.final_text(history, 'second')
+            restored, _ = native.output_items([json.loads(again.removeprefix('MEDIA:'))])
+            self.assertEqual(restored[0]['file']['artifactId'], aid)
+
     async def test_explicit_set_retains_caption_mode_and_duplicates(self):
         items = self.items(2)
         data = {'mode': 'album', 'items': [{'artifactId': item['file']['artifactId'], 'caption': item['caption']} for item in items]}

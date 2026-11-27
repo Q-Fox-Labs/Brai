@@ -71,7 +71,7 @@ class FailureNoticeTest(unittest.TestCase):
                 self.assertNotIn(self.notice._UNKNOWN, text)
 
     def test_typed_interrupted_request_keeps_cause_instead_of_unknown(self):
-        for code in ('stream_drop', 'timeout'):
+        for code in ('stream_drop', 'timeout', 'retry_limit'):
             text = self.render('unknown', result={'brai_failure_kind': code,
                                'brai_original_error': 'TurnRequestBudgetExhausted: partial_emitted'})
             self.assertIn(f'Код: `{code}`', text)
