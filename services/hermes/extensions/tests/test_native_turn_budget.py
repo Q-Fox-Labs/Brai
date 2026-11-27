@@ -137,11 +137,15 @@ class PortableTurnBudgetTests(unittest.TestCase):
         def run(agent, exhaust=False):
             budget = self.budget._current.get()
             if exhaust:
-                for request in ('1', '1', '2'):
+                for request in ('1', '1'):
                     budget.start({'api_request_id': request}).finish(failed=True)
+                budget.start({'api_request_id': '2'}).finish()
             else:
+                correction = budget.start({'api_request_id': '3'})
+                self.assertFalse(correction.is_retry)
+                correction.finish(failed=True)
                 with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
-                    budget.start({'api_request_id': '3'})
+                    budget.start({'api_request_id': '4'})
             return budget
 
         first = run(agent, exhaust=True)
