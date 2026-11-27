@@ -872,6 +872,7 @@ class Broker:
                             result = await self.control.call('login.send', {'uid': peer_uid,
                                 'telegramId': str(turn['telegramId']), 'privateChat': True,
                                 'requestId': receipt['requestId'],
+                                **({'messageId': turn['messageId']} if turn.get('messageId') is not None else {}),
                                 **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
                         except Exception:
                             result = {'status': 'unknown'}
