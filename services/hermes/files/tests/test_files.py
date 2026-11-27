@@ -265,7 +265,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             native.result_envelope({'final_response': output}, agent)
         self.assertEqual(self.store.reply_mode(route), 'voice')
 
-    def test_reply_mode_is_preserved_by_sqlite_backup_and_restore(self):
+    def test_reply_mode_is_preserved_by_profile_backup_and_restore(self):
         source = {'platform': 'telegram', 'account': 'instance-1:dev', 'chat': '42', 'thread': '7', 'sender': '11'}
         self.store.set_reply_mode(source, 'video_note')
         restored_root = self.root / 'restored'
@@ -273,6 +273,8 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         with sqlite3.connect(self.root / 'state' / 'files.sqlite') as source_db:
             with sqlite3.connect(restored_root / 'files.sqlite') as backup_db:
                 source_db.backup(backup_db)
+        for path in (self.root / 'state').glob('reply-mode-*.json'):
+            shutil.copy2(path, restored_root / path.name)
         restored = FileStore(restored_root, self.root / 'restored-cache', 'owner', self.backend, [self.input])
         self.assertEqual(restored.reply_mode(source), 'video_note')
 
@@ -298,18 +300,36 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.reply_mode(route), 'video_note')
         self.assertNotIn('_brai_reply_mode', result)
 
-    def test_old_file_database_gains_reply_modes_without_losing_data(self):
+    def test_old_file_database_remains_unchanged_when_setting_reply_mode(self):
         source = {'platform': 'telegram', 'account': 'instance:dev', 'chat': '42', 'thread': '7', 'sender': '11'}
         with self.store.db() as db:
-            db.execute('DROP TABLE reply_modes')
             db.execute('INSERT INTO tasks VALUES (?,?)', ('existing-task', 'existing-operation'))
+            before = db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
         upgraded = FileStore(self.root / 'state', self.cache, 'owner', self.backend, [self.input])
         self.assertIsNone(upgraded.reply_mode(source))
         upgraded.set_reply_mode(source, 'voice')
         with upgraded.db() as db:
             self.assertEqual(db.execute('SELECT operation FROM tasks WHERE identity=?', ('existing-task',)).fetchone()[0],
                              'existing-operation')
+            self.assertEqual([tuple(row) for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name")],
+                             [tuple(row) for row in before])
         self.assertEqual(upgraded.reply_mode(source), 'voice')
+
+    def test_reply_mode_rejects_a_symlink_and_concurrent_updates_remain_valid(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from files.store import key
+        source = {'platform': 'telegram', 'chat': '42', 'thread': '7', 'sender': '11'}
+        target = self.root / 'state' / ('reply-mode-' + key(source) + '.json')
+        outside = self.root / 'outside.json'
+        outside.write_text('untouched')
+        target.symlink_to(outside)
+        with self.assertRaises(FileError):
+            self.store.reply_mode(source)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda mode: self.store.set_reply_mode(source, mode),
+                          ['voice', 'video_note'] * 6))
+        self.assertIn(self.store.reply_mode(source), ('voice', 'video_note'))
+        self.assertEqual(outside.read_text(), 'untouched')
 
     def test_text_only_mode_survives_a_new_session(self):
         source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
