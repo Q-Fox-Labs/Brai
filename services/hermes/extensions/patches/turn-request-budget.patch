@@ -291,7 +291,7 @@ diff --git a/agent/brai_turn_budget.py b/agent/brai_turn_budget.py
 new file mode 100644
 --- /dev/null
 +++ b/agent/brai_turn_budget.py
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,401 @@
 +# ABOUTME: Ограничивает дополнительные запросы каждого агента в пользовательском ходе.
 +# ABOUTME: Хранит только техническое состояние; текст запросов и ответов не журналирует.
 +"""Бюджет агента: две дополнительные попытки, включая сжатие истории."""
@@ -340,6 +340,7 @@ new file mode 100644
 +        self.physical = 0
 +        self.lanes = {}
 +        self.deadlines = {}
++        self.children = {}
 +
 +    def start(self, metadata):
 +        """Учесть физический вызов до обращения к провайдеру."""
@@ -682,6 +683,9 @@ new file mode 100644
 +        if current is not None and (not getattr(agent, "_subagent_id", None) or getattr(current, "owner", None) is agent):
 +            return function(*args, **kwargs)
 +        budget = TurnRequestBudget()
++        if current is not None:
++            with current.lock:
++                budget = current.children.setdefault(id(agent), budget)
 +        budget.owner = agent
 +        token = _current.set(budget)
 +        try:

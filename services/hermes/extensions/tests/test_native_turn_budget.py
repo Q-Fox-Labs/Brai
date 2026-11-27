@@ -130,6 +130,25 @@ class PortableTurnBudgetTests(unittest.TestCase):
         self.assertIs(outer, inner)
         self.assertIsNot(outer, self.state)
 
+    def test_helper_schema_retry_keeps_previous_budget(self):
+        agent = types.SimpleNamespace(_subagent_id='sa-0')
+
+        @self.budget.turn_budget
+        def run(agent, exhaust=False):
+            budget = self.budget._current.get()
+            if exhaust:
+                for request in ('1', '1', '2'):
+                    budget.start({'api_request_id': request}).finish(failed=True)
+            else:
+                with self.assertRaises(self.budget.TurnRequestBudgetExhausted):
+                    budget.start({'api_request_id': '3'})
+            return budget
+
+        first = run(agent, exhaust=True)
+        second = run(agent)
+        self.assertIs(first, second)
+        self.assertEqual(self.state.spent, 0)
+
     def test_helper_retries_are_limited_and_parent_context_is_restored(self):
         agent = types.SimpleNamespace(_subagent_id='sa-0')
         callback = Mock(side_effect=ConnectionError('synthetic'))
