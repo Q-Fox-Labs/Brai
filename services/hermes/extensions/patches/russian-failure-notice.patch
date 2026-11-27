@@ -9682,3 +9682,13 @@ diff --git a/gateway/stream_consumer.py b/gateway/stream_consumer.py
 +                ledger = displayed
          if ledger and final_raw.startswith(ledger) and len(final_raw) > len(ledger):
              self._accumulated += final_raw[len(ledger):]
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -3380,4 +3380,6 @@
+         spans.extend(m.span() for m in re.finditer(
+             r"\[\[(?:audio_as_voice|as_document)\]\]", masked))
++        spans.extend(m.span() for m in re.finditer(
++            r"""(?m)^BRAI_FILES:[^\n]*|(?<!\w)MEDIA:[ \t]*["']?artifact:[^\s<>"']*["']?""", masked))
+         # Local Markdown destinations are not usable links in chat. Show their label only.
+         for match in re.finditer(

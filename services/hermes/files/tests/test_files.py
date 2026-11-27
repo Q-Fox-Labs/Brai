@@ -912,6 +912,9 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         markers = [
             'MEDIA:artifact:' + aid,
             'BRAI_FILES:' + json.dumps({'mode': 'album', 'items': [{'artifactId': aid}]}),
+            'BRAI_FILES:{oops}',
+            'BRAI_FILES:{"mode":"album","items":[{}]}',
+            'BRAI_FILES:{"mode":"album","items":[null]}',
         ]
         for marker in markers:
             with self.subTest(marker=marker), self.assertLogs(native.__name__, 'WARNING') as log:

@@ -1202,13 +1202,13 @@ def final_text(text, operation):
     text = _public_response_text(text)
     try:
         return _stage_final_text(text, operation)
-    except (FileError, FileNotFoundError) as error:
+    except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
         for pattern in (_SET, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
-        text = active_sub(_DESCRIPTOR, lambda match: '' if (
+        text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
         return text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}{reference}'
 
@@ -1224,11 +1224,13 @@ def _stage_final_text(text, operation):
     if explicit:
         match = explicit[0]
         data = json.loads(match.group(1))
-        if set(data) != {'mode', 'items'} or data['mode'] not in {'files', 'album'} or not data['items']:
+        if (not isinstance(data, dict) or set(data) != {'mode', 'items'}
+                or data['mode'] not in ('files', 'album') or not isinstance(data['items'], list) or not data['items']):
             raise FileError('INVALID_FILE_SET')
         mode = data['mode']
         for item in data['items']:
-            if set(item) - {'artifactId', 'caption', 'presentation'} or not isinstance(item.get('caption', ''), str):
+            if (not isinstance(item, dict) or set(item) - {'artifactId', 'caption', 'presentation'}
+                    or not isinstance(item.get('artifactId'), str) or not isinstance(item.get('caption', ''), str)):
                 raise FileError('INVALID_FILE_SET')
             with files.lock('cache'):
                 value = files.fetch(item['artifactId'])
