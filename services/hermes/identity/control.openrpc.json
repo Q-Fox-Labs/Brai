@@ -388,10 +388,89 @@
             "maximum": 9007199254740991,
             "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
           }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "denied",
+                "unavailable",
+                "failed",
+                "unknown"
+              ]
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "login.send-reply",
+      "paramStructure": "by-name",
+      "description": "Передаёт код ответом на доверенное исходное сообщение Telegram; при неизвестном исходе не повторяет отправку.",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        {
+          "name": "privateChat",
+          "required": true,
+          "schema": {
+            "type": "boolean",
+            "description": "false отклоняется как denied до выдачи кода."
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
+          }
         },
         {
           "name": "messageId",
-          "required": false,
+          "required": true,
           "schema": {
             "type": "string",
             "pattern": "^[1-9][0-9]{0,19}$",

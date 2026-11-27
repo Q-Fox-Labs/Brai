@@ -69,7 +69,7 @@ class FakeControl:
                 return {"status": "needs_consent", "botUrl": "https://t.me/brai_test_bot",
                         "accounts": [{"name": "Владелец", "username": "owner"}]}
             return {"status": getattr(self, "link_status", "sent"), "code": "synthetic-secret-must-not-escape"}
-        if method == "login.send":
+        if method in ("login.send", "login.send-reply"):
             return {"status": "sent", "code": "synthetic-code-must-not-escape"}
         if method == "tools.list":
             return {"role": "user", "generation": 0, "tools": []}
@@ -737,7 +737,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         lookup = {'uid': WORKER_UID, 'telegramId': '111222', 'chatId': '111222', 'deliveryId': 'c' * 64}
         self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.login-receipt', lookup), {'sent': False, 'unknown': False})
         await self.broker.call(WORKER_UID, 'login.send', {})
-        sent = [p for method, p, _ in self.control.calls if method == 'login.send'][-1]
+        sent = [p for method, p, _ in self.control.calls if method == 'login.send-reply'][-1]
         self.assertEqual((sent['messageId'], sent['threadId']), ('55', 73))
         await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': 'receipt'})
         self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.login-receipt', lookup), {'sent': True, 'unknown': False})

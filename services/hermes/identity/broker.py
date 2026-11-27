@@ -904,7 +904,8 @@ class Broker:
                     claimed, receipt['outcome'] = self.delivery_state().claim(receipt['requestId'], binding)
                     if claimed and self.turns.get(peer_uid) is turn:
                         try:
-                            result = await self.control.call('login.send', {'uid': peer_uid,
+                            control_method = 'login.send-reply' if turn.get('messageId') is not None else 'login.send'
+                            result = await self.control.call(control_method, {'uid': peer_uid,
                                 'telegramId': str(turn['telegramId']), 'privateChat': True,
                                 'requestId': receipt['requestId'],
                                 **({'messageId': turn['messageId']} if turn.get('messageId') is not None else {}),

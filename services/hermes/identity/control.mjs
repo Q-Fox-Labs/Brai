@@ -805,7 +805,8 @@ export async function privateCall(runtime, method, params) {
     if(Object.keys(params).some(key=>!['userId','profileId'].includes(key))||!text(params.userId)||!text(params.profileId))throw new Error('INVALID_ARGUMENT');
     return authCall('profile-ready',{userId:params.userId,profileId:params.profileId});
   }
-  if (method === 'login.send') return control.sendLogin(params);
+  if (method === 'login.send-reply' && (typeof params.messageId !== 'string' || !params.messageId)) throw new Error('INVALID_ARGUMENT');
+  if (method === 'login.send' || method === 'login.send-reply') return control.sendLogin(params);
   if (method === 'telegram.accounts') {
     if (Object.keys(params).some(key => !['uid', 'telegramId'].includes(key)) || !Number.isSafeInteger(params.uid) || params.uid <= 0 ||
         (params.telegramId !== undefined && (typeof params.telegramId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(params.telegramId)))) throw new Error('INVALID_ARGUMENT');

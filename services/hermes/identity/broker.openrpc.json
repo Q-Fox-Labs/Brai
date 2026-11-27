@@ -1505,7 +1505,7 @@
     },
     {
       "name": "login.send",
-      "description": "Worker-only code delivery for the currently registered private trusted input. Serialized per UID; root-only SQLite loginDeliveryStatePath persists unknown and an opaque durable-input binding in a FULL synchronous commit before control/Telegram write. Replay, timeout, cancellation, crash, close/reopen or restart never re-send the same recorded input. New real input uses a new stable requestId and Auth invalidates the prior code. Late completion cannot suppress a newer input. maxLoginReceipts defaults to 1000000; capacity blocks new login attempts without evicting old receipts or blocking ordinary input admission. No code or user text is stored or returned.",
+      "description": "Worker-only code delivery for the currently registered private trusted input. Serialized per UID; root-only SQLite loginDeliveryStatePath persists unknown in a FULL synchronous commit before control/Telegram write and stores only requestId/outcome. Replay, timeout, cancellation, crash, close/reopen or restart never re-send the same recorded input. New real input uses a new stable requestId and Auth invalidates the prior code. Late completion cannot suppress a newer input. maxLoginReceipts defaults to 1000000; capacity blocks new login attempts without evicting old receipts or blocking ordinary input admission. No code or user text is stored or returned.",
       "paramStructure": "by-name",
       "params": [],
       "result": {
