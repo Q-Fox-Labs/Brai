@@ -187,10 +187,13 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertIn('Не удалось обработать сообщение', russian['errors']['no_credentials'])
         self.assertNotIn('сервис ИИ', russian['errors']['no_credentials'])
         self.assertNotIn('Проверьте подключение', russian['errors']['no_credentials'])
-        for value in russian['errors'].values():
+        for key, value in russian['errors'].items():
             if isinstance(value, str):
                 for command in ('/retry', '/model', '/new', '/compress', '/login'):
                     self.assertNotIn(command, value)
+                if key != 'empty_response_model_label':
+                    self.assertNotIn('сервис ИИ', value)
+                    self.assertNotIn('модел', value.lower())
         def check(en, ru, path='gateway'):
             for key, value in en.items():
                 self.assertIn(key, ru, f'{path}.{key}')
@@ -1049,6 +1052,24 @@ class FailureNoticeTest(unittest.TestCase):
             text = self.render('truncated', result=verdict.result, delivered_partial=verdict.result['brai_delivered_partial'])
             self.assertTrue(text.startswith('Часть ответа'))
             self.assertNotIn('Внутренняя диагностика', text)
+
+    def test_cli_does_not_repeat_confirmed_partial_answer(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for CLI integration')
+        tree = ast.parse((Path(candidate) / 'hermes_cli/cli_chat_turn_mixin.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == '_brai_unstreamed_error_response')
+        scope = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        render = scope['_brai_unstreamed_error_response']
+        result = {'brai_partial_in_final': True, 'brai_delivered_partial': 'Часть ответа'}
+        response = 'Часть ответа\n\n⚠️ Не удалось завершить запрос.'
+        self.assertEqual(render(response, result, 'Часть ответа'), '⚠️ Не удалось завершить запрос.')
+        self.assertEqual(render(response, result, ''), response)
+        self.assertEqual(render(response, result, 'Часть'), response)
+        self.assertEqual(render(response, {}, 'Часть ответа'), response)
 
 class DeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_recovered_reply_is_russian_at_delivery_boundary(self):

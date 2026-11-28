@@ -9736,3 +9736,86 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
          adapter = self._delivery_adapter_for(source)
          # AIDEV-NOTE: обработать ошибку до озвучивания и финальной доставки.
          from gateway.run import _gateway_platform_value
+diff --git a/hermes_cli/cli_chat_turn_mixin.py b/hermes_cli/cli_chat_turn_mixin.py
+--- a/hermes_cli/cli_chat_turn_mixin.py
++++ b/hermes_cli/cli_chat_turn_mixin.py
+@@ -21,6 +21,15 @@
+ from agent.i18n import t
+-
++
+ from hermes_cli.cli_agent_setup_mixin import _retire_agent
++
++
++def _brai_unstreamed_error_response(response, result, streamed):
++    """Не повторять фрагмент, который уже выведен в этом ходе."""
++    if isinstance(response, str) and isinstance(result, dict) and result.get("brai_partial_in_final"):
++        partial = result.get("brai_delivered_partial")
++        if isinstance(partial, str) and partial and response.startswith(partial) and partial in (streamed or ""):
++            return response[len(partial):].lstrip()
++    return response
+-
++
+-
++
+ class CLIChatTurnMixin:
+@@ -690,6 +699,7 @@
+             ChatConsole, _ACCENT, _RST, _cprint, _maybe_remap_for_light_mode, _post_stream_transform_output,
+             _render_final_assistant_content,
+         )
++        response = _brai_unstreamed_error_response(response, turn.result, getattr(self, "_streamed_text_this_turn", ""))
+         if response and not (turn.result and turn.result.get("response_previewed", False)):
+             try:
+                 from hermes_cli.skin_engine import get_active_skin
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -666,17 +666,17 @@
+     native_stream_placeholder: "💬 Жду вашего выбора..."
+     skip_hint: 'Ответьте «Пропустить», если не хотите отвечать на этот вопрос.'
+   errors:
+-    rate_limited: "⏱️ Сервис ИИ временно ограничил запросы. Подождите немного и напишите «продолжай»."
+-    auth_failed: "⚠️ Не удалось войти в сервис ИИ. Проверьте подключение или обратитесь к администратору."
+-    bad_request: "⚠️ Сервис ИИ отклонил запрос. Попробуйте переформулировать сообщение или выбрать другую модель."
+-    connection_interrupted: "⚠️ Соединение с сервисом ИИ прервалось. Попробуйте позже и напишите «продолжай»."
+-    unreachable: "⚠️ Сервис ИИ сейчас недоступен. Попробуйте позже и напишите «продолжай»; если ошибка повторится, обратитесь к администратору."
+-    connection_unknown: "⚠️ Не удалось связаться с сервисом ИИ; причина неизвестна. Попробуйте позже и напишите «продолжай»."
+-    context_overflow: "⚠️ Разговор слишком длинный для выбранной модели. Не удалось обработать сообщение; если проблема повторится, обратитесь к администратору."
+-    usage_limit_resets: "⏱️ Достигнут лимит использования сервиса ИИ; он обновится через {window}. После этого напишите «продолжай»."
+-    provider_kept_failing: "⚠️ Сервис ИИ несколько раз ответил с ошибкой. Попробуйте позже и напишите «продолжай»."
+-    session_storage_unavailable_disk: "⚠️ Хранилище сеансов было временно недоступно, поэтому этот ход остановлен, чтобы защитить историю разговора. Проверьте свободное место на диске, затем отправьте сообщение ещё раз."
+-    session_storage_unavailable: "⚠️ Хранилище сеансов было временно недоступно, поэтому этот ход остановлен, чтобы защитить историю разговора. Ваше сообщение уже должно быть сохранено — отправьте его ещё раз чуть позже."
++    rate_limited: "⏱️ Сейчас слишком много запросов. Попробуйте позже."
++    auth_failed: "⚠️ Не удалось получить доступ. Обратитесь к администратору."
++    bad_request: "⚠️ Не удалось обработать запрос. Попробуйте изменить формулировку."
++    connection_interrupted: "⚠️ Ответ прервался. Попробуйте продолжить позже."
++    unreachable: "⚠️ Не удалось получить ответ. Попробуйте позже."
++    connection_unknown: "⚠️ Не удалось получить ответ; причина неизвестна."
++    context_overflow: "⚠️ Разговор стал слишком длинным. Попробуйте начать новый разговор."
++    usage_limit_resets: "⏱️ Достигнут лимит использования. Он обновится через {window}."
++    provider_kept_failing: "⚠️ Не удалось завершить запрос. Попробуйте позже."
++    session_storage_unavailable_disk: "⚠️ Не удалось сохранить разговор, поэтому работа остановлена. Обратитесь к администратору."
++    session_storage_unavailable: "⚠️ Не удалось сохранить разговор, поэтому работа остановлена. Попробуйте позже."
+     generic_failed: "⚠️ Не удалось завершить ответ. Попробуйте позже и напишите «продолжай»."
+     interrupted_before_start: "⚠️ Ваше сообщение было прервано до начала обработки. Если оно ещё актуально, отправьте его снова."
+     processing_incomplete: "обработка не завершена"
+@@ -685,15 +685,15 @@
+     previous_turn_cleanup: "⚠️ Ваше сообщение не было обработано (предыдущий ход ещё завершался). Отправьте его ещё раз."
+     unexpected_silence: "⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение."
+     empty_response_model_label: "Модель"
+-    hint_auth: " Не удалось войти в сервис ИИ. Проверьте подключение или обратитесь к администратору."
+-    hint_quota: " Сервис ИИ сообщил об ограничении баланса или тарифа. Проверьте условия подключения."
+-    hint_overloaded: " Сервис ИИ временно перегружен. Подождите немного и напишите «продолжай»."
++    hint_auth: " Не удалось получить доступ. Обратитесь к администратору."
++    hint_quota: " Достигнуто ограничение оплаты или тарифа."
++    hint_overloaded: " Сейчас слишком много запросов. Попробуйте позже."
+     hint_rate_limited: " Частота ваших запросов ограничена. Подождите немного и попробуйте снова."
+     hint_usage_limit_resets: " Достигнут лимит использования вашего тарифа. Он сбросится примерно через {hours} ч."
+     hint_usage_limit: " Достигнут лимит использования вашего тарифа. Дождитесь его сброса."
+-    hint_rejected: " Сервис ИИ-модели отклонил запрос."
++    hint_rejected: " Не удалось обработать запрос."
+     generic_failed_with_hint: "⚠️ Не удалось завершить ответ.{hint}\nПопробуйте позже и напишите «продолжай»."
+-    history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
++    history_unavailable: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
+     no_credentials: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
+   skills:
+     disabled: "Навык «{name}» установлен, но выключен. Для включения обратитесь к администратору."
