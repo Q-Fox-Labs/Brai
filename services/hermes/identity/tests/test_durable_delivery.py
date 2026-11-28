@@ -1223,7 +1223,7 @@ class PumpTests(unittest.IsolatedAsyncioTestCase):
         bridge = Bridge('owner', '42', 101, '/unused', AsyncMock(), AsyncMock(return_value={}))
         bridge.before_delivery = self.mirror.before_delivery
         bridge.input_receipt = AsyncMock()
-        source = NS(chat_id='42', thread_id=None, to_dict=lambda: {'user_id': '42'})
+        source = NS(chat_id='42', user_id='42', thread_id=None, to_dict=lambda: {'user_id': '42'})
         event = NS(message_id='1', _brai_release_updates=[1])
         peer = NS(call=AsyncMock())
         result = await bridge._dispatch(event, source, peer, {'handing_off': False, 'turn_id': None})

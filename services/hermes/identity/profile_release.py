@@ -1,6 +1,7 @@
 # ABOUTME: Удерживает один UID на границе фактической idle-проверки worker.
 # ABOUTME: Сохраняет operation receipt в его защищённой SQLite и не владеет systemd.
 import asyncio
+import json
 from pathlib import Path
 import socket
 import struct
@@ -130,6 +131,8 @@ class ProfileRelease:
                 await asyncio.to_thread(self.store.transition,profile,request,self.boot,'arming','reopening')
                 await self._reopen(profile,request,'reopening','busy')
                 return self._receipt(request,'busy','ingress_work')
+            await self._reconcile_completed_reactions(profile)
+            await self._verify_ingress(profile, request)
             peer = await self._peer(profile, request['workerPid'], request['workerStartTime'])
             result = await peer.call('release.try', request, timeout=None)
             if not isinstance(result,dict) or any(result.get(key) != request[key] for key in ('operationId','attemptId','profileId')):
@@ -140,6 +143,7 @@ class ProfileRelease:
                 return await self.status(**request)
             if result.get('state') != 'ready':
                 raise ValueError('WORKER_ATTEMPT_UNCONFIRMED')
+            await self._verify_ingress(profile, request)
             await asyncio.to_thread(self.store.transition,profile,request,self.boot,'arming','ready')
             return self._receipt(request,'ready')
         except Exception:
@@ -149,6 +153,45 @@ class ProfileRelease:
                 pass
             return self._receipt(request,'blocked','attempt_unconfirmed')
 
+    async def _completed_reactions(self, profile):
+        """Найти частично завершённые реакции владельца без изменения журналов."""
+        if self.mirror.transport is None:
+            return []
+        from .update_inbox import ignored_reaction
+        result = []
+        rows = await asyncio.to_thread(self.mirror.transport.pending)
+        for row in rows:
+            snapshot = json.loads(row['binding'])
+            original = snapshot.get('profile') if snapshot.get('state') == 'known' else None
+            if (not isinstance(original, dict) or original.get('uid') != profile['uid']
+                    or row['state'] != 'captured' or not ignored_reaction(json.loads(row['payload']))):
+                continue
+            if (row['bot_id'] != str(self.app.bot.id)
+                    or any(original.get(key) != profile.get(key) for key in ('uid', 'userId', 'profileId'))):
+                raise ValueError('PROFILE_REACTION_BINDING_CHANGED')
+            current = await self.mirror.resolve(original['telegramId'])
+            current = current.get('profile') if isinstance(current, dict) and current.get('state') == 'known' else None
+            if (not isinstance(current, dict) or any(current.get(key) != original.get(key) for key in
+                    ('uid', 'profileId', 'userId', 'telegramId', 'authorTelegramId', 'role', 'generation'))):
+                raise ValueError('PROFILE_REACTION_BINDING_CHANGED')
+            try:
+                observed = await asyncio.to_thread(self.mirror.inbox.observe, original, row['bot_id'], row['update_id'])
+            except ValueError as error:
+                if str(error) == 'INBOX_NOT_FOUND':
+                    continue
+                raise
+            if observed['state'] == 'handled':
+                if observed['digest'] != row['digest']:
+                    raise ValueError('PROFILE_REACTION_PAYLOAD_CHANGED')
+                result.append((original, row))
+        return result
+
+    async def _reconcile_completed_reactions(self, profile):
+        """Завершить транспортную запись уже пропущенной реакции владельца."""
+        for original, row in await self._completed_reactions(profile):
+            await asyncio.to_thread(self.mirror.inbox.ignore_reaction, original, row['bot_id'], row['update_id'])
+            await asyncio.to_thread(self.mirror.transport.ignore_reaction, original, row['bot_id'], row['update_id'])
+
     async def _verify_ingress(self, profile, request):
         """Recheck the exact gated owner and all unresolved durable inputs."""
         uid, operation = profile['uid'], request['operationId']
@@ -156,6 +199,8 @@ class ProfileRelease:
             raise ValueError('PROFILE_GATE_UNCONFIRMED')
         if uid in self.mirror.transport_blocked:
             raise ValueError('PROFILE_TRANSPORT_UNCONFIRMED')
+        if await self._completed_reactions(profile):
+            raise ValueError('PROFILE_REACTION_PARTIAL')
         outstanding = await asyncio.to_thread(self.mirror.inbox.unsettled, profile)
         if any(not row['bound'] or row['state'] in ('unknown', 'blocked', 'handing_off', 'captured', 'native_duplicate')
                or row['operationId'] != operation for row in outstanding):
@@ -274,6 +319,7 @@ class ProfileRelease:
             try:
                 if (row['replacement_pid'] != replacement_pid or row['replacement_start'] != replacement_start):
                     raise ValueError('PROFILE_REPLACEMENT_CHANGED')
+                await self._reconcile_completed_reactions(profile)
                 await self._verify_ingress(profile, request)
                 peer = await self._peer(profile,replacement_pid,replacement_start)
                 result = await peer.call('release.status', {'operationId':request['operationId']}, timeout=None)
@@ -285,6 +331,7 @@ class ProfileRelease:
             except Exception:
                 return self._receipt(request,'blocked','resume_unconfirmed')
         try:
+            await self._reconcile_completed_reactions(profile)
             await self._verify_ingress(profile, request)
             if row['state'] == 'ready':
                 await asyncio.to_thread(self.store.transition,profile,request,self.boot,'ready','resuming',
@@ -362,6 +409,7 @@ class ProfileRelease:
                 if (self.mirror.pending or tracker.counts.get(uid,0)
                         or any(value is None for value in tracker.tickets.values()) or batch.busy(uid)):
                     continue
+                await self._reconcile_completed_reactions(profile)
                 # Предыдущий SELECT выполнялся в другом потоке и мог устареть,
                 # пока capture завершал транзакцию. Перечитать под тем же lock,
                 # который сериализует запись перед Telegram ack.

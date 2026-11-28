@@ -44,6 +44,56 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         if self.owner.reapers:
             await asyncio.gather(*self.owner.reapers)
 
+    async def test_gate_reconciles_partially_completed_reaction_before_ready(self):
+        from identity.transport_inbox import TransportInbox
+        bot=self.app.bot;bot._bot_user=User(123,'synthetic',True)
+        reaction=Update.de_json({'update_id':41,'message_reaction':{'message_id':9,'date':1,
+            'chat':{'id':42,'type':'private'},'user':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'old_reaction':[],'new_reaction':[{'type':'emoji','emoji':'👍'}]}},bot)
+        inbox=self.mirror.inbox
+        transport=TransportInbox(inbox.journal);self.mirror.transport=transport
+        transport.capture_batch([(reaction,{'state':'known','profile':P1})],123)
+        inbox.capture(P1,reaction,123)
+        inbox.ignore_reaction(P1,123,41)
+        self.mirror.tracker.gates[1001]=self.request['operationId']
+        with self.assertRaisesRegex(ValueError,'PROFILE_REACTION_PARTIAL'):
+            await self.owner._verify_ingress(P1,self.request)
+        self.assertEqual(transport.observe(123,41)['state'],'captured')
+        with patch.object(transport,'ignore_reaction',side_effect=OSError('synthetic failure')):
+            with self.assertRaises(OSError):
+                await self.owner._reconcile_completed_reactions(P1)
+        self.assertEqual(transport.observe(123,41)['state'],'captured')
+        self.assertEqual(self.mirror.tracker.gates[1001],self.request['operationId'])
+        await self.owner._reconcile_completed_reactions(P1)
+        await self.owner._verify_ingress(P1,self.request)
+        self.assertEqual(transport.observe(123,41)['state'],'handled')
+        self.assertEqual(inbox.observe(P1,123,41)['state'],'handled')
+
+    async def test_gate_rejects_different_reaction_payloads(self):
+        import hashlib
+        import json
+        from identity.transport_inbox import TransportInbox, TRANSPORT_PROFILE
+        from identity.update_inbox import canonical
+        bot=self.app.bot;bot._bot_user=User(123,'synthetic',True)
+        reaction=Update.de_json({'update_id':41,'message_reaction':{'message_id':9,'date':1,
+            'chat':{'id':42,'type':'private'},'user':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'old_reaction':[],'new_reaction':[{'type':'emoji','emoji':'👍'}]}},bot)
+        inbox=self.mirror.inbox
+        transport=TransportInbox(inbox.journal);self.mirror.transport=transport
+        transport.capture_batch([(reaction,{'state':'known','profile':P1})],123)
+        inbox.capture(P1,reaction,123);inbox.ignore_reaction(P1,123,41)
+        row=transport.observe(123,41);payload=json.loads(row['payload'])
+        payload['message_reaction']['message_id']=10
+        raw=canonical(payload);digest=hashlib.sha256(raw.encode()).hexdigest()
+        db=inbox.journal.database(TRANSPORT_PROFILE)
+        with db: db.execute('UPDATE release_transport SET payload=?,digest=? WHERE seq=?',(raw,digest,row['seq']))
+        db.close()
+        self.mirror.tracker.gates[1001]=self.request['operationId']
+        with self.assertRaisesRegex(ValueError,'PROFILE_REACTION_PAYLOAD_CHANGED'):
+            await self.owner._reconcile_completed_reactions(P1)
+        self.assertEqual(transport.observe(123,41)['state'],'captured')
+        self.assertEqual(self.mirror.tracker.gates[1001],self.request['operationId'])
+
     async def test_busy_profile_remains_open_and_other_profile_independent(self):
         self.mirror.tracker.counts[1001]=1
         async def call(method, params, **kwargs):

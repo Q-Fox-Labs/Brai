@@ -4,7 +4,7 @@ import hashlib
 import json
 from types import SimpleNamespace
 
-from .update_inbox import canonical, number
+from .update_inbox import canonical, ignored_reaction, number
 
 # AIDEV-NOTE: Локальная попытка имеет отдельный durable ID и не меняет offset
 # Telegram. Пространство намеренно выше 64-битного Telegram update_id.
@@ -184,6 +184,25 @@ class TransportInbox:
                     raise ValueError('TRANSPORT_STATE_CHANGED')
                 if row['state'] == expected:
                     db.execute('UPDATE release_transport SET state=? WHERE seq=?',(state,row['seq']))
+        finally:
+            db.close()
+        self._sync()
+
+    def ignore_reaction(self, profile, bot_id, update_id):
+        """Завершить исходную непринятую реакцию с неизменной Auth-привязкой."""
+        db = self._open()
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT * FROM release_transport WHERE bot_id=? AND update_id=?',
+                                 (number(bot_id, 'BOT'), str(update_id))).fetchone()
+                if (row is None or row['state'] not in ('captured', 'handled')
+                        or row['binding'] != canonical(self._binding({'state': 'known', 'profile': profile}))
+                        or hashlib.sha256(row['payload'].encode()).hexdigest() != row['digest']
+                        or not ignored_reaction(json.loads(row['payload']))):
+                    raise ValueError('TRANSPORT_REACTION_NOT_IGNORABLE')
+                if row['state'] == 'captured':
+                    db.execute("UPDATE release_transport SET state='handled' WHERE seq=?", (row['seq'],))
         finally:
             db.close()
         self._sync()
