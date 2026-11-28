@@ -813,7 +813,8 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument'):
             setattr(telegram, name, NS)
         worker = self.adapter(deliver)
-        with patch.object(runtime, 'broker_call', broker), patch.dict(sys.modules, {'telegram': telegram}):
+        with patch.object(runtime, 'broker_call', broker), patch.dict(sys.modules, {'telegram': telegram}), \
+                patch('files.video_note.validate_video_note_stream', new_callable=AsyncMock):
             result = await native.send_set(worker, '123', items, mode, {'thread_id': '77'})
         self.assertTrue(result.success, result.error)
         self.assertEqual(result.message_id, '42')
@@ -841,6 +842,9 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_durable_video_note_reaches_private_chat_without_reply_anchor(self):
         from identity.delivery_journal import delivery_id
         from identity.reply_outbox import ReplyOutbox
+        preflight = patch('files.video_note.validate_video_note_stream', new_callable=AsyncMock)
+        preflight.start()
+        self.addCleanup(preflight.stop)
         video = self.input / 'note.mp4'
         video.write_bytes(b'synthetic video')
         artifact = self.files.resolve(str(video), ['test', 'durable-video-note'])
@@ -922,7 +926,8 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument'):
             setattr(telegram, name, NS)
         before = AsyncMock(side_effect=DeliveryDeferred('Auth unavailable'))
-        with patch.dict(sys.modules, {'telegram': telegram}):
+        with patch.dict(sys.modules, {'telegram': telegram}), \
+                patch('files.video_note.validate_video_note_stream', new_callable=AsyncMock):
             with self.assertRaises(DeliveryDeferred):
                 await native.telegram_sender(adapter, '123', {'thread_id': '77'}, 'single',
                     [{'presentation': 'video_note', 'caption': '', 'readHandle': BytesIO(b'video')}], False,

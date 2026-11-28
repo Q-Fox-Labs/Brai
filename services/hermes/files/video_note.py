@@ -2,6 +2,7 @@
 # ABOUTME: Не отправляет сообщения и возвращает ссылки после публикации каждого видео.
 """Локальная обработка аудио для штатной файловой доставки Telegram."""
 from pathlib import Path
+import asyncio
 import json
 import re
 import subprocess
@@ -11,6 +12,35 @@ import wave
 from .store import FileError
 
 VIDEO_NOTE_SIZE = 640
+
+
+async def validate_video_note_stream(stream):
+    """До отправки проверить геометрию даже у ролика из прежней очереди."""
+    try:
+        stream.seek(0)
+        process = await asyncio.create_subprocess_exec(
+            '/usr/bin/ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height', '-of', 'json', 'pipe:0',
+            stdin=stream, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            output, _ = await process.communicate()
+        except BaseException:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+            raise
+        if process.returncode:
+            raise FileError('VIDEO_NOTE_INVALID_OUTPUT')
+        streams = json.loads(output)['streams']
+        if len(streams) != 1 or (streams[0].get('width'), streams[0].get('height')) != (VIDEO_NOTE_SIZE, VIDEO_NOTE_SIZE):
+            raise FileError('VIDEO_NOTE_INVALID_OUTPUT')
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise FileError('VIDEO_NOTE_INVALID_OUTPUT') from error
+    finally:
+        stream.seek(0)
 
 
 def _audio_parts(source, directory):

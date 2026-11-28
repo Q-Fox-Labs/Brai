@@ -14,7 +14,7 @@ import sys
 import tempfile
 from types import SimpleNamespace, ModuleType
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import uuid
 import wave
 
@@ -1331,7 +1331,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             setattr(telegram, 'InputMedia' + name, object)
         adapter = SimpleNamespace(_bot=Bot())
         with self.store.materialize([item['file'] for item in items], 'video-test-send') as values:
-            with patch.dict(sys.modules, {'telegram': telegram}):
+            with patch.dict(sys.modules, {'telegram': telegram}), patch('files.video_note.validate_video_note_stream', new_callable=AsyncMock):
                 for item, value in zip(items, values):
                     native.validate_telegram([item])
                     await native.telegram_sender(adapter, '123', {'thread_id': '77'}, 'single',
@@ -1347,10 +1347,34 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(message_id=3, video=SimpleNamespace(), video_note=None)
         adapter._bot.send_video_note = unexpected_video
         with self.store.materialize([items[0]['file']], 'video-note-invalid-receipt') as values:
-            with patch.dict(sys.modules, {'telegram': telegram}):
+            with patch.dict(sys.modules, {'telegram': telegram}), patch('files.video_note.validate_video_note_stream', new_callable=AsyncMock):
                 with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_DELIVERY_UNCONFIRMED'):
                     await native.telegram_sender(adapter, '123', {}, 'single',
                         [{**items[0], 'localPath': values[0]['localPath']}], False)
+
+    async def test_video_note_preflight_rejects_old_oversized_queued_file(self):
+        from files.video_note import validate_video_note_stream
+        for size in (640, 900):
+            path = self.input / f'queued-{size}.mp4'
+            subprocess.run(['/usr/bin/ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                            f'color=black:s={size}x{size}:r=1', '-frames:v', '1',
+                            '-c:v', 'libx264', '-movflags', '+faststart', str(path)], check=True)
+            with path.open('rb') as stream:
+                if size == 640:
+                    await validate_video_note_stream(stream)
+                else:
+                    with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_INVALID_OUTPUT'):
+                        await validate_video_note_stream(stream)
+                self.assertEqual(stream.tell(), 0)
+        telegram = ModuleType('telegram')
+        for name in ('InputMediaPhoto', 'InputMediaVideo', 'InputMediaAudio', 'InputMediaDocument'):
+            setattr(telegram, name, SimpleNamespace)
+        bot = SimpleNamespace(send_video_note=AsyncMock())
+        with patch.dict(sys.modules, {'telegram': telegram}):
+            with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_INVALID_OUTPUT'):
+                await native.telegram_sender(SimpleNamespace(_bot=bot), '123', {}, 'single',
+                    [{'presentation': 'video_note', 'caption': '', 'localPath': str(self.input / 'queued-900.mp4')}], False)
+        bot.send_video_note.assert_not_awaited()
 
     def test_video_note_failure_preserves_text_and_code_examples(self):
         audio = self.input / 'speech.ogg'

@@ -1635,6 +1635,11 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             sources.append(file)
         positions = [file.tell() for file in sources] if anchored else []
         album = kind == 'album'
+        if any(item['presentation'] == 'video_note' for item in items):
+            if album or len(items) != 1:
+                raise FileError('VIDEO_NOTE_INVALID_OUTPUT')
+            from .video_note import validate_video_note_stream
+            await validate_video_note_stream(sources[0])
 
         deferred = []
 
