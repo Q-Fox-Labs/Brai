@@ -26,6 +26,12 @@ const pg = process.env.WELCOME_FIXTURE_PG;
 const nats = process.env.WELCOME_FIXTURE_NATS;
 const natsAuth = process.env.WELCOME_FIXTURE_NATS_AUTH;
 const secret = 'welcome-synthetic-fixture-only-1234';
+const connectFixture = address => connect({
+ servers: `nats://${address.hostname}:${address.port}`,
+ user: decodeURIComponent(address.username) || undefined,
+ pass: decodeURIComponent(address.password) || undefined,
+ maxReconnectAttempts: 0
+});
 
 test('Welcome: два личных MCP, тот же владелец и история после активации гостя', {skip: !pg || !nats}, async t => {
  const base = new URL(pg), broker = new URL(nats);
@@ -60,13 +66,13 @@ test('Welcome: два личных MCP, тот же владелец и исто
   await Promise.allSettled(pools.map(pool => pool.end()));
   await rm(folder, {recursive: true, force: true});
  });
- nc = await connect({servers: nats, maxReconnectAttempts: 0});
+ nc = await connectFixture(broker);
  if(natsAuth){
   const authAddress=new URL(natsAuth);
   assert.equal(authAddress.hostname,broker.hostname);
   assert.equal(authAddress.port,broker.port);
   assert.equal(authAddress.protocol,broker.protocol);
-  authNc=await connect({servers:natsAuth,maxReconnectAttempts:0});
+  authNc=await connectFixture(authAddress);
  }else authNc=nc;
  const root = sql(pg);
  for (const role of ['welcome_auth_owner', 'welcome_auth_app', 'welcome_dialogues_owner', 'welcome_dialogues_a', 'welcome_dialogues_b']) {
