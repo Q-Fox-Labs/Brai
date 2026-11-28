@@ -803,7 +803,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
 -    no_credentials: "⚠️ Мне не удалось подключиться к сервису ИИ-модели, поэтому сообщение не было обработано. Используйте /login, чтобы войти заново, или /model, чтобы выбрать другую модель. Если ошибка повторяется, выполните `hermes doctor` на хосте."
 +    generic_failed_with_hint: "⚠️ Не удалось завершить ответ.{hint}\nПопробуйте позже и напишите «продолжай»."
 +    history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
-+    no_credentials: "⚠️ Не удалось подключиться к сервису ИИ, поэтому сообщение не было обработано. Проверьте подключение или обратитесь к администратору."
++    no_credentials: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
    skills:
      disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
      not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"
@@ -2664,7 +2664,7 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
  }
 
 
-@@ -1067,64 +991,48 @@
+@@ -1067,64 +991,50 @@
              agent, classified, status_code=status_code, provider=provider, base_url=base_url, model=model
          )
      elif classified.reason == FailoverReason.model_not_found:
@@ -2728,6 +2728,7 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
              error_detail=_nonretryable_summary,
          )
 +        result["brai_original_error"] = result.get("final_response", "")
++        if delivered: result["brai_delivered_partial"] = delivered.strip()
 +        return result
      # Billing walls get the same structured recovery descriptor as the max-retries path
      # so every surface renders one consistent signal.
@@ -2738,11 +2739,12 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
              api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
          )
 +        result["brai_original_error"] = result.get("final_response", "")
++        if delivered: result["brai_delivered_partial"] = delivered.strip()
 +        return result
      if _welcome_hint:
          # A free-tier refusal is fully explained by its own sentence; the raw provider summary
          # (status codes, JSON) is for the log, not for a first-time user's chat.
-@@ -1138,16 +1046,21 @@
+@@ -1138,16 +1046,20 @@
      # Same verdict fields as the max-retries path: without them the UI descriptor
      # (agent/error_surface.py) reads a rejected OAuth token as a retryable
      # "Provider error" and offers Retry instead of a re-login.
@@ -2760,7 +2762,6 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
      if _keep_partial:
          result["partial"] = True
 +        result["brai_delivered_partial"] = delivered.strip()
-+        result["brai_partial_already_delivered"] = True
      _stamp_limit_reset(result, agent, api_error)
      if _welcome_hint and (_kind := _welcome_surface_kind(classified)):
          # The card form: the desktop renders the sign-in as a button, so no "To sign in" tail.
@@ -2830,12 +2831,11 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
      result.update({
          # Classified reason so callers (kanban worker in cli.py) can tell a quota wall
          # (``rate_limit`` / ``billing``) from a task failure.
-@@ -1295,6 +1204,8 @@
+@@ -1295,6 +1204,7 @@
      if _keep_partial:
          result["final_response"] = _final_response
          result["partial"] = True
 +        result["brai_delivered_partial"] = delivered.strip()
-+        result["brai_partial_already_delivered"] = True
      _stamp_limit_reset(result, agent, api_error)
      if _free_tier_kind:
          _stamp_free_tier(result, _free_tier_kind, (
@@ -6089,7 +6089,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
      last_output: ". Последний вывод:\n```\n{tail}\n```"
      rerun_hint: "\nПопросите меня перезапустить её или показать полный журнал."
 -    no_credentials: "❌ Фоновая задача не запустилась: не настроен вход ни в одну модель ИИ. Используйте /login или выполните `hermes setup` на хосте."
-+    no_credentials: "❌ Не удалось запустить фоновую задачу: подключение к модели ИИ не настроено. Проверьте настройки подключения."
++    no_credentials: "❌ Не удалось запустить задачу. Обратитесь к администратору."
      complete_header: "✅ Фоновая задача выполнена\nПромпт: \"{preview}\"\n\n"
      no_response: "(Ответ не сгенерирован)"
      failed: "❌ Ваша фоновая задача \"{preview}\" завершилась с ошибкой, не дойдя до конца. Отправьте /bg ещё раз, чтобы повторить, или /agents, чтобы увидеть, что ещё выполняется."
@@ -6644,7 +6644,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
      none_value: "нет"
 @@ -689,12 +689,12 @@
      history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
-     no_credentials: "⚠️ Не удалось подключиться к сервису ИИ, поэтому сообщение не было обработано. Проверьте подключение или обратитесь к администратору."
+     no_credentials: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
    skills:
 -    disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
 -    not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"
@@ -9695,3 +9695,23 @@ diff --git a/gateway/run.py b/gateway/run.py
 -
 +
  # Provider/API failure envelope preambles (not ordinary assistant prose), anchored at line start.
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -4156,7 +4156,15 @@
+         payload: a mismatch (False, incl. payload-less split delivery) never suppresses; None (no
+         record) keeps legacy trust."""
+         _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
+-        if not isinstance(response, dict) or response.get("failed"):
++        if not isinstance(response, dict):
++            return
++        _partial = response.get("brai_delivered_partial")
++        _has_delivered = getattr(_sc, "has_durably_delivered_text", None)
++        if _partial and callable(_has_delivered):
++            with suppress(Exception):
++                if _has_delivered(_partial):
++                    response["brai_partial_already_delivered"] = True
++        if response.get("failed"):
+             return
+         _final = response.get("final_response") or ""
+         _is_empty_sentinel = not _final or _final == "(empty)"

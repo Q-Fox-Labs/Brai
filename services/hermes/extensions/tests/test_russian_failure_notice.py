@@ -184,6 +184,9 @@ class FailureNoticeTest(unittest.TestCase):
         english = yaml.safe_load((directory / 'en.yaml').read_text())['gateway']
         russian = yaml.safe_load((directory / 'ru.yaml').read_text())['gateway']
         self.assertIn('Не удалось получить ответ', russian['errors']['unexpected_silence'])
+        self.assertIn('Не удалось обработать сообщение', russian['errors']['no_credentials'])
+        self.assertNotIn('сервис ИИ', russian['errors']['no_credentials'])
+        self.assertNotIn('Проверьте подключение', russian['errors']['no_credentials'])
         for value in russian['errors'].values():
             if isinstance(value, str):
                 for command in ('/retry', '/model', '/new', '/compress', '/login'):
@@ -866,6 +869,20 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertEqual(result['brai_original_error'], 'original diagnostic')
         self.assertEqual(result['brai_delivered_partial'], 'Личная часть ответа')
         self.assertNotIn('Личная часть ответа', result['brai_original_error'])
+        scope.update({'_print_nonretryable_auth_guidance': lambda *a, **kw: None,
+                      'CONTENT_POLICY_NEXT_STEPS': 'попробуйте изменить запрос',
+                      'content_policy_copy': lambda **kw: 'ошибка',})
+        modules['agent.conversation_loop'] = types.SimpleNamespace(
+            _billing_failure_result=lambda **kw: {'failed': True, 'final_response': 'ошибка'},
+            _content_policy_blocked_result=lambda *a, **kw: {'failed': True, 'final_response': 'ошибка'})
+        for reason in (reasons.content_policy_blocked, reasons.billing):
+            with patch.dict('sys.modules', modules):
+                blocked = scope['nonretryable_client_error_result'](agent, Exception('error'),
+                    types.SimpleNamespace(reason=reason, is_auth=False, retryable=False),
+                    status_code=400, api_kwargs=None, api_messages=[], messages=[], conversation_history=[],
+                    api_call_count=1, approx_tokens=0, provider='test', base_url='test', model='test',
+                    delivered='Личная часть ответа')
+            self.assertEqual(blocked['brai_delivered_partial'], 'Личная часть ответа')
 
     def test_tool_validation_distinguishes_incomplete_and_unknown_actions(self):
         import os

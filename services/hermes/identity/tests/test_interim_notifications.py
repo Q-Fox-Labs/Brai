@@ -4,6 +4,7 @@ import ast
 import asyncio
 from contextlib import suppress
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -60,6 +61,23 @@ def fixture_method(filename, classname, name):
 class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.notification, self.send = adapter_methods()
+
+    async def test_partial_is_marked_delivered_only_with_a_matching_receipt(self):
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required')
+        tree = ast.parse((Path(candidate) / 'gateway/run_turn.py').read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == '_run_agent_mark_streamed_delivery')
+        future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+        scope = {'suppress': suppress}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        for confirmed in (True, False, None):
+            response = {'failed': True, 'brai_delivered_partial': 'Часть ответа'}
+            consumer = None if confirmed is None else SimpleNamespace(has_durably_delivered_text=lambda text: confirmed)
+            ctx = SimpleNamespace(stream_consumer_holder=[consumer], source=None, session_key='s')
+            await scope['_run_agent_mark_streamed_delivery'](None, response, ctx)
+            self.assertEqual(response.get('brai_partial_already_delivered', False), confirmed is True)
 
     async def test_queued_partial_gets_explanation_without_repeating_delivered_text(self):
         marker = '--- a/gateway/run_turn.py\n+++ b/gateway/run_turn.py\n'
