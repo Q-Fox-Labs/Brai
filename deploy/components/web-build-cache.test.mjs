@@ -60,7 +60,7 @@ test('publisher cache is not qualified by an environment flag without the fixed 
 test('publisher accepts only the mounted readonly receipt and sealed paths inside a real namespace',t=>{
   const root=mkdtempSync(join(tmpdir(),'brai-sealed-proof-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
   const id='f6dd5556-83f6-4e66-8589-9cb923e723de',job=join(root,'job'),generation=join(root,'generation'),code=join(root,'code');
-  for(const path of [join(job,'checkout'),join(job,'repo/.git/brai-dependencies/prepared'),join(generation,'node_modules'),code])mkdirSync(path,{recursive:true});
+  for(const path of [join(job,'checkout'),join(job,'repo/.git/sealed-inputs/prepared'),join(generation,'node_modules'),code])mkdirSync(path,{recursive:true});
   mkdirSync(join(job,'checkout/apps/web'),{recursive:true});
   for(const name of ['package.json','apps/web/package.json','apps/web/next.config.ts','apps/web/tsconfig.json','apps/web/postcss.config.mjs'])writeFileSync(join(job,'checkout',name),'{}\n');
   const hash='a'.repeat(64),mount=`/opt/brai-shared/immutable-files-v1/npm-${hash}`,base=`/var/lib/brai-dev/host-publisher/${id}`;
@@ -68,7 +68,7 @@ test('publisher accepts only the mounted readonly receipt and sealed paths insid
   writeFileSync(join(generation,'.brai-toolchain.json'),tool);
   const lock=JSON.stringify({packages:{}})+'\n';writeFileSync(join(generation,'package-lock.json'),lock);
   writeFileSync(join(generation,'.brai-closure.json'),JSON.stringify({packages:[]}));
-  mkdirSync(join(job,'checkout/node_modules'));writeFileSync(join(job,'checkout/node_modules/.brai-worktree.json'),JSON.stringify({dependencyRoot:base+'/repo/.git/brai-dependencies/prepared'}));
+  mkdirSync(join(job,'checkout/node_modules'));writeFileSync(join(job,'checkout/node_modules/.brai-worktree.json'),JSON.stringify({dependencyRoot:base+'/repo/.git/sealed-inputs/prepared'}));
   const proof={format:'brai-dev-dependency-generation-v1',root:mount,lockSha256:createHash('sha256').update(lock).digest('hex'),contentSha256:hash,toolchainSha256:createHash('sha256').update(tool).digest('hex'),platform:'linux',arch:'x64',node:process.versions.node,npm:'11.19.1',relativeRoots:['node_modules']};
   const receipt=join(root,'receipt');writeFileSync(receipt,JSON.stringify(proof));
   copyFileSync(join(import.meta.dirname,'web-build-cache.mjs'),join(code,'web-build-cache.mjs'));
@@ -77,9 +77,9 @@ test('publisher accepts only the mounted readonly receipt and sealed paths insid
   writeFileSync(join(code,'graph.mjs'),'export const sourceFiles=()=>[];\n');
   writeFileSync(join(code,'lock-inputs.mjs'),'export const lockInputs=()=>[];\n');
   writeFileSync(join(code,'build-web-standalone.mjs'),'// fixture\n');
-  writeFileSync(join(code,'probe.mjs'),`import {cacheIdentity} from './web-build-cache.mjs';const value=cacheIdentity(${JSON.stringify(base+'/checkout')},{},[${JSON.stringify(base+'/repo/.git/brai-dependencies/prepared/node_modules')}]);console.log(value??'unqualified');`);
+  writeFileSync(join(code,'probe.mjs'),`import {cacheIdentity} from './web-build-cache.mjs';const value=cacheIdentity(${JSON.stringify(base+'/checkout')},{},[${JSON.stringify(base+'/repo/.git/sealed-inputs/prepared/node_modules')}]);console.log(value??'unqualified');`);
   const toolroot='/usr/local/libexec/brai-dev-release/check-tools';
-  const args=['--unshare-pid','--unshare-net','--tmpfs','/','--ro-bind','/usr','/usr','--ro-bind',toolroot,toolroot,'--symlink','usr/bin','/bin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64','--proc','/proc','--dev','/dev','--dir','/code','--ro-bind',code,'/code','--dir','/publisher-proof','--ro-bind',receipt,'/publisher-proof/receipt.json','--dir','/opt','--dir','/opt/brai-shared','--dir','/opt/brai-shared/immutable-files-v1','--ro-bind',generation,mount,'--dir','/var','--dir','/var/lib','--dir','/var/lib/brai-dev','--dir','/var/lib/brai-dev/host-publisher','--dir',base,'--ro-bind',job,base,'--ro-bind',generation,base+'/repo/.git/brai-dependencies/prepared','--clearenv','--setenv','BRAI_PUBLISHER_PROOF_FD','3','--'];
+  const args=['--unshare-pid','--unshare-net','--tmpfs','/','--ro-bind','/usr','/usr','--ro-bind',toolroot,toolroot,'--symlink','usr/bin','/bin','--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64','--proc','/proc','--dev','/dev','--dir','/code','--ro-bind',code,'/code','--dir','/publisher-proof','--ro-bind',receipt,'/publisher-proof/receipt.json','--dir','/opt','--dir','/opt/brai-shared','--dir','/opt/brai-shared/immutable-files-v1','--ro-bind',generation,mount,'--dir','/var','--dir','/var/lib','--dir','/var/lib/brai-dev','--dir','/var/lib/brai-dev/host-publisher','--dir',base,'--ro-bind',job,base,'--ro-bind',generation,base+'/repo/.git/sealed-inputs/prepared','--clearenv','--setenv','BRAI_PUBLISHER_PROOF_FD','3','--'];
   const run=path=>spawnSync('/usr/bin/bwrap',[...args,'/bin/sh','-c',`exec 3<${path}; exec ${toolroot}/bin/node /code/probe.mjs`],{encoding:'utf8'});
   const accepted=run('/publisher-proof/receipt.json');assert.equal(accepted.status,0,accepted.stderr);assert.match(accepted.stdout.trim(),/^[a-f0-9]{64}$/);
   const rejected=run('/code/graph.mjs');assert.equal(rejected.status,0,rejected.stderr);assert.equal(rejected.stdout.trim(),'unqualified');

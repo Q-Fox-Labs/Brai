@@ -2,13 +2,15 @@
 // ABOUTME: Использует только явно заданный изолированный PostgreSQL и локальный NATS.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {execFile} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
+import {once} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {promisify} from 'node:util';
+import {setTimeout as delay} from 'node:timers/promises';
 import {connect} from 'nats';
 import {Pool} from 'pg';
 import {createAuthAccess} from '../dist/auth-access.js';
@@ -32,6 +34,14 @@ const connectFixture = address => connect({
  pass: decodeURIComponent(address.password) || undefined,
  maxReconnectAttempts: 0
 });
+
+async function unusedPort(){
+ const probe=createServer();
+ await new Promise((done,reject)=>probe.once('error',reject).listen(0,'127.0.0.1',done));
+ const port=probe.address().port;
+ await new Promise(done=>probe.close(done));
+ return port;
+}
 
 test('Welcome: два личных MCP, тот же владелец и история после активации гостя', {skip: !pg || !nats}, async t => {
  const base = new URL(pg), broker = new URL(nats);
@@ -237,10 +247,7 @@ test('Welcome: два личных MCP, тот же владелец и исто
  const welcomeDb=sql(url('welcome_service_fixture','welcome_fixture_root'));
  await welcomeDb.query(await readFile(new URL('../../welcome/migrations/001.sql',import.meta.url),'utf8'));
  await welcomeDb.query('UPDATE welcome.settings SET enabled=true,request_limit=1 WHERE singleton');
- const portProbe=createServer();
- await new Promise(done=>portProbe.listen(0,'127.0.0.1',done));
- const listenPort=portProbe.address().port;
- await new Promise(done=>portProbe.close(done));
+ const listenPort=await unusedPort();
  const publicOrigin='http://127.0.0.1:'+listenPort;
  const grantToken='welcome-dialogues-fixture-grant-only-test';
  const gateway=welcomeOwner({owner:dialoguesOwner,administrator:root,ownerRole:owner,
@@ -274,7 +281,40 @@ test('Welcome: два личных MCP, тот же владелец и исто
  const send=(text,kind='text',extra={})=>service.handle({...ingress,kind,text,updateId:String(++update),...extra});
  assert.match((await send('прикрыли файлом','file')).text,/не принимает файлы/);
  assert.equal(await welcomeAuth.resolve(ingress.telegramId),null);
- assert.match((await send('/start')).text,/Привет/);
+ if(broker.username){
+  const port=await unusedPort(), originHTTP='http://127.0.0.1:'+port;
+  const ingressSecret=join(folder,'welcome-ingress'), dialoguesGrant=join(folder,'welcome-dialogues-grant');
+  const token='welcome-synthetic-ingress-only-fixture';
+  const configPath=join(folder,'welcome.json');
+  await writeFile(ingressSecret,token,{mode:0o600});
+  await writeFile(dialoguesGrant,grantToken,{mode:0o600});
+  await writeFile(configPath,JSON.stringify({
+   host:'127.0.0.1',port,botName:'fixture_welcome_bot',ingressSecret,dialoguesGrant,
+   databaseURL:url('welcome_service_fixture','welcome_fixture_root'),dialoguesOrigin:publicOrigin,adminOrigins:[origin],
+   media:{},codex:{},nats:{servers:[`nats://${broker.hostname}:${broker.port}`],
+    user:decodeURIComponent(broker.username),password:decodeURIComponent(broker.password),inbox:'_INBOX.welcome_fixture'}
+  }),{mode:0o600});
+  const child=spawn(process.execPath,[new URL('../../welcome/src/main.mjs',import.meta.url).pathname],
+   {env:{...process.env,WELCOME_CONFIG:configPath},stdio:'ignore'});
+  const exit=once(child,'exit');
+  listeners.push({async close(){child.kill();await exit;}});
+  let healthy=false;
+  for(let attempt=0;attempt<20&&!healthy&&child.exitCode===null;attempt++){
+   healthy=await fetch(originHTTP+'/health').then(response=>response.ok,()=>false);
+   if(!healthy)await delay(100);
+  }
+  assert.equal(healthy,true,'Welcome HTTP process must start');
+  const body=JSON.stringify({...ingress,kind:'text',text:'/start',updateId:String(++update)});
+  const post=authorization=>fetch(originHTTP+'/telegram',{method:'POST',headers:{authorization,'content-type':'application/json'},body});
+  assert.equal((await post('Bearer incorrect')).status,401);
+  const greeting=await post('Bearer '+token);
+  assert.equal(greeting.status,200);
+  assert.match((await greeting.json()).text,/Привет/);
+  const visitors=await fetch(originHTTP+'/admin',{method:'POST',headers:{...headers,'content-type':'application/json'},
+   body:JSON.stringify({operation:'visitors'})});
+  assert.equal(visitors.status,200);
+  assert.equal((await visitors.json()).items[0].name,ingress.name);
+ }else assert.match((await send('/start')).text,/Привет/);
  assert.equal((await send('Тестовый вопрос')).text,'Ответ справочной для фикстуры');
  assert.match((await send('Второй запрос')).text,/лимит запросов исчерпан/i);
  assert.equal((await send('Только текст')).voice,false);

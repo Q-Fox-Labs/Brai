@@ -80,20 +80,29 @@ function hostProof() {
   const proof=JSON.parse(result.stdout);
   return proofSchema(proof) && protectedAncestors(proof.root)?proof:null;
 }
-export function trustedHostGeneration(path) {
-  try {return hostProof()?.root===path;} catch {return false;}
+export function trustedHostGeneration(root,path) {
+  try {
+    if(process.env.BRAI_PUBLISHER_PROOF_FD==='3')return Boolean(verifiedProof(root,[join(path,'node_modules')],path));
+    return hostProof()?.root===path;
+  } catch {return false;}
 }
-export function verifiedProof(root,roots) {
+export function verifiedProof(root,roots,prepared) {
   if(process.env.BRAI_PUBLISHER_PROOF_FD==='3') {
-    const info=fstatSync(3),fixed=statSync('/publisher-proof/receipt.json');
+    const info=fstatSync(3,{bigint:true}),fixed=statSync('/publisher-proof/receipt.json',{bigint:true});
     const flags=readFileSync('/proc/self/fdinfo/3','utf8').match(/^flags:\s+([0-7]+)$/m);
     if(!info.isFile() || info.dev!==fixed.dev || info.ino!==fixed.ino || !flags || (parseInt(flags[1],8)&3)!==0)return null;
-    const bytes=Buffer.alloc(info.size);if(readSync(3,bytes,0,bytes.length,0)!==bytes.length)return null;
-    const proof=JSON.parse(bytes.toString('utf8')),job=dirname(root),prepared=join(job,'repo/.git/brai-dependencies/prepared');
-    if(!proofSchema(proof) || !/^\/var\/lib\/brai-dev\/host-publisher\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/checkout$/.test(root) ||
+    const bytes=Buffer.alloc(Number(info.size));if(readSync(3,bytes,0,bytes.length,0)!==bytes.length)return null;
+    const proof=JSON.parse(bytes.toString('utf8'));
+    if(!proofSchema(proof) || !/^\/var\/lib\/brai-dev\/host-publisher\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/checkout$/.test(root))return null;
+    const common=join(dirname(root),'repo/.git');
+    if(typeof prepared!=='string' || (prepared!==proof.root && (prepared===common || !inside(common,prepared))) ||
+       realpathSync(prepared)!==prepared ||
        !roots.some(path=>realpathSync(path)===realpathSync(join(prepared,'node_modules'))) || !roots.every(path=>inside(prepared,realpathSync(path))) ||
        !readonlyMounts(['/publisher-proof/receipt.json',prepared,proof.root,'/usr/local/libexec/brai-dev-release/check-tools']) ||
        realpathSync(process.execPath)!=='/usr/local/libexec/brai-dev-release/check-tools/bin/node')return null;
+    // The checkout alias and the sealed generation must refer to the same read-only object.
+    const alias=statSync(prepared,{bigint:true}),generation=statSync(proof.root,{bigint:true});
+    if(!alias.isDirectory() || alias.dev!==generation.dev || alias.ino!==generation.ino)return null;
     return proof;
   }
   const proof=hostProof();
@@ -105,10 +114,9 @@ export function verifiedProof(root,roots) {
 export function cacheIdentity(root,component,dependencyRoots) {
   try {
     if(process.env.NODE_PATH||process.env.NODE_OPTIONS||Object.entries(process.env).some(([key,value])=>key.startsWith('LD_')&&value))return null;
-    const proof=verifiedProof(root,dependencyRoots);if(!proof)return null;
     const generation=json(join(root,'node_modules/.brai-worktree.json')).dependencyRoot;
-    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?join(dirname(root),'repo/.git/brai-dependencies/prepared'):proof.root;
-    if(generation!==expected)return null;
+    const proof=verifiedProof(root,dependencyRoots,generation);if(!proof)return null;
+    if(process.env.BRAI_PUBLISHER_PROOF_FD!=='3' && generation!==proof.root)return null;
     const inventory=sealedInventory(root,lockInputs(root,component.npm?.workspaces??[],{development:true}),proof,generation);
     if(!inventory)return null;
     const toolchainFile=join(proof.root,'.brai-toolchain.json'),toolchain=json(toolchainFile);

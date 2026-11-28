@@ -7,7 +7,10 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 
 /** Подключает отдельного NATS principal Welcome. */
 export async function messaging(config) {
- const nc=await connect({servers:config.servers,authenticator:credsAuthenticator(await readFile(config.credentials)),inboxPrefix:config.inbox});
+ const login=config.credentials?{authenticator:credsAuthenticator(await readFile(config.credentials))}:
+  {user:config.user,pass:config.password};
+ if(!config.credentials&&(!login.user||!login.pass))throw Error('WELCOME_NATS_AUTH_REQUIRED');
+ const nc=await connect({servers:config.servers,...login,inboxPrefix:config.inbox});
  return {
   async request(subject,value,timeout=10000) {
    const reply=await nc.request(subject,Buffer.from(JSON.stringify(value)),{timeout});
