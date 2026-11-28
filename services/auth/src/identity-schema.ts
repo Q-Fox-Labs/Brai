@@ -10,12 +10,15 @@ export async function migrateIdentity(pool:Pool) {
  CREATE TABLE IF NOT EXISTS brai_identity (
   user_id text PRIMARY KEY REFERENCES "user"(id) ON DELETE CASCADE,
   telegram_id text UNIQUE, profile_id text UNIQUE,
-  role text NOT NULL CHECK (role IN ('creator','admin','user','guest')),
+  role text NOT NULL,
   status text NOT NULL CHECK (status IN ('provisioning','active','blocked')),
   created_at timestamptz NOT NULL DEFAULT now()
  );
  ALTER TABLE brai_identity DROP CONSTRAINT IF EXISTS brai_identity_role_check;
- ALTER TABLE brai_identity ADD CONSTRAINT brai_identity_role_check CHECK (role IN ('creator','admin','user','guest'));
+ ALTER TABLE brai_identity ADD CONSTRAINT brai_identity_role_check CHECK (
+  role IN ('creator','admin','user','guest') OR
+  (role='welcome' AND status IN ('provisioning','blocked') AND profile_id IS NOT NULL)
+ );
  COMMENT ON TABLE brai_identity IS 'Роли и внешние идентификаторы пользователей Auth';
  COMMENT ON COLUMN brai_identity.user_id IS 'Идентификатор пользователя Better Auth';
  COMMENT ON COLUMN brai_identity.telegram_id IS 'Стабильный внутренний автор памяти; текущие аккаунты хранятся отдельно';

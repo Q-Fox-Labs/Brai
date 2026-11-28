@@ -2,9 +2,10 @@
 // ABOUTME: Сам по себе тип не предоставляет endpoint и не подтверждает доступ.
 
 export type Role = "creator" | "admin" | "user" | "guest";
+export type IdentityRole = Role | "welcome";
 export type Status = "provisioning" | "active" | "blocked";
 export interface IdentityUser {
- id:string; name:string; role:Role; status:Status;
+ id:string; name:string; role:IdentityRole; status:Status;
  telegramId:string|null; profileId:string|null; generation?:number; appliedGeneration?:number; telegramIds?:string[]; email?:string;
 }
 export interface HeadersInput {

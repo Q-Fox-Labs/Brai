@@ -7,6 +7,13 @@ const binding={subject:'brai.auth.v2.dialogues-access.'+'a'.repeat(64),userId:'u
 const pool=row=>({query:async(sql,params)=>{assert.deepEqual(params,['user']);return {rows:row?[row]:[]};}});
 const base={user_id:'user',profile_id:'profile',role:'guest',status:'active'};
 test('активный пользователь не требует Hermes',async()=>assert.equal((await dialoguesAccess(pool(base),binding,{})).allowed,true));
+test('Welcome получает только свой допуск до подготовки Hermes',async()=>{
+ const welcome={...base,role:'welcome',status:'provisioning'};
+ assert.equal((await dialoguesAccess(pool(welcome),binding,{})).allowed,true);
+ for(const patch of [{status:'active'},{status:'blocked'},{profile_id:null},{profile_id:'other'}]){
+  assert.equal((await dialoguesAccess(pool({...welcome,...patch}),binding,{})).allowed,false);
+ }
+});
 test('явный prepare активирует только доступ к сервису',async()=>{
  assert.equal((await dialoguesAccess(pool({...base,status:'provisioning',kind:'prepare',activate_on_success:true}),binding,{})).allowed,true);
  for(const patch of [{status:'blocked',kind:'prepare',activate_on_success:true},{status:'provisioning',kind:'stop',activate_on_success:true},{status:'provisioning',kind:'prepare',activate_on_success:false},{profile_id:'other'},{role:'unknown'}])assert.equal((await dialoguesAccess(pool({...base,...patch}),binding,{})).allowed,false);

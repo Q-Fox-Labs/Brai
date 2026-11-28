@@ -39,8 +39,11 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  }
  if(roleChange&&!['creator','admin','user','guest'].includes(body.role))return {status:400,body:{code:'INVALID_ROLE'}};
  if(action==='users-add'&&body.role!==undefined&&!['user','guest'].includes(body.role))return {status:400,body:{code:'INVALID_ROLE'}};
- if(action==='users-add'&&user&&body.role!==undefined&&body.role!==user.role)return {status:409,body:{code:'ROLE_CONFLICT'}};
- const nextRole=roleChange?body.role:user?.role??body.role??'user';
+ const grantingWelcome=user?.role==='welcome'&&action==='users-add'&&body.role==='guest';
+ // AIDEV-NOTE: Только явная выдача гостевого доступа переводит Welcome в подготовку профиля.
+ if(user?.role==='welcome'&&!grantingWelcome)return {status:409,body:{code:'ROLE_CONFLICT'}};
+ if(action==='users-add'&&user&&body.role!==undefined&&body.role!==user.role&&!grantingWelcome)return {status:409,body:{code:'ROLE_CONFLICT'}};
+ const nextRole=grantingWelcome?'guest':roleChange?body.role:user?.role??body.role??'user';
  const manager=(role:string)=>['creator','admin'].includes(role);
  const kind=action==='users-revoke'||body.status==='blocked'||roleChange&&user.status==='blocked'?'stop':'prepare';
  const noop=user?.status==='active'&&(action==='users-add'||body.status==='active'||roleChange&&user.role===nextRole);
