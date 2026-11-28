@@ -1,0 +1,27 @@
+{
+  "integration": "speckit",
+  "version": "1.4.5",
+  "installed_at": "2026-11-27T18:54:19.397934+00:00",
+  "files": {
+    ".specify/scripts/python/resolve_template.py": "10b8ca3ca5ce2f668454e0ad19b1fe38e7f3303f3b9192f3b7345292de56fe0a",
+    ".specify/scripts/python/setup_tasks.py": "1ac4e0566cee1cdf812a6254b20321e85fb4054f94a98efb485855ba18926a40",
+    ".specify/scripts/python/common.py": "4fc4fbf3cc68f5fcb819c2d77dd5e3839a7d32cecd116b51165d18ffdc4113a6",
+    ".specify/scripts/python/setup_plan.py": "4e563a462a2bca277f60decae744b23f4663f561e038faf00cc88c87cb376cec",
+    ".specify/scripts/python/check_prerequisites.py": "367e0e7cf8d384167aa60d2a99ba8d40ef9ca1e49b8a35f3ec44c9c759416600",
+    ".specify/scripts/python/create_new_feature.py": "bbea1d8d3c3275fccb4fb02c40a244446657385caf72211c1853376ca78f7295",
+    ".specify/scripts/python/markdown_sections.py": "189e980b7c86f54c0886be57e3113cf47fc474467a08dff851144b5cc5e1fe39",
+    ".specify/scripts/bash/resolve-template.sh": "829e227096abc8bf0889889ec9f792f503ca5d395b7836a8a7eb739ee75214e7",
+    ".specify/scripts/bash/create-new-feature.sh": "1e422acb000ab106b63ba1f9f9258bbcdc5b5c93f4e9f88588c0e671ad61b872",
+    ".specify/scripts/bash/common.sh": "063ecfacccb38b2bc0155019dd927dbd65a3a2ca73479c60e94bf196329eb63f",
+    ".specify/scripts/bash/setup-plan.sh": "d378ec66ba20d2da01c71dad8935062c1c27f0bba890be9a6d3dda52ea056a4e",
+    ".specify/scripts/bash/check-prerequisites.sh": "47cddf0ee476a1a5201927260666364490b7c602a52fdd8466160802925f995b",
+    ".specify/scripts/bash/setup-tasks.sh": "0350b2def158c4dc333cd888fc5a3b10785b3d5c2cf936f93e910242ea9d507d",
+    ".specify/scripts/bash/markdown_sections.py": "189e980b7c86f54c0886be57e3113cf47fc474467a08dff851144b5cc5e1fe39",
+    ".specify/templates/spec-template.md": "3945437fc35cd30a5b2bf7beea680337c3516826d3efa5a6b92c4a7eca1ba28e",
+    ".specify/templates/checklist-template.md": "70bbc48e884fab372ffb09e83e78ff983e28b69caebf8cd9964a02b6836683ac",
+    ".specify/templates/plan-template.md": "a828ad6206526574ab3fc99be6d0154588cb1c9774c5919d71b81ab5b2dbffa0",
+    ".specify/templates/tasks-template.md": "b0f527d41e546af0c31903e04f9b20965b6b497b573792198f663a64ce128863",
+    ".specify/templates/constitution-template.md": "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3",
+    ".specify/.gitignore": "0a61c5378b0bb2e0f85babff99c8b166f2170a2c12378cd17d929aa19296ec88"
+  }
+}
