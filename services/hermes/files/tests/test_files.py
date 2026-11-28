@@ -1408,6 +1408,104 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item['presentation'] for item in items], ['voice', 'video_note'])
         self.assertEqual([item['file']['filename'] for item in items], ['first.ogg', 'note.mp4'])
 
+    def test_experiment_default_and_explicit_choice_keep_rollback_preference(self):
+        route = {'platform': 'telegram', 'account': 'local', 'sender': 'sender', 'chat': 'chat', 'thread': 'topic'}
+        self.store.set_reply_mode(route, 'voice')
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+            self.assertEqual(native._effective_reply_mode(route), 'video_note')
+            self.store.set_reply_mode(route, 'off', experiment=True)
+            self.assertEqual(native._effective_reply_mode(route), 'off')
+        self.assertEqual(self.store.reply_mode(route), 'voice')
+
+    def test_experiment_duration_limit_preserves_text_and_skips_render(self):
+        candidate = {'source': {}, 'mode': None, 'current': 'off'}
+        reset = native._reply_mode_candidate.set(candidate)
+        try:
+            for mode, marker, seconds in (('voice', 'audio_as_voice', 181),
+                                          ('video_note', 'audio_as_video_note', 61)):
+                with self.subTest(mode=mode):
+                    candidate['current'] = mode
+                    audio = self.input / ('too-long-' + mode + '.ogg')
+                    subprocess.run(['/usr/bin/ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                                    'anullsrc=sample_rate=8000:channel_layout=mono', '-t', str(seconds),
+                                    '-c:a', 'libopus', str(audio)], check=True)
+                    with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                        response = native.final_text(
+                            f'{native._VOICE_ONLY_OPEN}Полный ответ.{native._VOICE_ONLY_CLOSE}\n'
+                            f'[[{marker}]]\nMEDIA:{audio}', 'turn')
+                    self.assertIn('Полный ответ.', response)
+                    self.assertNotIn('MEDIA:', response)
+                    self.assertNotIn(marker, response)
+                    self.assertNotIn(native._VOICE_ONLY_OPEN, response)
+        finally:
+            native._reply_mode_candidate.reset(reset)
+
+    def test_voice_only_fallback_text_is_not_streamed(self):
+        fragments = []
+        stream = native._filtered_reply_stream(fragments.append)
+        for char in f'Вступление {native._VOICE_ONLY_OPEN}Запасной текст{native._VOICE_ONLY_CLOSE} итог':
+            stream(char)
+        self.assertEqual(''.join(fragments), 'Вступление  итог')
+
+    def test_experiment_keeps_an_ordinary_attachment_when_circle_render_fails(self):
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS sample')
+        document = self.input / 'notes.txt'
+        document.write_text('Полный документ')
+        context = native._reply_mode_candidate.set({'source': {}, 'mode': None, 'current': 'video_note'})
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                with patch('files.video_note.render_video_notes', side_effect=FileError('VIDEO_NOTE_RENDER_FAILED')):
+                    answer = native.final_text(f'Текст.\n[[audio_as_voice]]\nMEDIA:{audio}\nMEDIA:{document}', 'turn')
+            output = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+            self.assertIn('Текст.', answer)
+            self.assertTrue(output['brai_attachment_preparation_failed'])
+            self.assertEqual([row['file']['filename'] for row in output['fileSets'][0]['items']], ['notes.txt'])
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                answer = native.final_text(
+                    f'Текст.\n[[audio_as_voice]]\nMEDIA:{self.input / "missing.ogg"}\nMEDIA:{document}', 'turn')
+            output = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+            self.assertTrue(output['brai_attachment_preparation_failed'])
+            self.assertEqual([row['file']['filename'] for row in output['fileSets'][0]['items']], ['notes.txt'])
+        finally:
+            native._reply_mode_candidate.reset(context)
+
+    def test_experiment_keeps_an_ordinary_attachment_when_audio_becomes_unavailable(self):
+        document = self.input / 'notes.txt'
+        document.write_text('Полный документ')
+        backend_call = self.backend.call
+
+        for mode, extension in (('voice', 'ogg'), ('voice', 'mp3'), ('voice', 'wav'), ('video_note', 'ogg')):
+            with self.subTest(mode=mode, extension=extension):
+                audio = self.input / ('speech-' + mode + '.' + extension)
+                audio.write_bytes(b'sample')
+                aid = self.store.publish(audio, ['test-speech', mode, extension])['artifactId']
+                audio_reads = 0
+
+                def read_once(method, args, **kwargs):
+                    nonlocal audio_reads
+                    if method == 'files.fetch' and args['artifactId'] == aid:
+                        audio_reads += 1
+                        if audio_reads > 1:
+                            raise RuntimeError('owner/not-ready/unavailable')
+                    return backend_call(method, args, **kwargs)
+
+                token = native._reply_mode_candidate.set({'source': {}, 'mode': None, 'current': mode})
+                try:
+                    with patch.object(self.backend, 'call', side_effect=read_once), patch.dict(os.environ, {
+                            'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                        answer = native.final_text(
+                            f'Текст.\n[[audio_as_voice]]\nMEDIA:artifact:{aid}\nMEDIA:{document}', 'turn-' + mode)
+                finally:
+                    native._reply_mode_candidate.reset(token)
+                result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+                self.assertIn('Текст.', answer)
+                self.assertTrue(result['brai_attachment_preparation_failed'])
+                self.assertEqual(audio_reads, 2)
+                self.assertEqual([row['file']['filename'] for row in result['fileSets'][0]['items']], ['notes.txt'])
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0], 0)
+
     def test_long_video_note_preserves_every_audio_sample(self):
         from files.video_note import render_video_notes
         audio = self.input / 'long.wav'

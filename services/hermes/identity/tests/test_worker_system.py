@@ -338,7 +338,9 @@ class SystemTests(unittest.TestCase):
         def broker(method, params, **kwargs):
             calls.append((method, params))
             if method == 'tools.call':
-                self.assertEqual(params, {'name': 'local_ai_invoke_synthesize', 'args': {'text': 'Привет'}})
+                self.assertEqual(params['name'], 'local_ai_invoke_synthesize')
+                self.assertEqual(params['args']['text'], 'Привет')
+                self.assertRegex(params['args']['operationId'], r'^[a-f0-9-]{36}$')
                 return {'audioArtifactId': 'owned'}
             return {'artifactId': 'owned', 'localPath': str(audio), 'mimeType': 'audio/ogg',
                     'sizeBytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}

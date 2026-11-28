@@ -18,7 +18,7 @@ import uuid
 import time
 import tempfile
 from urllib.parse import unquote, urlparse
-from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
+from .store import FileStore, FileError, FileMaterializationError, canonical, key, deliver, workspace_in_use
 
 _store = None
 _telegram_observer = None
@@ -31,6 +31,7 @@ _reply_mode_candidate = ContextVar('brai_reply_mode_candidate', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inbound_attachments = ContextVar('brai_file_inbound_attachments', default=())
 _VOICE_RETRY_ADMISSION = object()
+_VOICE_REPLY_SECONDS = 180
 _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
@@ -38,7 +39,12 @@ _VIDEO_NOTE = re.compile(r'\[\[audio_as_video_note\]\][ \t]*\n[ \t]*' + _MEDIA.p
 _VIDEO_NOTE_MARKER = re.compile(r'\[\[audio_as_video_note\]\]')
 _REPLY_MODE = re.compile(r'\[\[brai_reply_mode:(voice|video_note|off)\]\]')
 _REPLY_ONCE = re.compile(r'\[\[brai_reply_once:(voice|video_note)\]\]')
+_VOICE_MARKER = re.compile(r'\[\[audio_as_voice\]\]')
+_VOICE_ONLY_OPEN = '[[brai_voice_only_text]]'
+_VOICE_ONLY_CLOSE = '[[/brai_voice_only_text]]'
+_VOICE_ONLY_TEXT = re.compile(re.escape(_VOICE_ONLY_OPEN) + r'(.*?)' + re.escape(_VOICE_ONLY_CLOSE), re.S)
 _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
+_VOICE_LINE = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n[ \t]*' + _MEDIA.pattern)
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
 _ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы. Номер в журнале: '
@@ -59,25 +65,40 @@ def _filtered_reply_stream(callback):
     """Не выводить служебные маркеры даже при разделении между потоковыми фрагментами."""
     markers = ('[[brai_reply_mode:voice]]', '[[brai_reply_mode:video_note]]',
                '[[brai_reply_mode:off]]', '[[brai_reply_once:voice]]',
-               '[[brai_reply_once:video_note]]', '[[audio_as_video_note]]')
+               '[[brai_reply_once:video_note]]', '[[audio_as_video_note]]', '[[audio_as_voice]]')
+    open_marker, close_marker = _VOICE_ONLY_OPEN, _VOICE_ONLY_CLOSE
+    pattern = re.compile('|'.join(map(re.escape, (*markers, open_marker, close_marker))))
     pending = ''
+    hidden = False
 
     def send(fragment):
-        nonlocal pending
+        nonlocal pending, hidden
         if fragment is None:
-            if pending in ('[', '[['):
+            if not hidden and pending in ('[', '[['):
                 callback(pending)
             pending = ''
+            hidden = False
             return callback(None)
         text = pending + fragment
-        for marker in markers:
-            text = text.replace(marker, '')
-        length = max((size for marker in markers for size in range(1, len(marker))
-                      if text.endswith(marker[:size])), default=0)
-        pending = text[-length:] if length else ''
-        visible = text[:-length] if length else text
-        if visible:
-            return callback(visible)
+        visible = []
+        start = 0
+        for match in pattern.finditer(text):
+            if not hidden:
+                visible.append(text[start:match.start()])
+            if match.group(0) == open_marker:
+                hidden = True
+            elif match.group(0) == close_marker:
+                hidden = False
+            start = match.end()
+        tail = text[start:]
+        length = max((size for marker in (*markers, open_marker, close_marker) for size in range(1, len(marker))
+                      if tail.endswith(marker[:size])), default=0)
+        pending = tail[-length:] if length else ''
+        if not hidden:
+            visible.append(tail[:-length] if length else tail)
+        output = ''.join(visible)
+        if output:
+            return callback(output)
 
     return send
 
@@ -134,13 +155,24 @@ def source_of(event):
             'chat': str(s.chat_id or ''), 'thread': str(s.thread_id or ''), 'sender': str(s.user_id or '')}
 
 
+def _voice_experiment():
+    return (os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
+            and os.environ.get('BRAI_VOICE_REPLY_EXPERIMENT') == '1')
+
+
+def _effective_reply_mode(route):
+    experiment = _voice_experiment()
+    saved = store().reply_mode(route, experiment=experiment)
+    return saved if saved is not None else 'video_note' if experiment else None
+
+
 def reply_mode_for_event(event):
     """Look up the human's format without changing the native workspace identity."""
     route = source_of(event)
     if route['platform'] != 'telegram':
         return None
     route['sender'] = str(getattr(event.source, '_brai_actor_id', None) or route['sender'])
-    return store().reply_mode(route)
+    return _effective_reply_mode(route)
 
 
 def commit_reply_mode(result, event):
@@ -151,7 +183,7 @@ def commit_reply_mode(result, event):
     route = source_of(event)
     route['sender'] = str(getattr(event.source, '_brai_actor_id', None) or route['sender'])
     if route['platform'] == 'telegram' and candidate['source'] == route:
-        store().set_reply_mode(route, candidate['mode'])
+        store().set_reply_mode(route, candidate['mode'], experiment=_voice_experiment())
 
 
 def batch_key(event, group):
@@ -1008,10 +1040,11 @@ def conversation(agent, user_message, task_id=None):
         # API-only context: keep the user's persisted text and the shared process environment unchanged.
         mode_prompt = ''
         if candidate is not None:
-            mode = store().reply_mode(candidate['source'])
+            mode = _effective_reply_mode(candidate['source'])
             candidate['current'] = mode
-            descriptions = {'voice': 'обычное голосовое',
-                            'video_note': 'кружочек с апельсином', 'off': 'только текст'}
+            descriptions = {'voice': 'обычное голосовое', 'off': 'только текст',
+                            'video_note': ('текст и кружочек с апельсином'
+                                           if _voice_experiment() else 'кружочек с апельсином')}
             current = descriptions.get(mode, 'определяется историей беседы')
             mode_prompt = (
                 '\n\n[Формат ответа текущей беседы] Сейчас: ' + current + '. '
@@ -1025,6 +1058,15 @@ def conversation(agent, user_message, task_id=None):
                 'Наличие текста определяй по правилам голосового режима и просьбе пользователя. '
                 'Для кружочка используй [[audio_as_video_note]] перед MEDIA со звуком. '
                 'Правила озвучки находятся в policies/LOCAL_VOICE.md из системного INDEX.md.\n')
+            if _voice_experiment():
+                mode_prompt += (
+                    'Озвучивай короткий ответ целиком. Для ответа дольше 60 секунд в кружочке '
+                    'или трёх минут в голосовом отправь полный текст и одну озвученную выжимку '
+                    'даже в режиме только голоса. Выжимка для кружочка около 50–60 секунд. '
+                    'Для короткого ответа в режиме только голоса оберни полный текст в '
+                    '[[brai_voice_only_text]] и [[/brai_voice_only_text]] перед маркером аудио. '
+                    'Текст из этого блока отправится, если озвучка недоступна. '
+                    'При сбое озвучки всё равно отправь полный текст.\n')
         dialogue = getattr(source, '_brai_welcome_dialogue_id', None)
         continuation = ('\nДиалоги текущей беседы Telegram используют стабильный ID ' + dialogue
                         + '. Передавай его в dialogue.id и dialogue_id для текущего хода.\n') if dialogue else ''
@@ -1312,6 +1354,14 @@ def final_text(text, operation):
     if not isinstance(text, str):
         return text
     text = _public_response_text(text)
+    candidate = _reply_mode_candidate.get()
+    limit_speech = candidate is not None and _voice_experiment()
+    fallback = []
+    if limit_speech:
+        def preserve_text(match):
+            fallback.append(match.group(1).strip())
+            return ''
+        text = active_sub(_VOICE_ONLY_TEXT, preserve_text, text)
     try:
         def select_mode(match):
             candidate = _reply_mode_candidate.get()
@@ -1336,25 +1386,56 @@ def final_text(text, operation):
         effective_mode = (once[0] if once else (candidate['mode'] or candidate.get('current'))
                           if candidate is not None else None)
         if effective_mode == 'video_note':
-            def as_video_notes(match):
-                return ''.join('[[audio_as_video_note]]\n' + line
-                               for line in match.group('files').splitlines(keepends=True))
-            text = active_sub(_VOICE_BLOCK, as_video_notes, text)
-        return _stage_final_text(text, operation)
+            if limit_speech:
+                text = active_sub(_VOICE_LINE, lambda match: match.group(0).replace(
+                    '[[audio_as_voice]]', '[[audio_as_video_note]]', 1), text)
+            else:
+                def as_video_notes(match):
+                    return ''.join('[[audio_as_video_note]]\n' + line
+                                   for line in match.group('files').splitlines(keepends=True))
+                text = active_sub(_VOICE_BLOCK, as_video_notes, text)
+        return _stage_final_text(text, operation, limit_speech=limit_speech, fallback=fallback)
     except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
-        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
+        if limit_speech and isinstance(error, FileError) and str(error).startswith(('REPLY_AUDIO_', 'VIDEO_NOTE_')):
+            remaining = active_sub(_VOICE_LINE, lambda match: '', text)
+            remaining = active_sub(_VIDEO_NOTE, lambda match: '', remaining)
+            remaining = active_sub(_VIDEO_NOTE_MARKER, lambda match: '', remaining)
+            try:
+                prepared = _stage_final_text(remaining, operation, fallback=fallback)
+                return prepared.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}{reference}'
+            except (FileError, FileNotFoundError, json.JSONDecodeError):
+                pass
+        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _VOICE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
+        if fallback:
+            text = '\n\n'.join(filter(None, (*fallback, text.strip())))
         return text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}{reference}'
 
 
-def _stage_final_text(text, operation):
+def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
     """Создать отдельные временные копии для исходящего набора."""
     files, replacements, items = store(), [], []
+    spoken_paths, spoken_items = set(), set()
+    if limit_speech:
+        video_count = 0
+        def record_voice(match):
+            spoken_paths.add(next(value for value in match.groups() if value is not None))
+            return match.group(0)
+
+        def count_video(match):
+            nonlocal video_count
+            video_count += 1
+            return match.group(0)
+        active_sub(_VOICE_LINE, record_voice, text)
+        active_sub(_VIDEO_NOTE, count_video, text)
+        if video_count > 1:
+            raise FileError('REPLY_AUDIO_LIMIT')
+
     explicit = []
     active_sub(_SET, lambda match: explicit.append(match) or match.group(0), text)
     if len(explicit) > 1:
@@ -1385,10 +1466,20 @@ def _stage_final_text(text, operation):
         if explicit:
             raise FileError('MIXED_FILE_SET_FORMAT')
         with files.lock('cache'):
-            value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
-                     else files.resolve(local_path(path), ['final', operation, path]))
+            try:
+                value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
+                         else files.resolve(local_path(path), ['final', operation, path]))
+            except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
+                if path in spoken_paths:
+                    raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+                raise
             index = len(items)
-            items.append({'file': files.checked(value), 'caption': caption, 'presentation': presentation(value)})
+            kind = presentation(value)
+            if path in spoken_paths:
+                if not value['mimeType'].startswith('audio/'):
+                    raise FileError('REPLY_AUDIO_INVALID')
+                spoken_items.add(index)
+            items.append({'file': files.checked(value), 'caption': caption, 'presentation': kind})
         replacements.append((match.start(), match.end(), [index]))
         return match.group(0)
     def add_video_note(match):
@@ -1397,12 +1488,25 @@ def _stage_final_text(text, operation):
         from .video_note import render_video_notes
         path = next(value for value in match.groups() if value is not None)
         with files.lock('cache'):
-            audio = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
-                     else files.resolve(local_path(path), ['final', operation, path]))
-        videos = render_video_notes(files, audio, operation)
+            try:
+                audio = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
+                         else files.resolve(local_path(path), ['final', operation, path]))
+            except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
+                if limit_speech:
+                    raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+                raise
+        try:
+            videos = (render_video_notes(files, audio, operation, single=True) if limit_speech
+                      else render_video_notes(files, audio, operation))
+        except FileMaterializationError as error:
+            if limit_speech:
+                raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+            raise
         indexes = []
         for video in videos:
             indexes.append(len(items))
+            if limit_speech:
+                spoken_items.add(len(items))
             items.append({'file': files.checked(video), 'caption': '', 'presentation': 'video_note'})
         replacements.append((match.start(), match.end(), indexes))
         return ' ' * (match.end() - match.start())
@@ -1423,8 +1527,10 @@ def _stage_final_text(text, operation):
         label = re.sub(r'\\(.)', r'\1', match.group('label'))
         return add(match, path, label)
     active_sub(_DESCRIPTOR, descriptor, masked)
+    if len(spoken_items) > 1:
+        raise FileError('REPLY_AUDIO_LIMIT')
     if not items:
-        return text
+        return '\n\n'.join(filter(None, (*fallback, text.strip()))) if fallback else text
     order = [index for _, _, indexes in sorted(replacements) for index in indexes]
     positions = {old: new for new, old in enumerate(order)}
     items = [items[index] for index in order]
@@ -1439,8 +1545,23 @@ def _stage_final_text(text, operation):
     if workspace.resolve() != workspace:
         raise FileError('UNSAFE_DELIVERY_WORKSPACE')
     paths = []
-    with files.materialize([item['file'] for item in items], scope) as values:
+    with ExitStack() as leases:
+        try:
+            values = leases.enter_context(files.materialize([item['file'] for item in items], scope))
+        except FileMaterializationError as error:
+            if any(item['file']['artifactId'] == error.artifact_id and old_index in spoken_items
+                   for item, old_index in zip(items, order)):
+                raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+            raise
         for index, (item, value) in enumerate(zip(items, values)):
+            if order[index] in spoken_items and item['presentation'] != 'video_note':
+                from identity.audio_parts import audio_info
+                try:
+                    seconds, _ = audio_info(Path(value['localPath']))
+                except ValueError as error:
+                    raise FileError('REPLY_AUDIO_INVALID') from error
+                if seconds is None or seconds > _VOICE_REPLY_SECONDS:
+                    raise FileError('REPLY_AUDIO_LIMIT')
             suffix = Path(value['filename']).suffix
             suffix = suffix if re.fullmatch(r'\.[A-Za-z0-9]{1,16}', suffix) else '.bin'
             target = workspace / (str(index) + '-' + value['artifactId'] + suffix)
@@ -1458,6 +1579,8 @@ def _stage_final_text(text, operation):
                                                            'explicit': bool(explicit)})))
     for start, end, indexes in sorted(replacements, reverse=True):
         text = text[:start] + '\n'.join('MEDIA:' + json.dumps(paths[index], ensure_ascii=False) for index in indexes) + text[end:]
+    if fallback and not spoken_items:
+        return '\n\n'.join(filter(None, (*fallback, text.strip())))
     return text
 
 
@@ -2117,7 +2240,8 @@ def result_envelope(result, agent=None):
         guardrail = result.get('guardrail') if isinstance(result, dict) else None
         if (candidate['mode'] is not None and isinstance(result, dict)
                 and isinstance(result.get('final_response'), str) and result['final_response'].strip()
-                and not re.search(r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'[0-9a-f]{16}$', result['final_response'])
+                and (_voice_experiment() or not re.search(
+                    r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'[0-9a-f]{16}$', result['final_response']))
                 and not any(result.get(name) for name in ('failed', 'partial', 'error', 'interrupted'))
                 and result.get('completed') is not False
                 and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable')):
@@ -2136,7 +2260,7 @@ def result_envelope(result, agent=None):
         response = cleaned
         result = {**result, 'final_response': response}
     if re.search(r"(?m)^" + re.escape(_ATTACHMENT_FAILURE_NOTE) + r"[0-9a-f]{16}$", response):
-        return {**result, 'brai_attachment_preparation_failed': True}
+        result = {**result, 'brai_attachment_preparation_failed': True}
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))

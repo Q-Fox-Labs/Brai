@@ -1,6 +1,7 @@
 // ABOUTME: Реализует прикладные правила запросов и fenced исполнения transcription.
 // ABOUTME: Все внешние операции передаются портами; текст живёт только в ограниченной памяти процесса.
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as wait } from 'node:timers/promises';
 import { assertDto, methodMap } from '#transcription-contracts';
 import type { IncidentKey } from '../../notifications.js';
 
@@ -410,6 +411,7 @@ export function createCoordinator(options: {
       expectedRevision: start.request.revision,
     });
     let currentRevision = running.request.revision;
+    let leaseExpiresAt = Date.parse(claim.leaseExpiresAt);
     let finished = false;
     let leaseLost = false;
     let renewal: Promise<void> | null = null;
@@ -424,6 +426,7 @@ export function createCoordinator(options: {
           expectedRevision: currentRevision,
         }).then((value) => {
           currentRevision = value.revision;
+          leaseExpiresAt = Date.parse(value.leaseExpiresAt);
           renewal = null;
           if (!finished && !leaseLost) renew();
         }).catch(() => {
@@ -456,18 +459,41 @@ export function createCoordinator(options: {
         failure = response.errorCode;
       } else {
         // AIDEV-NOTE: Внутренний executor получает ID задачи и отдельный ID попытки; owner adapter сопоставляет оба ID local-ai с attemptId.
-        response = await ownerCall<any>(ports.local, localMethods, 'execute', {
+        const input = {
           requestId: request.requestId,
           audioArtifactId: request.audioArtifactId,
           operationId: attemptId,
           ownerId: request.ownerId,
           model: request.selectedModel,
           deadlineAt: effectiveDeadlineAt,
-        });
-        if (response.requestId !== request.requestId || response.operationId !== attemptId) {
+        };
+        while (!leaseLost) {
+          try {
+            response = await ownerCall<any>(ports.local, localMethods, 'execute', input);
+            break;
+          } catch (error) {
+            if (errorCode(error) !== 'OVERLOADED') throw error;
+            // AIDEV-NOTE: Прямой отказ Local AI до распознавания оставляет тот же
+            // запрос и attempt. Разрыв транспорта никогда не попадает в этот путь.
+            const deadline = Date.parse(effectiveDeadlineAt);
+            const remaining = deadline - now();
+            if (remaining > 0 && !leaseLost) await wait(Math.min(remaining, config.leaseRenewIntervalMs));
+            if (renewal) await renewal;
+            if (leaseLost || leaseExpiresAt <= now()) {
+              leaseLost = true;
+              break;
+            }
+            if (deadline <= now()) {
+              outcome = 'failed';
+              failure = 'DEADLINE_EXCEEDED';
+              break;
+            }
+          }
+        }
+        if (response && (response.requestId !== request.requestId || response.operationId !== attemptId)) {
           outcome = 'outcome_unknown';
           failure = 'REQUEST_OUTCOME_UNKNOWN';
-        } else {
+        } else if (response) {
           actualModel = response.actualModel;
           if (!sameSelector(response.actualModel, request.selectedModel)) {
             outcome = 'failed';

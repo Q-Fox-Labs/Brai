@@ -8,14 +8,15 @@ from pathlib import Path
 import stat
 import sys
 import time
+import uuid
 
-from .tool_client import broker_call
+from .tool_client import SYNTHESIS_BROKER_TIMEOUT, SYNTHESIS_TOOL, broker_call, synthesis_failure
 
 
-def synthesize_file(input_path, output_path, *, call=broker_call, timeout=180):
-    """Выполнить один синтез и создать новый OGG результат за общий срок до 180 секунд."""
+def synthesize_file(input_path, output_path, *, call=broker_call, timeout=SYNTHESIS_BROKER_TIMEOUT):
+    """Выполнить один синтез и создать OGG в пределах бюджета командного TTS."""
     source, target = Path(input_path), Path(output_path)
-    if not source.is_absolute() or not target.is_absolute() or not 0 < timeout <= 180:
+    if not source.is_absolute() or not target.is_absolute() or not 0 < timeout <= SYNTHESIS_BROKER_TIMEOUT:
         raise ValueError('INVALID_ARGUMENT')
     info = source.lstat()
     if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 65536:
@@ -31,27 +32,40 @@ def synthesize_file(input_path, output_path, *, call=broker_call, timeout=180):
         if remaining <= 0:
             raise TimeoutError('DEADLINE_EXCEEDED')
         return call(method, params, timeout=remaining)
-    result = invoke('tools.call', {'name': 'local_ai_invoke_synthesize', 'args': {'text': text}})
-    if not isinstance(result, dict) or not isinstance(result.get('audioArtifactId'), str):
-        raise ValueError('INVALID_SYNTHESIS_RESULT')
-    aid = result['audioArtifactId']
-    artifact = invoke('files.fetch', {'artifactId': aid})
-    if (not isinstance(artifact, dict) or artifact.get('artifactId') != aid
-            or artifact.get('mimeType') not in ('audio/ogg', 'audio/opus')):
-        raise ValueError('INVALID_AUDIO_ARTIFACT')
-    audio = Path(artifact['localPath'])
-    info = audio.lstat()
-    if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 50 * 1024 * 1024:
-        raise ValueError('INVALID_AUDIO_ARTIFACT')
-    raw = audio.read_bytes()
-    if (len(raw) != artifact.get('sizeBytes') or not raw.startswith(b'OggS')
-            or hashlib.sha256(raw).hexdigest() != artifact.get('sha256')):
-        raise ValueError('INVALID_AUDIO_ARTIFACT')
-    if time.monotonic() - started >= timeout:
-        raise TimeoutError('DEADLINE_EXCEEDED')
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'wb') as stream:
-        stream.write(raw)
+    operation = str(uuid.uuid4())
+    try:
+        result = invoke('tools.call', {'name': SYNTHESIS_TOOL, 'args': {'text': text, 'operationId': operation}})
+    except (OSError, ValueError) as error:
+        synthesis_failure(error, operation)
+        raise
+    stage = 'result'
+    try:
+        if not isinstance(result, dict) or not isinstance(result.get('audioArtifactId'), str):
+            raise ValueError('INVALID_SYNTHESIS_RESULT')
+        aid = result['audioArtifactId']
+        stage = 'artifact_fetch'
+        artifact = invoke('files.fetch', {'artifactId': aid})
+        stage = 'artifact_verify'
+        if (not isinstance(artifact, dict) or artifact.get('artifactId') != aid
+                or artifact.get('mimeType') not in ('audio/ogg', 'audio/opus')):
+            raise ValueError('INVALID_AUDIO_ARTIFACT')
+        audio = Path(artifact['localPath'])
+        info = audio.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 50 * 1024 * 1024:
+            raise ValueError('INVALID_AUDIO_ARTIFACT')
+        raw = audio.read_bytes()
+        if (len(raw) != artifact.get('sizeBytes') or not raw.startswith(b'OggS')
+                or hashlib.sha256(raw).hexdigest() != artifact.get('sha256')):
+            raise ValueError('INVALID_AUDIO_ARTIFACT')
+        stage = 'output'
+        if time.monotonic() - started >= timeout:
+            raise TimeoutError('DEADLINE_EXCEEDED')
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+    except (ValueError, KeyError, OSError) as error:
+        synthesis_failure(error, operation, stage=stage)
+        raise
 
 
 def main():

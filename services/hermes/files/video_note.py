@@ -12,6 +12,7 @@ import wave
 from .store import FileError
 
 VIDEO_NOTE_SIZE = 640
+VIDEO_NOTE_MAX_SECONDS = 60
 
 
 async def validate_video_note_stream(stream):
@@ -43,12 +44,17 @@ async def validate_video_note_stream(stream):
         stream.seek(0)
 
 
-def _audio_parts(source, directory):
+def _audio_parts(source, directory, *, single=False):
     """Разделить звук на паузах, сохранив все аудиосэмплы и порядок частей."""
     decoded = directory / 'decoded.wav'
     subprocess.run(['/usr/bin/ffmpeg', '-v', 'error', '-i', source, '-map', '0:a:0',
                     '-vn', '-ac', '1', '-c:a', 'pcm_s16le', str(decoded)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if single:
+        with wave.open(str(decoded), 'rb') as reader:
+            if not 0 < reader.getnframes() <= VIDEO_NOTE_MAX_SECONDS * reader.getframerate():
+                raise FileError('REPLY_AUDIO_LIMIT')
+        return [decoded]
     analysis = subprocess.run(['/usr/bin/ffmpeg', '-hide_banner', '-i', str(decoded), '-af',
                                'silencedetect=noise=-35dB:d=0.15', '-f', 'null', '-'],
                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -77,17 +83,23 @@ def _audio_parts(source, directory):
     return parts
 
 
-def render_video_notes(files, audio, operation, *, python='/usr/bin/python3'):
-    """Вернуть упорядоченные метаданные MP4 для полного аудиоартефакта."""
+def render_video_notes(files, audio, operation, *, python='/usr/bin/python3', single=False):
+    """Вернуть MP4 для аудио, проверив предел одного кружочка для ответа."""
     if not audio['mimeType'].startswith('audio/'):
         raise FileError('VIDEO_NOTE_AUDIO_REQUIRED')
     renderer = Path(__file__).resolve().parent.parent / 'identity' / 'avatar' / 'talking_orange.py'
     asset = renderer.with_name('orange.png')
     try:
         with files.materialize([files.checked(audio)], ['video-note', operation]) as sources:
+            source = sources[0]['localPath']
+            if single:
+                from identity.audio_parts import audio_info
+                duration, _ = audio_info(source)
+                if duration is None or duration > VIDEO_NOTE_MAX_SECONDS:
+                    raise FileError('REPLY_AUDIO_LIMIT')
             with tempfile.TemporaryDirectory(prefix='video-note-', dir=files.work) as directory:
                 directory = Path(directory)
-                parts = _audio_parts(sources[0]['localPath'], directory)
+                parts = _audio_parts(source, directory, single=single)
                 if not parts:
                     raise FileError('VIDEO_NOTE_EMPTY_AUDIO')
                 videos = []
@@ -106,7 +118,7 @@ def render_video_notes(files, audio, operation, *, python='/usr/bin/python3'):
                     streams = metadata['streams']
                     video = next(stream for stream in streams if stream['codec_type'] == 'video')
                     audio_stream = next(stream for stream in streams if stream['codec_type'] == 'audio')
-                    if (not 0 < duration <= 60 or video['codec_name'] != 'h264'
+                    if (not 0 < duration <= VIDEO_NOTE_MAX_SECONDS or video['codec_name'] != 'h264'
                             or video['width'] != VIDEO_NOTE_SIZE or video['height'] != VIDEO_NOTE_SIZE
                             or audio_stream['codec_name'] != 'aac'):
                         raise FileError('VIDEO_NOTE_INVALID_OUTPUT')

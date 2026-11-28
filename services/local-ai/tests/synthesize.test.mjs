@@ -99,28 +99,40 @@ test('invalid direct text and invalid published artifact IDs fail closed', async
   } finally { await f.lifecycle.close(); }
 });
 
-test('Artifacts publishing verifies owner, trusted upload origin and ready bytes; each attempt gets a new key', async () => {
+test('Artifacts publishing reuses the operation key and recovers a verified receipt after a lost upload reply', async () => {
   const originalFetch = globalThis.fetch;
   const hash = createHash('sha256').update(audio).digest('hex');
-  let prepareKeys = []; let owner = 'owner'; let uploadUrl = 'http://artifacts.invalid/upload/opaque'; let responseHash = hash; let puts = 0;
+  const prepareKeys = [];
+  let owner = 'owner'; let uploadUrl = 'http://artifacts.invalid/upload/opaque'; let responseHash = hash;
+  let status = 'pending'; let loseReply = false; let puts = 0;
   const nats = { async request(subject, bytes) {
     const input = JSON.parse(Buffer.from(bytes));
     if (subject.endsWith('.prepare')) {
       prepareKeys.push(input.requestId); assert.deepEqual(input.metadata, { title: 'Синтез речи', filename: 'speech.ogg', extension: 'ogg', mimeType: 'audio/ogg', source: 'local_ai' });
-      return { data: Buffer.from(JSON.stringify({ artifact: { artifactId, ownerId: owner, requestId: input.requestId, status: 'pending', mimeType: 'audio/ogg' }, uploadUrl })) };
+      return { data: Buffer.from(JSON.stringify({ artifact: { artifactId, ownerId: owner, requestId: input.requestId, status, mimeType: 'audio/ogg' }, uploadUrl })) };
     }
     assert.equal(subject, 'brai.artifacts.v1.get');
-    return { data: Buffer.from(JSON.stringify({ artifactId, ownerId: owner, status: 'ready', mimeType: 'audio/ogg', sizeBytes: audio.length, sha256: hash })) };
+    return { data: Buffer.from(JSON.stringify({ artifactId, ownerId: owner, status, mimeType: 'audio/ogg', sizeBytes: audio.length, sha256: hash })) };
   } };
-  globalThis.fetch = async (url, options) => { puts++; assert.equal(url.href, uploadUrl); assert.equal(options.redirect, 'manual'); assert.deepEqual(options.body, audio); return new Response(null, { status: 201, headers: { 'x-artifact-id': artifactId, 'x-artifact-state': 'ready', 'x-artifact-size': String(audio.length), 'x-artifact-sha256': responseHash } }); };
+  globalThis.fetch = async (url, options) => {
+    puts++; assert.equal(url.href, uploadUrl); assert.equal(options.redirect, 'manual'); assert.deepEqual(options.body, audio);
+    status = 'ready';
+    if (loseReply) throw new TypeError('connection closed');
+    return new Response(null, { status: 201, headers: { 'x-artifact-id': artifactId, 'x-artifact-state': 'ready', 'x-artifact-size': String(audio.length), 'x-artifact-sha256': responseHash } });
+  };
   try {
     const adapter = createArtifactsAdapter({ nats, internalBaseUrl: 'http://artifacts.invalid/', tempRoot: '/tmp', maxAudioBytes: 1, allowedMimeTypes: ['audio/ogg'] });
     const input = request(); const ctx = context(input);
     assert.deepEqual(await adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), { artifactId });
     assert.deepEqual(await adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), { artifactId });
-    assert.notEqual(prepareKeys[0], prepareKeys[1]);
+    assert.equal(prepareKeys[0], prepareKeys[1]);
+    assert.equal(puts, 1);
+    status = 'pending'; loseReply = true;
+    assert.deepEqual(await adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, context(request())), { artifactId });
+    assert.notEqual(prepareKeys[0], prepareKeys[2]);
     owner = 'other'; await assert.rejects(adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), error => error.code === 'DEPENDENCY_UNAVAILABLE'); assert.equal(puts, 2);
-    owner = 'owner'; uploadUrl = 'http://foreign.invalid/upload/opaque'; await assert.rejects(adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), error => error.code === 'DEPENDENCY_UNAVAILABLE'); assert.equal(puts, 2);
+    owner = 'owner'; status = 'pending'; loseReply = false;
+    uploadUrl = 'http://foreign.invalid/upload/opaque'; await assert.rejects(adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), error => error.code === 'DEPENDENCY_UNAVAILABLE'); assert.equal(puts, 2);
     uploadUrl = 'http://artifacts.invalid/upload/opaque'; responseHash = '0'.repeat(64); await assert.rejects(adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), error => error.code === 'DEPENDENCY_UNAVAILABLE');
   } finally { globalThis.fetch = originalFetch; }
 });

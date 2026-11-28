@@ -336,6 +336,61 @@ test('a lost executor reply closes as outcome_unknown and never automatically in
   assert.equal(JSON.stringify(helperCalls).includes('connection lost'), false);
 });
 
+for (const staleRenewal of [false, true]) test(staleRenewal
+  ? 'an overloaded attempt does not redispatch after an in-flight lease renewal fails'
+  : 'explicit overload waits for capacity and reuses the accepted attempt and deadline', async () => {
+  let current = request();
+  const helperCalls = [], executions = [];
+  const ports = basePorts(async (method, params) => {
+    helperCalls.push(method);
+    if (method === 'request.claim') return { claimToken: ids.claim, fenceGeneration: 1, revision: 1, leaseExpiresAt: '2026-10-05T22:00:00Z', request: current };
+    if (method === 'attempt.start' || method === 'attempt.markRunning') {
+      const state = method === 'attempt.start' ? 'dispatching' : 'running';
+      current = request({ ...current, taskState: state, currentAttemptId: ids.attempt, fenceGeneration: 1, revision: current.revision + 1 });
+      return { ...(state === 'dispatching' ? { created: true } : {}), request: current, attempt: attemptRecord(state) };
+    }
+    if (method === 'request.renew') {
+      if (staleRenewal) {
+        await new Promise(resolve => setTimeout(resolve, 15));
+        throw Object.assign(new Error('stale lease'), { errorCode: 'STALE_CLAIM' });
+      }
+      current = request({ ...current, revision: current.revision + 1 });
+      return { claimToken: ids.claim, fenceGeneration: 1, revision: current.revision, leaseExpiresAt: '2026-10-05T22:00:00Z', request: current };
+    }
+    if (method === 'attempt.finish') {
+      assert.equal(params.expectedRevision, current.revision);
+      assert.equal(params.outcome, 'succeeded');
+      current = request({ ...current, taskState: 'succeeded', resultState: 'available', revision: current.revision + 1 });
+      return { request: current, attempt: attemptRecord('succeeded') };
+    }
+    assert.fail(`unexpected helper method ${method}`);
+  }, {
+    local: { call: async (_method, params) => {
+      executions.push(params);
+      if (executions.length === 1) throw Object.assign(new Error('local admission rejected'), { errorCode: 'OVERLOADED' });
+      return { requestId: ids.request, operationId: ids.attempt, actualModel: selector, text: 'raspoznano', segments: null, durationMs: 1, usage: null, cost: null };
+    } },
+  });
+  const core = createCoordinator({
+    ports, config: config({ leaseRenewIntervalMs: 5 }), uuid: () => ids.attempt, now: () => Date.parse(at),
+  });
+  try {
+    assert.equal(await core.pumpOnce(), !staleRenewal);
+    if (staleRenewal) {
+      assert.equal(executions.length, 1);
+      assert.equal(helperCalls.includes('request.renew'), true);
+      assert.equal(helperCalls.includes('attempt.finish'), false);
+      return;
+    }
+    assert.equal(executions.length, 2);
+    assert.deepEqual(executions[0], executions[1]);
+    assert.equal(helperCalls.filter((method) => method === 'attempt.start').length, 1);
+    assert.equal(helperCalls.filter((method) => method === 'attempt.finish').length, 1);
+  } finally {
+    core.clearVolatileResults();
+  }
+});
+
 test('RPC_REMOTE preserves a valid closed error code without claiming a definite failure', async () => {
   let current = request();
   let finishParams;

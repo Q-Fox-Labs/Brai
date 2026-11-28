@@ -379,7 +379,9 @@ class Worker:
             if callable(original_voice_check):
                 def voice_check(event, *args, **kwargs):
                     import brai_files
-                    if getattr(event, '_brai_voice_done', False) or brai_files.reply_mode_for_event(event) in ('video_note', 'off'):
+                    from files.native import _voice_experiment
+                    if (_voice_experiment() or getattr(event, '_brai_voice_done', False)
+                            or brai_files.reply_mode_for_event(event) in ('video_note', 'off')):
                         return False
                     return original_voice_check(event, *args, **kwargs)
                 runner._should_send_voice_reply = voice_check
@@ -602,9 +604,10 @@ class Worker:
                 response = getattr(event, '_brai_ready_response', None)
                 if response is not None:
                     from .scope import input_delivery, prepared_response
+                    from files.native import _voice_experiment
                     prepared_response.set((session_key, input_delivery.get(), response))
                     event._brai_successful_turn = True
-                    if getattr(event, '_brai_auto_voice', False):
+                    if getattr(event, '_brai_auto_voice', False) and not _voice_experiment():
                         await runner._send_voice_reply(event, response)
                     return response
                 return await handle(event, source, session_key, *args, **kwargs)
@@ -1638,6 +1641,12 @@ async def run(config_path):
     from .tool_client import broker_call
     # У файлового bootstrap только привязанный по UID broker; старый fixed-owner порт запрещён.
     os.environ['BRAI_IDENTITY_MODE'] = 'worker'
+    os.environ.pop('BRAI_VOICE_REPLY_EXPERIMENT', None)
+    accepted_profile = Path('/opt/brai-profile/profile-config.json')
+    if accepted_profile.is_file():
+        from .native_policy import protected_config
+        if protected_config(accepted_profile).get('brai_voice_reply_experiment') is True:
+            os.environ['BRAI_VOICE_REPLY_EXPERIMENT'] = '1'
     sys.modules['_brai_identity_worker'] = SimpleNamespace(
         call=lambda method, params, timeout: broker_call(method, params, timeout=timeout))
     path, ingress, owner, telegram, egress = load_config(config_path, os.environ)

@@ -464,6 +464,8 @@ test('MCP синтез берёт модель и срок из доверенн
     assert.ok(Date.parse(payload.deadlineAt) >= before + 180_000 && Date.parse(payload.deadlineAt) <= after + 180_000);
     const stale = await client.callTool({ name: tool.name, arguments: { text: 'Проверка', deadlineAt: '2026-10-30T23:59:59.000Z' } });
     assert.equal(stale.isError, true); assert.equal(JSON.parse(stale.content[0].text).code, 'INVALID_ARGUMENT');
+    const chosenOperation = await client.callTool({ name: tool.name, arguments: { text: 'Проверка', operationId: ids[2] } });
+    assert.equal(chosenOperation.isError, true); assert.equal(JSON.parse(chosenOperation.content[0].text).code, 'INVALID_ARGUMENT');
     assert.equal(requests.length, 1);
   } finally { await client.close(); await service.close(); }
 });
