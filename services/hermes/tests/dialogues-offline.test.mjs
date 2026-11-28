@@ -15,7 +15,9 @@ test('standalone keeps Dialogues tools offline and calls the recovered listener'
   assert.deepEqual((await runtime.listTools()).filter(t=>t.name.startsWith('dialogues_')).map(t=>t.name),['dialogues_exchange','dialogues_context_ack']);
   const args={request_id:'test',consumer_id:'c',context_instance_id:'i',delivery_id:'d'};
   const down=await runtime.call('dialogues_context_ack',args);
-  assert.equal(JSON.parse(down.content[0].text).code,'DIALOGUES_UNAVAILABLE');
+  const failure=JSON.parse(down.content[0].text);
+  assert.equal(failure.code,'DIALOGUES_UNAVAILABLE');
+  assert.match(failure.next_action,/не упоминай внутренний сервис пользователю/i);
   listener=await startMcp({ack:async()=>({acknowledged:true})},cfg);
   const result=await runtime.call('dialogues_context_ack',args);
   assert.equal(result.structuredContent.acknowledged,true);

@@ -5,10 +5,10 @@ import { assertDto } from '#transcription-contracts';
 export const incidentKeys = ['storage', 'local_ai', 'artifacts', 'history', 'recovery', 'delivery', 'capacity'] as const;
 export type IncidentKey = typeof incidentKeys[number];
 const titles: Record<IncidentKey, string> = {
-  storage: 'Хранилище транскрибаций недоступно', local_ai: 'Сервис распознавания недоступен',
-  artifacts: 'Хранилище аудио недоступно', history: 'Не удалось сохранить историю транскрибаций',
-  recovery: 'Не удалось восстановить состояние транскрибаций',
-  delivery: 'Доставка уведомлений транскрибаций задерживается', capacity: 'Очередь транскрибаций заполнена',
+  storage: 'Не удалось сохранить результат расшифровки', local_ai: 'Не удалось превратить звук в текст',
+  artifacts: 'Не удалось получить аудиофайл', history: 'Не удалось сохранить историю расшифровок',
+  recovery: 'Не удалось продолжить расшифровку',
+  delivery: 'Уведомление о расшифровке задерживается', capacity: 'Расшифровка временно недоступна',
 };
 
 /** Создаёт обезличенное общее событие; повтор сохраняет ID и время. */
@@ -24,7 +24,7 @@ export function requestEvent(record: any, id: string, occurredAt: string): any {
   const personal = record.scope.scopeType === 'user';
   return assertDto('AlertEvent', { id, service_id: 'transcription', type_id: failed ? 1 : 3,
     scope_type: personal ? 'user' : 'system', scope_id: personal ? record.ownerId : 'global',
-    title: lost ? 'Результат транскрибации потерян' : failed ? 'Не удалось выполнить транскрибацию' : 'Исход транскрибации неизвестен',
+    title: lost ? 'Текст расшифровки недоступен' : failed ? 'Не удалось превратить звук в текст' : 'Пока неизвестно, завершилась ли расшифровка',
     text: lost ? 'Текст больше недоступен из-за сбоя.' : failed ? 'Запрос завершился ошибкой.' : 'Обработка могла продолжиться. Автоматический повтор не выполняется.',
     data: personal ? { requestId: record.requestId, attemptId: record.currentAttemptId, errorCode: record.errorCode } : {},
     occurred_at: occurredAt });

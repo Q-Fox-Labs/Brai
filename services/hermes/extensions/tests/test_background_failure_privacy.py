@@ -83,13 +83,13 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
                     runner = Runner('concise', busy=True)
                     await runner._run_process_watcher({**watcher, 'notify_on_complete': notify})
                     self.assertEqual(len(runner.direct), 1)
-                    self.assertIn('abcdef123456', runner.direct[0])
+                    self.assertNotIn('abcdef123456', runner.direct[0])
                     for private in ('Traceback', '/private/path', 'SECRET'):
                         self.assertNotIn(private, runner.direct[0])
                     if notify:
                         for private in ('Traceback', '/private/path', 'SECRET'):
                             self.assertNotIn(private, str(runner.agent[0]))
-                        self.assertIn('abcdef123456', runner.agent[0][0])
+                        self.assertNotIn('abcdef123456', runner.agent[0][0])
                 self.assertIn('reference=abcdef123456', stream.getvalue())
                 self.assertNotIn('SECRET', stream.getvalue())
                 log.disabled = True

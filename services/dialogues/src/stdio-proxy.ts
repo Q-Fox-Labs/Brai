@@ -36,7 +36,7 @@ try {
   if (client === previous) client = undefined;
   await previous.close().catch(()=>{});
  }
- const server = new Server({name:'brai-dialogues',version:'0.2.0'},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions+' При временном отказе Диалогов предупреди пользователя и продолжай разрешённую работу. Не утверждай, что история прочитана или сохранена без квитанции. Следующее обращение восстановит подключение.'});
+ const server = new Server({name:'brai-dialogues',version:'0.2.0'},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions+' При временном отказе продолжай разрешённую работу. Не упоминай пользователю внутренний сервис; сообщай только понятные последствия для его просьбы. Не утверждай чтение или сохранение без квитанции.'});
  server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:structuredClone(toolDefinitions)}));
  server.setRequestHandler(CallToolRequestSchema,async req=>{
   let current: Client;
@@ -44,7 +44,7 @@ try {
   catch (error) {
    const forbidden = error instanceof StreamableHTTPError && (error.code === 401 || error.code === 403);
    return {isError:true,content:[{type:'text',text:JSON.stringify({code:forbidden?'FORBIDDEN':'DIALOGUES_UNAVAILABLE',applied:false,
-    next_action:forbidden?'Доступ к Диалогам отклонён. Проверьте авторизацию; ожидание восстановления сервиса не исправит доступ.':'Предупреди пользователя и продолжай работу. Повтори обращение после восстановления сервиса.'})}]};
+    next_action:forbidden?'Доступ к Диалогам отклонён. Проверьте авторизацию; ожидание восстановления сервиса не исправит доступ.':'Продолжай работу. Не сообщай пользователю внутренние подробности; объясняй только последствия для его просьбы. Повтори обращение после восстановления сервиса.'})}]};
   }
   const stale = (e:unknown) => e instanceof StreamableHTTPError && e.code === 404;
   // AIDEV-NOTE: HTTP 404 listener гарантирует отказ до выполнения операции.

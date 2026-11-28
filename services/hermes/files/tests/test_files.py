@@ -1184,9 +1184,9 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(answer.startswith('Готово.'))
         self.assertNotIn(str(missing), answer)
         self.assertNotIn('MEDIA:', answer)
-        reference = answer.rsplit(' ', 1)[-1]
-        self.assertRegex(reference, r'^[a-f0-9]{16}$')
-        self.assertIn(reference, log.output[0])
+        self.assertIn('Не удалось приложить файлы.', answer)
+        self.assertNotIn('Номер в журнале', answer)
+        self.assertRegex(log.output[0], r'reference=[a-f0-9]{16}')
 
     async def test_unavailable_artifact_keeps_text_for_both_outgoing_formats(self):
         aid = str(uuid.uuid4())
@@ -1202,7 +1202,8 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                 answer = native.final_text('Готово.\n' + marker, 'turn')
                 self.assertTrue(answer.startswith('Готово.'))
                 self.assertNotIn(marker, answer)
-                self.assertIn(answer.rsplit(' ', 1)[-1], log.output[-1])
+                self.assertNotIn('Номер в журнале', answer)
+                self.assertRegex(log.output[-1], r'reference=[a-f0-9]{16}')
                 result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
                 self.assertTrue(result['brai_attachment_preparation_failed'])
 

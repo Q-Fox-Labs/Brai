@@ -41,7 +41,7 @@ _REPLY_ONCE = re.compile(r'\[\[brai_reply_once:(voice|video_note)\]\]')
 _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
-_ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы. Номер в журнале: '
+_ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы.'
 _MUTATION_FOOTER = re.compile(
     r'(?m)^⚠️?\s*(?:Проверка изменений файлов:|File-mutation verifier:)[^\n]*'
     r'(?:\n[ \t]+•[^\n]*)*\s*\Z'
@@ -1346,7 +1346,7 @@ def final_text(text, operation):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
-        return text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}{reference}'
+        return text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}'
 
 
 def _stage_final_text(text, operation):
@@ -2114,7 +2114,7 @@ def result_envelope(result, agent=None):
         guardrail = result.get('guardrail') if isinstance(result, dict) else None
         if (candidate['mode'] is not None and isinstance(result, dict)
                 and isinstance(result.get('final_response'), str) and result['final_response'].strip()
-                and not re.search(r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'[0-9a-f]{16}$', result['final_response'])
+                and not re.search(r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'$', result['final_response'])
                 and not any(result.get(name) for name in ('failed', 'partial', 'error', 'interrupted'))
                 and result.get('completed') is not False
                 and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable')):
@@ -2132,7 +2132,7 @@ def result_envelope(result, agent=None):
     if cleaned != response:
         response = cleaned
         result = {**result, 'final_response': response}
-    if re.search(r"(?m)^" + re.escape(_ATTACHMENT_FAILURE_NOTE) + r"[0-9a-f]{16}$", response):
+    if re.search(r"(?m)^" + re.escape(_ATTACHMENT_FAILURE_NOTE) + r"$", response):
         return {**result, 'brai_attachment_preparation_failed': True}
     paths = []
     def found(match):

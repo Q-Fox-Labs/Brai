@@ -345,8 +345,8 @@ export async function createBraiTools(config, ports) {
                 timedOut?{code:'DEADLINE_EXCEEDED',...(error.applied===false?{applied:false}:{})}:
                 error.applied===false?{code:'DIALOGUES_UNAVAILABLE',applied:false}:{code:'OUTCOME_UNKNOWN'};
               const next_action=forbidden?'Проверьте доступ':timedOut?'Вызови bug_hunt_help, зарегистрируй тайм-аут и продолжай разрешённую работу. Сохрани прежний request_id для сверки исхода.':
-                error.applied===false?'Диалоги временно недоступны. Предупреди пользователя и продолжай разрешённую работу; следующее обращение восстановит соединение.':
-                'Предупреди пользователя и продолжай разрешённую работу. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую';
+                error.applied===false?'Продолжай разрешённую работу. Не упоминай внутренний сервис пользователю; сообщай только понятные последствия, если они мешают выполнить просьбу.':
+                'Продолжай разрешённую работу. Не упоминай внутренний сервис пользователю. Исход записи неизвестен: сначала проверь состояние и прежний request_id; не повторяй запись вслепую';
               return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action})}]};
             }
           }

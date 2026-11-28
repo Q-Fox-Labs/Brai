@@ -40,6 +40,18 @@ test('safe projection preserves audience and typed reason without transcript or 
   assert.equal(validateDto('AlertEvent',{ ...incidentEvent('storage',randomUUID(),when), data:{ text:'private' } }),false);
   assert.equal(validateDto('AlertEvent',{ ...requestEvent(record,randomUUID(),when),scope_type:'system',scope_id:'global' }),false);
 });
+test('speech failure messages explain the user-visible effect while retaining diagnostic metadata', () => {
+  const failed=requestEvent(record,randomUUID(),when);
+  assert.equal(failed.title,'Не удалось превратить звук в текст');
+  assert.equal(failed.data.errorCode,'MODEL_UNAVAILABLE');
+  const lost=requestEvent({ ...record,taskState:'succeeded',resultState:'lost' },randomUUID(),when);
+  assert.equal(lost.title,'Текст расшифровки недоступен');
+  const unknown=requestEvent({ ...record,taskState:'outcome_unknown' },randomUUID(),when);
+  assert.match(unknown.title,/неизвестно/);
+  const incident=incidentEvent('local_ai',randomUUID(),when);
+  assert.equal(incident.title,'Не удалось превратить звук в текст');
+  assert.equal(incident.data.reason,'local_ai');
+});
 test('normal observations, empty queue and repeated healthy ticks publish nothing',async()=>{
   const f=fixture();f.controller.observe('storage',true);f.controller.observe('local_ai',true);
   await f.controller.tick();await f.controller.tick();assert.deepEqual(f.events,[]);await f.controller.close();
