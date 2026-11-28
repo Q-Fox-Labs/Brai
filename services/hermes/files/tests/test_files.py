@@ -1471,15 +1471,15 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             native._reply_mode_candidate.reset(context)
 
     def test_experiment_keeps_an_ordinary_attachment_when_audio_becomes_unavailable(self):
-        audio = self.input / 'speech.ogg'
-        audio.write_bytes(b'OggS sample')
-        aid = self.store.publish(audio, 'test-speech')['artifactId']
         document = self.input / 'notes.txt'
         document.write_text('Полный документ')
         backend_call = self.backend.call
 
-        for mode in ('voice', 'video_note'):
-            with self.subTest(mode=mode):
+        for mode, extension in (('voice', 'ogg'), ('voice', 'mp3'), ('voice', 'wav'), ('video_note', 'ogg')):
+            with self.subTest(mode=mode, extension=extension):
+                audio = self.input / ('speech-' + mode + '.' + extension)
+                audio.write_bytes(b'sample')
+                aid = self.store.publish(audio, ['test-speech', mode, extension])['artifactId']
                 audio_reads = 0
 
                 def read_once(method, args, **kwargs):

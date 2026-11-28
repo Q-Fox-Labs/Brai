@@ -1472,7 +1472,9 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
                 raise
             index = len(items)
             kind = presentation(value)
-            if path in spoken_paths and kind == 'voice':
+            if path in spoken_paths:
+                if not value['mimeType'].startswith('audio/'):
+                    raise FileError('REPLY_AUDIO_INVALID')
                 spoken_items.add(index)
             items.append({'file': files.checked(value), 'caption': caption, 'presentation': kind})
         replacements.append((match.start(), match.end(), [index]))
@@ -1549,7 +1551,7 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
                 raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
             raise
         for index, (item, value) in enumerate(zip(items, values)):
-            if order[index] in spoken_items and item['presentation'] == 'voice':
+            if order[index] in spoken_items and item['presentation'] != 'video_note':
                 from identity.audio_parts import audio_info
                 try:
                     seconds, _ = audio_info(Path(value['localPath']))
