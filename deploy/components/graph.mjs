@@ -9,6 +9,13 @@ import { descriptorValidator } from './descriptor-validation.mjs';
 import { lockInputs } from './lock-inputs.mjs';
 import { buildKey } from './build-engine.mjs';
 
+// Каталог хранит только хеши ID, окончательно выведенных из всех активных составов.
+const retiredIds = new Set([
+  "ed46f1a0a70ae8557b37335dd3dab18aa919f47559a89cedbfe2f2f2ab4629cb",
+  "ea46ec304045e154f2ff13f8777f48d9e875fabdbf562d943158b1062a8a1d04"
+]);
+const retiredId = id => retiredIds.has(createHash("sha256").update(id).digest("hex"));
+
 const ignored = new Set(['.git', 'node_modules', '.next', 'dist', 'tmp', '__pycache__', '.venv']);
 export const json = path => JSON.parse(readFileSync(path, 'utf8'));
 /** Возвращает существующие tracked и новые non-ignored исходники без обхода live-каталогов. */
@@ -45,16 +52,20 @@ export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
   for (const file of files.filter(path => path.endsWith('/component.json') || path === 'component.json')) {
     const value = json(join(root,file));
     if (!validator(value)) throw Error(`COMPONENT_SCHEMA: ${file}: ${JSON.stringify(validator.errors)}`);
+    if (value.status==='active' && retiredId(value.id)) throw Error(`RETIRED_ID_REUSED: ${value.id}`);
     if (components.has(value.id)) throw Error(`DUPLICATE_COMPONENT: ${value.id}`);
     components.set(value.id, {...value,directory:dirname(file),descriptor:file});
   }
   if (base) {
-    // A tombstone is retained under version control; disappearing descriptions never silently stop deployed units.
+    // Require explicit retirement before a component disappears from the current graph.
     const before=git(root,['ls-tree','-r','--name-only',base]).trim().split('\n').filter(p=>p.endsWith('/component.json'));
     for (const path of before) {
       const old=JSON.parse(git(root,['show',`${base}:${path}`]));
       const current=components.get(old.id);
-      if (!current) throw Error(`COMPONENT_REMOVED_WITHOUT_RETIREMENT: ${old.id}`);
+      if (!current) {
+        if (old.status==='retired' && retiredId(old.id)) continue;
+        throw Error(`COMPONENT_REMOVED_WITHOUT_RETIREMENT: ${old.id}`);
+      }
       if (old.status==='retired' && current.status!=='retired') throw Error(`RETIRED_ID_REUSED: ${old.id}`);
       if (old.status==='active' && current.status==='active' && old.deploy.units.some(unit=>!current.deploy.units.includes(unit)&&![...components.values()].some(c=>c.status==='retired'&&c.deploy.units.includes(unit)))) throw Error(`DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: ${old.id}`);
     }

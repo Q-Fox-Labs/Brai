@@ -480,7 +480,9 @@ class Mirror:
                     if not isinstance(resolved, dict) or resolved.get('state') not in ('known','unregistered','forbidden'):
                         raise ValueError('INGRESS_IDENTITY_UNAVAILABLE')
                     snapshot = dict(resolved)
-                    if grouped and snapshot['state'] == 'unregistered':
+                    interactive = (getattr(update, 'callback_query', None) is not None
+                                   or getattr(update, 'inline_query', None) is not None)
+                    if snapshot['state'] == 'unregistered' and (grouped or message is None and not interactive):
                         snapshot = {'state': 'outside'}
                     if snapshot['state'] == 'known':
                         profile = snapshot.get('profile')

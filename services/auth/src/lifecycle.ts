@@ -39,8 +39,12 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
  }
  if(roleChange&&!['creator','admin','user','guest'].includes(body.role))return {status:400,body:{code:'INVALID_ROLE'}};
  if(action==='users-add'&&body.role!==undefined&&!['user','guest'].includes(body.role))return {status:400,body:{code:'INVALID_ROLE'}};
- if(action==='users-add'&&user&&body.role!==undefined&&body.role!==user.role)return {status:409,body:{code:'ROLE_CONFLICT'}};
- const nextRole=roleChange?body.role:user?.role??body.role??'user';
+ const grantingWelcome=user?.role==='welcome'&&action==='users-add'&&body.role==='guest';
+ const blockingWelcome=user?.role==='welcome'&&(action==='users-revoke'||action==='status-set'&&body.status==='blocked');
+ // AIDEV-NOTE: Только явная выдача гостевого доступа переводит Welcome в подготовку профиля.
+ if(user?.role==='welcome'&&!grantingWelcome&&!blockingWelcome)return {status:409,body:{code:'ROLE_CONFLICT'}};
+ if(action==='users-add'&&user&&body.role!==undefined&&body.role!==user.role&&!grantingWelcome)return {status:409,body:{code:'ROLE_CONFLICT'}};
+ const nextRole=grantingWelcome?'guest':roleChange?body.role:user?.role??body.role??'user';
  const manager=(role:string)=>['creator','admin'].includes(role);
  const kind=action==='users-revoke'||body.status==='blocked'||roleChange&&user.status==='blocked'?'stop':'prepare';
  const noop=user?.status==='active'&&(action==='users-add'||body.status==='active'||roleChange&&user.role===nextRole);
@@ -75,8 +79,10 @@ export async function requestLifecycle(client:PoolClient,actor:string,action:str
   await client.query('DELETE FROM sys_telegram_link WHERE user_id=$1',[user.id]);
  }
  const activate=roleChange?user.status==='active':body.status!=='provisioning';
- await client.query("INSERT INTO brai_user_operation(id,request_id,fingerprint,user_id,generation,kind,state,activate_on_success,required_policy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",[randomUUID(),requestId,fingerprint,user.id,generation,kind,noop?'succeeded':'pending',activate,roleChange||nextRole==='guest'?1:0]);
- await client.query('INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,request_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),actor,user.id,action,roleChange?user.role:null,roleChange?nextRole:null,requestId,generation]);
+ // AIDEV-NOTE: У Welcome ещё нет процесса Hermes. Отзыв завершает сама транзакция Auth.
+ await client.query("INSERT INTO brai_user_operation(id,request_id,fingerprint,user_id,generation,kind,state,activate_on_success,required_policy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",[randomUUID(),requestId,fingerprint,user.id,generation,kind,noop||blockingWelcome?'succeeded':'pending',activate,roleChange||nextRole==='guest'?1:0]);
+ const auditRoleChange=roleChange||grantingWelcome;
+ await client.query('INSERT INTO brai_identity_audit(id,actor_id,target_id,action,old_role,new_role,request_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),actor,user.id,action,auditRoleChange?user.role:null,auditRoleChange?nextRole:null,requestId,generation]);
  return response(user.id);
 }
 

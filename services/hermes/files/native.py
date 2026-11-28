@@ -1067,7 +1067,10 @@ def conversation(agent, user_message, task_id=None):
                     '[[brai_voice_only_text]] и [[/brai_voice_only_text]] перед маркером аудио. '
                     'Текст из этого блока отправится, если озвучка недоступна. '
                     'При сбое озвучки всё равно отправь полный текст.\n')
-        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + mode_prompt + (
+        dialogue = getattr(source, '_brai_welcome_dialogue_id', None)
+        continuation = ('\nДиалоги текущей беседы Telegram используют стабильный ID ' + dialogue
+                        + '. Передавай его в dialogue.id и dialogue_id для текущего хода.\n') if dialogue else ''
+        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + mode_prompt + continuation + (
             '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
             + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
             'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '

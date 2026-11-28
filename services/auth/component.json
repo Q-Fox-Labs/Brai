@@ -24,6 +24,7 @@
     ],
     "runtime": [
       "services/auth/package.json",
+      "services/auth/migrations/001_welcome.sql",
       "services/auth/schemas/messages.schema.json",
       "services/auth/src/admin.ts",
       "services/auth/src/auth.ts",
@@ -91,6 +92,7 @@
     "kind": "oci-context",
     "files": [
       "services/auth/dist",
+      "services/auth/migrations",
       "services/auth/package.json",
       "services/auth/schemas",
       "services/auth/contracts"

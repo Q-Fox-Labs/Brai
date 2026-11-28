@@ -91,11 +91,9 @@ function sealedDependencies(root,entries) {
     const marker=json(join(root,'node_modules/.brai-worktree.json'));
     const generation=marker.dependencyRoot;
     if(typeof generation!=='string')return null;
-    const proof=verifiedProof(root,[join(generation,'node_modules')]);
+    const proof=verifiedProof(root,[join(generation,'node_modules')],generation);
     if(!proof)return null;
-    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'
-      ?join(dirname(root),'repo/.git/codeworks-dependencies/prepared'):proof.root;
-    if(generation!==expected)return null;
+    if(process.env.BRAI_PUBLISHER_PROOF_FD!=='3' && generation!==proof.root)return null;
     return sealedInventory(root,entries,proof,generation);
   } catch {return null;}
 }

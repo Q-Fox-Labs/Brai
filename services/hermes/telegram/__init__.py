@@ -172,17 +172,6 @@ class Bridge:
             self.slots.release()
 
     def _call(self, method, params, timeout):
-        # The managed bootstrap provides this in-memory port only to this exact plugin.
-        # Legacy gateway launches retain the existing trusted stdio subprocess below.
-        import sys
-        private = sys.modules.get('_brai_codeworks_gateway')
-        if private is not None:
-            try:
-                return private.call_plugin(method, params, timeout)
-            except Exception as error:
-                code = str(error)
-                allowed = {'HUMAN_OUTPUT_REQUIRED', 'HUMAN_FINAL_DECISION_REQUIRED', 'HUMAN_OUTPUT_MAPPING_REQUIRED', 'LEGACY_RESULT_REVIEW_CHECK', 'STALE_ACTION', 'NOT_FOUND'}
-                raise BridgeError(code if code in allowed else 'RPC_REJECTED') from None
         request_id = secrets.token_hex(16)
         request = (json.dumps({"jsonrpc": "2.0", "id": request_id,
                                "method": method, "params": params}, ensure_ascii=False) + "\n").encode()
@@ -238,6 +227,8 @@ class Bridge:
                 if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") in {"HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED", "LEGACY_RESULT_REVIEW_CHECK", "STALE_ACTION"}:
                     raise BridgeError(error["data"]["code"])
                 code = error.get("data", {}).get("code") if isinstance(error.get("data"), dict) else None
+                if error["code"] == -32000 and method == "files.get" and code == "NOT_FOUND":
+                    raise BridgeError("NOT_FOUND")
                 if method == "files.publish" and isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", code):
                     logging.getLogger(__name__).warning("BRAI_FILE_PUBLISH_REJECTED code=%s", code)
                 raise BridgeError("RPC_REJECTED")
@@ -2060,25 +2051,15 @@ class TelegramPlugin:
         await self._notify(notice, row["chat_id"], row["thread_id"])
 
 
-def file_rpc(method, params, timeout):
-    """Внутренний файловый порт owner MCP без полномочий human actions."""
-    if method not in {'files.configuration', 'files.publish', 'files.fetch', 'files.get', 'files.list', 'files.prepare'}:
-        raise BridgeError('FORBIDDEN')
-    return sys.modules['_brai_codeworks_gateway'].call_plugin(method, params, timeout)
-
-
 def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
     if os.environ.get('BRAI_IDENTITY_MODE') == 'telegram':
         from identity.native_ingress import register as register_identity
         register_identity(ctx, topic_names=_topic_module('topic_names'), topic_rename=_topic_module('topic_rename'))
         return
-    from types import SimpleNamespace
     from hermes_cli.plugins import get_plugin_manager
     manager = get_plugin_manager()
     worker = os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
-    if not worker:
-        sys.modules['_brai_hermes_file_port'] = SimpleNamespace(call=file_rpc)
     plugin = TelegramPlugin(Config.from_identity() if worker else Config.from_env(), inject_message=getattr(ctx, "inject_message", None),
                             injection_ready=lambda: manager.has_gateway_message_injector)
     if worker:

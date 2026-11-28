@@ -43,17 +43,6 @@ class Bridge:
             return worker.call(method, params, timeout)
         if os.environ.get('BRAI_IDENTITY_MODE') in ('telegram', 'worker'):
             raise BridgeError('FILES_OWNER_REQUIRED')
-        private = sys.modules.get('_brai_codeworks_gateway')
-        if private is not None:
-            try:
-                port = sys.modules.get('_brai_hermes_file_port')
-                if port is None:
-                    raise BridgeError('FILES_PORT_NOT_READY')
-                return port.call(method, params, timeout)
-            except Exception as error:
-                code = str(error)
-                allowed = {'HUMAN_OUTPUT_REQUIRED', 'HUMAN_FINAL_DECISION_REQUIRED', 'HUMAN_OUTPUT_MAPPING_REQUIRED', 'STALE_ACTION', 'NOT_FOUND'}
-                raise BridgeError(code if code in allowed else 'RPC_REJECTED') from None
         request_id = secrets.token_hex(16)
         request = (json.dumps({"jsonrpc": "2.0", "id": request_id,
                                "method": method, "params": params}, ensure_ascii=False) + "\n").encode()

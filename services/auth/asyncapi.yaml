@@ -135,6 +135,15 @@ channels:
       request:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/IdentityProvisionRequest"
+  welcomeRegister:
+    address: brai.auth.v2.welcome-register
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/WelcomeRegisterRequest"
   profileReady:
     address: brai.auth.v2.profile-ready
     bindings:
@@ -499,6 +508,19 @@ operations:
       $ref: "#/channels/identityProvision"
     messages:
       - $ref: "#/channels/identityProvision/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  welcomeRegister:
+    action: receive
+    channel:
+      $ref: "#/channels/welcomeRegister"
+    messages:
+      - $ref: "#/channels/welcomeRegister/messages/request"
     reply:
       address:
         location: "$message.header#/replyTo"

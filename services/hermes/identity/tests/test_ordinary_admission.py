@@ -775,6 +775,26 @@ class FullAdmissionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(effects,[])
             self.assertEqual(transport.pending(),[])
 
+    async def test_pending_guest_only_reaches_welcome(self):
+        from identity import telegram_runtime as runtime
+        bot = Bot('123:abc')
+        bot._bot_user = User(123, 'synthetic', True)
+        update = Update.de_json({'update_id':8, 'message':{'message_id':8, 'date':1,
+            'chat':{'id':42,'type':'private'}, 'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'text':'/start invite_abcdefghijklmnop'}}, bot)
+        snapshot = {'state':'unregistered'}
+        adapter = SimpleNamespace(_bot=bot)
+        resolver = SimpleNamespace(mirror=SimpleNamespace(snapshot=lambda key:snapshot))
+        resolve = AsyncMock(return_value={**snapshot, 'welcomePending':True})
+        dispatch = AsyncMock(return_value=True)
+        with patch.dict(runtime._resolvers, {id(adapter):resolver}), \
+             patch.object(runtime, 'broker_call', resolve), \
+             patch.object(runtime, 'welcome_enabled', return_value=True), \
+             patch.object(runtime, 'dispatch_welcome', dispatch):
+            self.assertFalse(await runtime.admit_update(update, adapter))
+        resolve.assert_awaited_once_with('ingress.resolve-known', {'telegramId':'42'}, timeout=None)
+        dispatch.assert_awaited_once_with(update, adapter, runtime._control_reply, pending_guest=True)
+
     async def test_redelivery_after_auth_rebind_never_reaches_new_owner(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox

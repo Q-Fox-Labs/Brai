@@ -32,13 +32,16 @@
 | `telegram-resolve` | `{telegramId}` | `{user}` или null |
 | `telegram-code-issue` | `{telegramId,requestId}` | `{code,expiresAt,origin}` |
 | `identity-provision` | `{requestId,telegramId,name?,role,userId?,profileId?,status}` | `{user}` |
+| `welcome-register` | `{requestId,telegramId,name?}` | `{user}` |
 | `profile-ready` | `{userId,profileId}` | `{user}` или null |
 | `invite-redeem` | `{telegramId,code,name?}` | `{user}` или null |
 | `login-code-redeem` | `{headers,body:{code}}` | `{status,body,setCookies}` |
 
-Первые пять subjects доступны только доверенному Telegram ingress через ACL, не браузеру и не web. Auth не отправляет сообщения в Telegram. Код — 12 случайных символов Crockford32; регистр и дефисы игнорируются. Срок — 120 секунд; новый код отменяет прежний. В БД хранится HMAC. Выдача ограничена тремя запросами за 60 секунд на пользователя; проверка ограничена по клиенту и глобально, без блокировки владельца подбираемого кода. Погашение одноразово и создаёт новую сессию через официальное расширение Better Auth. Origin и CSRF проверяются, JSON не содержит токен. `requestId` выдачи предназначен для корреляции; после неопределённого ответа новый запрос создаёт новый код.
+Операции регистрации, подготовки, разрешения Telegram ID и выдачи кода требуют доверенного подключения через ACL. Auth не отправляет сообщения в Telegram. Код — 12 случайных символов Crockford32; регистр и дефисы игнорируются. Срок — 120 секунд; новый код отменяет прежний. В БД хранится HMAC. Выдача ограничена тремя запросами за 60 секунд на пользователя; проверка ограничена по клиенту и глобально, без блокировки владельца подбираемого кода. Погашение одноразово и создаёт новую сессию через официальное расширение Better Auth. Origin и CSRF проверяются, JSON не содержит токен. `requestId` выдачи предназначен для корреляции; после неопределённого ответа новый запрос создаёт новый код.
 
 Provision идемпотентен по `requestId` и точным параметрам; конфликт повтора отклоняется. Telegram ID уникален среди всех аккаунтов; несколько Telegram ID могут ссылаться на одного пользователя. Стабильный автор памяти и profile ID сохраняются. Доверенный вызов не может создать первого администратора. `profile-ready` активирует пользователя с совпадающей привязкой, кроме блокированного. Приглашение случайно, действительно 24 часа и хранится как HMAC; повторное погашение тем же отправителем возвращает созданного пользователя. После первой административной lifecycle-операции profile-ready больше не активирует provisioning: активацию подтверждает только worker.
+
+`welcome-register` закрепляет Telegram ID и создаёт постоянные `userId` и `profileId` с ролью `welcome` и состоянием `provisioning`. Идемпотентный повтор возвращает текущее состояние после одобрения. Параллельные регистрации того же посетителя сохраняют его ID. После выдачи гостевого доступа новый запрос на регистрацию отклоняется. Для роли `welcome` `profile-ready` не активирует профиль. «Диалоги» допускают точную пару ID до подготовки Hermes. Административный `users-add` с явно заданной ролью `guest` сохраняет оба ID и ставит штатную операцию prepare. При отзыве доступа у Welcome Auth закрывает чтение и запись в «Диалоги» и сохраняет привязку. Операция завершается в Auth, поскольку процесс Hermes ещё не запускался.
 
 Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная creator-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role,requestId?}`, `status-set` — `{userId,status,requestId?}`, `sessions-revoke` — `{userId}`. Последнего активного управляющего нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `chats.pause`, `chats.resume`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
 
@@ -87,7 +90,7 @@ Web-команды используют оболочку `{headers,body}`, де�
 
 | Subject `brai.auth.v2.` | body | body ответа |
 | --- | --- | --- |
-| `users-add` | `{requestId,telegramId}` | `{user,operation}` |
+| `users-add` | `{requestId,telegramId,role?}` | `{user,operation}` |
 | `users-revoke` | `{requestId,userId}` | `{user,operation}` |
 | `users-operation-get` | `{requestId}` | `{operation,user?}`, operation null для неизвестного ID |
 
@@ -121,7 +124,7 @@ errorCode — безопасная константа `[A-Z][A-Z0-9_]{0,63}`; в
 
 ## Роли и применение профиля
 
-Нормативное поведение четырёх ролей, приглашений, role-set, поколений и совместимого обновления описано в [ROLES.md](ROLES.md). role-set возвращает user/operation из существующей очереди prepare/stop. Для новых users-add и invite-create необязательная role — user/guest; приглашение хранит назначенную роль. Нынешняя миграция не назначает creator автоматически.
+Нормативное поведение ролей, приглашений, role-set, поколений и совместимого обновления описано в [ROLES.md](ROLES.md). role-set возвращает user/operation из существующей очереди prepare/stop. Для новых users-add и invite-create необязательная role — user/guest; приглашение хранит назначенную роль. Нынешняя миграция не назначает creator автоматически.
 
 ## Доступ к Диалогам без Hermes
 

@@ -842,6 +842,14 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             return {'user': {'id':'user', 'profileId':'profile', 'telegramId':'111222', 'status':'blocked'}}
         with mock.patch.object(self.control, 'call', side_effect=inactive):
             self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params), {'state':'forbidden'})
+        async def provisioning(*args, **kwargs):
+            return {'user': {'id':'user', 'profileId':'profile', 'telegramId':'333444',
+                             'status':'provisioning', 'role':'guest'}}
+        with mock.patch.object(self.control, 'call', side_effect=provisioning):
+            self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.resolve-known', params),
+                             {'state':'unregistered', 'welcomePending':True})
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'identity.resolve', params)
         for answer in ({}, {'user': {}}, {'user': 'bad'}):
             with mock.patch.object(self.control, 'call', return_value=answer):
                 with self.assertRaises(ValueError):

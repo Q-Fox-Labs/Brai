@@ -25,6 +25,7 @@ from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
+from .welcome_telegram import dispatch as dispatch_welcome, dialogue_id as welcome_dialogue_id, enabled as welcome_enabled
 from .ordinary_admission import disabled_command, group_chat_id, group_message, message_thread, start_command
 
 MAX_FRAME = 2 * 1024 * 1024
@@ -97,9 +98,9 @@ async def broker_call(method, params, timeout=15):
         await writer.wait_closed()
 
 
-async def _control_reply(adapter, chat, message, text):
+async def _control_reply(adapter, chat, message, text, *, thread_override=None):
     """Ответить в исходную тему; сообщить исход без содержимого, кодов и повтора."""
-    thread = getattr(message, 'message_thread_id', None)
+    thread = getattr(message, 'message_thread_id', None) if thread_override is None else thread_override or None
     if thread is not None and (type(thread) is not int or thread < 1):
         _logger.warning('telegram_control_reply status=invalid_route')
         return False
@@ -163,12 +164,14 @@ async def admit_update(update, adapter):
     resolver = _resolvers.get(id(adapter))
     mirror = getattr(resolver, 'mirror', None)
     snapshot = mirror.snapshot(f'{adapter._bot.id}:{update.update_id}') if mirror is not None else None
+    pending_guest = False
     if snapshot is not None and snapshot.get('state') in ('outside', 'forbidden'):
         return False
     if snapshot is not None:
         try:
             latest = await broker_call('ingress.resolve-known', {'telegramId': telegram}, timeout=None)
             same = isinstance(latest, dict) and latest.get('state') == snapshot.get('state')
+            pending_guest = same and latest.get('welcomePending') is True
             if same and snapshot.get('state') == 'known':
                 before, after = snapshot['profile'], latest.get('profile')
                 same = isinstance(after, dict) and all(before.get(key) == after.get(key)
@@ -193,7 +196,20 @@ async def admit_update(update, adapter):
                 except Exception:
                     pass
                 snapshot['state'] = 'binding_unknown'
+            elif private and snapshot.get('state') == 'unregistered' and welcome_enabled():
+                snapshot['state'] = 'outcome_unknown'
+                await _notice(adapter, telegram, message, 'Не удалось проверить доступ. Отправьте сообщение ещё раз.')
             return False
+    if pending_guest:
+        if private and welcome_enabled():
+            try:
+                handled = await dispatch_welcome(update, adapter, _control_reply, pending_guest=True)
+                if not handled:
+                    await _notice(adapter, telegram, message, 'Состояние доступа изменилось. Отправьте сообщение ещё раз.')
+            except Exception:
+                snapshot['state'] = 'outcome_unknown'
+                await _control_reply(adapter, telegram, message, 'Справочная временно недоступна. Попробуйте позже.')
+        return False
     raw = (getattr(message, 'text', '') or '').strip()
     link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
     if link:
@@ -267,7 +283,7 @@ async def admit_update(update, adapter):
     # Приглашение принимается только из личного сообщения самого нового пользователя.
     raw = getattr(message, 'text', '') or ''
     invitation = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+(?:invite_)?([A-Za-z0-9_-]{16,128})', raw.strip())
-    if private and invitation:
+    if private and invitation and not invitation[1].startswith('ref_'):
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
@@ -278,6 +294,14 @@ async def admit_update(update, adapter):
             await _control_reply(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False
     if private:
+        try:
+            if await dispatch_welcome(update, adapter, _control_reply):
+                return False
+        except Exception:
+            if snapshot is not None:
+                snapshot['state'] = 'outcome_unknown'
+            await _control_reply(adapter, telegram, message, 'Справочная временно недоступна. Попробуйте позже.')
+            return False
         reply = _control_reply if starting else _notice
         await reply(adapter, telegram, message, 'Здравствуйте! Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
@@ -1241,6 +1265,10 @@ class Resolver:
             replacements = dict(zip(all_paths, mapped))
             data['media_urls'] = [replacements[p] for p in paths]
             data['identity_inputs'] = [{**item, 'path': replacements[item['path']]} for item in inputs]
+        if private and welcome_enabled():
+            candidate = welcome_dialogue_id(self.adapter._bot.id, route)
+            if candidate is not None:
+                data['welcome_dialogue_id'] = candidate
         return data
 
     def authorize_delivery(self, profile, action, payload):
@@ -1617,6 +1645,27 @@ class Resolver:
 
     async def interactive_admit(self, update):
         """Guard не отправляет callback в общий native gateway."""
+        if self.mirror is not None:
+            bot_id = self.adapter._bot.id
+            snapshot = self.mirror.snapshot(f'{bot_id}:{update.update_id}')
+            if snapshot.get('state') == 'unregistered':
+                callback = getattr(update, 'callback_query', None)
+                user = getattr(update, 'effective_user', None)
+                try:
+                    if welcome_enabled() and getattr(callback, 'data', None) == 'welcome.submit':
+                        latest = await broker_call('ingress.resolve-known', {'telegramId':str(user.id)}, timeout=None)
+                        if latest['state'] != 'unregistered':
+                            if self.mirror.transport is not None:
+                                await asyncio.to_thread(self.mirror.transport.transition, bot_id, update.update_id,
+                                                        'handing_off', 'blocked')
+                            snapshot['state'] = 'binding_changed'
+                            return False
+                        await dispatch_welcome(update, self.adapter, _control_reply,
+                                               pending_guest=latest.get('welcomePending') is True)
+                except Exception:
+                    snapshot['state'] = 'outcome_unknown'
+                await self.mirror.handled(update)
+                return False
         await self.interactive_binding(update)
         return True
 

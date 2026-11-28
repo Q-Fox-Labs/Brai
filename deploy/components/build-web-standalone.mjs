@@ -56,13 +56,17 @@ export function dependencyLocation(sourceRoot,key,bases,allowedRoots) {
 
 export function dependencyRoots(sourceRoot=root) {
   const markerPath=join(sourceRoot,'node_modules/.brai-worktree.json');
-  if(!existsSync(markerPath))return [sourceRoot];
+  if(!existsSync(markerPath)){
+    if(process.env.BRAI_PUBLISHER_PROOF_FD==='3')fail('WEB_DEPENDENCY_ROOT_INVALID');
+    return [sourceRoot];
+  }
   const marker=json(markerPath);
   const common=realpathSync(execFileSync('git',['-C',sourceRoot,'rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());
   const source=realpathSync(marker.source),expected=realpathSync(dirname(common));
   if(source!==expected)fail('WEB_DEPENDENCY_SOURCE_INVALID');
   const generation=marker.dependencyRoot?realpathSync(marker.dependencyRoot):source;
-  if(generation!==source && !inside(join(common,'codeworks-dependencies'),generation) && !trustedHostGeneration(generation))fail('WEB_DEPENDENCY_ROOT_INVALID');
+  const local=process.env.BRAI_PUBLISHER_PROOF_FD!=='3' && (generation===source || inside(join(common,'brai-dependencies'),generation));
+  if(!local && !trustedHostGeneration(sourceRoot,generation))fail('WEB_DEPENDENCY_ROOT_INVALID');
   return [generation];
 }
 

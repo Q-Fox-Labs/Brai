@@ -22,6 +22,19 @@ export async function getIdentity(pool:Pool,userId:string) {
 }
 /** Идемпотентно создаёт идентичность; конфликт повторного запроса отклоняется. */
 export async function provision(pool:Pool,secret:string,input:ProvisionRequest):Promise<IdentityUser> {
+ return provisionIdentity(pool,secret,input);
+}
+
+type WelcomeRegistration=Pick<ProvisionRequest,'requestId'|'telegramId'|'name'>;
+
+/** Резервирует постоянного владельца и будущий profileId без постановки Hermes в очередь. */
+export async function registerWelcome(pool:Pool,secret:string,input:WelcomeRegistration):Promise<IdentityUser> {
+ return provisionIdentity(pool,secret,{...input,role:'welcome',status:'provisioning'});
+}
+
+type IdentityProvision=ProvisionRequest|(WelcomeRegistration&{role:'welcome';status:'provisioning';userId?:never;profileId?:never});
+
+async function provisionIdentity(pool:Pool,secret:string,input:IdentityProvision):Promise<IdentityUser> {
  const client=await pool.connect();
  const canonical=[input.requestId,input.telegramId,input.name??null,input.role,input.userId??null,input.profileId??null,input.status];
  const fingerprint=createHmac("sha256",secret).update(JSON.stringify(canonical)).digest("hex");
@@ -38,7 +51,8 @@ export async function provision(pool:Pool,secret:string,input:ProvisionRequest):
   else {
    const id=input.userId??randomUUID();const name=input.name??"Пользователь";
    await client.query('INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt") VALUES ($1,$2,$3,false,now(),now())',[id,name,asSyntheticEmail(id)]);
-   user=await insertIdentity(client,{id,name,role:input.role,status:input.status,telegramId:input.telegramId,profileId:input.profileId??null});
+   const profileId=input.role==='welcome'?randomUUID():input.profileId??null;
+   user=await insertIdentity(client,{id,name,role:input.role,status:input.status,telegramId:input.telegramId,profileId});
   }
   await client.query('INSERT INTO brai_identity_request(request_id,fingerprint,user_id) VALUES($1,$2,$3)',[input.requestId,fingerprint,user.id]);
   await client.query("COMMIT");return user;
@@ -52,8 +66,8 @@ export async function profileReady(pool:Pool,userId:string,profileId:string):Pro
   await client.query("BEGIN");
   await lifecycleLock(client);
   const managed=await client.query("SELECT state FROM brai_user_operation WHERE user_id=$1 ORDER BY generation DESC LIMIT 1",[userId]);
-  const current=await client.query("SELECT profile_id,status FROM brai_identity WHERE user_id=$1 FOR UPDATE",[userId]);
-  if(!current.rowCount||(managed.rowCount&&(current.rows[0].status!=="active"||managed.rows[0].state!=="succeeded"))||current.rows[0].status==="blocked"||(current.rows[0].profile_id&&current.rows[0].profile_id!==profileId)){await client.query("COMMIT");return null;}
+  const current=await client.query("SELECT profile_id,role,status FROM brai_identity WHERE user_id=$1 FOR UPDATE",[userId]);
+  if(!current.rowCount||current.rows[0].role==="welcome"||(managed.rowCount&&(current.rows[0].status!=="active"||managed.rows[0].state!=="succeeded"))||current.rows[0].status==="blocked"||(current.rows[0].profile_id&&current.rows[0].profile_id!==profileId)){await client.query("COMMIT");return null;}
   if(managed.rowCount){const result=await client.query(selectUser+" WHERE i.user_id=$1",[userId]);await client.query("COMMIT");return result.rows[0]??null;}
   await client.query("UPDATE brai_identity SET profile_id=$2,status='active' WHERE user_id=$1",[userId,profileId]);
   const result=await client.query(selectUser+" WHERE i.user_id=$1",[userId]);

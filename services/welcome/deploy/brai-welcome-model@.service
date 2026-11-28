@@ -1,0 +1,28 @@
+# ABOUTME: Запускает модель Welcome через допущенный канал общей авторизации Codex.
+# ABOUTME: HTTP-процесс Welcome видит только сокет модельных запросов.
+[Unit]
+Description=Brai Welcome model (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=brai-welcome-model-%i
+Group=brai-welcome-ipc-%i
+SupplementaryGroups=brai-welcome-model-%i
+WorkingDirectory=/var/lib/brai-welcome-model-%i
+Environment=WELCOME_MODEL_CONFIG=/etc/brai-welcome/%i/model.json
+ExecStart=/usr/local/bin/node /opt/brai-welcome/%i/services/welcome/src/model-server.mjs
+StateDirectory=brai-welcome-model-%i
+StateDirectoryMode=0700
+RuntimeDirectory=brai-welcome-model-%i
+RuntimeDirectoryMode=0750
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

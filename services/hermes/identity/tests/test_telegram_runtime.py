@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import telegram_runtime as runtime
@@ -128,6 +128,33 @@ class TopicNamingTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_onboarding_callbacks_do_not_read_a_worker_binding(self):
+        for callback, latest, expected in (('welcome.submit','unregistered','handled'),
+                                            ('welcome.submit','known','blocked'),
+                                            ('native.menu','unregistered','handled')):
+            with self.subTest(callback=callback, latest=latest):
+                resolver = runtime.Resolver(NS(_bot=NS(id=123)))
+                self.addCleanup(resolver.ledger.close)
+                snapshot = {'state':'unregistered'}
+                resolver.mirror = NS(snapshot=lambda key:snapshot,
+                    transport=NS(transition=Mock()), handled=AsyncMock())
+                resolver.interactive_binding = AsyncMock()
+                update = NS(update_id=88, callback_query=NS(data=callback), effective_user=NS(id=42))
+                resolve = AsyncMock(return_value={'state':latest})
+                dispatch = AsyncMock(return_value=False)
+                with patch.object(runtime, 'welcome_enabled', return_value=True), \
+                     patch.object(runtime, 'broker_call', resolve), \
+                     patch.object(runtime, 'dispatch_welcome', dispatch):
+                    self.assertFalse(await resolver.interactive_admit(update))
+                resolver.interactive_binding.assert_not_awaited()
+                self.assertEqual(dispatch.await_count, int(callback == 'welcome.submit' and latest == 'unregistered'))
+                if expected == 'blocked':
+                    self.assertEqual(snapshot['state'],'binding_changed')
+                    resolver.mirror.transport.transition.assert_called_once_with(123, 88, 'handing_off', 'blocked')
+                    resolver.mirror.handled.assert_not_awaited()
+                else:
+                    resolver.mirror.handled.assert_awaited_once_with(update)
+
     async def test_video_note_outbox_is_at_most_once_and_rollback_does_not_block(self):
         owner = {**profile(), 'profileId': 'profile', 'role': 'creator', 'generation': 0}
         resolver = runtime.Resolver(NS())

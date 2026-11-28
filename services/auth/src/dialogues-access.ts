@@ -21,7 +21,10 @@ export async function dialoguesAccess(pool:Pool,binding:DialoguesBinding,input:u
   LEFT JOIN brai_user_operation o ON o.user_id=i.user_id AND o.generation=i.lifecycle_generation
   WHERE i.user_id=$1`,[binding.userId])).rows[0];
  // AIDEV-NOTE: prepare с явным намерением активации не ждёт подтверждения Hermes.
- const allowed=Boolean(row&&row.profile_id===binding.profileId&&['creator','admin','user','guest'].includes(row.role)&&
-  (row.status==='active'||row.status==='provisioning'&&row.kind==='prepare'&&row.activate_on_success===true));
+ const allowed=Boolean(row&&row.profile_id===binding.profileId&&(
+  row.role==='welcome'&&row.status==='provisioning'||
+  ['creator','admin','user','guest'].includes(row.role)&&
+   (row.status==='active'||row.status==='provisioning'&&row.kind==='prepare'&&row.activate_on_success===true)
+ ));
  return {allowed,userId:binding.userId,profileId:binding.profileId};
 }

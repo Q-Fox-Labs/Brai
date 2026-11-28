@@ -101,7 +101,8 @@ class TransportInbox:
                         raise ValueError('TRANSPORT_UPDATE_INVALID')
                     user = getattr(update,'effective_user',None)
                     actor = str(getattr(user,'id','') or '')
-                    payload = canonical(update.to_dict())
+                    from .welcome_telegram import filtered_payload
+                    payload = canonical(filtered_payload(update, update.to_dict(), snapshot))
                     digest = hashlib.sha256(payload.encode()).hexdigest()
                     bound = canonical(self._binding(snapshot))
                     row = db.execute('SELECT * FROM release_transport WHERE bot_id=? AND update_id=?',

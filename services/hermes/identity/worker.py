@@ -1216,6 +1216,10 @@ class Worker:
         if not isinstance(actor, str) or not actor.isascii() or not actor.isdecimal() or int(actor) <= 0:
             raise RpcError(-32602, 'Invalid Telegram actor')
         source._brai_actor_id = actor
+        if os.environ.get('BRAI_WELCOME_CONTINUATION') == '1':
+            dialogue = event['source'].get('brai_welcome_dialogue_id')
+            if isinstance(dialogue, str) and re.fullmatch(r'telegram:[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}', dialogue):
+                source._brai_welcome_dialogue_id = dialogue
         if self.operator_route == self._chat_route(source) and not _cancel_control:
             return {'accepted': False, 'turn_id': None}
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:

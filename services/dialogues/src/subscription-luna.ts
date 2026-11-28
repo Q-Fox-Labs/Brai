@@ -26,13 +26,17 @@ export async function credential(socketPath:string){
 /** Преобразует публичный stdio Codex в транспорт существующего Luna executor. */
 export class NativeSocket extends EventEmitter implements LunaSocket {
  readyState=0;private child:ChildProcessWithoutNullStreams;private buffer='';
+ private stopping:NodeJS.Timeout|undefined;
  constructor(binary:string,args:string[],home:string,cwd:string,path='/usr/bin:/bin'){
   super();
   const decoder=new StringDecoder('utf8');
   this.child=spawn(binary,args,{cwd,env:{HOME:home,CODEX_HOME:home+'/.codex',PATH:path},stdio:'pipe'});
   this.child.once('spawn',()=>{this.readyState=1;this.emit('open');});
   this.child.once('error',()=>{this.emit('error',new Error('LUNA_UNAVAILABLE'));});
-  this.child.once('close',()=>{this.readyState=3;this.emit('close');});
+  this.child.once('close',()=>{
+   if(this.stopping) clearTimeout(this.stopping);
+   this.readyState=3;this.emit('close');
+  });
   this.child.stderr.resume();
   this.child.stdin.on('error',()=>this.emit('error',new Error('LUNA_UNAVAILABLE')));
   this.child.stdout.on('error',()=>this.emit('error',new Error('LUNA_UNAVAILABLE')));
@@ -44,10 +48,16 @@ export class NativeSocket extends EventEmitter implements LunaSocket {
  /** Отправляет один native RPC без shell и диагностического echo. */
  send(value:string,callback?:(error?:Error)=>void){this.child.stdin.write(value+'\n',error=>callback?.(error??undefined));}
  /** Завершение транспорта подтверждается фактическим выходом дочернего процесса. */
- terminate(){if(this.readyState!==3){this.readyState=2;this.child.kill('SIGTERM');}}
+ terminate(){
+  if(this.readyState>=2)return;
+  this.readyState=2;
+  this.child.kill('SIGTERM');
+  // Use the same grace period as the App Server interrupt and unsubscribe RPCs.
+  this.stopping=setTimeout(()=>{if(this.readyState!==3)this.child.kill('SIGKILL');},5000).unref();
+ }
 }
 /** Каждый запрос использует актуальную связь аккаунта и отдельный временный native. */
-export function createSubscriptionLuna(cfg:SubscriptionConfig){
+export function createSubscriptionLuna(cfg:SubscriptionConfig, selection?:{model:string;reasoning:string}){
  for(const key of ['binary','python','credentialClient','credentialSocket','home','cwd','catalogPath'] as const)if(typeof cfg[key]!=='string'||!cfg[key].startsWith('/'))throw new Error('INVALID_SUBSCRIPTION_CONFIG');
  if(!/^[a-f0-9]{64}$/.test(cfg.sourceRef))throw new Error('INVALID_SUBSCRIPTION_CONFIG');
  return createLuna('',cfg.cwd,async()=>{
@@ -58,7 +68,7 @@ export function createSubscriptionLuna(cfg:SubscriptionConfig){
   // AIDEV-NOTE: Access остаётся внутри helper/auth.command. Native не получает его через env/argv.
   delete value.access;
   const provider='dialogues_subscription';
-  const settings:Record<string,unknown>={model:'gpt-6-luna',model_provider:provider,model_catalog_json:cfg.catalogPath,check_for_update_on_startup:false,
+  const settings:Record<string,unknown>={model:selection?.model??'gpt-6-luna',model_provider:provider,model_catalog_json:cfg.catalogPath,check_for_update_on_startup:false,
    [`model_providers.${provider}.name`]:'Dialogues subscription',
    [`model_providers.${provider}.base_url`]:baseUrl,[`model_providers.${provider}.wire_api`]:'responses',
    [`model_providers.${provider}.requires_openai_auth`]:false,
@@ -70,5 +80,5 @@ export function createSubscriptionLuna(cfg:SubscriptionConfig){
    [`model_providers.${provider}.request_max_retries`]:0,[`model_providers.${provider}.stream_max_retries`]:0};
   const args=['app-server','--listen','stdio://'];for(const [key,item]of Object.entries(settings))args.push('-c',key+'='+toml(item));
   return new NativeSocket(cfg.binary,args,cfg.home,cfg.cwd,cfg.node?cfg.node.slice(0,cfg.node.lastIndexOf('/'))+':/usr/bin:/bin':'/usr/bin:/bin');
- });
+ },selection);
 }

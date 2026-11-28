@@ -63,7 +63,11 @@ export function AdminMessageBody({ message, owner }: { message: ChatMessage; own
 }
 
 /** Сохраняет историю и прокрутку; скрытый раздел не опрашивает сервер, потеря прав очищает экран. */
-export default function AdminChats({ userId, active, onUnauthorized }: { userId: string; active: boolean; onUnauthorized: () => void }) {
+export default function AdminChats({ userId, active, onUnauthorized, source, embedded }: {
+  userId: string; active: boolean; onUnauthorized: () => void; embedded?: boolean;
+  source?: { list: (previous: AdminChat[], signal: AbortSignal) => ReturnType<typeof loadAdminChats>;
+    latest: typeof latestAdminChat };
+}) {
   const [chats, setChats] = useState<AdminChat[]>([]), [selected, setSelected] = useState<AdminChat | null>(null);
   const [unavailable, setUnavailable] = useState<ChatOwner[]>([]);
   const [history, setHistory] = useState<History>(emptyHistory);
@@ -101,7 +105,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
     };
     const refresh = async () => {
       try {
-        accept(await loadAdminChats(chatsRef.current, controller.signal, accept));
+        accept(await (source?.list(chatsRef.current, controller.signal) ?? loadAdminChats(chatsRef.current, controller.signal, accept)));
         if (!controller.signal.aborted && !deniedRef.current) setListReady(true);
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -126,7 +130,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
     const refresh = async () => {
       try {
         const previous = historyRef.current;
-        const page = await latestAdminChat(chat, previous.messages.at(-1)?.id, controller.signal, previous.updatesCursor);
+        const page = await (source?.latest ?? latestAdminChat)(chat, previous.messages.at(-1)?.id, controller.signal, previous.updatesCursor);
         if (controller.signal.aborted || deniedRef.current) return;
         const current = historyRef.current;
         if (!follow.current) setNewCount(count => count + page.messages.filter(message => !message.deleted && (message.text.length > 0 || !!message.richMessage || !!message.attachments?.length || message.attachmentState === "pending") && !current.messages.some(old => old.id === message.id)).length);
@@ -157,12 +161,12 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
   const offline = !!messageError || !!listError || selectedChatUnavailable(selected, unavailable);
   const ready = selected ? connected : listReady;
   const status = offline ? "Нет связи" : ready ? "В эфире" : "Подключение";
-  return <WorkspaceFrame section="agent" userId={userId} title={selected ? title(selected) : "Агент"} railTitle="Чаты" railStatus={<span className="tg-live" data-state={offline ? "offline" : ready ? "live" : "loading"} role="status" title={status}><i aria-hidden="true" /><span>{status}</span></span>} rail={<aside className="tg-sidebar" aria-label="Список чатов">
+  const rail = <aside className="tg-sidebar" aria-label="Список чатов">
     <div className="tg-chat-list">{chats.map(chat => <button type="button" className="tg-chat" data-frame-close-rail data-selected={selectedKey === adminChatKey(chat)} key={adminChatKey(chat)} onClick={() => setSelected(chat)}>
       <ParticipantAvatar chat={chat} /><span className="tg-chat-copy"><strong>{title(chat)}</strong><span>{[chat.participant?.username ? "@" + chat.participant.username : "", time(chat.updatedAt)].filter(Boolean).join(" · ")}</span></span>
     </button>)}{unavailable.map(owner => <p className="tg-error" role="status" key={owner.id}>{owner.name || owner.telegramId || owner.id}: источник чатов недоступен. Повторяем подключение.</p>)}{listError && <p className="tg-error" role="status">{listError}</p>}{!chats.length && !denied && (!listReady || listError) && <p className="tg-empty-list" role="status">{!listError && "Загружаем чаты… "}<button type="button" onClick={() => setListAttempt(attempt => attempt + 1)}>Повторить подключение</button></p>}{!chats.length && listReady && !unavailable.length && !listError && !denied && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
-  </aside>}>
-    <section className="tg-main" aria-label="Переписка">
+  </aside>;
+  const conversation = <section className="tg-main" aria-label="Переписка">
       {(messageError || denied || selectedChatUnavailable(selected, unavailable)) && <p className="tg-error" role="status">{denied ? "Сервер отклонил доступ к чатам. Обновите страницу; если ошибка повторится, проверьте доступ к разделу." : messageError || "Источник чатов выбранного профиля недоступен. Повторяем подключение."}</p>}
       <div ref={scroll} className="tg-conversation" onScroll={event => { const el = event.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; if (follow.current) setNewCount(0); }}>
         {!selected ? <div className="tg-empty"><h2>Выберите чат</h2><p>Здесь появятся переписки с агентом.</p></div> : <div className="tg-timeline">
@@ -175,6 +179,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
         </div>}
       </div>
       {newCount > 0 && <button type="button" className="tg-new" onClick={() => { follow.current = true; setNewCount(0); if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }}>Новые сообщения: {newCount} ↓</button>}
-    </section>
-  </WorkspaceFrame>;
+    </section>;
+  if (embedded) return <div className="welcome-chat-view">{rail}{conversation}</div>;
+  return <WorkspaceFrame section="agent" userId={userId} title={selected ? title(selected) : "Агент"} railTitle="Чаты" railStatus={<span className="tg-live" data-state={offline ? "offline" : ready ? "live" : "loading"} role="status" title={status}><i aria-hidden="true" /><span>{status}</span></span>} rail={rail}>{conversation}</WorkspaceFrame>;
 }

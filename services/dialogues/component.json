@@ -16,7 +16,8 @@
     "services/dialogues/src/topic-backfill.ts",
     "services/dialogues/src/isolation-cli.ts",
     "services/dialogues/src/summary-worker.ts",
-    "services/dialogues/src/provision.ts"
+    "services/dialogues/src/provision.ts",
+    "services/dialogues/src/welcome-entry.ts"
   ],
   "inputs": {
     "build": [
@@ -70,7 +71,9 @@
       "services/dialogues/src/auth-access.ts",
       "services/dialogues/src/subscription-luna.ts",
       "services/dialogues/src/subscription-catalog.ts",
-      "services/dialogues/src/provision.ts"
+      "services/dialogues/src/provision.ts",
+      "services/dialogues/src/welcome-entry.ts",
+      "services/dialogues/src/welcome-owner.ts"
     ],
     "checks": [
       "services/dialogues/tests/domain.test.mjs",
@@ -92,6 +95,7 @@
       "services/dialogues/tests/fence-http.test.mjs",
       "services/dialogues/tests/personal-summary.test.mjs",
       "services/dialogues/tests/personal-stack.integration.test.mjs",
+      "services/dialogues/tests/welcome.integration.test.mjs",
       "services/dialogues/tests/personal-summary-stream.test.mjs",
       "services/dialogues/tests/auth-access.test.mjs",
       "services/dialogues/tests/subscription-luna.test.mjs"
@@ -131,7 +135,8 @@
       "services/dialogues/dist/topic-backfill.js",
       "services/dialogues/dist/isolation-cli.js",
       "services/dialogues/dist/summary-worker.js",
-      "services/dialogues/dist/provision.js"
+      "services/dialogues/dist/provision.js",
+      "services/dialogues/dist/welcome-entry.js"
     ],
     "smokeImports": [],
     "systemRequirements": [

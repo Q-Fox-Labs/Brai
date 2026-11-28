@@ -6,7 +6,7 @@ import type { Config } from "./config.js";
 import { adminAction } from "./admin.js";
 import { lifecycleWorker } from "./lifecycle.js";
 import { issueCode } from "./login-code.js";
-import { getIdentity, issueTelegramLink, profileReady, provision, redeemInvite, redeemTelegramLink, resolveTelegram, unlinkTelegram } from "./identity.js";
+import { getIdentity, issueTelegramLink, profileReady, provision, redeemInvite, redeemTelegramLink, registerWelcome, resolveTelegram, unlinkTelegram } from "./identity.js";
 
 const id=z.string().min(1).max(128);
 const telegramId=z.string().regex(/^[0-9]{1,20}$/);
@@ -24,6 +24,7 @@ const trusted={
  "identity-get":z.strictObject({userId:id}),
  "telegram-code-issue":z.strictObject({telegramId,requestId:id}),
  "identity-provision":z.strictObject({requestId:id,telegramId,name:z.string().min(1).max(200).optional(),role,userId:id.optional(),profileId:id.optional(),status}),
+ "welcome-register":z.strictObject({requestId:id,telegramId:adminTelegramId,name:z.string().min(1).max(200).optional()}),
  "profile-ready":z.strictObject({userId:id,profileId:id}),
  "invite-redeem":z.strictObject({telegramId,code:z.string().regex(/^[A-Za-z0-9_-]{43}$/),name:z.string().min(1).max(200).optional()})
 };
@@ -60,6 +61,7 @@ export async function v2(operation:string,input:unknown,cfg:Config,pool:Pool,han
  if(operation==="lifecycle-renew")return lifecycleWorker(pool,"renew",parse(trusted[operation],input));
  if(operation==="lifecycle-complete")return lifecycleWorker(pool,"complete",parse(trusted[operation],input));
  if(operation==="telegram-resolve"){const data=parse(trusted[operation],input);return {user:await resolveTelegram(pool,data.telegramId)};}
+ if(operation==="welcome-register")return {user:await registerWelcome(pool,cfg.secret,parse(trusted[operation],input))};
  if(operation==="telegram-code-issue"){const data=parse(trusted[operation],input);const code=await issueCode(pool,cfg.secret,data.telegramId);if(!code)throw new Error("Invalid request");return {...code,origin:cfg.origin};}
  if(operation==="identity-provision"){const data=parse(trusted[operation],input);if(data.status==="active"&&!data.profileId)throw new Error("Invalid request");return {user:await provision(pool,cfg.secret,data)};}
  if(operation==="profile-ready"){const data=parse(trusted[operation],input);return {user:await profileReady(pool,data.userId,data.profileId)};}
