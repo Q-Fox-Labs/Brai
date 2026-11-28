@@ -20,6 +20,12 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def ignored_reaction(value):
+    """Определить реакцию, которую входной guard не передаёт ни одному обработчику."""
+    return (isinstance(value, dict) and set(value) == {'update_id', 'message_reaction'}
+            and isinstance(value['message_reaction'], dict))
+
+
 def telegram_topic(message):
     """Вернуть тему личного чата. Telegram также передаёт thread ID как якорь UI."""
     return str(message.get('message_thread_id') or '') if message.get('is_topic_message') is True else ''
@@ -338,6 +344,28 @@ class UpdateInbox:
     def markhandled(self, profile, bot_id, update_id):
         """Зафиксировать завершённый ingress-only outcome без утверждения worker effect."""
         return self._finish(profile, bot_id, update_id, 'handled', None)
+
+    def ignore_reaction(self, profile, bot_id, update_id, *, operation_id=None):
+        """Завершить только ещё не переданную реакцию без пользовательского действия."""
+        db = self._open(profile)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                row = self._find(db, profile, bot_id, update_id)
+                payload = json.loads(row['payload'])
+                if (not ignored_reaction(payload) or canonical(payload) != row['payload']
+                        or hashlib.sha256(row['payload'].encode()).hexdigest() != row['digest']
+                        or row['state'] not in ('captured', 'held', 'handled')
+                        or row['receipt'] is not None
+                        or db.execute('SELECT 1 FROM release_inbox_auth WHERE inbox_seq=?', (row['seq'],)).fetchone() is None
+                        or db.execute('SELECT 1 FROM release_input_delivery WHERE inbox_seq=?', (row['seq'],)).fetchone() is not None
+                        or (row['state'] == 'held' and row['operation_id'] != operation(operation_id))):
+                    raise ValueError('INBOX_REACTION_NOT_IGNORABLE')
+                if row['state'] in ('captured', 'held'):
+                    db.execute("UPDATE release_inbox SET state='handled' WHERE seq=?", (row['seq'],))
+        finally:
+            db.close()
+        self._sync_journal_directories(profile)
 
     def unsettled(self, profile):
         """Ошибки/неизвестные outcomes блокируют переключение и не исчезают из proof."""

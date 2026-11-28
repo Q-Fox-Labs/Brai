@@ -52,6 +52,55 @@ async def pump(mirror):
                             await asyncio.to_thread(mirror.transport.transition, row['bot_id'], row['update_id'], 'captured', 'blocked')
                         return
                     profile = current
+                    from .update_inbox import ignored_reaction
+                    if row['state'] == 'captured' and ignored_reaction(update.to_dict()):
+                        # AIDEV-NOTE: Резервирование охватывает обе SQLite-записи,
+                        # даже если отменён ожидающий их supervisor.
+                        reservation = object()
+                        mirror.tracker.enter(reservation, update)
+                        try:
+                            async with mirror.capture_lock:
+                                operation = mirror.tracker.gates.get(profile['uid'])
+                                def dispose_reaction():
+                                    mirror.inbox.capture(profile, update, mirror.app.bot.id)
+                                    observed = mirror.inbox.observe(profile, row['bot_id'], row['update_id'])
+                                    if operation is not None:
+                                        if observed['state'] == 'captured':
+                                            mirror.inbox.disposition(profile, row['bot_id'], row['update_id'],
+                                                                     'held', operation_id=operation)
+                                        return
+                                    mirror.inbox.ignore_reaction(profile, row['bot_id'], row['update_id'])
+                                    mirror.transport.ignore_reaction(profile, row['bot_id'], row['update_id'])
+                                import threading
+                                done = threading.Event()
+                                errors = []
+                                def run_disposition():
+                                    try:
+                                        dispose_reaction()
+                                    except BaseException as error:
+                                        errors.append(error)
+                                    finally:
+                                        done.set()
+                                threading.Thread(target=run_disposition, daemon=True).start()
+                                cancelled = False
+                                while not done.is_set():
+                                    try:
+                                        await asyncio.sleep(0.01)
+                                    except asyncio.CancelledError:
+                                        # Поток SQLite нельзя отменить; защита остаётся
+                                        # до его завершения и при повторной отмене.
+                                        cancelled = True
+                                if cancelled:
+                                    if errors:
+                                        import logging
+                                        logging.getLogger(__name__).warning('DURABLE_REACTION_CANCELLED_WRITE_FAILED class=%s',
+                                                                           type(errors[0]).__name__)
+                                    raise asyncio.CancelledError
+                                if errors:
+                                    raise errors[0]
+                        finally:
+                            mirror.tracker.release_reservation(reservation)
+                        return
                     await asyncio.to_thread(mirror.inbox.capture, profile, update, mirror.app.bot.id)
                     observed = await asyncio.to_thread(mirror.inbox.observe, profile, row['bot_id'], row['update_id'])
                     binding = await asyncio.to_thread(mirror.inbox.delivery_for, profile, row['bot_id'], row['update_id'])

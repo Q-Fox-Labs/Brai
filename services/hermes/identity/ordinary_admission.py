@@ -48,6 +48,13 @@ class Tracker:
         self.changed.set()
         return key
 
+    def release_reservation(self, key):
+        """Снять временный нераспределённый учёт после сохранения входа."""
+        if key not in self.tickets or self.tickets[key] is not None:
+            raise ValueError('RESERVATION_CHANGED')
+        del self.tickets[key]
+        self.changed.set()
+
     async def classify(self, key, update):
         uid = await self.authorize(update)
         if self.tickets[key] is not None:
@@ -528,13 +535,34 @@ class Mirror:
         profile = snapshot['profile']
         if profile['uid'] != uid:
             raise PermissionError('INGRESS_BINDING_CHANGED')
+        from .update_inbox import ignored_reaction
+        reaction = (getattr(update, 'message_reaction', None) is not None
+                    and ignored_reaction(update.to_dict()))
+        reaction_finished = False
         if self.restartable:
             seen = await asyncio.to_thread(self.inbox.observe, profile, self.bot_id, update.update_id)
-            if seen['state'] in ('accepted', 'handled'):
+            if seen['state'] == 'accepted' or (seen['state'] == 'handled' and not reaction):
                 return True
+            if seen['state'] == 'handled' and reaction:
+                reaction_finished = True
         if operation is not None and _replay_binding.get() != (uid, operation):
-            await asyncio.to_thread(self.inbox.disposition, profile, self.bot_id, update.update_id,
-                                    'held', operation_id=operation)
+            if not reaction_finished:
+                await asyncio.to_thread(self.inbox.disposition, profile, self.bot_id, update.update_id,
+                                        'held', operation_id=operation)
+            return True
+        if reaction:
+            # AIDEV-NOTE: Guard никогда не передаёт реакцию без сообщения дальше;
+            # фиксируем отсутствие действия до проверки паузы другой темы.
+            try:
+                await asyncio.to_thread(self.inbox.ignore_reaction, profile, self.bot_id, update.update_id,
+                                        operation_id=operation)
+                if self.transport is not None:
+                    await asyncio.to_thread(self.transport.ignore_reaction, profile, self.bot_id, update.update_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning('BRAI_IDENTITY_REACTION_DISPOSITION_PENDING')
+                # Не выдаём native receipt: supervisor повторит только эту запись.
+                return True
             return True
         if self.restartable:
             from .durable_inputs import ordinary
