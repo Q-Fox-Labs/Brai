@@ -1,13 +1,13 @@
 {
   "formatVersion": 1,
   "id": "welcome",
-  "type": "container",
+  "type": "program",
   "status": "active",
   "environments": ["dev", "prod"],
   "executableSources": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs"],
   "inputs": {
     "build": [],
-    "runtime": ["services/welcome/package.json", "services/welcome/src/*", "services/welcome/migrations/*.sql", "services/welcome/CONTRACT.md"],
+    "runtime": ["services/welcome/package.json", "services/welcome/src/*", "services/welcome/migrations/*.sql", "services/welcome/deploy/*.service", "services/welcome/CONTRACT.md"],
     "checks": ["services/welcome/tests/*.test.mjs"]
   },
   "dependencies": [{
@@ -20,16 +20,16 @@
     "check": "npm test"
   },
   "delivery": {
-    "kind": "oci-context",
-    "files": ["services/welcome/package.json", "services/welcome/src", "services/welcome/migrations"],
-    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs"],
-    "smokeImports": [],
-    "systemRequirements": ["Node.js 24.22.1"]
+    "kind": "ready-files",
+    "files": ["services/welcome/package.json", "services/welcome/src", "services/welcome/migrations", "services/welcome/deploy"],
+    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/dialogues/dist/welcome-entry.js"],
+    "smokeImports": ["services/welcome/src/model.mjs", "services/dialogues/dist/welcome-owner.js"],
+    "systemRequirements": ["Node.js 24.22.1", "systemd", "ffprobe", "Codex App Server"]
   },
   "deploy": {
-    "units": ["welcome", "welcome-migrate"],
+    "units": ["brai-welcome@.service", "brai-welcome-dialogues@.service"],
     "migrations": ["services/welcome/migrations"],
     "health": "GET /health"
   },
-  "npm": { "workspaces": ["services/welcome"] }
+  "npm": { "workspaces": ["services/welcome", "services/dialogues"] }
 }
