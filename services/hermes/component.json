@@ -292,6 +292,7 @@
       "services/hermes/tests/confirmation.test.mjs",
       "services/hermes/tests/tools.test.mjs",
       "services/hermes/tests/transcribe.test.mjs",
+      "services/hermes/tests/cli-process.mjs",
       "services/hermes/tests/planning-read.test.mjs",
       "services/hermes/tests/files.test.mjs",
       "services/hermes/tests/runtime-reads.test.mjs",

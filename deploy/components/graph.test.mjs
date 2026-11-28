@@ -2,13 +2,13 @@
 // ABOUTME: Изолированные Git fixtures не читают live-данные основной копии.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync, openSync, closeSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, cpSync, rmSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { discover, fingerprints, checkGroupFingerprint, sourceFiles } from './graph.mjs';
 import { execute } from './cli.mjs';
 const repository=resolve(import.meta.dirname,'../..');
-function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
+function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text,{mode:0o644});}
 function descriptor(id) {
  const dir='services/'+id;
  return {formatVersion:1,id,type:'program',status:'active',environments:['dev','prod'],executableSources:[dir+'/main.mjs'],inputs:{build:[dir+'/build.mjs'],runtime:[dir+'/main.mjs'],checks:[dir+'/tests.mjs']},dependencies:[],commands:{build:'node build.mjs',check:'node tests.mjs'},delivery:{kind:'ready-files',files:[dir+'/main.mjs'],entrypoints:[dir+'/main.mjs'],smokeImports:[],systemRequirements:['node:24.22.1']},deploy:{units:[id],migrations:[],health:null},npm:{workspaces:[]}};
@@ -39,6 +39,19 @@ function add(root,id,edit=()=>{}) {
  put(root,'services/'+id+'/tests.mjs',"import assert from 'node:assert/strict';assert.equal(1,1);\n");return d;
 }
 function save(root,id,d){put(root,'services/'+id+'/component.json',JSON.stringify(d));}
+function cleanupCheckFixture(runner,groups,pids,root) {
+ if(runner && runner.exitCode===null && runner.signalCode===null)runner.kill('SIGKILL');
+ for(const [group,pid] of groups)try{
+  const value=readFileSync(`/proc/${pid}/stat`,'utf8');
+  const actual=Number(value.slice(value.lastIndexOf(')')+2).split(' ')[2]);
+  const command=readFileSync(`/proc/${pid}/cmdline`,'utf8');
+  if(actual===group && (command.includes('tests.mjs') || command.includes('peer.mjs'))
+     && readlinkSync(`/proc/${pid}/cwd`).startsWith(root+'/'))process.kill(-group,'SIGKILL');
+ }catch(error){if(error.code!=='ENOENT' && error.code!=='ESRCH')throw error;}
+ for(const pid of pids)try{
+  if(readFileSync(`/proc/${pid}/cmdline`,'utf8').includes('BRAI_CHECK_CHILD='))process.kill(pid,'SIGKILL');
+ }catch(error){if(error.code!=='ENOENT' && error.code!=='ESRCH')throw error;}
+}
 test('Git source boundary excludes unreadable ignored live directories and keeps tracked and new executable gates',t=>{
  const root=fixture(t);add(root,'probe');
  put(root,'.gitignore','.private-live/\nservices/probe/generated/\n');
@@ -168,6 +181,57 @@ writeFileSync('../../tmp/peer-finished','yes');\n`);
  await assert.rejects(execute(root,'check',['probe']),/COMMAND_FAILED/);
  assert.equal(readFileSync(join(root,'tmp/peer-finished'),'utf8'),'yes');
  assert.equal(JSON.parse(readFileSync(join(root,'tmp/component-state/probe.json'))).checkGroups,undefined);
+});
+for(const signal of ['SIGTERM','SIGINT'])test(`cancelling parallel check groups with ${signal} stops their CLI children without receipts`,{skip:process.platform!=='linux'},async t=>{
+ const root=fixture(t),d=add(root,'probe');d.commands.build=null;
+ d.inputs.checks.push('services/probe/peer.mjs');
+ d.commands.checkGroups=[
+  {id:'first',command:'node tests.mjs',tools:['node'],excludedInputs:[],extraInputs:[]},
+  {id:'second',command:'node peer.mjs',tools:['node'],excludedInputs:[],extraInputs:[]}
+ ];save(root,'probe',d);
+ const synthetic=`import{spawn}from'node:child_process';import{readFileSync}from'node:fs';
+const stat=readFileSync('/proc/self/stat','utf8');const group=stat.slice(stat.lastIndexOf(')')+2).split(' ')[2];
+console.log('BRAI_CHECK_GROUP='+group+',TEST='+process.pid);
+const child=spawn(process.execPath,['-e','console.log("BRAI_CHECK_CHILD="+process.pid);setInterval(()=>{},1000)'],{stdio:'inherit'});
+await new Promise(resolve=>child.once('close',resolve));\n`;
+ put(root,'services/probe/tests.mjs',synthetic);put(root,'services/probe/peer.mjs',synthetic);
+ const code=`import{execute}from ${JSON.stringify(new URL('./cli.mjs',import.meta.url).href)};
+try{await execute(${JSON.stringify(root)},'check',['probe']);process.exitCode=2}catch(error){console.error(error.message);process.exitCode=1}`;
+ const runner=spawn(process.execPath,['--input-type=module','-e',code],{cwd:root,stdio:['ignore','pipe','pipe'],detached:true});
+ const pids=new Set(),groups=new Map();let stdout='',stderr='';
+ t.after(()=>cleanupCheckFixture(runner,groups,pids,root));
+ const closed=new Promise(resolve=>runner.once('close',(code,exitSignal)=>resolve({code,signal:exitSignal})));
+ runner.stderr.on('data',chunk=>{stderr+=chunk;});
+ await new Promise((resolve,reject)=>{
+  runner.once('error',reject);
+  runner.once('exit',()=>{if(pids.size<2)reject(Error('checks exited before both children started'));});
+  runner.stdout.on('data',chunk=>{
+   stdout+=chunk;
+   for(const match of stdout.matchAll(/BRAI_CHECK_GROUP=(\d+),TEST=(\d+)/g))groups.set(Number(match[1]),Number(match[2]));
+   for(const match of stdout.matchAll(/BRAI_CHECK_CHILD=(\d+)/g))pids.add(Number(match[1]));
+   if(pids.size===2)resolve();
+  });
+ });
+ runner.kill(signal);
+ assert.deepEqual(await closed,{code:1,signal:null});
+ assert.match(stderr,new RegExp(`CHECK_CANCELLED: ${signal}`));
+ assert.equal(JSON.parse(readFileSync(join(root,'tmp/component-state/probe.json'))).checkGroups,undefined);
+ for(const pid of pids) {
+  let state;
+  try {const value=readFileSync(`/proc/${pid}/stat`,'utf8');state=value.slice(value.lastIndexOf(')')+2, value.lastIndexOf(')')+3);}
+  catch(error){if(error.code!=='ENOENT')throw error;}
+  assert.ok(state===undefined || state==='Z',`synthetic child ${pid} still running`);
+ }
+});
+test('fixture cleanup stops an identified live synthetic process group',{skip:process.platform!=='linux'},async t=>{
+ const root=fixture(t);add(root,'probe');
+ put(root,'services/probe/tests.mjs','console.log("ready");setInterval(()=>{},1000);\n');
+ const child=spawn(process.execPath,['tests.mjs'],{cwd:join(root,'services/probe'),detached:true,stdio:['ignore','pipe','pipe']});
+ t.after(()=>{if(child.exitCode===null && child.signalCode===null)child.kill('SIGKILL');});
+ const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+ await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);});
+ cleanupCheckFixture(null,new Map([[child.pid,child.pid]]),new Set(),root);
+ assert.deepEqual(await closed,{code:null,signal:'SIGKILL'});
 });
 test('concurrent groups inherit the publisher proof descriptor',t=>{
  const root=fixture(t),d=add(root,'probe');d.commands.build=null;

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
-import { spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -20,6 +20,7 @@ import { createHumanActions } from '../human-actions.mjs';
 import { createTrustedDispatcher, serveTrusted } from '../trusted.mjs';
 import { serveTools } from '../tools.mjs';
 import { synthesizeFile } from '../voice.mjs';
+import { startNode } from './cli-process.mjs';
 
 const owner = 'trusted-owner';
 const ids = Array.from({ length: 8 }, (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
@@ -522,7 +523,7 @@ test('voice CLI adapter получает owner artifact и копирует то
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('CLI entry points start through direct and stable directory symlink paths', async () => {
+test('CLI entry points start through direct and stable directory symlink paths', async t => {
   const tmpRoot = fileURLToPath(new URL('../../../tmp/', import.meta.url));
   await mkdir(tmpRoot, { recursive: true });
   const directory = await mkdtemp(join(tmpRoot, 'hermes-cli-'));
@@ -533,7 +534,8 @@ test('CLI entry points start through direct and stable directory symlink paths',
     const env = { BRAI_HERMES_CONFIG: join(directory, 'absent-config.json') };
     for (const [name, rejection] of [['tools.mjs', 'HERMES_TOOLS_STARTUP_FAILED'], ['trusted.mjs', 'HERMES_TRUSTED_FAILED'], ['voice.mjs', 'ENOENT']]) {
       for (const base of [root, link]) {
-        const result = spawnSync(process.execPath, [join(base, name)], { env, encoding: 'utf8', timeout: 5000 });
+        const { result: pending } = startNode([join(base, name)], { env, signal: t.signal });
+        const result = await pending;
         assert.equal(result.error, undefined, name);
         assert.equal(result.signal, null, name);
         assert.equal(result.status, 1, `${name} must start and reject missing config`);
@@ -544,15 +546,38 @@ test('CLI entry points start through direct and stable directory symlink paths',
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('CLI entry points remain importable with nonexistent argv path and no config', () => {
+test('CLI entry points remain importable with nonexistent argv path and no config', async t => {
   const modules = ['tools.mjs', 'trusted.mjs', 'voice.mjs'].map(name => new URL(`../${name}`, import.meta.url).href);
   const code = modules.map(url => `await import(${JSON.stringify(url)});`).join('');
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code, '/nonexistent-hermes-import-argv'], { env: {}, encoding: 'utf8', timeout: 5000 });
+  const { result: pending } = startNode(['--input-type=module', '-e', code, '/nonexistent-hermes-import-argv'], { env: {}, signal: t.signal });
+  const result = await pending;
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0);
   assert.equal(result.stdout, '');
   assert.equal(result.stderr, '');
+});
+
+test('cancelled CLI check forcibly closes an unresponsive child', async () => {
+  const controller = new AbortController();
+  const { child, result } = startNode(['-e', 'process.on("SIGTERM", () => {}); process.stdout.write("ready"); process.stdin.resume()'], { signal: controller.signal });
+  let exited = false;
+  const closed = new Promise(resolve => child.once('close', (code, signal) => { exited = true; resolve({ code, signal }); }));
+  await once(child.stdout, 'data');
+  const pid = child.pid;
+  controller.abort();
+  const outcome = await result;
+  assert.equal(exited, true);
+  const exit = await closed;
+  assert.equal(outcome.error?.name, 'AbortError');
+  assert.equal(outcome.signal, 'SIGKILL');
+  assert.equal(exit.signal, 'SIGKILL');
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
+
+test('CLI check captures both output streams and a nonzero exit', async () => {
+  const { result } = startNode(['-e', 'process.stdout.write("out"); process.stderr.write("err"); process.exitCode = 7']);
+  assert.deepEqual(await result, { error: undefined, status: 7, signal: null, stdout: 'out', stderr: 'err' });
 });
 
 

@@ -192,6 +192,196 @@ class MirrorTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn('delivery_id', receipt)
             self.assertEqual(inbox.observe(second, 123, 14)['state'], 'handing_off')
 
+    async def test_group_reaction_allows_capture_of_following_topic_message(self):
+        from identity.chat_journal import IdentityJournal
+        from identity.transport_inbox import TransportInbox
+        from identity.update_inbox import UpdateInbox
+        profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'synthetic',
+                 'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        bot=Bot('123:synthetic');bot._bot_user=User(123,'synthetic',True)
+        chat={'id':-10012,'type':'supergroup','title':'Synthetic','is_forum':True}
+        actor={'id':42,'is_bot':False,'first_name':'Synthetic'}
+        reaction=Update.de_json({'update_id':41,'message_reaction':{'message_id':9,'date':1,
+            'chat':chat,'user':actor,'old_reaction':[],'new_reaction':[{'type':'emoji','emoji':'👍'}]}},bot)
+        message=Update.de_json({'update_id':42,'message':{'message_id':10,'date':2,
+            'chat':chat,'from':actor,'message_thread_id':77,'is_topic_message':True,'text':'synthetic'}},bot)
+        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ', {'BRAI_IDENTITY_INSTANCE':'dev'}):
+            journal=IdentityJournal(Path(directory)/'chats');inbox=UpdateInbox(journal)
+            transport=TransportInbox(journal);inbox.install_v2(profile)
+            async def resolve(actor_id): return {'state':'known','profile':profile}
+            mirror=Mirror(inbox,resolve,transport=transport)
+            await mirror.capture([reaction],123)
+            self.assertEqual(mirror.snapshot('123:41'),{'state':'outside'})
+            self.assertEqual(transport.observe(123,41)['state'],'ignored')
+            ticket=mirror.enter('123:41',reaction)
+            self.assertFalse(await mirror.classify(ticket,reaction))
+            mirror.finish(ticket,{'deferred':True})
+            self.assertNotIn('123:41',mirror.tracker.tickets)
+            await mirror.capture([message],123)
+            row=inbox.observe(profile,123,42)
+            self.assertEqual((row['state'],row['chat'],row['thread']),('captured','-10012','77'))
+
+    async def test_reaction_does_not_block_next_topic(self):
+        await self._reaction_case(None, False, False, False)
+
+    async def test_reaction_with_main_topic_paused_does_not_block_other_topic(self):
+        await self._reaction_case(None, True, False, False)
+
+    async def test_old_captured_reaction_recovers_while_main_topic_paused(self):
+        await self._reaction_case(None, True, False, True)
+
+    async def test_gate_cannot_start_while_pump_saves_reaction(self):
+        await self._reaction_case(None, True, False, 'race')
+
+    async def test_cancelled_pump_holds_gate_until_sqlite_finishes(self):
+        await self._reaction_case(None, True, False, 'cancel')
+
+    async def test_cancelled_pump_preserves_cancellation_when_write_fails(self):
+        await self._reaction_case(None, True, False, 'cancel_error')
+
+    async def test_reaction_recovers_after_partial_journal_write(self):
+        await self._reaction_case(None, True, True, True)
+
+    async def test_failed_reaction_disposition_does_not_reach_other_handlers(self):
+        await self._reaction_case('profile', False, False, False)
+
+    async def test_failed_transport_write_retries_reaction_without_new_input(self):
+        await self._reaction_case('transport', True, False, False)
+
+    async def test_held_reaction_write_failure_keeps_gate_closed_until_reconciled(self):
+        await self._reaction_case('held', False, False, False)
+
+    async def _reaction_case(self, write_fails, main_paused, partial, pump):
+        from types import SimpleNamespace as NS
+        from identity import native_ingress
+        from identity.chat_journal import IdentityJournal
+        from identity.transport_inbox import TransportInbox
+        from identity.update_inbox import UpdateInbox
+
+        profile={'profileId':'11111111-1111-4111-8111-111111111111','userId':'synthetic',
+                 'uid':1001,'telegramId':'42','authorTelegramId':'42','role':'user','generation':1}
+        bot=Bot('123:synthetic');bot._bot_user=User(123,'synthetic',True)
+        reaction=Update.de_json({'update_id':41,'message_reaction':{'message_id':9,'date':1,
+            'chat':{'id':42,'type':'private'},'user':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'old_reaction':[],'new_reaction':[{'type':'emoji','emoji':'👍'}]}},bot)
+        message=Update.de_json({'update_id':42,'message':{'message_id':10,'date':2,
+            'chat':{'id':42,'type':'private'},'from':{'id':42,'is_bot':False,'first_name':'synthetic'},
+            'message_thread_id':3,'is_topic_message':True,'text':'synthetic'}},bot)
+        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ', {'BRAI_IDENTITY_INSTANCE':'release'}):
+            module=patched_module(directory)
+            journal=IdentityJournal(Path(directory)/'chats');inbox=UpdateInbox(journal)
+            transport=TransportInbox(journal);inbox.install_v2(profile)
+            if main_paused:
+                journal.set_chat_pause(profile,('42',''),True)
+            async def resolve(actor): return {'state':'known','profile':profile}
+            mirror=Mirror(inbox,resolve,transport=transport);mirror.hydrated=True
+            mirror.input_ready=AsyncMock(return_value=True)
+            adapter=NS(_update_admission=None,_updates_dispatched_total=0,
+                _seen_update_ids={},_inflight_update_ids={},_brai_identity_batch_protocol=1,
+                _brai_identity_held_protocol=1,_pending_text_batches={},_pending_photo_batches={},
+                _media_group_events={},_held_inbound_events=[],gateway_runner=NS(_hm_admit_event=AsyncMock()))
+            app=ApplicationBuilder().bot(bot).application_class(module.TelegramApplication,{'adapter':adapter}).build()
+            app._initialized=True
+            class Resolver:
+                journal=None
+                def __init__(self): self.mirror=mirror
+                def __call__(self,source): return None
+            resolver=Resolver()
+            ctx=NS(register_telegram_handler=lambda callback:setattr(ctx,'factory',callback),
+                   on_unload=lambda callback:setattr(ctx,'close',callback))
+            forward=NS(_brai_restore_authorize=lambda:None)
+            async def admit(update, adapter): return True
+            receipts=[]
+            with patch.object(native_ingress,'install',return_value=forward), \
+                 patch.object(module,'_load_receipts',lambda *args:None), \
+                 patch.object(module,'_record_receipt',lambda adapter,key:receipts.append(key)):
+                native_ingress.register(ctx,build_resolver=lambda *args:resolver,admit_update=admit)
+                ctx.factory(app,adapter)
+                handled=[]
+                async def handle(update,context):
+                    handled.append(update.update_id)
+                    event=NS(_brai_release_updates=[update.update_id])
+                    await mirror.before_delivery(event)
+                    await mirror.accepted(event,{'accepted':True,'turn_id':'synthetic'})
+                app.add_handler(TypeHandler(Update,handle),group=0)
+                if pump:
+                    mirror.bot_id=123
+                    transport.capture_batch([(reaction,{'state':'known','profile':profile})],123)
+                    if partial:
+                        inbox.capture(profile,reaction,123)
+                else:
+                    await mirror.capture([reaction],123)
+                if partial:
+                    inbox.ignore_reaction(profile,123,41)
+                if write_fails == 'held':
+                    from identity.profile_release import ProfileRelease
+                    import uuid
+                    operation=str(uuid.uuid4())
+                    inbox.disposition(profile,123,41,'held',operation_id=operation)
+                    mirror._release_snapshot('123:41')
+                    mirror.tracker.gates[1001]=operation
+                    owner=ProfileRelease(resolver,app)
+                    with patch.object(transport,'ignore_reaction',side_effect=OSError('synthetic failure')):
+                        with self.assertRaises(OSError):
+                            await owner._reopen(profile,{'operationId':operation},None,None)
+                    self.assertEqual(mirror.tracker.gates[1001],operation)
+                    self.assertEqual(inbox.observe(profile,123,41)['state'],'handled')
+                    self.assertEqual(transport.observe(123,41)['state'],'captured')
+                    await owner._reopen(profile,{'operationId':operation},None,None)
+                    self.assertNotIn(1001,mirror.tracker.gates)
+                elif write_fails:
+                    target=inbox if write_fails == 'profile' else transport
+                    with patch.object(target,'ignore_reaction',side_effect=OSError('synthetic failure')):
+                        await app.process_update(reaction)
+                    self.assertEqual(handled,[])
+                    self.assertEqual(receipts,[])
+                    self.assertEqual(inbox.observe(profile,123,41)['state'],
+                                     'captured' if write_fails == 'profile' else 'handled')
+                    self.assertEqual(transport.observe(123,41)['state'],'captured')
+                    self.assertEqual(mirror.tracker.counts.get(1001,0),0)
+                    await mirror.pump()
+                elif pump:
+                    if pump in ('race', 'cancel', 'cancel_error'):
+                        import threading
+                        entered,proceed=threading.Event(),threading.Event()
+                        original=inbox.capture
+                        def capture(*args):
+                            entered.set();proceed.wait()
+                            if pump == 'cancel_error':
+                                raise OSError('synthetic failure')
+                            return original(*args)
+                        with patch.object(inbox,'capture',side_effect=capture):
+                            task=asyncio.create_task(mirror.pump())
+                            await asyncio.to_thread(entered.wait)
+                            self.assertFalse(mirror.tracker.try_gate(1001,'synthetic'))
+                            if pump in ('cancel', 'cancel_error'):
+                                task.cancel()
+                                await asyncio.sleep(0)
+                                task.cancel()
+                                await asyncio.sleep(0)
+                                self.assertFalse(task.done())
+                                self.assertTrue(mirror.capture_lock.locked())
+                                self.assertFalse(mirror.tracker.try_gate(1001,'synthetic'))
+                            proceed.set()
+                            if pump in ('cancel', 'cancel_error'):
+                                with self.assertRaises(asyncio.CancelledError): await task
+                            else:
+                                await task
+                    else:
+                        await mirror.pump()
+                else:
+                    await app.process_update(reaction)
+                if pump == 'cancel_error':
+                    await mirror.pump()
+                self.assertEqual(inbox.observe(profile,123,41)['state'],'handled')
+                self.assertEqual(transport.observe(123,41)['state'],'handled')
+                self.assertEqual(mirror.tracker.counts.get(1001,0),0)
+                await mirror.capture([message],123)
+                await app.process_update(message)
+                self.assertEqual(handled,[42])
+                self.assertEqual(inbox.observe(profile,123,42)['state'],'accepted')
+                ctx.close()
+
     async def test_reserved_profile_collision_is_rejected_before_global_journal_open(self):
         from identity.chat_journal import IdentityJournal
         from identity.update_inbox import UpdateInbox, ProfileGateStore

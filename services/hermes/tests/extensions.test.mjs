@@ -2,10 +2,10 @@
 // ABOUTME: Не требует сети, установленного движка или пользовательского профиля.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { buildOutputInventory } from '../../../deploy/components/cli.mjs';
+import { startProcess } from './cli-process.mjs';
 
 test('delivery includes every extension file', () => {
   const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -20,16 +20,22 @@ test('delivery includes every extension file', () => {
 });
 
 for (const name of ['test_xlsx.py', 'test_connect.py', 'test_context_gif.py', 'test_shared_codex_search.py', 'test_skill_helpers.py', 'test_codex_cli_owner.py', 'test_memory_quality.py', 'test_memory_bridge.py', 'test_conversation_approval.py', 'test_consent_regressions.py', 'test_return_notices.py', 'test_native_memory.py', 'test_native_turn_budget.py', 'test_resume_guidance.py', 'test_native_model_context.py', 'test_native_proxy_policy.py', 'test_native_composition.py']) {
-  test('extensions: ' + name, { timeout: 60000 }, () => {
+  test('extensions: ' + name, async t => {
     const script = fileURLToPath(new URL(`../extensions/tests/${name}`, import.meta.url));
-    const result = spawnSync('python3', ['-B', script], { encoding: 'utf8', timeout: 55000, maxBuffer: 1024 * 1024 });
+    const { result: pending } = startProcess('python3', ['-B', script], { signal: t.signal });
+    const result = await pending;
+    assert.equal(result.error, undefined, result.stderr);
+    assert.equal(result.signal, null, result.stderr);
     assert.equal(result.status, 0, result.stdout + result.stderr);
   });
 }
 
 
-test('video helper uses real local FFmpeg fixtures', { timeout: 60000 }, () => {
+test('video helper uses real local FFmpeg fixtures', async t => {
   const script = fileURLToPath(new URL('../extensions/skill-scripts/media/youtube-content/scripts/test_video_workflow.py', import.meta.url));
-  const result = spawnSync('python3', ['-B', script], { encoding: 'utf8', timeout: 55000, maxBuffer: 1024 * 1024 });
+  const { result: pending } = startProcess('python3', ['-B', script], { signal: t.signal });
+  const result = await pending;
+  assert.equal(result.error, undefined, result.stderr);
+  assert.equal(result.signal, null, result.stderr);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
