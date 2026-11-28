@@ -30,7 +30,7 @@ test('Welcome: два личных MCP, тот же владелец и исто
  assert.equal(broker.protocol, 'nats:');
  assert.equal(broker.hostname, '127.0.0.1');
  assert.ok(broker.port);
- const {adminAction} = await import('../../auth/dist/admin.js');
+ const {createAuth} = await import('../../auth/dist/auth.js');
  const {runNats} = await import('../../auth/dist/nats.js');
  const folder = await mkdtemp(join(tmpdir(), 'brai-welcome-proof-'));
  const pools = [], listeners = [], clients = [], runtimes = [];
@@ -45,15 +45,16 @@ test('Welcome: два личных MCP, тот же владелец и исто
   value.username = login;
   return value.href;
  };
- const nc = await connect({servers: nats, maxReconnectAttempts: 0});
+ let nc;
  t.after(async () => {
   await Promise.allSettled(clients.map(client => client.close()));
   await Promise.allSettled(listeners.map(listener => listener.close()));
   await Promise.allSettled(runtimes.map(runtime => runtime.stop()));
-  await nc.close();
+  await nc?.close();
   await Promise.allSettled(pools.map(pool => pool.end()));
   await rm(folder, {recursive: true, force: true});
  });
+ nc = await connect({servers: nats, maxReconnectAttempts: 0});
  const root = sql(pg);
  for (const role of ['welcome_auth_owner', 'welcome_auth_app', 'welcome_dialogues_owner', 'welcome_dialogues_a', 'welcome_dialogues_b']) {
   await root.query('CREATE ROLE ' + role + ' LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT');
@@ -70,11 +71,14 @@ test('Welcome: два личных MCP, тот же владелец и исто
  const actor = randomUUID();
  await authOwner.query('INSERT INTO "user"(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,false,now(),now())',
   [actor, 'Fixture admin', 'fixture-admin@fixture.invalid']);
- await authOwner.query("INSERT INTO brai_identity(user_id,role,status) VALUES($1,'creator','active')", [actor]);
+ await authOwner.query("INSERT INTO brai_identity(user_id,telegram_id,profile_id,role,status) VALUES($1,'710010',$2,'creator','active')",
+  [actor, randomUUID()]);
 
- const auth = {identityMode: 'telegram', secret};
+ const origin = 'https://fixture.invalid';
+ const auth = {identityMode: 'telegram', origin, trustedOrigins: [origin], secret};
+ const engine = createAuth(auth, authApp);
  const startAuth = async config => {
-  const runtime = await runNats(nc, config, () => { throw Error('Unexpected web auth request'); }, authApp);
+  const runtime = await runNats(nc, config, engine.handler, authApp);
   runtimes.push(runtime);
   await nc.flush();
   return runtime;
@@ -85,9 +89,19 @@ test('Welcome: два личных MCP, тот же владелец и исто
  };
  const start = await startAuth(auth);
  const registration = {requestId: 'welcome-a', telegramId: '710001', name: 'Первый'};
- const a = (await request('welcome-register', registration)).body.user;
+ const [firstRegistration, concurrentRegistration] = await Promise.all([
+  request('welcome-register', registration),
+  request('welcome-register', {...registration, requestId: 'welcome-a-concurrent'})
+ ]);
+ const a = firstRegistration.body.user;
+ assert.equal(firstRegistration.ok, true);
+ assert.equal(concurrentRegistration.ok, true);
+ assert.deepEqual(concurrentRegistration.body.user, a);
  const b = (await request('welcome-register', {requestId: 'welcome-b', telegramId: '710002', name: 'Второй'})).body.user;
  assert.deepEqual((await request('welcome-register', registration)).body.user, a);
+ const repeatLookup = await Promise.all(['welcome-a-repeat-1', 'welcome-a-repeat-2'].map(requestId =>
+  request('welcome-register', {...registration, requestId})));
+ assert.ok(repeatLookup.every(reply => reply.ok && reply.body.user.id === a.id && reply.body.user.profileId === a.profileId));
  assert.equal((await request('welcome-register', {...registration, telegramId: '710003'})).ok, false);
  assert.equal((await request('welcome-register', {...registration, role: 'admin'})).ok, false);
  assert.equal((await request('profile-ready', {userId: a.id, profileId: a.profileId})).body.user, null);
@@ -95,6 +109,7 @@ test('Welcome: два личных MCP, тот же владелец и исто
  assert.equal((await request('telegram-code-issue', {telegramId: registration.telegramId, requestId: 'before-approved'})).ok, false);
  assert.equal(a.role, 'welcome');
  assert.equal(b.role, 'welcome');
+ await assert.rejects(authApp.query("UPDATE brai_identity SET status='active' WHERE user_id=$1", [a.id]), {code: '23514'});
 
  const bindings = [a, b].map((user, i) => ({
   userId: user.id, profileId: user.profileId, subject: 'brai.auth.v2.dialogues-access.' + String(i + 1).repeat(64)
@@ -114,7 +129,7 @@ test('Welcome: два личных MCP, тот же владелец и исто
   await bindOwner(dialoguesOwner, owner, login, ownerBinding);
   const pool = sql(url('welcome_dialogues_fixture', login));
   await verifyOwnerConnection(pool, ownerBinding);
-  const settings = {host: '127.0.0.1', port: 0, hosts: [], origins: [], owner: ownerBinding.ownerId,
+  const settings = {host: '127.0.0.1', port: 0, hosts: ['127.0.0.1'], origins: ['http://127.0.0.1'], owner: ownerBinding.ownerId,
    token: randomUUID().replaceAll('-', ''), personal: {...ownerBinding, authorize: createAuthAccess(nc, binding.subject, binding)}};
   const listener = await startMcp(createStore(pool, 'welcome-fixture-cursor'), settings, () => {});
   listeners.push(listener);
@@ -123,12 +138,12 @@ test('Welcome: два личных MCP, тот же владелец и исто
  };
  const endpointA = await startOwner(bindings[0], 'welcome_dialogues_a');
  const endpointB = await startOwner(bindings[1], 'welcome_dialogues_b');
- const client = endpoint => {
-  const value = connectMcpEndpoint(endpoint, {endpointName: 'dialogues'});
+ const client = async endpoint => {
+  const value = await connectMcpEndpoint(endpoint, {endpointName: 'dialogues'});
   clients.push(value);
   return value;
  };
- const welcomeA = client(endpointA), welcomeB = client(endpointB);
+ const welcomeA = await client(endpointA), welcomeB = await client(endpointB);
  const exchange = async (endpoint, action, args, automaticReceipt) => {
   const result = await endpoint.call('dialogues_exchange', {action, arguments: args}, undefined, automaticReceipt);
   assert.equal(result.isError, undefined, JSON.stringify(result));
@@ -145,34 +160,55 @@ test('Welcome: два личных MCP, тот же владелец и исто
  };
  await saveTurn(welcomeA, 'Данные только первого пользователя');
  await saveTurn(welcomeB, 'Данные только второго пользователя');
- await assert.rejects(client({...endpointA, token: endpointB.token}).list(), error => error.code === 401);
- await assert.rejects(client({...endpointA, profileId: endpointB.profileId}).list(), error => error.code === 403);
+ await assert.rejects((await client({...endpointA, token: endpointB.token})).list(), error => error.code === 401);
+ await assert.rejects((await client({...endpointA, profileId: endpointB.profileId})).list(), error => error.code === 403);
 
  const grant = {requestId: 'approved-welcome-a', telegramId: registration.telegramId, role: 'guest'};
- assert.equal((await adminAction(authApp, secret, actor, 'users-add', {...grant, requestId: 'invalid-role', role: 'user'})).status, 409);
- assert.equal((await adminAction(authApp, secret, actor, 'status-set', {requestId: 'invalid-active', userId: a.id, status: 'active'})).status, 409);
- assert.equal((await adminAction(authApp, secret, b.id, 'users-add', grant)).status, 403);
- const approval = await adminAction(authApp, secret, actor, 'users-add', grant);
+ const issued = await request('telegram-code-issue', {telegramId: '710010', requestId: 'fixture-admin-login'});
+ assert.equal(issued.ok, true);
+ const signed = (await request('login-code-redeem', {headers: {origin, 'x-forwarded-for': '192.0.2.77'}, body: {code: issued.body.code}})).body;
+ assert.equal(signed.status, 200);
+ const cookie = signed.setCookies.map(value => value.split(';')[0]).join('; ');
+ assert.ok(cookie);
+ const admin = async (operation, body) => (await request(operation, {headers: {origin, cookie}, body})).body;
+ assert.equal((await admin('users-add', {...grant, requestId: 'invalid-role', role: 'user'})).status, 409);
+ assert.equal((await admin('status-set', {requestId: 'invalid-active', userId: a.id, status: 'active'})).status, 409);
+ assert.equal((await request('users-add', {headers: {origin}, body: grant})).body.status, 401);
+ const approval = await admin('users-add', grant);
  assert.equal(approval.status, 200);
  assert.equal(approval.body.user.id, a.id);
  assert.equal(approval.body.user.profileId, a.profileId);
  assert.equal(approval.body.user.role, 'guest');
  assert.equal(approval.body.user.status, 'provisioning');
- assert.equal((await adminAction(authApp, secret, actor, 'users-add', grant)).body.operation.id, approval.body.operation.id);
+ const audit = await authOwner.query('SELECT actor_id,old_role,new_role FROM brai_identity_audit WHERE request_id=$1', [grant.requestId]);
+ assert.deepEqual(audit.rows, [{actor_id: actor, old_role: 'welcome', new_role: 'guest'}]);
+ assert.equal((await admin('users-add', grant)).body.operation.id, approval.body.operation.id);
  assert.equal((await request('profile-ready', {userId: a.id, profileId: a.profileId})).body.user, null);
  const {operation} = (await request('lifecycle-claim', {workerId: 'synthetic-hermes', rolePolicyVersion: 1})).body;
  assert.equal(operation.id, approval.body.operation.id);
  assert.equal((await request('lifecycle-complete', {operationId: operation.id, leaseToken: operation.leaseToken, success: true})).body.accepted, true);
  assert.equal((await request('telegram-resolve', {telegramId: registration.telegramId})).body.user.status, 'active');
+ assert.equal((await request('welcome-register', registration)).body.user.role, 'guest');
 
  await welcomeA.close();
- const guest = client(endpointA);
+ const guest = await client(endpointA);
  const continued = await exchange(guest, 'input', {request_id: 'first-guest-input', dialogue: {id, channel: 'telegram'},
   messages: [{id: 'input-2', text: 'Продолжим тот же разговор'}]}, 'start');
  assert.match(JSON.stringify(continued.context), /Данные только первого пользователя/);
  assert.doesNotMatch(JSON.stringify(continued.context), /Данные только второго пользователя/);
  assert.equal((await exchange(guest, 'read', {request_id: 'read-first', dialogue_id: id, message_id: 'input-1'})).text,
   'Данные только первого пользователя');
- const count = await dialoguesOwner.query('SELECT count(*)::int AS n FROM dialogues_live.messages');
- assert.equal(count.rows[0].n, 5);
+ assert.equal((await exchange(guest, 'read', {request_id: 'read-first-answer', dialogue_id: id, message_id: 'final-1'})).text,
+  'Ответ справочной');
+ const count = async login => (await sql(url('welcome_dialogues_fixture', login)).query('SELECT count(*)::int AS n FROM dialogues_live.messages')).rows[0].n;
+ assert.equal(await count('welcome_dialogues_a'), 3);
+ assert.equal(await count('welcome_dialogues_b'), 2);
+
+ const blocked = await admin('users-revoke', {requestId: 'block-welcome-b', userId: b.id});
+ assert.equal(blocked.body.user.status, 'blocked');
+ assert.equal(blocked.body.user.profileId, b.profileId);
+ assert.equal(blocked.body.operation.state, 'succeeded');
+ assert.equal((await request('lifecycle-claim', {workerId: 'fixture', rolePolicyVersion: 1})).body.operation, null);
+ await assert.rejects(welcomeB.list(), error => error.code === 403);
+ assert.equal(await count('welcome_dialogues_b'), 2);
 });

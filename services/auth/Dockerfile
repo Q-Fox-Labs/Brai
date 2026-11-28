@@ -29,6 +29,7 @@ COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 RUN npm ci --omit=dev --workspace=@brai/auth
 WORKDIR /app/services/auth
 COPY --from=build /app/services/auth/dist ./dist
+COPY --from=build /app/services/auth/migrations ./migrations
 COPY --from=build /app/services/auth/schemas ./schemas
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 CMD ["node", "dist/health.js"]
 CMD ["node", "dist/main.js"]

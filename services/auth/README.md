@@ -41,7 +41,7 @@
 
 Provision идемпотентен по `requestId` и точным параметрам; конфликт повтора отклоняется. Telegram ID уникален среди всех аккаунтов; несколько Telegram ID могут ссылаться на одного пользователя. Стабильный автор памяти и profile ID сохраняются. Доверенный вызов не может создать первого администратора. `profile-ready` активирует пользователя с совпадающей привязкой, кроме блокированного. Приглашение случайно, действительно 24 часа и хранится как HMAC; повторное погашение тем же отправителем возвращает созданного пользователя. После первой административной lifecycle-операции profile-ready больше не активирует provisioning: активацию подтверждает только worker.
 
-`welcome-register` закрепляет Telegram ID и создаёт постоянные `userId` и `profileId` с ролью `welcome` и состоянием `provisioning`. Идемпотентный повтор возвращает текущее состояние после одобрения. Новая регистрация подключённого пользователя отклоняется. Для роли `welcome` `profile-ready` не активирует профиль. «Диалоги» допускают точную пару ID до подготовки Hermes. Административный `users-add` с явно заданной ролью `guest` сохраняет оба ID и ставит штатную операцию prepare.
+`welcome-register` закрепляет Telegram ID и создаёт постоянные `userId` и `profileId` с ролью `welcome` и состоянием `provisioning`. Идемпотентный повтор возвращает текущее состояние после одобрения. Параллельные регистрации того же посетителя сохраняют его ID. После выдачи гостевого доступа новый запрос на регистрацию отклоняется. Для роли `welcome` `profile-ready` не активирует профиль. «Диалоги» допускают точную пару ID до подготовки Hermes. Административный `users-add` с явно заданной ролью `guest` сохраняет оба ID и ставит штатную операцию prepare. При отзыве доступа у Welcome Auth закрывает чтение и запись в «Диалоги» и сохраняет привязку. Операция завершается в Auth, поскольку процесс Hermes ещё не запускался.
 
 Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная creator-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role,requestId?}`, `status-set` — `{userId,status,requestId?}`, `sessions-revoke` — `{userId}`. Последнего активного управляющего нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `chats.pause`, `chats.resume`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
 
@@ -90,7 +90,7 @@ Web-команды используют оболочку `{headers,body}`, де�
 
 | Subject `brai.auth.v2.` | body | body ответа |
 | --- | --- | --- |
-| `users-add` | `{requestId,telegramId}` | `{user,operation}` |
+| `users-add` | `{requestId,telegramId,role?}` | `{user,operation}` |
 | `users-revoke` | `{requestId,userId}` | `{user,operation}` |
 | `users-operation-get` | `{requestId}` | `{operation,user?}`, operation null для неизвестного ID |
 
@@ -124,7 +124,7 @@ errorCode — безопасная константа `[A-Z][A-Z0-9_]{0,63}`; в
 
 ## Роли и применение профиля
 
-Нормативное поведение четырёх ролей, приглашений, role-set, поколений и совместимого обновления описано в [ROLES.md](ROLES.md). role-set возвращает user/operation из существующей очереди prepare/stop. Для новых users-add и invite-create необязательная role — user/guest; приглашение хранит назначенную роль. Нынешняя миграция не назначает creator автоматически.
+Нормативное поведение ролей, приглашений, role-set, поколений и совместимого обновления описано в [ROLES.md](ROLES.md). role-set возвращает user/operation из существующей очереди prepare/stop. Для новых users-add и invite-create необязательная role — user/guest; приглашение хранит назначенную роль. Нынешняя миграция не назначает creator автоматически.
 
 ## Доступ к Диалогам без Hermes
 

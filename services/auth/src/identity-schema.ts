@@ -1,6 +1,7 @@
 // ABOUTME: Создаёт постоянные таблицы идентичностей и одноразовых секретов Auth.
 // ABOUTME: Выполняется только владельцем БД в отдельном процессе миграции.
 import type { Pool } from "pg";
+import { readFileSync } from "node:fs";
 
 /** Создаёт отсутствующие таблицы; повтор не изменяет существующие данные. */
 export async function migrateIdentity(pool:Pool) {
@@ -14,11 +15,7 @@ export async function migrateIdentity(pool:Pool) {
   status text NOT NULL CHECK (status IN ('provisioning','active','blocked')),
   created_at timestamptz NOT NULL DEFAULT now()
  );
- ALTER TABLE brai_identity DROP CONSTRAINT IF EXISTS brai_identity_role_check;
- ALTER TABLE brai_identity ADD CONSTRAINT brai_identity_role_check CHECK (
-  role IN ('creator','admin','user','guest') OR
-  (role='welcome' AND status IN ('provisioning','blocked') AND profile_id IS NOT NULL)
- );
+ ${readFileSync(new URL('../migrations/001_welcome.sql', import.meta.url), 'utf8')}
  COMMENT ON TABLE brai_identity IS 'Роли и внешние идентификаторы пользователей Auth';
  COMMENT ON COLUMN brai_identity.user_id IS 'Идентификатор пользователя Better Auth';
  COMMENT ON COLUMN brai_identity.telegram_id IS 'Стабильный внутренний автор памяти; текущие аккаунты хранятся отдельно';
