@@ -336,7 +336,9 @@ test('a lost executor reply closes as outcome_unknown and never automatically in
   assert.equal(JSON.stringify(helperCalls).includes('connection lost'), false);
 });
 
-test('explicit overload waits for capacity and reuses the accepted attempt and deadline', async () => {
+for (const staleRenewal of [false, true]) test(staleRenewal
+  ? 'an overloaded attempt does not redispatch after an in-flight lease renewal fails'
+  : 'explicit overload waits for capacity and reuses the accepted attempt and deadline', async () => {
   let current = request();
   const helperCalls = [], executions = [];
   const ports = basePorts(async (method, params) => {
@@ -348,6 +350,10 @@ test('explicit overload waits for capacity and reuses the accepted attempt and d
       return { ...(state === 'dispatching' ? { created: true } : {}), request: current, attempt: attemptRecord(state) };
     }
     if (method === 'request.renew') {
+      if (staleRenewal) {
+        await new Promise(resolve => setTimeout(resolve, 15));
+        throw Object.assign(new Error('stale lease'), { errorCode: 'STALE_CLAIM' });
+      }
       current = request({ ...current, revision: current.revision + 1 });
       return { claimToken: ids.claim, fenceGeneration: 1, revision: current.revision, leaseExpiresAt: '2026-10-05T22:00:00Z', request: current };
     }
@@ -365,9 +371,17 @@ test('explicit overload waits for capacity and reuses the accepted attempt and d
       return { requestId: ids.request, operationId: ids.attempt, actualModel: selector, text: 'raspoznano', segments: null, durationMs: 1, usage: null, cost: null };
     } },
   });
-  const core = createCoordinator({ ports, config: config({ leaseRenewIntervalMs: 5 }), uuid: () => ids.attempt });
+  const core = createCoordinator({
+    ports, config: config({ leaseRenewIntervalMs: 5 }), uuid: () => ids.attempt, now: () => Date.parse(at),
+  });
   try {
-    assert.equal(await core.pumpOnce(), true);
+    assert.equal(await core.pumpOnce(), !staleRenewal);
+    if (staleRenewal) {
+      assert.equal(executions.length, 1);
+      assert.equal(helperCalls.includes('request.renew'), true);
+      assert.equal(helperCalls.includes('attempt.finish'), false);
+      return;
+    }
     assert.equal(executions.length, 2);
     assert.deepEqual(executions[0], executions[1]);
     assert.equal(helperCalls.filter((method) => method === 'attempt.start').length, 1);

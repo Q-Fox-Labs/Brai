@@ -411,6 +411,7 @@ export function createCoordinator(options: {
       expectedRevision: start.request.revision,
     });
     let currentRevision = running.request.revision;
+    let leaseExpiresAt = Date.parse(claim.leaseExpiresAt);
     let finished = false;
     let leaseLost = false;
     let renewal: Promise<void> | null = null;
@@ -425,6 +426,7 @@ export function createCoordinator(options: {
           expectedRevision: currentRevision,
         }).then((value) => {
           currentRevision = value.revision;
+          leaseExpiresAt = Date.parse(value.leaseExpiresAt);
           renewal = null;
           if (!finished && !leaseLost) renew();
         }).catch(() => {
@@ -476,6 +478,11 @@ export function createCoordinator(options: {
             const deadline = Date.parse(effectiveDeadlineAt);
             const remaining = deadline - now();
             if (remaining > 0 && !leaseLost) await wait(Math.min(remaining, config.leaseRenewIntervalMs));
+            if (renewal) await renewal;
+            if (leaseLost || leaseExpiresAt <= now()) {
+              leaseLost = true;
+              break;
+            }
             if (deadline <= now()) {
               outcome = 'failed';
               failure = 'DEADLINE_EXCEEDED';
