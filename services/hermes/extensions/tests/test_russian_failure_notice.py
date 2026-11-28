@@ -883,6 +883,8 @@ class FailureNoticeTest(unittest.TestCase):
                     api_call_count=1, approx_tokens=0, provider='test', base_url='test', model='test',
                     delivered='Личная часть ответа')
             self.assertEqual(blocked['brai_delivered_partial'], 'Личная часть ответа')
+            self.assertTrue(blocked['final_response'].startswith('Личная часть ответа'))
+            self.assertTrue(blocked['brai_partial_in_final'])
 
     def test_tool_validation_distinguishes_incomplete_and_unknown_actions(self):
         import os
@@ -1159,6 +1161,14 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Не удалось получить доступ', reply)
         self.assertNotIn('ChatGPT', reply)
         runner._send_voice_reply.assert_awaited_once_with(unittest.mock.ANY, reply)
+        runner._send_voice_reply.reset_mock()
+        with patch.dict('sys.modules', {'gateway.run':fake_run, 'gateway.russian_failure_notice':module,
+                                        'agent.error_surface':classifier}):
+            duplicate = await scope['_hmwa_deliver_turn_response'](runner, object(), types.SimpleNamespace(platform='telegram'),
+                types.SimpleNamespace(session_id='x'), 's', 1, {**result, '_brai_failure_notice_delivered': True},
+                [], 'previously delivered', '', False)
+        self.assertIsNone(duplicate)
+        runner._send_voice_reply.assert_not_awaited()
 
 
 if __name__ == '__main__':

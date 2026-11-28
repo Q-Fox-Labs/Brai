@@ -253,6 +253,12 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Часть ответа', result['brai_delivered_partial'])
         for detail in ('[[brai_', '[[audio_', 'MEDIA:', '/tmp/', '/srv/'):
             self.assertNotIn(detail, result['brai_delivered_partial'])
+        result = native.result_envelope({'final_response': partial + '\n\n⚠️ Не удалось завершить запрос.',
+                                         'brai_delivered_partial': partial, 'brai_partial_in_final': True})
+        self.assertIn('Часть ответа', result['final_response'])
+        self.assertIn('Не удалось завершить запрос', result['final_response'])
+        self.assertNotIn('/srv/', result['final_response'])
+        self.assertNotIn('MEDIA:', result['final_response'])
 
     def test_saved_video_mode_converts_native_voice_tags_and_switches_back(self):
         source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')

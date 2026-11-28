@@ -2169,7 +2169,12 @@ def result_envelope(result, agent=None):
     if not isinstance(result, dict):
         return result
     if isinstance(result.get('brai_delivered_partial'), str):
-        result = {**result, 'brai_delivered_partial': _public_partial_text(result['brai_delivered_partial'])}
+        original_partial = result['brai_delivered_partial']
+        safe_partial = _public_partial_text(original_partial)
+        result = {**result, 'brai_delivered_partial': safe_partial}
+        if (result.get('brai_partial_in_final') and isinstance(result.get('final_response'), str)
+                and result['final_response'].startswith(original_partial)):
+            result['final_response'] = safe_partial + result['final_response'][len(original_partial):]
     response = result.get('final_response', '')
     if not isinstance(response, str):
         return result

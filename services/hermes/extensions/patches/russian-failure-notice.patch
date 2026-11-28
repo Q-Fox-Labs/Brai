@@ -2664,7 +2664,7 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
  }
 
 
-@@ -1067,64 +991,50 @@
+@@ -1067,64 +991,58 @@
              agent, classified, status_code=status_code, provider=provider, base_url=base_url, model=model
          )
      elif classified.reason == FailoverReason.model_not_found:
@@ -2728,7 +2728,11 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
              error_detail=_nonretryable_summary,
          )
 +        result["brai_original_error"] = result.get("final_response", "")
-+        if delivered: result["brai_delivered_partial"] = delivered.strip()
++        if delivered:
++            result["brai_delivered_partial"] = delivered.strip()
++            result["final_response"] = delivered.strip() + "\n\n⚠️ Не удалось завершить запрос."
++            result["brai_partial_in_final"] = True
++            result["partial"] = True
 +        return result
      # Billing walls get the same structured recovery descriptor as the max-retries path
      # so every surface renders one consistent signal.
@@ -2739,7 +2743,11 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
              api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
          )
 +        result["brai_original_error"] = result.get("final_response", "")
-+        if delivered: result["brai_delivered_partial"] = delivered.strip()
++        if delivered:
++            result["brai_delivered_partial"] = delivered.strip()
++            result["final_response"] = delivered.strip() + "\n\n⚠️ Не удалось завершить запрос."
++            result["brai_partial_in_final"] = True
++            result["partial"] = True
 +        return result
      if _welcome_hint:
          # A free-tier refusal is fully explained by its own sentence; the raw provider summary
@@ -9715,3 +9723,16 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
              return
          _final = response.get("final_response") or ""
          _is_empty_sentinel = not _final or _final == "(empty)"
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -1985,6 +1985,8 @@
+             logger.info("Suppressing intentional silence marker for session %s", session_entry.session_id)
+             response = ""
+-
++
++        if agent_result.get("_brai_failure_notice_delivered"):
++            return None
+         adapter = self._delivery_adapter_for(source)
+         # AIDEV-NOTE: обработать ошибку до озвучивания и финальной доставки.
+         from gateway.run import _gateway_platform_value

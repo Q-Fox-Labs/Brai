@@ -90,6 +90,10 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
             target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/gateway/run_turn.py').read_text())
             subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
                            stdout=subprocess.DEVNULL, check=True)
+            receipt_block = marker + next(part.split('--- a/', 1)[0] for part in candidates
+                                          if '_brai_failure_notice_delivered' in part)
+            subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=receipt_block, text=True,
+                           stdout=subprocess.DEVNULL, check=True)
             tree = ast.parse(target.read_text())
         method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                       and n.name == '_run_agent_deliver_first_response')
@@ -114,6 +118,7 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sender.await_args.args[0], 'Сохранённая часть\n⚠️ Работа не завершена.')
         self.assertFalse(sender.await_args.kwargs['deliver_media'])
         self.assertTrue(result['already_sent'])
+        self.assertTrue(result['_brai_failure_notice_delivered'])
 
         # Очередь других каналов должна обрабатывать сбой так же.
         ctx.source.platform = 'api_server'

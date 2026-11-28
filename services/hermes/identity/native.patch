@@ -2788,3 +2788,14 @@ diff --git a/plugins/image_gen/openai-codex/__init__.py b/plugins/image_gen/open
      try:
          from agent.auxiliary_client import _resolve_codex_credential_and_base
  
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3893,6 +3893,8 @@
+                 # fallback just delivered — the #81052 duplicate. A REFUSED send reports False, and
+                 # the completion send stays the fallback so the user is not left with nothing.
+                 if _text_delivered and isinstance(result, dict):
++                    if _first_failed:
++                        result["_brai_failure_notice_delivered"] = True
+                     result["already_sent"] = True
+                     # The queued lane already uploaded this response's MEDIA: attachments; without
+                     # this the completion path's already_sent rescan uploads every file twice.
