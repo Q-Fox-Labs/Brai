@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transcribeFile } from '../transcribe.mjs';
+import { startNode } from './cli-process.mjs';
 
 const artifactId = '00000000-0000-4000-8000-000000000001';
 const requestId = '00000000-0000-4000-8000-000000000002';
@@ -111,12 +111,14 @@ test('an output created during transcription is preserved without overwrite or r
   });
 });
 
-test('native command entry executes through a stable symlink and reports only a safe config error', async () => {
+test('native command entry executes through a stable symlink and reports only a safe config error', async t => {
   await fixture(async ({ directory }) => {
     const entry = fileURLToPath(new URL('../transcribe.mjs', import.meta.url)), link = join(directory, 'transcribe.mjs');
     await symlink(entry, link);
     for (const path of [entry, link]) {
-      const child = spawnSync(process.execPath, [path, '--input', '/missing/input', '--output', '/missing/output'], { env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 5000 });
+      const { result: pending } = startNode([path, '--input', '/missing/input', '--output', '/missing/output'], { env: { PATH: process.env.PATH }, signal: t.signal });
+      const child = await pending;
+      assert.equal(child.error, undefined); assert.equal(child.signal, null);
       assert.equal(child.status, 1); assert.equal(child.stdout, ''); assert.equal(child.stderr.trim(), 'INVALID_HERMES_CONFIG');
     }
   });

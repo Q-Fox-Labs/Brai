@@ -37,18 +37,54 @@ function checkEnvironment() {
   delete environment.SUDO_COMMAND;
   return environment;
 }
-function runCheckCommand(root,c,text) {
+function runCheckCommand(root,c,text,active) {
   if(!text)return Promise.resolve();
   const environment=checkEnvironment();
   const stdio=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?['inherit','inherit','inherit',3]:'inherit';
   return new Promise((resolve,reject)=>{
-    const child=spawn(text,{cwd:join(root,c.directory),shell:true,stdio,env:environment});
-    child.once('error',reject);
+    const child=spawn(text,{cwd:join(root,c.directory),shell:true,stdio,env:environment,detached:process.platform!=='win32'});
+    let failure;
+    active.add(child);
+    child.once('error',error=>{failure=error;});
     child.once('close',(status,signal)=>{
-      if(status===0)resolve();
+      active.delete(child);
+      if(failure)reject(failure);
+      else if(status===0)resolve();
       else reject(Error(`COMMAND_FAILED: ${c.id}: ${text}: ${status ?? signal}`));
     });
   });
+}
+
+/**
+ * Остановить активные foreground-группы при SIGINT/SIGTERM и дождаться закрытия.
+ * Потомки, пережившие shell или создавшие свою сессию, не входят в эту гарантию.
+ */
+export async function runCheckCommands(root,c,commands) {
+  const active=new Set();
+  let cancelled, stopFailure;
+  const stop=signal=>{
+    cancelled ??= signal;
+    for(const child of active) {
+      if(!child.pid || child.exitCode!==null || child.signalCode!==null)continue;
+      try {
+        if(process.platform==='win32')child.kill('SIGKILL');
+        else process.kill(-child.pid,'SIGKILL');
+      } catch(error) {
+        if(error.code!=='ESRCH')stopFailure ??= error;
+      }
+    }
+  };
+  const onInt=()=>stop('SIGINT'), onTerm=()=>stop('SIGTERM');
+  process.on('SIGINT',onInt);process.on('SIGTERM',onTerm);
+  try {
+    const tasks=commands.map(text=>cancelled?Promise.reject(Error('CHECK_CANCELLED')):runCheckCommand(root,c,text,active));
+    const outcomes=await Promise.allSettled(tasks);
+    if(stopFailure)throw stopFailure;
+    if(cancelled)throw Error(`CHECK_CANCELLED: ${cancelled}`);
+    return outcomes;
+  } finally {
+    process.off('SIGINT',onInt);process.off('SIGTERM',onTerm);
+  }
 }
 function sealedDependencies(root,entries) {
   try {
@@ -249,7 +285,7 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
           inputs.push({group,checks,qualified,key,proof});
         }
         // Wait for every started process even on failure; no partial receipts escape.
-        const outcomes=await Promise.allSettled(inputs.filter(row=>row.proof==='executed').map(({group})=>runCheckCommand(root,c,group.command)));
+        const outcomes=await runCheckCommands(root,c,inputs.filter(row=>row.proof==='executed').map(({group})=>group.command));
         const failed=outcomes.find(result=>result.status==='rejected');
         if(failed)throw failed.reason;
         checkGroups=[];
@@ -264,7 +300,11 @@ export async function execute(root, action, ids=[], {base,includeDependencies=tr
       } else {
         const key=dependencies && checkKey(c,{checks:item.checks+dependencies},toolCache);
         if(key && state.checkReceipt?.key===key) checkProof='cached';
-        else {await runCheckCommand(root,c,c.commands.check);checkProof='executed';}
+        else {
+          const outcomes=await runCheckCommands(root,c,[c.commands.check]);
+          if(outcomes[0].status==='rejected')throw outcomes[0].reason;
+          checkProof='executed';
+        }
         if(fingerprints(root,c).checks!==item.checks || (key && checkKey(c,{checks:item.checks+dependencies},toolCache)!==key))throw Error(`CHECK_INPUTS_CHANGED: ${c.id}`);
         if(dependencies && dependencyInventory(root,c,true,new Map())!==dependencies)throw Error(`CHECK_DEPENDENCIES_CHANGED: ${c.id}`);
         state.checkReceipt=key?{key}:null;
