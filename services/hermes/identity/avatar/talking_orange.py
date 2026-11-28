@@ -323,6 +323,7 @@ def main():
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", str(args.fps), "-i", "-",
         "-i", args.audio,
         "-map", "0:v", "-map", "1:a",
+        "-vf", "scale=640:640",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart",
         args.output,

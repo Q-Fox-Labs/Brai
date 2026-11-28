@@ -1662,7 +1662,8 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
                 return await bot.send_media_group(**options, media=media)
             field = items[0]['presentation']
             if field == 'video_note':
-                return await bot.send_video_note(**options, video_note=media[0].media)
+                from .video_note import VIDEO_NOTE_SIZE
+                return await bot.send_video_note(**options, video_note=media[0].media, length=VIDEO_NOTE_SIZE)
             return await getattr(bot, 'send_' + field)(**options, **{field: media[0].media},
                                                       caption=media[0].caption,
                                                       parse_mode='MarkdownV2' if media[0].caption else None)
@@ -1675,6 +1676,8 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, rep
             raise
         if not album:
             result = [result]
+    if not album and items[0]['presentation'] == 'video_note' and not getattr(result[0], 'video_note', None):
+        raise FileError('VIDEO_NOTE_DELIVERY_UNCONFIRMED')
     if strict:
         expected = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id') or (metadata or {}).get('direct_messages_topic_id')
         general_forum = (str(chat_id).startswith('-') and str(expected) == '1') if not require_reply else None

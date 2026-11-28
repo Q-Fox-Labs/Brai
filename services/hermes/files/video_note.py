@@ -10,6 +10,8 @@ import wave
 
 from .store import FileError
 
+VIDEO_NOTE_SIZE = 640
+
 
 def _audio_parts(source, directory):
     """Разделить звук на паузах, сохранив все аудиосэмплы и порядок частей."""
@@ -75,7 +77,7 @@ def render_video_notes(files, audio, operation, *, python='/usr/bin/python3'):
                     video = next(stream for stream in streams if stream['codec_type'] == 'video')
                     audio_stream = next(stream for stream in streams if stream['codec_type'] == 'audio')
                     if (not 0 < duration <= 60 or video['codec_name'] != 'h264'
-                            or video['width'] <= 0 or video['width'] != video['height']
+                            or video['width'] != VIDEO_NOTE_SIZE or video['height'] != VIDEO_NOTE_SIZE
                             or audio_stream['codec_name'] != 'aac'):
                         raise FileError('VIDEO_NOTE_INVALID_OUTPUT')
                     with files.lock('cache'):

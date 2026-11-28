@@ -794,7 +794,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
 
         async def send_video_note(**values):
             sent.append((values['video_note'].read(), values))
-            return NS(message_id=42)
+            return NS(message_id=42, video_note=NS())
 
         root_adapter = NS(platform='telegram', _bot=NS(send_video_note=send_video_note))
         resolver = runtime.Resolver(root_adapter)
@@ -847,7 +847,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         sent = []
         async def send_video_note(**values):
             sent.append(values)
-            return NS(message_id=42, chat_id=123, message_thread_id=None)
+            return NS(message_id=42, chat_id=123, message_thread_id=None, video_note=NS())
         owner = {**self.profile, 'role': 'creator', 'generation': 0}
         resolver = runtime.Resolver(NS(platform='telegram', _bot=NS(send_video_note=send_video_note)))
         self.addCleanup(resolver.ledger.close)

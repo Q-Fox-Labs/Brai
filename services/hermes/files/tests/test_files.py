@@ -1324,7 +1324,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         class Bot:
             async def send_video_note(self, **kwargs):
                 calls.append({**kwargs, 'bytes': kwargs['video_note'].read()})
-                return SimpleNamespace(message_id=len(calls))
+                return SimpleNamespace(message_id=len(calls), video_note=SimpleNamespace())
 
         telegram = ModuleType('telegram')
         for name in ['Photo', 'Video', 'Audio', 'Document']:
@@ -1341,6 +1341,16 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(call['chat_id'] == 123 and call['message_thread_id'] == 77
                             and call['reply_to_message_id'] == 99 for call in calls))
         self.assertTrue(all('caption' not in call and 'parse_mode' not in call for call in calls))
+        self.assertTrue(all(call['length'] == 640 for call in calls))
+
+        async def unexpected_video(**kwargs):
+            return SimpleNamespace(message_id=3, video=SimpleNamespace(), video_note=None)
+        adapter._bot.send_video_note = unexpected_video
+        with self.store.materialize([items[0]['file']], 'video-note-invalid-receipt') as values:
+            with patch.dict(sys.modules, {'telegram': telegram}):
+                with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_DELIVERY_UNCONFIRMED'):
+                    await native.telegram_sender(adapter, '123', {}, 'single',
+                        [{**items[0], 'localPath': values[0]['localPath']}], False)
 
     def test_video_note_failure_preserves_text_and_code_examples(self):
         audio = self.input / 'speech.ogg'
@@ -1390,7 +1400,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                 return original_run(command, **kwargs)
             if command[0] == '/usr/bin/ffprobe':
                 return SimpleNamespace(stdout=json.dumps({'format': {'duration': '59'}, 'streams': [
-                    {'codec_type': 'video', 'codec_name': 'h264', 'width': 900, 'height': 900},
+                    {'codec_type': 'video', 'codec_name': 'h264', 'width': 640, 'height': 640},
                     {'codec_type': 'audio', 'codec_name': 'aac'}]}).encode())
             with wave.open(command[3], 'rb') as stream:
                 part_frames.append(stream.getnframes())
@@ -1411,17 +1421,18 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         source = self.store.resolve(str(audio), ['test', 'audio'])
         initial_published = len(self.backend.remote)
 
-        def run(command, **kwargs):
-            if command[0] == '/usr/bin/ffprobe':
-                return SimpleNamespace(stdout=json.dumps({'format': {'duration': '61'}, 'streams': [
-                    {'codec_type': 'video', 'codec_name': 'h264', 'width': 900, 'height': 900},
-                    {'codec_type': 'audio', 'codec_name': 'aac'}]}).encode())
-            Path(command[command.index('--output') + 1]).write_bytes(b'video')
-            return SimpleNamespace(returncode=0)
+        for duration, size in (('61', 640), ('5', 900)):
+            def run(command, **kwargs):
+                if command[0] == '/usr/bin/ffprobe':
+                    return SimpleNamespace(stdout=json.dumps({'format': {'duration': duration}, 'streams': [
+                        {'codec_type': 'video', 'codec_name': 'h264', 'width': size, 'height': size},
+                        {'codec_type': 'audio', 'codec_name': 'aac'}]}).encode())
+                Path(command[command.index('--output') + 1]).write_bytes(b'video')
+                return SimpleNamespace(returncode=0)
 
-        with patch('files.video_note._audio_parts', return_value=[audio]), patch('files.video_note.subprocess.run', side_effect=run):
-            with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_INVALID_OUTPUT'):
-                render_video_notes(self.store, source, 'turn', python='synthetic-python')
+            with self.subTest(duration=duration, size=size), patch('files.video_note._audio_parts', return_value=[audio]), patch('files.video_note.subprocess.run', side_effect=run):
+                with self.assertRaisesRegex(FileError, 'VIDEO_NOTE_INVALID_OUTPUT'):
+                    render_video_notes(self.store, source, 'turn', python='synthetic-python')
         self.assertEqual(len(self.backend.remote), initial_published)
 
     async def test_oversized_caption_is_sent_as_one_pdf_before_the_attachment(self):
