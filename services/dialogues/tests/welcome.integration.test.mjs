@@ -55,6 +55,7 @@ test('Welcome: два личных MCP, тот же владелец и исто
   const value = new URL(base);
   value.pathname = '/' + db;
   value.username = login;
+  if(base.password&&login!==base.username)value.password='fixture-'+login;
   return value.href;
  };
  let nc, authNc;
@@ -76,7 +77,8 @@ test('Welcome: два личных MCP, тот же владелец и исто
  }else authNc=nc;
  const root = sql(pg);
  for (const role of ['welcome_auth_owner', 'welcome_auth_app', 'welcome_dialogues_owner', 'welcome_dialogues_a', 'welcome_dialogues_b']) {
-  await root.query('CREATE ROLE ' + role + ' LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT');
+  const password=base.password ? " PASSWORD 'fixture-"+role+"'" : '';
+  await root.query('CREATE ROLE ' + role + ' LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT'+password);
  }
  await root.query('CREATE DATABASE welcome_auth_fixture OWNER welcome_auth_owner');
  await root.query('CREATE DATABASE welcome_dialogues_fixture OWNER welcome_dialogues_owner');
