@@ -570,6 +570,15 @@ class FailureNoticeTest(unittest.TestCase):
             mixed = '⚠ Compression aborted: Бюджет повторов исчерпан. No messages were dropped.'
             localized = prepare('telegram', 'warn', DiagnosticText(mixed))
             self.assertIsNone(localized)
+        formatter = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                         and node.name == '_gateway_provider_error_reply')
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[formatter], type_ignores=[])), '<candidate>', 'exec'), scope)
+        scope['_looks_like_gateway_provider_error'] = lambda text: True
+        with self.assertLogs('notice-test', 'WARNING') as diagnostic:
+            text = prepare('telegram', 'warn', DiagnosticText('Provider authentication failed: SECRET API key'))
+        self.assertEqual(text, '⚠️ Не удалось завершить запрос.')
+        self.assertNotIn('SECRET', ' '.join(diagnostic.output))
+        self.assertIn('Provider authentication failed', ' '.join(diagnostic.output))
 
     def test_error_messages_explain_incomplete_work_without_internal_details(self):
         for code in self.notice._COPY:
@@ -926,6 +935,7 @@ class FailureNoticeTest(unittest.TestCase):
                       and isinstance(node.value, ast.Dict)
                       and any(isinstance(key, ast.Constant) and key.value == 'failure_reason' for key in node.value.keys if key))
         result = {'failed':True, 'failure_reason':'rate_limit', 'error':'error', 'brai_connection_kind':'external', 'brai_subscription_limit':True,
+                  'brai_partial_already_delivered': True,
                   'brai_delivered_partial':'partial answer', 'brai_failure_kind':'truncated_tool_call',
                   'failure_resets_at':1121, 'billing_unverified':True, 'billing_block':{},
                   'free_tier':{'kind':'rate_limited'}, 'api_key':'secret', 'brai_original_error':'diagnostic',
@@ -936,7 +946,7 @@ class FailureNoticeTest(unittest.TestCase):
                  'history_offset':0, 'compacted_in_place':False, 'effective_session_id':'s', 'usage':{}}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[common], type_ignores=[])), '<candidate>', 'exec'), scope)
         output = scope['common']
-        for key in ('brai_connection_kind', 'brai_subscription_limit', 'brai_delivered_partial', 'brai_failure_kind',
+        for key in ('brai_connection_kind', 'brai_subscription_limit', 'brai_delivered_partial', 'brai_partial_already_delivered', 'brai_failure_kind',
                     'failure_resets_at', 'billing_unverified', 'billing_block', 'free_tier', 'brai_original_error',
                     'brai_http_status', 'brai_attempts', 'brai_error_provider', 'brai_error_model',
                     'brai_request_tokens', 'brai_context_window', 'compaction_disabled', 'failure_retryable'):
@@ -990,6 +1000,10 @@ class FailureNoticeTest(unittest.TestCase):
             with self.assertLogs(self.log, 'WARNING'):
                 api = func('original', types.SimpleNamespace(platform='api_server'), result=result)
             self.assertIn('Не удалось', api)
+            with self.assertLogs(self.log, 'WARNING'):
+                already = func('original', types.SimpleNamespace(platform='telegram'),
+                               result={**result, 'brai_partial_already_delivered': True})
+            self.assertNotIn('Уже полученная часть ответа.', already)
 
     def test_truncated_answer_is_preserved_without_diagnostic_notice(self):
         import os

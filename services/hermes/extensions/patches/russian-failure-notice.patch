@@ -27,7 +27,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
 +                      else result.get("error", "") if result is not None else "")
 +        if failure_notice is not None:
 +            partial = failure_notice(result) == PARTIAL_FAILED_TURN_NOTICE
-+        candidate = result.get("brai_delivered_partial", "") if result else ""
++        candidate = result.get("brai_delivered_partial", "") if result and not result.get("brai_partial_already_delivered") else ""
 +        if candidate:
 +            delivered = _sanitize_gateway_final_response(source.platform, candidate)
 +        return explain_failure(response, surface=surface, diagnostic=diagnostic, logger=logger,
@@ -121,7 +121,7 @@ diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
              "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
              **usage,
 +            **{key: result[key] for key in (
-+                "brai_connection_kind", "brai_delivered_partial", "brai_failure_kind", "brai_subscription_limit",
++                "brai_connection_kind", "brai_delivered_partial", "brai_partial_already_delivered", "brai_failure_kind", "brai_subscription_limit",
 +                "failure_resets_at", "billing_unverified", "billing_block", "free_tier",
 +                "brai_http_status", "brai_attempts", "brai_error_provider", "brai_error_model",
 +                "brai_original_error", "brai_request_tokens", "brai_context_window", "compaction_disabled", "failure_retryable",
@@ -2742,7 +2742,7 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
      if _welcome_hint:
          # A free-tier refusal is fully explained by its own sentence; the raw provider summary
          # (status codes, JSON) is for the log, not for a first-time user's chat.
-@@ -1138,16 +1046,20 @@
+@@ -1138,16 +1046,21 @@
      # Same verdict fields as the max-retries path: without them the UI descriptor
      # (agent/error_surface.py) reads a rejected OAuth token as a retryable
      # "Provider error" and offers Retry instead of a re-login.
@@ -2760,6 +2760,7 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
      if _keep_partial:
          result["partial"] = True
 +        result["brai_delivered_partial"] = delivered.strip()
++        result["brai_partial_already_delivered"] = True
      _stamp_limit_reset(result, agent, api_error)
      if _welcome_hint and (_kind := _welcome_surface_kind(classified)):
          # The card form: the desktop renders the sign-in as a button, so no "To sign in" tail.
@@ -2829,11 +2830,12 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
      result.update({
          # Classified reason so callers (kanban worker in cli.py) can tell a quota wall
          # (``rate_limit`` / ``billing``) from a task failure.
-@@ -1295,6 +1204,7 @@
+@@ -1295,6 +1204,8 @@
      if _keep_partial:
          result["final_response"] = _final_response
          result["partial"] = True
 +        result["brai_delivered_partial"] = delivered.strip()
++        result["brai_partial_already_delivered"] = True
      _stamp_limit_reset(result, agent, api_error)
      if _free_tier_kind:
          _stamp_free_tier(result, _free_tier_kind, (
@@ -9673,3 +9675,23 @@ diff --git a/gateway/run.py b/gateway/run.py
 -
 +
      text = _redact_gateway_user_facing_secrets(text)
+diff --git a/gateway/run.py b/gateway/run.py
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -658,10 +658,8 @@
+-
++
+ def _gateway_provider_error_reply(text: str) -> str:
+-    """Map raw provider/API errors to a short user-safe Telegram reply."""
+-    for pattern, reply_key in _PROVIDER_ERROR_REPLIES:
+-        if pattern.search(text):
+-            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else t(reply_key)
+-    return t("gateway.errors.provider_kept_failing")
++    """Сохранить диагностику и объяснить сбой без внутреннего устройства."""
++    logger.warning("Gateway provider failure: %s", _redact_gateway_user_facing_secrets(text))
++    return "⚠️ Не удалось завершить запрос."
+-
++
+-
++
+ # Provider/API failure envelope preambles (not ordinary assistant prose), anchored at line start.

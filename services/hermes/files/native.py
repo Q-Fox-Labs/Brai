@@ -40,6 +40,7 @@ _VIDEO_NOTE_MARKER = re.compile(r'\[\[audio_as_video_note\]\]')
 _REPLY_MODE = re.compile(r'\[\[brai_reply_mode:(voice|video_note|off)\]\]')
 _REPLY_ONCE = re.compile(r'\[\[brai_reply_once:(voice|video_note)\]\]')
 _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
+_VOICE_MARKER = re.compile(r'\[\[audio_as_voice\]\]')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
 _ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы.'
@@ -979,7 +980,7 @@ def conversation(agent, user_message, task_id=None):
         raise
     token = _operation.set(operation)
     previous_attachment = getattr(agent, '_brai_attachment_outcome', None)
-    attachment = {'previous': previous_attachment, 'failed_texts': []}
+    attachment = {'previous': previous_attachment, 'failed': False}
     agent._brai_attachment_outcome = attachment
     attachment_token = _attachment_outcome.set(attachment)
     previous_candidate = _reply_mode_candidate.get()
@@ -1319,7 +1320,19 @@ def _public_response_text(text):
     return text
 
 
-def final_text(text, operation):
+def _public_partial_text(text):
+    """Убрать из прерванного ответа файловые директивы и внутренние пути."""
+    text = _public_response_text(text)
+    for pattern in (re.compile(r'(?m)^BRAI_FILES:.*$'), _VIDEO_NOTE, _VIDEO_NOTE_MARKER,
+                    _VOICE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
+        text = active_sub(pattern, lambda match: '', text)
+    text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
+        match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
+    internal_path = re.compile(r'(?<![\w./])/(?:tmp|home|srv|var|opt|usr|etc)/[^\s<>()]+')
+    return active_sub(internal_path, lambda match: '', text).strip()
+
+
+def final_text(text, operation, *, final_output=False):
     """Подготовить весь набор, сохранив ответ при ошибке вложения."""
     if not isinstance(text, str):
         return text
@@ -1352,19 +1365,23 @@ def final_text(text, operation):
                 return ''.join('[[audio_as_video_note]]\n' + line
                                for line in match.group('files').splitlines(keepends=True))
             text = active_sub(_VOICE_BLOCK, as_video_notes, text)
-        return _stage_final_text(text, operation)
+        staged = _stage_final_text(text, operation)
+        outcome = _attachment_outcome.get()
+        if final_output and outcome is not None:
+            outcome['failed'] = False
+        return staged
     except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
-        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
+        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _VOICE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
         failed_text = _AttachmentFailureText(text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}')
         outcome = _attachment_outcome.get()
-        if outcome is not None:
-            outcome['failed_texts'].append(failed_text)
+        if final_output and outcome is not None:
+            outcome['failed'] = True
         return failed_text
 
 
@@ -2131,10 +2148,7 @@ def result_envelope(result, agent=None):
         else:
             agent._brai_attachment_outcome = outcome['previous']
     response = result.get('final_response', '') if isinstance(result, dict) else ''
-    attachment_failed = isinstance(response, _AttachmentFailureText) or (
-        isinstance(response, str) and outcome is not None
-        and any(_MUTATION_FOOTER.sub('', response).rstrip() == text.rstrip()
-                for text in outcome['failed_texts']))
+    attachment_failed = isinstance(response, _AttachmentFailureText) or bool(outcome and outcome['failed'])
     candidate = getattr(agent, '_brai_reply_mode_candidate', None)
     if candidate is not None:
         if candidate['previous'] is None:
@@ -2154,6 +2168,8 @@ def result_envelope(result, agent=None):
                 store().set_reply_mode(candidate['source'], candidate['mode'])
     if not isinstance(result, dict):
         return result
+    if isinstance(result.get('brai_delivered_partial'), str):
+        result = {**result, 'brai_delivered_partial': _public_partial_text(result['brai_delivered_partial'])}
     response = result.get('final_response', '')
     if not isinstance(response, str):
         return result

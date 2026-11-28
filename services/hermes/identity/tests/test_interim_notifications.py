@@ -97,6 +97,13 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sender.await_args.kwargs['deliver_media'])
         self.assertTrue(result['already_sent'])
 
+        # Очередь других каналов должна обрабатывать сбой так же.
+        ctx.source.platform = 'api_server'
+        sender.reset_mock()
+        await deliver(runner, ctx, None, result, result, None)
+        self.assertEqual(sender.await_args.args[0], 'Сохранённая часть\n⚠️ Работа не завершена.')
+        ctx.source.platform = 'telegram'
+
         # Если часть уже пришла потоковой доставкой, повторяем только предупреждение.
         runner._run_agent_stream_confirmed_final_delivery = lambda *_a, **_kw: True
         sender.reset_mock()

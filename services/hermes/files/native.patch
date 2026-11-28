@@ -111,7 +111,7 @@
              pre_transform, final_response, transformed = final_response, _hook_result, True
              break
 +    import brai_files
-+    _stored = brai_files.final_text(final_response, turn_id)
++    _stored = brai_files.final_text(final_response, turn_id, final_output=True)
 +    if _stored != final_response:
 +        pre_transform, final_response, transformed = final_response, _stored, True
      agent._llm_output_transform = (turn_id, transformed, pre_transform)
