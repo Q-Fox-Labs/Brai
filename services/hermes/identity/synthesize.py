@@ -35,7 +35,7 @@ def synthesize_file(input_path, output_path, *, call=broker_call, timeout=SYNTHE
     operation = str(uuid.uuid4())
     try:
         result = invoke('tools.call', {'name': SYNTHESIS_TOOL, 'args': {'text': text, 'operationId': operation}})
-    except (ConnectionError, TimeoutError) as error:
+    except (OSError, ValueError) as error:
         synthesis_failure(error, operation)
         raise
     stage = 'result'

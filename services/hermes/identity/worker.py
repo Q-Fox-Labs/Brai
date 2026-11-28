@@ -604,9 +604,10 @@ class Worker:
                 response = getattr(event, '_brai_ready_response', None)
                 if response is not None:
                     from .scope import input_delivery, prepared_response
+                    from files.native import _voice_experiment
                     prepared_response.set((session_key, input_delivery.get(), response))
                     event._brai_successful_turn = True
-                    if getattr(event, '_brai_auto_voice', False):
+                    if getattr(event, '_brai_auto_voice', False) and not _voice_experiment():
                         await runner._send_voice_reply(event, response)
                     return response
                 return await handle(event, source, session_key, *args, **kwargs)

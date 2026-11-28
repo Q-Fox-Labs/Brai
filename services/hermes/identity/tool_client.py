@@ -281,12 +281,14 @@ def handle(method, params):
                 raise RuntimeError('Invalid artifact receipt')
             return {'content':[{'type':'text', 'text':result['markdown']}], 'structuredContent':result}
         if name == SYNTHESIS_TOOL:
+            if set(arguments) != {'text'} or not isinstance(arguments['text'], str):
+                return {'isError': True, 'content': [{'type': 'text', 'text': '{"code":"INVALID_ARGUMENT"}'}]}
             operation = str(uuid.uuid4())
             try:
                 arguments = {**arguments, 'operationId': operation}
                 result = broker_call('tools.call', {'name': name, 'args': arguments},
                                      timeout=SYNTHESIS_BROKER_TIMEOUT)
-            except (ConnectionError, TimeoutError) as error:
+            except (OSError, ValueError) as error:
                 details = synthesis_failure(error, operation)
                 return {'isError': True, 'content': [{'type': 'text', 'text': json.dumps(details)}]}
             return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]}

@@ -44,6 +44,7 @@ _VOICE_ONLY_OPEN = '[[brai_voice_only_text]]'
 _VOICE_ONLY_CLOSE = '[[/brai_voice_only_text]]'
 _VOICE_ONLY_TEXT = re.compile(re.escape(_VOICE_ONLY_OPEN) + r'(.*?)' + re.escape(_VOICE_ONLY_CLOSE), re.S)
 _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
+_VOICE_LINE = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n[ \t]*' + _MEDIA.pattern)
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
 _ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы. Номер в журнале: '
@@ -1382,15 +1383,28 @@ def final_text(text, operation):
         effective_mode = (once[0] if once else (candidate['mode'] or candidate.get('current'))
                           if candidate is not None else None)
         if effective_mode == 'video_note':
-            def as_video_notes(match):
-                return ''.join('[[audio_as_video_note]]\n' + line
-                               for line in match.group('files').splitlines(keepends=True))
-            text = active_sub(_VOICE_BLOCK, as_video_notes, text)
+            if limit_speech:
+                text = active_sub(_VOICE_LINE, lambda match: match.group(0).replace(
+                    '[[audio_as_voice]]', '[[audio_as_video_note]]', 1), text)
+            else:
+                def as_video_notes(match):
+                    return ''.join('[[audio_as_video_note]]\n' + line
+                                   for line in match.group('files').splitlines(keepends=True))
+                text = active_sub(_VOICE_BLOCK, as_video_notes, text)
         return _stage_final_text(text, operation, limit_speech=limit_speech, fallback=fallback)
     except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
+        if limit_speech and isinstance(error, FileError) and str(error).startswith(('REPLY_AUDIO_', 'VIDEO_NOTE_')):
+            remaining = active_sub(_VOICE_LINE, lambda match: '', text)
+            remaining = active_sub(_VIDEO_NOTE, lambda match: '', remaining)
+            remaining = active_sub(_VIDEO_NOTE_MARKER, lambda match: '', remaining)
+            try:
+                prepared = _stage_final_text(remaining, operation, fallback=fallback)
+                return prepared.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}{reference}'
+            except (FileError, FileNotFoundError, json.JSONDecodeError):
+                pass
         for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _VOICE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
@@ -1407,15 +1421,14 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
     if limit_speech:
         video_count = 0
         def record_voice(match):
-            spoken_paths.update(next(value for value in marker.groups() if value is not None)
-                                for marker in _MEDIA.finditer(match.group('files')))
+            spoken_paths.add(next(value for value in match.groups() if value is not None))
             return match.group(0)
 
         def count_video(match):
             nonlocal video_count
             video_count += 1
             return match.group(0)
-        active_sub(_VOICE_BLOCK, record_voice, text)
+        active_sub(_VOICE_LINE, record_voice, text)
         active_sub(_VIDEO_NOTE, count_video, text)
         if video_count > 1:
             raise FileError('REPLY_AUDIO_LIMIT')
@@ -2220,7 +2233,7 @@ def result_envelope(result, agent=None):
         response = cleaned
         result = {**result, 'final_response': response}
     if re.search(r"(?m)^" + re.escape(_ATTACHMENT_FAILURE_NOTE) + r"[0-9a-f]{16}$", response):
-        return {**result, 'brai_attachment_preparation_failed': True}
+        result = {**result, 'brai_attachment_preparation_failed': True}
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))

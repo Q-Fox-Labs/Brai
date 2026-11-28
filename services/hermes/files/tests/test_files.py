@@ -1447,6 +1447,23 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             stream(char)
         self.assertEqual(''.join(fragments), 'Вступление  итог')
 
+    def test_experiment_keeps_an_ordinary_attachment_when_circle_render_fails(self):
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS sample')
+        document = self.input / 'notes.txt'
+        document.write_text('Полный документ')
+        context = native._reply_mode_candidate.set({'source': {}, 'mode': None, 'current': 'video_note'})
+        try:
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                with patch('files.video_note.render_video_notes', side_effect=FileError('VIDEO_NOTE_RENDER_FAILED')):
+                    answer = native.final_text(f'Текст.\n[[audio_as_voice]]\nMEDIA:{audio}\nMEDIA:{document}', 'turn')
+            output = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+            self.assertIn('Текст.', answer)
+            self.assertTrue(output['brai_attachment_preparation_failed'])
+            self.assertEqual([row['file']['filename'] for row in output['fileSets'][0]['items']], ['notes.txt'])
+        finally:
+            native._reply_mode_candidate.reset(context)
+
     def test_long_video_note_preserves_every_audio_sample(self):
         from files.video_note import render_video_notes
         audio = self.input / 'long.wav'
