@@ -1461,6 +1461,12 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Текст.', answer)
             self.assertTrue(output['brai_attachment_preparation_failed'])
             self.assertEqual([row['file']['filename'] for row in output['fileSets'][0]['items']], ['notes.txt'])
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                answer = native.final_text(
+                    f'Текст.\n[[audio_as_voice]]\nMEDIA:{self.input / "missing.ogg"}\nMEDIA:{document}', 'turn')
+            output = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+            self.assertTrue(output['brai_attachment_preparation_failed'])
+            self.assertEqual([row['file']['filename'] for row in output['fileSets'][0]['items']], ['notes.txt'])
         finally:
             native._reply_mode_candidate.reset(context)
 

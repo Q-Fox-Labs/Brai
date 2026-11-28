@@ -1463,8 +1463,13 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
         if explicit:
             raise FileError('MIXED_FILE_SET_FORMAT')
         with files.lock('cache'):
-            value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
-                     else files.resolve(local_path(path), ['final', operation, path]))
+            try:
+                value = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
+                         else files.resolve(local_path(path), ['final', operation, path]))
+            except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
+                if path in spoken_paths:
+                    raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+                raise
             index = len(items)
             kind = presentation(value)
             if path in spoken_paths and kind == 'voice':
@@ -1478,8 +1483,13 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
         from .video_note import render_video_notes
         path = next(value for value in match.groups() if value is not None)
         with files.lock('cache'):
-            audio = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
-                     else files.resolve(local_path(path), ['final', operation, path]))
+            try:
+                audio = (files.fetch(path.split(':', 1)[1].lstrip('/')) if path.startswith('artifact:')
+                         else files.resolve(local_path(path), ['final', operation, path]))
+            except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
+                if limit_speech:
+                    raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+                raise
         videos = (render_video_notes(files, audio, operation, single=True) if limit_speech
                   else render_video_notes(files, audio, operation))
         indexes = []
