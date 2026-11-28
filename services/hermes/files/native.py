@@ -28,6 +28,7 @@ _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _conversation_source = ContextVar('brai_file_conversation_source', default=None)
 _reply_mode_candidate = ContextVar('brai_reply_mode_candidate', default=None)
+_attachment_outcome = ContextVar('brai_attachment_outcome', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inbound_attachments = ContextVar('brai_file_inbound_attachments', default=())
 _VOICE_RETRY_ADMISSION = object()
@@ -42,6 +43,10 @@ _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MED
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
 _ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы.'
+
+class _AttachmentFailureText(str):
+    """Тип сохраняет признак отказа при прямом вызове без области хода."""
+
 _MUTATION_FOOTER = re.compile(
     r'(?m)^⚠️?\s*(?:Проверка изменений файлов:|File-mutation verifier:)[^\n]*'
     r'(?:\n[ \t]+•[^\n]*)*\s*\Z'
@@ -973,6 +978,10 @@ def conversation(agent, user_message, task_id=None):
             db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
         raise
     token = _operation.set(operation)
+    previous_attachment = getattr(agent, '_brai_attachment_outcome', None)
+    attachment = {'previous': previous_attachment, 'failed_texts': []}
+    agent._brai_attachment_outcome = attachment
+    attachment_token = _attachment_outcome.set(attachment)
     previous_candidate = _reply_mode_candidate.get()
     if previous_candidate is not getattr(agent, '_brai_reply_mode_candidate', None):
         previous_candidate = None
@@ -1056,6 +1065,12 @@ def conversation(agent, user_message, task_id=None):
         if filtered_interim is not None and getattr(agent, 'interim_assistant_callback', None) is filtered_interim:
             agent.interim_assistant_callback = interim
         _reply_mode_candidate.reset(mode_token)
+        _attachment_outcome.reset(attachment_token)
+        if not completed and getattr(agent, '_brai_attachment_outcome', None) is attachment:
+            if previous_attachment is None:
+                del agent._brai_attachment_outcome
+            else:
+                agent._brai_attachment_outcome = previous_attachment
         if not completed and candidate is not None and getattr(agent, '_brai_reply_mode_candidate', None) is candidate:
             if candidate['previous'] is None:
                 del agent._brai_reply_mode_candidate
@@ -1346,7 +1361,11 @@ def final_text(text, operation):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
-        return text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}'
+        failed_text = _AttachmentFailureText(text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}')
+        outcome = _attachment_outcome.get()
+        if outcome is not None:
+            outcome['failed_texts'].append(failed_text)
+        return failed_text
 
 
 def _stage_final_text(text, operation):
@@ -2105,6 +2124,17 @@ def validate_telegram(items):
 
 def result_envelope(result, agent=None):
     """CLI/API и дочерний агент получают стабильные IDs и состав, а не один временный path."""
+    outcome = getattr(agent, '_brai_attachment_outcome', None)
+    if outcome is not None:
+        if outcome['previous'] is None:
+            del agent._brai_attachment_outcome
+        else:
+            agent._brai_attachment_outcome = outcome['previous']
+    response = result.get('final_response', '') if isinstance(result, dict) else ''
+    attachment_failed = isinstance(response, _AttachmentFailureText) or (
+        isinstance(response, str) and outcome is not None
+        and any(_MUTATION_FOOTER.sub('', response).rstrip() == text.rstrip()
+                for text in outcome['failed_texts']))
     candidate = getattr(agent, '_brai_reply_mode_candidate', None)
     if candidate is not None:
         if candidate['previous'] is None:
@@ -2114,7 +2144,7 @@ def result_envelope(result, agent=None):
         guardrail = result.get('guardrail') if isinstance(result, dict) else None
         if (candidate['mode'] is not None and isinstance(result, dict)
                 and isinstance(result.get('final_response'), str) and result['final_response'].strip()
-                and not re.search(r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'$', result['final_response'])
+                and not attachment_failed
                 and not any(result.get(name) for name in ('failed', 'partial', 'error', 'interrupted'))
                 and result.get('completed') is not False
                 and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable')):
@@ -2132,7 +2162,7 @@ def result_envelope(result, agent=None):
     if cleaned != response:
         response = cleaned
         result = {**result, 'final_response': response}
-    if re.search(r"(?m)^" + re.escape(_ATTACHMENT_FAILURE_NOTE) + r"$", response):
+    if attachment_failed:
         return {**result, 'brai_attachment_preparation_failed': True}
     paths = []
     def found(match):

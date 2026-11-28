@@ -413,13 +413,13 @@ class FailureNoticeTest(unittest.TestCase):
         notice = scope['provider_failure_notice']('Проверка', 'job', 'rate_limit',
             backup_provider_phrase='Резервный сервис не настроен.')
         self.assertIn('Проверка', notice)
-        self.assertIn('сервис ИИ временно ограничил доступ', notice)
-        self.assertIn('по расписанию', notice)
+        self.assertIn('не выполнена', notice)
+        self.assertNotIn('сервис ИИ', notice)
         self.assertNotIn('hermes cron', notice)
         self.assertNotIn('RAW', scope['generic_failure_notice']('Проверка', 'job', 'RAW ERROR'))
-        self.assertIn('не настроен доступ к сервису ИИ', scope['blocked_config_notice'](
+        self.assertIn('не удалось получить доступ', scope['blocked_config_notice'](
             'Проверка', 'provider credential missing: test'))
-        self.assertIn('не настроен канал доставки', scope['blocked_config_notice'](
+        self.assertIn('нет возможности доставить результат', scope['blocked_config_notice'](
             'Проверка', 'delivery platform is unavailable'))
         hold_scope = {'Any': Any, 'Optional': Optional, '_window_end': lambda seconds: 'end',
                       'safe_strftime': lambda date, fmt: '10:00 UTC'}
@@ -560,7 +560,8 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertNotIn('SECRET', ' '.join(logs.output))
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}):
             self.assertEqual(prepare('telegram', 'interim', 'Hello, world'), 'Hello, world')
-            self.assertEqual(prepare('api_server', 'warn', DiagnosticText('Original diagnostic')), 'Original diagnostic')
+            with self.assertLogs('notice-test', 'WARNING'):
+                self.assertNotIn('Original diagnostic', prepare('api_server', 'warn', DiagnosticText('Original diagnostic')))
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING') as diagnostic:
             self.assertEqual(prepare('telegram', 'warn', DiagnosticText('Ошибка сервиса OpenAI API')), '⚠️ Возникла неполадка.')
             self.assertIsNone(prepare('telegram', 'lifecycle', DiagnosticText('Служебный запуск OpenAI API')))
@@ -568,9 +569,7 @@ class FailureNoticeTest(unittest.TestCase):
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING'):
             mixed = '⚠ Compression aborted: Бюджет повторов исчерпан. No messages were dropped.'
             localized = prepare('telegram', 'warn', DiagnosticText(mixed))
-            self.assertIn('Не удалось продолжить разговор', localized)
-            self.assertNotIn('Compression', localized)
-            self.assertNotIn('No messages', localized)
+            self.assertIsNone(localized)
 
     def test_error_messages_explain_incomplete_work_without_internal_details(self):
         for code in self.notice._COPY:
@@ -981,10 +980,42 @@ class FailureNoticeTest(unittest.TestCase):
                 text = func('ChatGPT hermes fallback add', types.SimpleNamespace(platform='telegram'),
                             result=result, failure_notice=lambda value: 'partial')
             self.assertTrue(text.startswith('Уже полученная часть ответа.'))
-            self.assertIn('Сторонний сервис ИИ', text)
+            self.assertNotIn('Сторонний сервис ИИ', text)
             self.assertIn('Некоторые действия могли уже выполниться', text)
             self.assertNotIn('ChatGPT', text)
-            self.assertEqual(func('original', types.SimpleNamespace(platform='other'), result=result), 'original')
+            with self.assertLogs(self.log, 'WARNING'):
+                other = func('original', types.SimpleNamespace(platform='other'), result=result)
+            self.assertIn('Не удалось', other)
+            self.assertNotIn('сервис ИИ', other)
+            with self.assertLogs(self.log, 'WARNING'):
+                api = func('original', types.SimpleNamespace(platform='api_server'), result=result)
+            self.assertIn('Не удалось', api)
+
+    def test_truncated_answer_is_preserved_without_diagnostic_notice(self):
+        import os
+        import sys
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for truncation integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_truncation.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_continue_text')
+        fn.returns = None
+        for arg in fn.args.args + fn.args.kwonlyargs:
+            arg.annotation = None
+        scope = {'Any': object, '_WINDOW_FILLED': 'Внутренняя диагностика {prompt} {ctx}',
+                 '_CEILING_NO_TEXT': 'Внутренняя диагностика', 'collapse_continuation_trail': lambda *a, **kw: 'Часть ответа'}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        module = types.SimpleNamespace(_get_continuation_prompt=lambda *a: '', _join_truncated_parts=lambda *a: '')
+        for filled in (None, (123, 456)):
+            state = types.SimpleNamespace(length_continue_retries=3, agent=types.SimpleNamespace(_vprint=lambda *a, **kw: None, log_prefix=''),
+                messages=[], is_stub=False, finish_reason='length', truncated_response_parts=[], window_filled=filled,
+                current_turn_user_idx=0, end_turn=lambda response, error: types.SimpleNamespace(result={'final_response': response, 'partial': True, 'error': error}))
+            with patch.dict(sys.modules, {'agent.conversation_loop': module}):
+                verdict = scope['_continue_text'](state, object(), types.SimpleNamespace(content=None))
+            self.assertEqual(verdict.result['brai_delivered_partial'], 'Часть ответа')
+            text = self.render('truncated', result=verdict.result, delivered_partial=verdict.result['brai_delivered_partial'])
+            self.assertTrue(text.startswith('Часть ответа'))
+            self.assertNotIn('Внутренняя диагностика', text)
 
 class DeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_recovered_reply_is_russian_at_delivery_boundary(self):

@@ -7,19 +7,17 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
  """Agent-turn execution for GatewayRunner: _handle_message_with_agent, _run_agent*, proxy path,
  background tasks, MCP reload. Bound onto ``GatewayRunner`` via the MRO; ``gateway.run`` internals
  are imported lazily inside method bodies (import cycle) so ``patch("gateway.run.X")`` still works.
-@@ -87,6 +89,37 @@
+@@ -87,6 +89,35 @@
  def _unexpected_silence_reply() -> str:
      """Reply when the model returned only a silence marker for a message that needed an answer."""
      return t("gateway.errors.unexpected_silence")
 +
 +
 +def _telegram_failure_explanation(response, source, *, result=None, exception=None, partial=False, failure_notice=None):
-+    """Подготовить понятное сообщение о сбое для Telegram."""
++    """Подготовить понятное сообщение о сбое для пользовательского канала."""
 +    delivered = ""
 +    try:
 +        from gateway.run import _gateway_platform_value, _redact_gateway_user_facing_secrets, _sanitize_gateway_final_response
-+        if _gateway_platform_value(source.platform) != "telegram":
-+            return response
 +        from agent.error_surface import build_error_surface_from_result, build_error_surface_from_exception
 +        from gateway.russian_failure_notice import explain_failure
 +        result = result if isinstance(result, dict) else None
@@ -53,15 +51,14 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
                  # Re-point the Telegram topic binding at the fresh session, or the binding-heal walk
                  # switches the next message back onto the bloated child and re-triggers exhaustion
                  # forever. No-op on non-topic lanes.
-@@ -1927,6 +1961,15 @@
+@@ -1927,6 +1961,14 @@
              response = ""
 
          adapter = self._delivery_adapter_for(source)
 +        # AIDEV-NOTE: обработать ошибку до озвучивания и финальной доставки.
 +        from gateway.run import _gateway_platform_value
-+        telegram_failure = (_gateway_platform_value(source.platform) == "telegram" and
-+                            (agent_result.get("failed") or
-+                             (agent_result.get("partial") and agent_result.get("error"))))
++        telegram_failure = (agent_result.get("failed") or
++                            (agent_result.get("partial") and agent_result.get("error")))
 +        if telegram_failure:
 +            response = _telegram_failure_explanation(
 +                response, source, result=agent_result, failure_notice=self._hmwa_failed_turn_notice,
@@ -740,9 +737,9 @@ diff --git a/gateway/run.py b/gateway/run.py
 +            return (f"ℹ️ Примерная стоимость попыток без ответа: {amount.group(0)}."
 +                    if amount else "ℹ️ Попытки без ответа могли потребовать оплаты.")
 +        if "fallback" in lowered:
-+            return "⚠️ Не удалось выполнить запрос с первой попытки."
++            return None
 +        if "compression" in lowered or "compressed" in lowered or "compacting" in lowered:
-+            return "⚠️ Не удалось продолжить разговор. Попробуйте ещё раз."
++            return None
 +        if "no response" in lowered or "no events" in lowered or "without activity" in lowered:
 +            return "⚠️ Не удалось вовремя получить ответ. Попробуйте ещё раз."
 +        return "⚠️ Не удалось выполнить запрос. Попробуйте ещё раз."
@@ -3859,7 +3856,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"Run log: `hermes cron runs {job_id}`."
 -    )
 +        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
-+    return f"⚠️ Задача «{job_name}» не выполнена: {cause}. {action}"
++    return f"⚠️ Задача «{job_name}» не выполнена."
 
 
  def generic_failure_notice(job_name: str, job_id: str, cleaned_error: str) -> str:
@@ -3870,7 +3867,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"{cron_output_dir_display(job_id)}); run it again with `hermes cron run {job_id}`, "
 -        f"edit it with `hermes cron edit {job_id}`, or pause it with `hermes cron pause {job_id}`."
 -    )
-+    return f"⚠️ Задача «{job_name}» завершилась с ошибкой. Подробности сохранены в журнале выполнения."
++    return f"⚠️ Задача «{job_name}» не выполнена."
 
 
  def script_timeout_notice(job_name: str, job_id: str) -> str:
@@ -3879,7 +3876,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"Check the script's output under {cron_output_dir_display(job_id)} or `hermes cron runs {job_id}`, "
 -        f"then run it again with `hermes cron run {job_id}`."
 -    )
-+    return f"⚠️ Задача «{job_name}» не выполнена: скрипт не завершился вовремя. Модель не запускалась. Проверьте журнал выполнения."
++    return f"⚠️ Задача «{job_name}» не завершилась вовремя."
 
 
  def inactivity_notice(job_name: str, job_id: str) -> str:
@@ -3889,7 +3886,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"{cron_output_dir_display(job_id)} (`hermes cron runs {job_id}`), then run it again with "
 -        f"`hermes cron run {job_id}`."
 -    )
-+    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности. Проверьте журнал выполнения."
++    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности."
 
 
  def blocked_config_notice(job_name: str, reason: str) -> str:
@@ -3904,13 +3901,13 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -    )
 +    text = str(reason or "").lower()
 +    if "provider credential" in text:
-+        detail = "не настроен доступ к сервису ИИ"
++        detail = "не удалось получить доступ для выполнения задачи"
 +    elif "mcp server" in text:
-+        detail = "не удалось подключить необходимые инструменты"
++        detail = "недоступно действие, необходимое для выполнения задачи"
 +    elif "delivery platform" in text:
-+        detail = "не настроен канал доставки результата"
++        detail = "нет возможности доставить результат"
 +    elif "attached skill" in text:
-+        detail = "не готов необходимый навык"
++        detail = "недоступно действие, необходимое для выполнения задачи"
 +    else:
 +        detail = "обнаружена ошибка настроек"
 +    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась. Повторю запуск по расписанию."
@@ -9422,8 +9419,8 @@ diff --git a/gateway/run.py b/gateway/run.py
 +        lowered = text.lower()
 +        if any(word in lowered for word in ("compression", "compressed", "compacting", "сокращен", "сокращён")):
 +            if "no messages were dropped" in lowered or "сообщения сохранены" in lowered:
-+                return "⚠️ Не удалось сократить историю разговора. Сообщения сохранены."
-+            return "⚠️ Не удалось продолжить разговор. Попробуйте ещё раз."
++                return None
++            return None
          from agent.i18n import _russian_gateway_error
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 --- a/gateway/run_notifications.py
@@ -9437,7 +9434,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          future = asyncio.get_running_loop().create_future()
          self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
          if key not in self._completion_notification_batch_tasks:
-@@ -1992,26 +1992,12 @@
+@@ -1992,26 +1992,15 @@
          }
  
      def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
@@ -9456,6 +9453,9 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
 +        if session.exit_code:
 +            return t("gateway.background.task_failed")
++        if session.exit_code == 0 and notify_mode in {"all", "result"}:
++            output = self._redacted_output_tail(session, 1000).strip()
++            return output or t("gateway.background.task_finished")
 +        return t("gateway.background.task_finished") if session.exit_code == 0 else "⚠️ Ошибка задачи или результат неизвестен."
  
      def _format_process_running_message(self, session) -> str:
@@ -9468,24 +9468,24 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
  
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
-@@ -2055,6 +2041,9 @@
+@@ -2055,6 +2041,10 @@
              session = process_registry.get(session_id)
              if session is None:
                  break
 +            if session.exited and session.exit_code and logger.isEnabledFor(logging.WARNING):
 +                async with self._completion_event_scope(watcher):
-+                    logger.warning("BACKGROUND_FAILURE reference=%s exit=%s", session_id.removeprefix("proc_"), session.exit_code)
++                    logger.warning("BACKGROUND_FAILURE reference=%s exit=%s output=%s",
++                                   session_id.removeprefix("proc_"), session.exit_code, self._redacted_output_tail(session, 2000))
              if silent:
                  # Still wait for the process to exit so we can log it, but don't push any messages.
                  if session.exited:
-@@ -2066,8 +2055,9 @@
+@@ -2066,8 +2055,8 @@
              if session.exited:
                  # Agent-notify: inject a synthetic message unless the agent already consumed the result via
                  # wait/log (poll() is read-only and deliberately does NOT mark consumed).
 -                if agent_notify and not process_registry.is_completion_consumed(session_id):
 +                if (agent_notify or (session.exit_code == 0 and notify_mode != "error" and (watcher.get("parent_session_id") or getattr(session, "parent_session_id", "")))) and not process_registry.is_completion_consumed(session_id):
                      completion_evt = self._build_process_completion_event(watcher, session, session_id)
-+                    if session.exit_code != 0: completion_evt.update(command="", output=self._format_process_final_message(session_id, session, notify_mode))
                      synth_text = format_process_notification(completion_evt)
                      if not synth_text:
                          break
@@ -9631,3 +9631,45 @@ diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
 -                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:file://)?/[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:file://)?/[^\n)]*(?:\)|\Z))', masked):
 +                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:artifact:|(?:file://)?/)[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:artifact:|(?:file://)?/)[^\n)]*(?:\)|\Z))', masked):
              spans.extend([(match.start(), match.start("label")), (match.end("label"), match.end())])
+diff --git a/agent/turn_truncation.py b/agent/turn_truncation.py
+--- a/agent/turn_truncation.py
++++ b/agent/turn_truncation.py
+@@ -358,14 +358,19 @@
+     )
+     if filled is not None:
+         notice = _WINDOW_FILLED.format(prompt=filled[0], ctx=filled[1])
+-        return st.end_turn(
++        verdict = st.end_turn(
+             f"{partial_response}\n\n{notice}" if partial_response else notice,
+             f"Prompt used {filled[0]} of {filled[1]} context tokens; no room to answer",
+         )
+-    return st.end_turn(
+-        partial_response or _CEILING_NO_TEXT,
+-        "Response remained truncated after 4 continuation attempts",
+-    )
++    else:
++        verdict = st.end_turn(
++            partial_response or _CEILING_NO_TEXT,
++            "Response remained truncated after 4 continuation attempts",
++        )
++    # The gateway must retain the actual answer without exposing the diagnostic notice.
++    if partial_response and isinstance(verdict.result, dict):
++        verdict.result["brai_delivered_partial"] = partial_response
++    return verdict
+-
++
+-
++
+ def _model_output_limit(agent: Any) -> Optional[int]:
+diff --git a/gateway/run.py b/gateway/run.py
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -732,5 +732,6 @@
+         return None
+-    if _gateway_surface_passes_raw_text(platform):
++    from gateway.warning_notifications import DiagnosticText
++    if _gateway_surface_passes_raw_text(platform) and event_type not in {"warn", "lifecycle"} and not isinstance(message, DiagnosticText):
+         return text
+-
++
+     text = _redact_gateway_user_facing_secrets(text)

@@ -1522,13 +1522,6 @@ index e9819bc..800c70d 100644
      if getattr(agent, "verbose_logging", False):
          _vlines(
 
---- a/gateway/russian_failure_notice.py
-+++ b/gateway/russian_failure_notice.py
-@@ -169,2 +169,4 @@
- def _message_for_connection(code, kind):
-+    if kind == 'local' and code in {'auth', 'auth_permanent'}:
-+        return 'Запрос направлен через локальное подключение и отклонён при проверке доступа. Причина отказа пока не подтверждена; состояние работы сохранено.'
-     message = _COPY.get(code, _UNKNOWN)
 --- a/hermes_constants.py
 +++ b/hermes_constants.py
 @@ -878,2 +878,6 @@

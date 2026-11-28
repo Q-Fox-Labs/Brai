@@ -5,7 +5,7 @@ import { assertDto } from '#transcription-contracts';
 export const incidentKeys = ['storage', 'local_ai', 'artifacts', 'history', 'recovery', 'delivery', 'capacity'] as const;
 export type IncidentKey = typeof incidentKeys[number];
 const titles: Record<IncidentKey, string> = {
-  storage: 'Не удалось сохранить результат расшифровки', local_ai: 'Не удалось превратить звук в текст',
+  storage: 'Расшифровка временно недоступна', local_ai: 'Превращение звука в текст временно недоступно',
   artifacts: 'Не удалось получить аудиофайл', history: 'Не удалось сохранить историю расшифровок',
   recovery: 'Не удалось продолжить расшифровку',
   delivery: 'Уведомление о расшифровке задерживается', capacity: 'Расшифровка временно недоступна',

@@ -171,10 +171,9 @@ class CommandFreeErrorTests(unittest.TestCase):
             self.assert_no_command(delivered)
             compression = scope['_prepare_gateway_status_message']('telegram', 'warn', DiagnosticText(
                 'Compression timed out. No messages were dropped. Run /compress.'))
-            self.assert_no_command(compression)
-            self.assertIn('Сообщения сохранены', compression)
+            self.assertIsNone(compression)
             self.assertEqual(scope['_prepare_gateway_status_message']('telegram', 'interim', text), text)
-            self.assertEqual(scope['_prepare_gateway_status_message']('api_server', 'warn', DiagnosticText(text)), text)
+            self.assert_no_command(scope['_prepare_gateway_status_message']('api_server', 'warn', DiagnosticText(text)))
 
     def test_gateway_error_formatter_contains_no_command_hints(self):
         tree = ast.parse((self.root / 'gateway/russian_failure_notice.py').read_text())

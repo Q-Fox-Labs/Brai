@@ -235,9 +235,17 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             with native.conversation(agent, 'Кружочками'):
                 with patch('files.video_note.render_video_notes', side_effect=FileError('failed')):
                     output = native.final_text(f'[[brai_reply_mode:video_note]]\n[[audio_as_video_note]]\nMEDIA:{audio}', 'turn')
-            result = native.result_envelope({'final_response': output}, agent)
+            result = native.result_envelope({'final_response': str(output)}, agent)
         self.assertTrue(result['brai_attachment_preparation_failed'])
         self.assertEqual(self.store.reply_mode(route), 'voice')
+
+    def test_plain_failure_words_do_not_hide_a_valid_attachment(self):
+        path = self.input / 'answer.txt'
+        path.write_text('готово')
+        answer = native.final_text(f'Не удалось приложить файлы.\nMEDIA:{path}', 'turn')
+        result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+        self.assertNotIn('brai_attachment_preparation_failed', result)
+        self.assertEqual(len(result['fileSets'][0]['items']), 1)
 
     def test_saved_video_mode_converts_native_voice_tags_and_switches_back(self):
         source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')

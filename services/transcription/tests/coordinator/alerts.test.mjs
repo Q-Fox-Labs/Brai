@@ -49,7 +49,7 @@ test('speech failure messages explain the user-visible effect while retaining di
   const unknown=requestEvent({ ...record,taskState:'outcome_unknown' },randomUUID(),when);
   assert.match(unknown.title,/неизвестно/);
   const incident=incidentEvent('local_ai',randomUUID(),when);
-  assert.equal(incident.title,'Не удалось превратить звук в текст');
+  assert.equal(incident.title,'Превращение звука в текст временно недоступно');
   assert.equal(incident.data.reason,'local_ai');
 });
 test('normal observations, empty queue and repeated healthy ticks publish nothing',async()=>{
