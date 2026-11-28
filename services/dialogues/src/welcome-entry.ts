@@ -11,7 +11,11 @@ function required(name:string){
 const env=JSON.parse(readFileSync(required('DIALOGUES_WELCOME_CONFIG'),'utf8'));
 const owner=new Pool({connectionString:env.ownerDatabaseURL});
 const administrator=new Pool({connectionString:env.administratorDatabaseURL});
-const nc=await connect({servers:env.natsServers,authenticator:credsAuthenticator(readFileSync(env.natsCredsFile)),inboxPrefix:env.natsInbox});
+const natsAuthentication=env.natsCredsFile
+ ? {authenticator:credsAuthenticator(readFileSync(env.natsCredsFile))}
+ : {user:env.natsUser,pass:env.natsPassword};
+if(!env.natsCredsFile&&(!env.natsUser||!env.natsPassword))throw Error('WELCOME_NATS_AUTH_REQUIRED');
+const nc=await connect({servers:env.natsServers,...natsAuthentication,inboxPrefix:env.natsInbox});
 const gateway=welcomeOwner({owner,administrator,ownerRole:env.ownerRole,databaseURL:env.runtimeDatabaseURL,
  secret:readFileSync(env.secretFile,'utf8').trim(),grantToken:readFileSync(env.grantFile,'utf8').trim(),
  publicOrigin:env.origin,authorize:async userId=>{

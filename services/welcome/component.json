@@ -4,7 +4,7 @@
   "type": "program",
   "status": "active",
   "environments": ["dev", "prod"],
-  "executableSources": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs"],
+  "executableSources": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/welcome/src/probe.mjs"],
   "inputs": {
     "build": [],
     "runtime": ["services/welcome/package.json", "services/welcome/src/*", "services/welcome/migrations/*.sql", "services/welcome/deploy/*.service", "services/welcome/CONTRACT.md"],
@@ -13,7 +13,7 @@
   "dependencies": [{
     "id": "dialogues",
     "inputs": ["services/dialogues/src/luna.ts", "services/dialogues/src/subscription-luna.ts", "services/dialogues/src/subscription-catalog.ts", "services/dialogues/src/domain.ts"],
-    "delivery": ["services/dialogues/dist", "services/dialogues/package.json"]
+    "delivery": ["services/dialogues/dist", "services/dialogues/migrations", "services/dialogues/package.json"]
   }],
   "commands": {
     "build": "npm run build",
@@ -22,7 +22,7 @@
   "delivery": {
     "kind": "ready-files",
     "files": ["services/welcome/package.json", "services/welcome/src", "services/welcome/migrations", "services/welcome/deploy"],
-    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/dialogues/dist/welcome-entry.js"],
+    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/welcome/src/probe.mjs", "services/dialogues/dist/welcome-entry.js"],
     "smokeImports": ["services/welcome/src/model.mjs", "services/dialogues/dist/welcome-owner.js"],
     "systemRequirements": ["Node.js 24.22.1", "systemd", "ffprobe", "Codex App Server"]
   },
