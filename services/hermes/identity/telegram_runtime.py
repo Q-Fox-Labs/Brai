@@ -25,6 +25,7 @@ from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
+from .welcome_telegram import dispatch as dispatch_welcome, dialogue_id as welcome_dialogue_id
 from .ordinary_admission import disabled_command, group_chat_id, group_message, message_thread, start_command
 
 MAX_FRAME = 2 * 1024 * 1024
@@ -97,9 +98,9 @@ async def broker_call(method, params, timeout=15):
         await writer.wait_closed()
 
 
-async def _control_reply(adapter, chat, message, text):
+async def _control_reply(adapter, chat, message, text, *, thread_override=None):
     """Ответить в исходную тему; сообщить исход без содержимого, кодов и повтора."""
-    thread = getattr(message, 'message_thread_id', None)
+    thread = getattr(message, 'message_thread_id', None) if thread_override is None else thread_override or None
     if thread is not None and (type(thread) is not int or thread < 1):
         _logger.warning('telegram_control_reply status=invalid_route')
         return False
@@ -267,7 +268,7 @@ async def admit_update(update, adapter):
     # Приглашение принимается только из личного сообщения самого нового пользователя.
     raw = getattr(message, 'text', '') or ''
     invitation = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+(?:invite_)?([A-Za-z0-9_-]{16,128})', raw.strip())
-    if private and invitation:
+    if private and invitation and not invitation[1].startswith('ref_'):
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
@@ -278,6 +279,14 @@ async def admit_update(update, adapter):
             await _control_reply(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False
     if private:
+        try:
+            if await dispatch_welcome(update, adapter, _control_reply):
+                return False
+        except Exception:
+            if snapshot is not None:
+                snapshot['state'] = 'outcome_unknown'
+            await _control_reply(adapter, telegram, message, 'Справочная временно недоступна. Попробуйте позже.')
+            return False
         reply = _control_reply if starting else _notice
         await reply(adapter, telegram, message, 'Здравствуйте! Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
@@ -1241,6 +1250,10 @@ class Resolver:
             replacements = dict(zip(all_paths, mapped))
             data['media_urls'] = [replacements[p] for p in paths]
             data['identity_inputs'] = [{**item, 'path': replacements[item['path']]} for item in inputs]
+        if private:
+            candidate = welcome_dialogue_id(self.adapter._bot.id, route)
+            if candidate is not None:
+                data['welcome_dialogue_id'] = candidate
         return data
 
     def authorize_delivery(self, profile, action, payload):
@@ -1617,6 +1630,13 @@ class Resolver:
 
     async def interactive_admit(self, update):
         """Guard не отправляет callback в общий native gateway."""
+        callback=getattr(update, 'callback_query', None)
+        if getattr(callback, 'data', None)=='welcome.submit':
+            original=self.mirror.snapshot(f'{self.adapter._bot.id}:{update.update_id}') if self.mirror is not None else None
+            if original and original.get('state')=='unregistered':
+                if await dispatch_welcome(update,self.adapter,_control_reply):
+                    await self.mirror.handled(update)
+                    return False
         await self.interactive_binding(update)
         return True
 

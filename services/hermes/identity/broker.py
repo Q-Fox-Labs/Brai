@@ -361,7 +361,8 @@ class Broker:
         if user is None:
             return {'state': 'unregistered'}
         if user['status'] != 'active':
-            return {'state': 'forbidden'}
+            from .welcome_telegram import welcome_user
+            return {'state': 'unregistered' if welcome_user(user) else 'forbidden'}
         matches = [(uid, profile) for uid, profile in self.profiles().items()
                    if profile['userId'] == user['id'] and profile['profileId'] == user['profileId']
                    and str(profile['telegramId']) == user['telegramId'] and profile['status'] == 'active']

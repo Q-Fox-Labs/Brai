@@ -149,6 +149,9 @@ class Bridge:
             raise ValueError('Event preparation failed')
         data['source'] = source.to_dict()
         data['source']['brai_actor_id'] = str(source.user_id)
+        welcome_dialogue = data.pop('welcome_dialogue_id', None)
+        if welcome_dialogue is not None:
+            data['source']['brai_welcome_dialogue_id'] = welcome_dialogue
         # AIDEV-NOTE: Внутри профиля автор канонический; исходный личный chat_id
         # сохраняет Telegram-аккаунт и отдельную native session. Права задаёт Auth.
         data['source']['user_id'] = self.worker_telegram_id

@@ -1025,7 +1025,10 @@ def conversation(agent, user_message, task_id=None):
                 'Наличие текста определяй по правилам голосового режима и просьбе пользователя. '
                 'Для кружочка используй [[audio_as_video_note]] перед MEDIA со звуком. '
                 'Правила озвучки находятся в policies/LOCAL_VOICE.md из системного INDEX.md.\n')
-        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + mode_prompt + (
+        dialogue = getattr(source, '_brai_welcome_dialogue_id', None)
+        continuation = ('\nДиалоги текущей беседы Telegram используют стабильный ID ' + dialogue
+                        + '. Передавай его в dialogue.id и dialogue_id для текущего хода.\n') if dialogue else ''
+        agent.ephemeral_system_prompt = shared_context + (effective_prompt or '') + mode_prompt + continuation + (
             '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
             + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
             'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '

@@ -1,0 +1,35 @@
+{
+  "formatVersion": 1,
+  "id": "welcome",
+  "type": "container",
+  "status": "active",
+  "environments": ["dev", "prod"],
+  "executableSources": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs"],
+  "inputs": {
+    "build": [],
+    "runtime": ["services/welcome/package.json", "services/welcome/src/*", "services/welcome/migrations/*.sql", "services/welcome/CONTRACT.md"],
+    "checks": ["services/welcome/tests/*.test.mjs"]
+  },
+  "dependencies": [{
+    "id": "dialogues",
+    "inputs": ["services/dialogues/src/luna.ts", "services/dialogues/src/subscription-luna.ts", "services/dialogues/src/subscription-catalog.ts", "services/dialogues/src/domain.ts"],
+    "delivery": ["services/dialogues/dist", "services/dialogues/package.json"]
+  }],
+  "commands": {
+    "build": "npm run build",
+    "check": "npm test"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": ["services/welcome/package.json", "services/welcome/src", "services/welcome/migrations"],
+    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs"],
+    "smokeImports": [],
+    "systemRequirements": ["Node.js 24.22.1"]
+  },
+  "deploy": {
+    "units": ["welcome", "welcome-migrate"],
+    "migrations": ["services/welcome/migrations"],
+    "health": "GET /health"
+  },
+  "npm": { "workspaces": ["services/welcome"] }
+}

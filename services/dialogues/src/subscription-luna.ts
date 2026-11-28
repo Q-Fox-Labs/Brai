@@ -47,7 +47,7 @@ export class NativeSocket extends EventEmitter implements LunaSocket {
  terminate(){if(this.readyState!==3){this.readyState=2;this.child.kill('SIGTERM');}}
 }
 /** Каждый запрос использует актуальную связь аккаунта и отдельный временный native. */
-export function createSubscriptionLuna(cfg:SubscriptionConfig){
+export function createSubscriptionLuna(cfg:SubscriptionConfig, selection?:{model:string;reasoning:string}){
  for(const key of ['binary','python','credentialClient','credentialSocket','home','cwd','catalogPath'] as const)if(typeof cfg[key]!=='string'||!cfg[key].startsWith('/'))throw new Error('INVALID_SUBSCRIPTION_CONFIG');
  if(!/^[a-f0-9]{64}$/.test(cfg.sourceRef))throw new Error('INVALID_SUBSCRIPTION_CONFIG');
  return createLuna('',cfg.cwd,async()=>{
@@ -58,7 +58,7 @@ export function createSubscriptionLuna(cfg:SubscriptionConfig){
   // AIDEV-NOTE: Access остаётся внутри helper/auth.command. Native не получает его через env/argv.
   delete value.access;
   const provider='dialogues_subscription';
-  const settings:Record<string,unknown>={model:'gpt-6-luna',model_provider:provider,model_catalog_json:cfg.catalogPath,check_for_update_on_startup:false,
+  const settings:Record<string,unknown>={model:selection?.model??'gpt-6-luna',model_provider:provider,model_catalog_json:cfg.catalogPath,check_for_update_on_startup:false,
    [`model_providers.${provider}.name`]:'Dialogues subscription',
    [`model_providers.${provider}.base_url`]:baseUrl,[`model_providers.${provider}.wire_api`]:'responses',
    [`model_providers.${provider}.requires_openai_auth`]:false,
@@ -70,5 +70,5 @@ export function createSubscriptionLuna(cfg:SubscriptionConfig){
    [`model_providers.${provider}.request_max_retries`]:0,[`model_providers.${provider}.stream_max_retries`]:0};
   const args=['app-server','--listen','stdio://'];for(const [key,item]of Object.entries(settings))args.push('-c',key+'='+toml(item));
   return new NativeSocket(cfg.binary,args,cfg.home,cfg.cwd,cfg.node?cfg.node.slice(0,cfg.node.lastIndexOf('/'))+':/usr/bin:/bin':'/usr/bin:/bin');
- });
+ },selection);
 }

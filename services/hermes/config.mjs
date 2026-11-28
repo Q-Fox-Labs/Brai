@@ -33,7 +33,8 @@ export function validateConfig(value, trustedOwnerId) {
   if(value.dialogues?.enabled!==false&&value.dialogues!==undefined){
     endpoint(value.dialogues);
     if(value.dialogues.enabled!==true||value.dialogues.userId!==value.ownerId||typeof value.dialogues.profileId!=='string'||!value.dialogues.profileId)invalid();
-    if(new URL(value.dialogues.url).pathname!=='/mcp')invalid();
+    const address=new URL(value.dialogues.url);
+    if(address.pathname!=='/mcp'&&(address.hostname!=='127.0.0.1'||address.pathname!=='/mcp/'+value.dialogues.userId))invalid();
   }
   if (!object(value.publisher) || typeof value.publisher.configPath !== 'string' || !isAbsolute(value.publisher.configPath) ||
     value.publisher.entrypoint !== undefined && (typeof value.publisher.entrypoint !== 'string' || !isAbsolute(value.publisher.entrypoint))) invalid();

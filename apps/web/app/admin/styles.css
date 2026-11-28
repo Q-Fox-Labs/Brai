@@ -54,3 +54,6 @@
 .admin-source-list button[aria-pressed="true"] { background: var(--accent); border-color: var(--foreground); }
 .admin-screen [role="alert"] { color: var(--destructive); }
 @media (max-width: 600px) { .admin-screen { padding: 24px 16px 100px; } }
+
+.welcome-chat-view { display: grid; grid-template-columns: minmax(11rem, 18rem) minmax(0, 1fr); min-height: 24rem; }
+@media (max-width: 45rem) { .welcome-chat-view { grid-template-columns: minmax(0, 1fr); } }

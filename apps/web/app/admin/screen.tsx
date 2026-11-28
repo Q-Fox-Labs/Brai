@@ -1,6 +1,7 @@
 "use client";
 // ABOUTME: Показывает управление пользователями и приглашениями администратора.
 // ABOUTME: Данные памяти и чатов запрашиваются только после выбора пользователя.
+import WelcomeSection from "./welcome";
 import { useEffect, useRef, useState } from "react";
 import WorkspaceFrame from "../shell/workspace-frame";
 import { AdminDetail } from "./detail";
@@ -35,7 +36,7 @@ async function call(operation: string, input: Record<string, string> = {}, write
 /** Управляет аккаунтами; выбранная цель всегда передаётся явно. */
 export default function AdminScreen({ userId, actorRole }: { userId: string; actorRole: "creator" | "admin" }) {
  const [users, setUsers] = useState<User[]>([]), [invites, setInvites] = useState<Invite[]>([]), [selected, setSelected] = useState<string | null>(null);
- const [section, setSection] = useState<"users" | "data" | "invites">("users");
+ const [section, setSection] = useState<"users" | "data" | "invites" | "welcome">("users");
  const [userFilter, setUserFilter] = useState<"all" | "available" | "revoked">("available");
  const [detail, setDetail] = useState<unknown>(null), [error, setError] = useState(""), [code, setCode] = useState("");
  const [telegramId, setTelegramId] = useState(""), [newUserRole, setNewUserRole] = useState<"user" | "guest">("user"), [inviteRole, setInviteRole] = useState<"user" | "guest">("user"), [requests, setRequests] = useState<RequestRecord[]>([]), [busy, setBusy] = useState(false);
@@ -117,7 +118,7 @@ export default function AdminScreen({ userId, actorRole }: { userId: string; act
  const rawPage = detail && typeof detail === "object" ? detail as { items?: { id?: string; artifactId?: string; title?: string; filename?: string; text?: string }[]; nextCursor?: string | null } : null;
  const chatCursor = view === "admin-chats-get" && detail && typeof detail === "object" && "nextCursor" in detail && typeof detail.nextCursor === "string" ? detail.nextCursor : null;
  const page = rawPage?.items ? { nextCursor: rawPage.nextCursor, items: rawPage.items.map(item => ({ ...item, id: item.id || item.artifactId || "", title: item.title || item.filename })) } : null;
- const visibleUsers = users.filter(user => user.id !== ARCHIVE_TARGET);
+ const visibleUsers = users.filter(user => user.id !== ARCHIVE_TARGET && String(user.role) !== "welcome");
  function userCard(user: User) { const contacts = user.telegramIds ?? (user.telegramId ? [user.telegramId] : []); return <article key={user.id} className="admin-user-card">
   <p><strong>{user.name || "Пользователь"}</strong> · Telegram: {contacts.length ? contacts.join(", ") : "нет подключённых аккаунтов"} · Профиль: {user.profileId ?? "—"}</p><p>Роль: {ROLE_NAMES[user.role]} · Статус: {userStatus(user)}</p>
   <div className="flex flex-wrap gap-3"><button type="button" onClick={() => { selection.current++; setSelected(user.id); setDetail(null); setSection("data"); }}>Открыть данные</button>
@@ -126,7 +127,8 @@ export default function AdminScreen({ userId, actorRole }: { userId: string; act
    {(user.role !== "creator" || actorRole === "creator") && user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Повторить подготовку</button>}
    {(user.role !== "creator" || actorRole === "creator") && user.lifecycle?.kind === "stop" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Повторить отзыв</button>}
    {(user.role !== "creator" || actorRole === "creator") && <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button>}</div></article>; }
- return <WorkspaceFrame section="admin" userId={userId} title={{ users: "Пользователи", data: "Данные", invites: "Приглашения" }[section]} railTitle="Админка" rail={<nav className="admin-section-nav" aria-label="Разделы админки"><button type="button" data-frame-close-rail aria-current={section === "users" ? "page" : undefined} onClick={() => setSection("users")}>Пользователи</button><button type="button" data-frame-close-rail aria-current={section === "data" ? "page" : undefined} onClick={() => setSection("data")}>Данные</button><button type="button" data-frame-close-rail aria-current={section === "invites" ? "page" : undefined} onClick={() => setSection("invites")}>Приглашения</button></nav>}><main className="admin-screen">
+ return <WorkspaceFrame section="admin" userId={userId} title={{ users: "Пользователи", data: "Данные", invites: "Приглашения", welcome: "Welcome" }[section]} railTitle="Админка" rail={<nav className="admin-section-nav" aria-label="Разделы админки"><button type="button" data-frame-close-rail aria-current={section === "users" ? "page" : undefined} onClick={() => setSection("users")}>Пользователи</button><button type="button" data-frame-close-rail aria-current={section === "data" ? "page" : undefined} onClick={() => setSection("data")}>Данные</button><button type="button" data-frame-close-rail aria-current={section === "invites" ? "page" : undefined} onClick={() => setSection("invites")}>Приглашения</button><button type="button" data-frame-close-rail aria-current={section === "welcome" ? "page" : undefined} onClick={() => setSection("welcome")}>Welcome</button></nav>}><main className="admin-screen">
+  {section === "welcome" && <WelcomeSection userId={userId} />}
   {error && <p role="alert">{error}</p>}
   {loadError && <p role="alert">{loadError}</p>}
   {accessError && <p role="alert">{accessError.message}</p>}

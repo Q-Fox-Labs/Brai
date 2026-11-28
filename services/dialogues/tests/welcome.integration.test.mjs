@@ -4,7 +4,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
-import {mkdtemp, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {promisify} from 'node:util';
@@ -15,6 +16,10 @@ import {bindOwner, migrateIsolation, verifyOwnerConnection} from '../dist/isolat
 import {migrate} from '../dist/migrate.js';
 import {startMcp} from '../dist/mcp.js';
 import {createStore} from '../dist/store.js';
+import {welcomeOwner} from '../dist/welcome-owner.js';
+import {createWelcome,dialogueId} from '../../welcome/src/service.mjs';
+import {authPort,dialoguesPort} from '../../welcome/src/ports.mjs';
+import {welcomeAdmin} from '../../welcome/src/admin.mjs';
 import {connectMcpEndpoint} from '../../hermes/runtime.mjs';
 
 const pg = process.env.WELCOME_FIXTURE_PG;
@@ -211,4 +216,85 @@ test('Welcome: два личных MCP, тот же владелец и исто
  assert.equal((await request('lifecycle-claim', {workerId: 'fixture', rolePolicyVersion: 1})).body.operation, null);
  await assert.rejects(welcomeB.list(), error => error.code === 403);
  assert.equal(await count('welcome_dialogues_b'), 2);
+
+ await root.query('CREATE DATABASE welcome_service_fixture');
+ const welcomeDb=sql(url('welcome_service_fixture','welcome_fixture_root'));
+ await welcomeDb.query(await readFile(new URL('../../welcome/migrations/001.sql',import.meta.url),'utf8'));
+ await welcomeDb.query('UPDATE welcome.settings SET enabled=true,request_limit=1 WHERE singleton');
+ const portProbe=createServer();
+ await new Promise(done=>portProbe.listen(0,'127.0.0.1',done));
+ const listenPort=portProbe.address().port;
+ await new Promise(done=>portProbe.close(done));
+ const publicOrigin='http://127.0.0.1:'+listenPort;
+ const grantToken='welcome-dialogues-fixture-grant-only-test';
+ const gateway=welcomeOwner({owner:dialoguesOwner,administrator:root,ownerRole:owner,
+  databaseURL:url('welcome_dialogues_fixture',owner),publicOrigin,grantToken,secret:'welcome-fixture-owner-only-secret',
+  authorize:async userId=>(await request('identity-get',{userId})).body.user
+ });
+ await new Promise((done,reject)=>gateway.server.once('error',reject).listen(listenPort,'127.0.0.1',done));
+ listeners.push(gateway);
+ const welcomeAuth=authPort({async request(topic,value){
+  const reply=await nc.request(topic,Buffer.from(JSON.stringify(value)),{timeout:3000});
+  if(reply.headers?.get('Nats-Service-Error-Code'))throw Error('fixture RPC rejected');
+  return JSON.parse(Buffer.from(reply.data).toString());
+ }});
+ const decisions={
+  'Тестовый вопрос':{action:'answer',text:'Ответ справочной для фикстуры',valid:false},
+  'Второй запрос':{action:'answer',text:'Превышение квоты',valid:false},
+  'Только текст':{action:'voice-off',text:'',valid:false},
+  'Хочу гостевой доступ':{action:'apply',text:'',valid:false},
+  '...':{action:'question',text:'Опишите занятие подробнее.',valid:false},
+  'Преподаю историю':{action:'question',text:'',valid:true},
+  'Подготовка учебных материалов':{action:'question',text:'',valid:true},
+  'Пришли реферальную ссылку':{action:'referral',text:'',valid:false}
+ };
+ const model={async respond({text}){assert.ok(decisions[text],text);return decisions[text];}};
+ const bridge=dialoguesPort({origin:publicOrigin,token:grantToken});
+ const service=createWelcome({pool:welcomeDb,auth:welcomeAuth,dialogues:bridge,model,botName:'fixture_welcome_bot'});
+ const operator=welcomeAdmin(welcomeDb,welcomeAuth,model);
+ const headers={origin,cookie};
+ const ingress={botId:'710100',telegramId:'710005',name:'Посетитель'};
+ let update=0;
+ const send=(text,kind='text',extra={})=>service.handle({...ingress,kind,text,updateId:String(++update),...extra});
+ assert.match((await send('прикрыли файлом','file')).text,/не принимает файлы/);
+ assert.equal(await welcomeAuth.resolve(ingress.telegramId),null);
+ assert.match((await send('/start')).text,/Привет/);
+ assert.equal((await send('Тестовый вопрос')).text,'Ответ справочной для фикстуры');
+ assert.match((await send('Второй запрос')).text,/лимит запросов исчерпан/i);
+ assert.equal((await send('Только текст')).voice,false);
+ const referral=(await send('Пришли реферальную ссылку')).text.split('start=')[1];
+ await send('/start '+referral,'text',{name:'Приглашённый',telegramId:'710006'});
+ assert.equal((await operator('visitors',{},headers)).items.find(row=>row.telegram_id==='710006').inviter_name,ingress.name);
+ assert.match((await send('Хочу гостевой доступ')).text,/Чем вы занимаетесь/);
+ assert.match((await send('...')).text,/Опишите занятие подробнее/);
+ assert.match((await send('Преподаю историю')).text,/Для чего/);
+ assert.equal((await send('Подготовка учебных материалов')).button,'submit');
+ assert.match((await send(null,'callback',{action:'submit'})).text,/Заявка отправлена/);
+ const application=(await operator('applications',{},headers)).items[0];
+ assert.equal(application.occupation,'Преподаю историю');
+ assert.equal(application.purpose,'Подготовка учебных материалов');
+ const before=await welcomeAuth.resolve(ingress.telegramId);
+ const fetchEndpoint=async()=>{
+  const response=await fetch(publicOrigin+'/endpoint',{method:'POST',headers:{authorization:'Bearer '+grantToken},
+   body:JSON.stringify({userId:before.id,profileId:before.profileId})});
+  assert.equal(response.status,200);
+  return response.json();
+ };
+ const exactEndpoint=await fetchEndpoint();
+ const decision=await operator('decision',{applicationId:application.id,decision:'approve'},headers);
+ const approved=(await request('lifecycle-claim',{workerId:'synthetic-hermes',rolePolicyVersion:1})).body.operation;
+ assert.equal(approved.id,decision.operation.id);
+ assert.equal((await request('lifecycle-complete',{operationId:approved.id,leaseToken:approved.leaseToken,success:true})).body.accepted,true);
+ const after=await welcomeAuth.resolve(ingress.telegramId);
+ assert.equal(after.id,before.id);
+ assert.equal(after.profileId,before.profileId);
+ assert.equal(after.role,'guest');
+ assert.equal(after.status,'active');
+ assert.deepEqual(await fetchEndpoint(),exactEndpoint);
+ assert.equal((await operator('applications',{},headers)).items[0].status,'approved');
+ assert.deepEqual(await send('Продолжим'),{pass:true});
+ const guestEndpoint=await client({...exactEndpoint,ownerId:before.id});
+ const continuity=await exchange(guestEndpoint,'input',{request_id:'welcome-native-guest-input',
+  dialogue:{id:dialogueId(ingress),channel:'telegram'},messages:[{id:'guest-first',text:'Продолжим'}]},'start');
+ assert.match(JSON.stringify(continuity.context),/Ответ справочной для фикстуры/);
 });
