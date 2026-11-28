@@ -1,5 +1,5 @@
 // ABOUTME: Проверяет фактическую immutable поставку ядра, а не только строку в descriptor.
-// ABOUTME: Использует публичный Codeworks CLI и isolated Python import без исходного дерева.
+// ABOUTME: Использует CLI сборки компонентов и isolated Python import без исходного дерева.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

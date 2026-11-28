@@ -17,11 +17,6 @@ else:
         raise RuntimeError('FILES_PORT_NOT_READY')
     if '_brai_identity_worker' in sys.modules:
         config = sys.modules['_brai_identity_worker'].call('files.configuration', {}, 30)
-    elif '_brai_codeworks_gateway' in sys.modules:
-        port = sys.modules.get('_brai_hermes_file_port')
-        if port is None:
-            raise RuntimeError('FILES_PORT_NOT_READY')
-        config = port.call('files.configuration', {}, 30)
     else:
         path = Path('__BRAI_FILES_CONFIG__')
         info = path.lstat()

@@ -47,7 +47,7 @@ Telegram не публикует токены кандидата финальн�
 
 ## Файлы изолированных пользователей Telegram
 
-В режиме `BRAI_IDENTITY_MODE=telegram` общий ingress загружает только `transport.py`. Он не создаёт FileStore, не читает прежнюю конфигурацию owner и не использует `_brai_hermes_file_port`. Transport сохраняет исходные message/attachment IDs, подписи и ключ альбома до native объединения. Неописанные файловые и агентские операции завершаются `FILES_OWNER_REQUIRED`.
+В режиме `BRAI_IDENTITY_MODE=telegram` общий ingress загружает только `transport.py`. Он не создаёт FileStore, не читает прежнюю конфигурацию owner. Transport сохраняет исходные message/attachment IDs, подписи и ключ альбома до native объединения. Неописанные файловые и агентские операции завершаются `FILES_OWNER_REQUIRED`.
 
 Личный worker устанавливает `_brai_identity_worker.call` до импорта движка. Bootstrap получает `files.configuration` через Unix broker. При наличии этого marker ни bootstrap, ни bridge не переходят к прежнему publisher. FileStore, SQLite, рабочая область, aliases и результаты находятся в собственном home. Broker определяет UID через SO_PEERCRED и повторно проверяет действующего пользователя Auth и registry. До активации профилю со статусом provisioning доступна только несекретная конфигурация его собственного home, сверенная с root-owned runtime mapping: это позволяет проверить startup до перевода в active. Остальные файловые операции, инструменты и память в provisioning закрыты; blocked/disabled не получают и bootstrap.
 

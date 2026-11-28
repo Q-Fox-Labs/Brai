@@ -25,7 +25,7 @@ from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
-from .welcome_telegram import dispatch as dispatch_welcome, dialogue_id as welcome_dialogue_id
+from .welcome_telegram import dispatch as dispatch_welcome, dialogue_id as welcome_dialogue_id, enabled as welcome_enabled
 from .ordinary_admission import disabled_command, group_chat_id, group_message, message_thread, start_command
 
 MAX_FRAME = 2 * 1024 * 1024
@@ -1250,7 +1250,7 @@ class Resolver:
             replacements = dict(zip(all_paths, mapped))
             data['media_urls'] = [replacements[p] for p in paths]
             data['identity_inputs'] = [{**item, 'path': replacements[item['path']]} for item in inputs]
-        if private:
+        if private and welcome_enabled():
             candidate = welcome_dialogue_id(self.adapter._bot.id, route)
             if candidate is not None:
                 data['welcome_dialogue_id'] = candidate

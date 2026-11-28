@@ -89,7 +89,7 @@ export function verifiedProof(root,roots) {
     const flags=readFileSync('/proc/self/fdinfo/3','utf8').match(/^flags:\s+([0-7]+)$/m);
     if(!info.isFile() || info.dev!==fixed.dev || info.ino!==fixed.ino || !flags || (parseInt(flags[1],8)&3)!==0)return null;
     const bytes=Buffer.alloc(info.size);if(readSync(3,bytes,0,bytes.length,0)!==bytes.length)return null;
-    const proof=JSON.parse(bytes.toString('utf8')),job=dirname(root),prepared=join(job,'repo/.git/codeworks-dependencies/prepared');
+    const proof=JSON.parse(bytes.toString('utf8')),job=dirname(root),prepared=join(job,'repo/.git/brai-dependencies/prepared');
     if(!proofSchema(proof) || !/^\/var\/lib\/brai-dev\/host-publisher\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/checkout$/.test(root) ||
        !roots.some(path=>realpathSync(path)===realpathSync(join(prepared,'node_modules'))) || !roots.every(path=>inside(prepared,realpathSync(path))) ||
        !readonlyMounts(['/publisher-proof/receipt.json',prepared,proof.root,'/usr/local/libexec/brai-dev-release/check-tools']) ||
@@ -107,7 +107,7 @@ export function cacheIdentity(root,component,dependencyRoots) {
     if(process.env.NODE_PATH||process.env.NODE_OPTIONS||Object.entries(process.env).some(([key,value])=>key.startsWith('LD_')&&value))return null;
     const proof=verifiedProof(root,dependencyRoots);if(!proof)return null;
     const generation=json(join(root,'node_modules/.brai-worktree.json')).dependencyRoot;
-    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?join(dirname(root),'repo/.git/codeworks-dependencies/prepared'):proof.root;
+    const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'?join(dirname(root),'repo/.git/brai-dependencies/prepared'):proof.root;
     if(generation!==expected)return null;
     const inventory=sealedInventory(root,lockInputs(root,component.npm?.workspaces??[],{development:true}),proof,generation);
     if(!inventory)return null;

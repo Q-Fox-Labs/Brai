@@ -24,6 +24,7 @@ import {connectMcpEndpoint} from '../../hermes/runtime.mjs';
 
 const pg = process.env.WELCOME_FIXTURE_PG;
 const nats = process.env.WELCOME_FIXTURE_NATS;
+const natsAuth = process.env.WELCOME_FIXTURE_NATS_AUTH;
 const secret = 'welcome-synthetic-fixture-only-1234';
 
 test('Welcome: два личных MCP, тот же владелец и история после активации гостя', {skip: !pg || !nats}, async t => {
@@ -50,16 +51,23 @@ test('Welcome: два личных MCP, тот же владелец и исто
   value.username = login;
   return value.href;
  };
- let nc;
+ let nc, authNc;
  t.after(async () => {
   await Promise.allSettled(clients.map(client => client.close()));
   await Promise.allSettled(listeners.map(listener => listener.close()));
   await Promise.allSettled(runtimes.map(runtime => runtime.stop()));
-  await nc?.close();
+  await Promise.allSettled([...new Set([nc, authNc])].filter(Boolean).map(connection=>connection.close()));
   await Promise.allSettled(pools.map(pool => pool.end()));
   await rm(folder, {recursive: true, force: true});
  });
  nc = await connect({servers: nats, maxReconnectAttempts: 0});
+ if(natsAuth){
+  const authAddress=new URL(natsAuth);
+  assert.equal(authAddress.hostname,broker.hostname);
+  assert.equal(authAddress.port,broker.port);
+  assert.equal(authAddress.protocol,broker.protocol);
+  authNc=await connect({servers:natsAuth,maxReconnectAttempts:0});
+ }else authNc=nc;
  const root = sql(pg);
  for (const role of ['welcome_auth_owner', 'welcome_auth_app', 'welcome_dialogues_owner', 'welcome_dialogues_a', 'welcome_dialogues_b']) {
   await root.query('CREATE ROLE ' + role + ' LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT');
@@ -83,9 +91,9 @@ test('Welcome: два личных MCP, тот же владелец и исто
  const auth = {identityMode: 'telegram', origin, trustedOrigins: [origin], secret};
  const engine = createAuth(auth, authApp);
  const startAuth = async config => {
-  const runtime = await runNats(nc, config, engine.handler, authApp);
+  const runtime = await runNats(authNc, config, engine.handler, authApp);
   runtimes.push(runtime);
-  await nc.flush();
+  await authNc.flush();
   return runtime;
  };
  const request = async (operation, value) => {

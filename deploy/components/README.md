@@ -102,8 +102,7 @@ CLI по умолчанию сравнивает с `refs/remotes/origin/dev`; �
 службу: фактическое отключение — отдельный reviewed rollout оператора.
 
 Описаны web, auth, timer, history, alerts, artifacts (включая MCP), game-core,
-transcription, local-ai, agent, providers, supabase-mcp и hermes. Codeworks и
-codeworks-agent имеют статус retired; прежние контроллеры не поставляются. Transcription сохраняет coordinator/helper/local/external как
+transcription, local-ai, agent, providers, supabase-mcp и hermes. Transcription сохраняет coordinator/helper/local/external как
 четыре executable одного владельца. Caddy, NATS, Temporal и Supabase — внешние
 зависимости оператора. Instaloader — рецепт внешней on-demand программы (type `library`): готовые файлы
 задают pinned OCI runtime requirement. First-party executable здесь отсутствует;

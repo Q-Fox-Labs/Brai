@@ -62,7 +62,7 @@ export function dependencyRoots(sourceRoot=root) {
   const source=realpathSync(marker.source),expected=realpathSync(dirname(common));
   if(source!==expected)fail('WEB_DEPENDENCY_SOURCE_INVALID');
   const generation=marker.dependencyRoot?realpathSync(marker.dependencyRoot):source;
-  if(generation!==source && !inside(join(common,'codeworks-dependencies'),generation) && !trustedHostGeneration(generation))fail('WEB_DEPENDENCY_ROOT_INVALID');
+  if(generation!==source && !inside(join(common,'brai-dependencies'),generation) && !trustedHostGeneration(generation))fail('WEB_DEPENDENCY_ROOT_INVALID');
   return [generation];
 }
 

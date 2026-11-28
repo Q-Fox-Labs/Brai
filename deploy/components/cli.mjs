@@ -94,7 +94,7 @@ function sealedDependencies(root,entries) {
     const proof=verifiedProof(root,[join(generation,'node_modules')]);
     if(!proof)return null;
     const expected=process.env.BRAI_PUBLISHER_PROOF_FD==='3'
-      ?join(dirname(root),'repo/.git/codeworks-dependencies/prepared'):proof.root;
+      ?join(dirname(root),'repo/.git/brai-dependencies/prepared'):proof.root;
     if(generation!==expected)return null;
     return sealedInventory(root,entries,proof,generation);
   } catch {return null;}
