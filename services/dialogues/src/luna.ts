@@ -32,7 +32,6 @@ export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<L
  let socket:LunaSocket|undefined,sequence=0,connection:Promise<void>|undefined,effort:string|undefined,ready=false;
  const pending=new Map<number,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout}>();
  const ownThreads=new Set<string>();let config:any;
- let catalog:{id:string;name:string;reasoning:string[]}[]=[];
  let busy=false;
  let active:{thread:string;items:Map<string,any>;complete:(turn:any)=>void;fail:(error:Error)=>void}|undefined;
  async function call(method:string,params:any,timeout=15000):Promise<any>{
@@ -69,13 +68,8 @@ export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<L
    await new Promise<void>((resolve,reject)=>{ws.once('open',resolve);ws.once('error',()=>reject(fault('LUNA_UNAVAILABLE')));});
    await call('initialize',{clientInfo:{name:'brai_dialogues_summary',version:'0.2.0'},capabilities:{experimentalApi:true}});
    ws.send(JSON.stringify({method:'initialized',params:{}}));
-   const models=await call('model/list',{});
-   const model=models.data?.find((m:any)=>m.model===modelId);
+   const models=await call('model/list',{}),model=models.data?.find((m:any)=>m.model===modelId);
    if(!model)throw fault('LUNA_NOT_AVAILABLE');
-   catalog=models.data.filter((item:any)=>typeof item.model==='string').map((item:any)=>({
-    id:item.model,name:item.displayName??item.model,
-    reasoning:(item.supportedReasoningEfforts??[]).map((level:any)=>level.reasoningEffort).filter(Boolean)
-   }));
    const supported=model.supportedReasoningEfforts?.map((x:any)=>x.reasoningEffort)??[];
    effort=(selection?[selection.reasoning]:['none','minimal','low','medium']).find(e=>supported.includes(e));if(!effort)throw fault('LUNA_EFFORT_UNSUPPORTED');
    config=(await call('config/read',{includeLayers:false})).config;ready=true;
@@ -144,7 +138,7 @@ export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<L
   if(!result.includes('37'))throw fault('LUNA_PROBE_FAILED');
   return {model:modelId,effort,completed:true};
  }
- return {run,probe,async catalog(){await connect();return catalog;},structured:(input:string,prompt:NativePrompt)=>runNative(input,{},async()=>{},prompt),
+ return {run,probe,structured:(input:string,prompt:NativePrompt)=>runNative(input,{},async()=>{},prompt),
   async close(){
    active?.fail(fault('LUNA_UNAVAILABLE'));
    const ws=socket;

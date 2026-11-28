@@ -1,7 +1,6 @@
 // ABOUTME: Запускает отдельный Codex для Luna с существующей подписочной авторизацией.
 // ABOUTME: Получает access через закрытый RPC, не копирует OAuth state и не вызывает Hermes.
 import {createConnection} from 'node:net';
-import {lstatSync} from 'node:fs';
 import {spawn,type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {StringDecoder} from 'node:string_decoder';
 import {EventEmitter} from 'node:events';
@@ -27,13 +26,17 @@ export async function credential(socketPath:string){
 /** Преобразует публичный stdio Codex в транспорт существующего Luna executor. */
 export class NativeSocket extends EventEmitter implements LunaSocket {
  readyState=0;private child:ChildProcessWithoutNullStreams;private buffer='';
+ private stopping:NodeJS.Timeout|undefined;
  constructor(binary:string,args:string[],home:string,cwd:string,path='/usr/bin:/bin'){
   super();
   const decoder=new StringDecoder('utf8');
   this.child=spawn(binary,args,{cwd,env:{HOME:home,CODEX_HOME:home+'/.codex',PATH:path},stdio:'pipe'});
   this.child.once('spawn',()=>{this.readyState=1;this.emit('open');});
   this.child.once('error',()=>{this.emit('error',new Error('LUNA_UNAVAILABLE'));});
-  this.child.once('close',()=>{this.readyState=3;this.emit('close');});
+  this.child.once('close',()=>{
+   if(this.stopping) clearTimeout(this.stopping);
+   this.readyState=3;this.emit('close');
+  });
   this.child.stderr.resume();
   this.child.stdin.on('error',()=>this.emit('error',new Error('LUNA_UNAVAILABLE')));
   this.child.stdout.on('error',()=>this.emit('error',new Error('LUNA_UNAVAILABLE')));
@@ -45,7 +48,13 @@ export class NativeSocket extends EventEmitter implements LunaSocket {
  /** Отправляет один native RPC без shell и диагностического echo. */
  send(value:string,callback?:(error?:Error)=>void){this.child.stdin.write(value+'\n',error=>callback?.(error??undefined));}
  /** Завершение транспорта подтверждается фактическим выходом дочернего процесса. */
- terminate(){if(this.readyState!==3){this.readyState=2;this.child.kill('SIGTERM');}}
+ terminate(){
+  if(this.readyState>=2)return;
+  this.readyState=2;
+  this.child.kill('SIGTERM');
+  // Use the same grace period as the App Server interrupt and unsubscribe RPCs.
+  this.stopping=setTimeout(()=>{if(this.readyState!==3)this.child.kill('SIGKILL');},5000).unref();
+ }
 }
 /** Каждый запрос использует актуальную связь аккаунта и отдельный временный native. */
 export function createSubscriptionLuna(cfg:SubscriptionConfig, selection?:{model:string;reasoning:string}){
@@ -72,18 +81,4 @@ export function createSubscriptionLuna(cfg:SubscriptionConfig, selection?:{model
   const args=['app-server','--listen','stdio://'];for(const [key,item]of Object.entries(settings))args.push('-c',key+'='+toml(item));
   return new NativeSocket(cfg.binary,args,cfg.home,cfg.cwd,cfg.node?cfg.node.slice(0,cfg.node.lastIndexOf('/'))+':/usr/bin:/bin':'/usr/bin:/bin');
  },selection);
-}
-
-
-/** Запускает свою подписочную сессию с закрытым HOME и без пользовательских настроек Codex. */
-export function createLocalSubscriptionLuna(cfg:{binary:string;home:string;cwd:string;node?:string},
- selection?:{model:string;reasoning:string}){
- for(const key of ['binary','home','cwd'] as const)
-  if(typeof cfg[key]!=='string'||!cfg[key].startsWith('/'))throw Error('INVALID_SUBSCRIPTION_CONFIG');
- if(cfg.cwd!==cfg.home)throw Error('INVALID_SUBSCRIPTION_HOME');
- if(lstatSync(cfg.home+'/.codex/config.toml',{throwIfNoEntry:false}))throw Error('INVALID_SUBSCRIPTION_CONFIG');
- const args=['app-server','--listen','stdio://','-c','cli_auth_credentials_store="file"',
-  '-c','check_for_update_on_startup=false'];
- const path=cfg.node?cfg.node.slice(0,cfg.node.lastIndexOf('/'))+':/usr/bin:/bin':'/usr/bin:/bin';
- return createLuna('',cfg.cwd,async()=>new NativeSocket(cfg.binary,args,cfg.home,cfg.cwd,path),selection);
 }

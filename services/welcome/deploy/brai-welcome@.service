@@ -9,6 +9,7 @@ Requires=brai-welcome-dialogues@%i.service
 [Service]
 User=brai-welcome-%i
 Group=brai-welcome-%i
+SupplementaryGroups=brai-welcome-ipc-%i
 WorkingDirectory=/var/lib/brai-welcome-%i
 Environment=WELCOME_CONFIG=/etc/brai-welcome/%i/runtime.json
 ExecStart=/usr/local/bin/node /opt/brai-welcome/%i/services/welcome/src/main.mjs

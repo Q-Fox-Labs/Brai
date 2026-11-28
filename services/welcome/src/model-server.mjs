@@ -1,14 +1,16 @@
 // ABOUTME: Владеет отдельной подписочной сессией Welcome и выполняет один inference за раз.
 // ABOUTME: Вход принимает только форму Welcome на Unix-сокете без команд и инструментов.
-import {chmod,readFile} from 'node:fs/promises';
+import {chmod,mkdir,readFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
-import {welcomeLocalModel} from './model.mjs';
+import {welcomeModel} from './model.mjs';
 import {readModelMessage} from './model-port.mjs';
 
 const config=JSON.parse(await readFile(process.env.WELCOME_MODEL_CONFIG,'utf8'));
 const location=config.socketPath;
 if(!/^\/run\/brai-welcome-model-[a-z0-9-]+\/model\.sock$/.test(location))throw Error('WELCOME_MODEL_SOCKET');
-const model=await welcomeLocalModel(config);
+if(config.mode==='socket')throw Error('WELCOME_MODEL_CONFIG');
+const model=await welcomeModel(config);
+await mkdir(config.home+'/.codex',{recursive:true,mode:0o700});
 let previous=Promise.resolve();
 const server=createServer(async(req,res)=>{
  try{
