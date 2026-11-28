@@ -14,6 +14,9 @@ TOOL_POLICY = json.loads(Path(__file__).with_name('tool-policy.json').read_text(
 
 MAX_FRAME = 2 * 1024 * 1024 + 65536
 TOPIC_RENAME = 'telegram_rename_current_topic'
+SYNTHESIS_TOOL = 'local_ai_invoke_synthesize'
+# AIDEV-NOTE: Local AI уже даёт синтезу 180 секунд; штатный command provider ждёт 200.
+SYNTHESIS_BROKER_TIMEOUT = 200
 DIALOGUES_RECEIPTS = {}
 
 
@@ -96,6 +99,26 @@ def broker_call(method, params, *, path=None, timeout=120):
             if isinstance(data, dict) else None)
         raise error
     return response['result']
+
+
+def synthesis_failure(error, operation, *, stage=None):
+    """Сохранить безопасную причину синтеза без текста и сетевых данных запроса."""
+    diagnostic = getattr(error, 'diagnostic', None)
+    reason = {
+        'result': 'INVALID_SYNTHESIS_RESULT', 'artifact_fetch': 'ARTIFACT_UNAVAILABLE',
+        'artifact_verify': 'INVALID_AUDIO_ARTIFACT', 'output': 'OUTPUT_UNAVAILABLE',
+    }.get(stage, 'OUTCOME_UNKNOWN')
+    if stage and isinstance(error, TimeoutError):
+        reason = 'DEADLINE_EXCEEDED'
+    if isinstance(diagnostic, dict):
+        candidate = diagnostic.get('reason', '')
+        if isinstance(candidate, str) and re.fullmatch('[A-Z][A-Z_]{1,63}', candidate):
+            reason = candidate
+        if stage is None and diagnostic.get('stage') == 'control':
+            stage = 'control'
+    details = {'code': reason, 'stage': stage or 'broker', 'operationId': operation}
+    print(json.dumps({'event': 'identity_synthesis_failed', **details}), file=sys.stderr)
+    return details
 
 
 def handle(method, params):
@@ -257,6 +280,16 @@ def handle(method, params):
             if not isinstance(result, dict) or not isinstance(result.get('markdown'), str) or not result['markdown']:
                 raise RuntimeError('Invalid artifact receipt')
             return {'content':[{'type':'text', 'text':result['markdown']}], 'structuredContent':result}
+        if name == SYNTHESIS_TOOL:
+            operation = str(uuid.uuid4())
+            try:
+                arguments = {**arguments, 'operationId': operation}
+                result = broker_call('tools.call', {'name': name, 'args': arguments},
+                                     timeout=SYNTHESIS_BROKER_TIMEOUT)
+            except (ConnectionError, TimeoutError) as error:
+                details = synthesis_failure(error, operation)
+                return {'isError': True, 'content': [{'type': 'text', 'text': json.dumps(details)}]}
+            return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]}
         thread, arguments = dialogues_call_scope(name, arguments)
         try:
             result = broker_call('tools.call', {'name': name, 'args': arguments})

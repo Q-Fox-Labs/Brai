@@ -132,9 +132,10 @@ class FileStore:
         finally:
             os.close(directory)
 
-    def reply_mode(self, source):
+    def reply_mode(self, source, *, experiment=False):
         """Вернуть сохранённый режим конкретного участника, чата и темы."""
-        name = 'reply-mode-' + key(source) + '.json'
+        prefix = 'reply-mode-video-default-' if experiment else 'reply-mode-'
+        name = prefix + key(source) + '.json'
         with self._reply_directory() as directory:
             try:
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
@@ -155,12 +156,15 @@ class FileStore:
             raise FileError('INVALID_REPLY_MODE')
         return value['mode']
 
-    def set_reply_mode(self, source, mode):
+    def set_reply_mode(self, source, mode, *, experiment=False):
         """Сохранить подтверждённый формат ответа для одного источника."""
         if mode not in ('voice', 'video_note', 'off'):
             raise FileError('INVALID_REPLY_MODE')
         identity = key(source)
-        target = 'reply-mode-' + identity + '.json'
+        # AIDEV-NOTE: Прежнее имя сохраняет состояние для отката. Новый выбор
+        # действует после включения эксперимента, в том числе после его повторного выпуска.
+        prefix = 'reply-mode-video-default-' if experiment else 'reply-mode-'
+        target = prefix + identity + '.json'
         temporary = '.reply-mode-' + uuid.uuid4().hex
         with self._reply_directory() as directory:
             lock_name = 'lock-' + key(['reply-mode', identity])

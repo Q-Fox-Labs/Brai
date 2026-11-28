@@ -170,7 +170,15 @@ export async function connectPorts(config) {
         if (data.length > MAX_REQUEST_BYTES) throw fault('REQUEST_TOO_LARGE');
         const connection = await natsConnection();
         signal?.throwIfAborted();
-        const reply = await connection.request(subject, data, { timeout: requestTimeout });
+        let reply;
+        try {
+          reply = await connection.request(subject, data, { timeout: requestTimeout });
+        } catch (error) {
+          if (subject === 'brai.local_ai.v1.invoke.synthesize' && uncertain(error)) {
+            throw fault('OUTCOME_UNKNOWN', { operationId: payload.operationId, requestId: payload.requestId });
+          }
+          throw error;
+        }
         signal?.throwIfAborted();
         const code = reply.headers?.get(ServiceErrorHeader), status = reply.headers?.get(ServiceErrorCodeHeader);
         if (Boolean(code) !== Boolean(status) || status && !/^[45][0-9]{2}$/.test(status)) throw fault('INVALID_UPSTREAM_RESPONSE');
@@ -271,9 +279,12 @@ export async function createBraiTools(config, ports) {
     filesConfiguration: () => fileConfiguration(config, fault),
     /** Один вызов Local AI с доверенной моделью и сроком от часов моста. */
     async synthesizeVoice(args, signal) {
-      if (!validateVoiceInput(args) || !config.tts?.model) throw fault('INVALID_ARGUMENT');
-      return this.call('local_ai_invoke_synthesize', { requestId: randomUUID(), operationId: randomUUID(),
-        model: config.tts.model, deadlineAt: new Date(Date.now() + 180_000).toISOString(), text: args.text, voice: 'eugene' }, signal);
+      if (!object(args)) throw fault('INVALID_ARGUMENT');
+      const { operationId = randomUUID(), ...input } = args;
+      if (!validateVoiceInput(input) || !config.tts?.model || typeof operationId !== 'string'
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(operationId)) throw fault('INVALID_ARGUMENT');
+      return this.call('local_ai_invoke_synthesize', { requestId: randomUUID(), operationId,
+        model: config.tts.model, deadlineAt: new Date(Date.now() + 180_000).toISOString(), text: input.text, voice: 'eugene' }, signal);
     },
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {

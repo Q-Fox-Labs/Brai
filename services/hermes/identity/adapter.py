@@ -89,9 +89,10 @@ def make_adapter(config, platform, peer, publish_file):
             self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
         def _wants_auto_tts(self, event, *args, **kwargs):
-            # Native voice-input fallback must not send a voice bubble in a video-note or text-only mode.
+            # Experimental replies already use the bounded speech route in final_text.
             import brai_files
-            if brai_files.reply_mode_for_event(event) in ('video_note', 'off'):
+            from files.native import _voice_experiment
+            if _voice_experiment() or brai_files.reply_mode_for_event(event) in ('video_note', 'off'):
                 return False
             return super()._wants_auto_tts(event, *args, **kwargs)
 

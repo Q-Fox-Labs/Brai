@@ -47,7 +47,10 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
       const args = request.params.arguments ?? {};
       let value;
       if (request.params.name === renameTopic.name) value = await renameCurrentTopic(renameSocket, args._topicTicket, extra.signal);
-      else if (request.params.name === 'local_ai_invoke_synthesize') value = await runtime.synthesizeVoice(args, extra.signal);
+      else if (request.params.name === 'local_ai_invoke_synthesize') {
+        if (Object.hasOwn(args, 'operationId')) throw fault('INVALID_ARGUMENT');
+        value = await runtime.synthesizeVoice(args, extra.signal);
+      }
       else value = await runtime.call(request.params.name, args, extra.signal);
       if(['dialogues_exchange','dialogues_context_ack'].includes(request.params.name)&&Array.isArray(value?.content))return value;
       return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
