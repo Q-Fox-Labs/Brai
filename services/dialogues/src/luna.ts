@@ -145,5 +145,9 @@ export function createLuna(socketUrl:string,cwd:string,openSocket?:()=>Promise<L
   return {model:modelId,effort,completed:true};
  }
  return {run,probe,async catalog(){await connect();return catalog;},structured:(input:string,prompt:NativePrompt)=>runNative(input,{},async()=>{},prompt),
-  async close(){active?.fail(fault('LUNA_UNAVAILABLE'));socket?.terminate();}};
+  async close(){
+   active?.fail(fault('LUNA_UNAVAILABLE'));
+   const ws=socket;
+   if(ws&&ws.readyState!==WebSocket.CLOSED)await new Promise<void>(resolve=>{ws.once('close',resolve);ws.terminate();});
+  }};
 }

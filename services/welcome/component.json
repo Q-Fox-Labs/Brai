@@ -4,7 +4,7 @@
   "type": "program",
   "status": "active",
   "environments": ["dev", "prod"],
-  "executableSources": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/welcome/src/probe.mjs"],
+  "executableSources": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/welcome/src/probe.mjs", "services/welcome/src/model-server.mjs"],
   "inputs": {
     "build": [],
     "runtime": ["services/welcome/package.json", "services/welcome/src/*", "services/welcome/migrations/*.sql", "services/welcome/deploy/*.service", "services/welcome/CONTRACT.md"],
@@ -22,12 +22,12 @@
   "delivery": {
     "kind": "ready-files",
     "files": ["services/welcome/package.json", "services/welcome/src", "services/welcome/migrations", "services/welcome/deploy"],
-    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/welcome/src/probe.mjs", "services/dialogues/dist/welcome-entry.js"],
+    "entrypoints": ["services/welcome/src/main.mjs", "services/welcome/src/migrate.mjs", "services/welcome/src/probe.mjs", "services/welcome/src/model-server.mjs", "services/dialogues/dist/welcome-entry.js"],
     "smokeImports": ["services/welcome/src/model.mjs", "services/dialogues/dist/welcome-owner.js"],
     "systemRequirements": ["Node.js 24.22.1", "systemd", "ffprobe", "Codex App Server"]
   },
   "deploy": {
-    "units": ["brai-welcome@.service", "brai-welcome-dialogues@.service"],
+    "units": ["brai-welcome@.service", "brai-welcome-dialogues@.service", "brai-welcome-model@.service"],
     "migrations": ["services/welcome/migrations"],
     "health": "GET /health"
   },
