@@ -1,6 +1,6 @@
 // ABOUTME: Получает готовые media из Artifacts и публикует готовое аудио синтеза владельцу.
 // ABOUTME: Проверяет владельца, доверенный origin и байты; удаляет только свои temp-файлы.
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { open, mkdtemp, rm } from 'node:fs/promises';
 import { join, isAbsolute } from 'node:path';
 import type { NatsConnection } from 'nats';
@@ -347,7 +347,8 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
     if (!(input.audio instanceof Uint8Array) || input.mimeType !== 'audio/ogg' || input.audio.byteLength < 1) fail('INVALID_ARGUMENT');
     if (input.audio.byteLength > 64 * 1024 * 1024) fail('RESULT_TOO_LARGE');
     assertActive(context);
-    const requestId = `local_ai:synthesize:${randomUUID()}`;
+    const operationKey = createHash('sha256').update(JSON.stringify([context.ownerId, context.operationId])).digest('hex');
+    const requestId = `local_ai:synthesize:${operationKey}`;
     let prepared: unknown;
     try {
       const reply = await waitForOperation(config.nats.request('brai.artifacts.v1.prepare', Buffer.from(JSON.stringify({
@@ -363,7 +364,19 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
     if (!record(prepared) || !record(prepared.artifact) || typeof prepared.uploadUrl !== 'string') fail('DEPENDENCY_UNAVAILABLE');
     const artifact = prepared.artifact;
     if (typeof artifact.artifactId !== 'string' || !UUID.test(artifact.artifactId) || artifact.ownerId !== context.ownerId
-      || artifact.requestId !== requestId || artifact.status !== 'pending' || artifact.mimeType !== 'audio/ogg') fail('DEPENDENCY_UNAVAILABLE');
+      || artifact.requestId !== requestId || artifact.mimeType !== 'audio/ogg') fail('DEPENDENCY_UNAVAILABLE');
+    const artifactId = artifact.artifactId;
+    const hash = createHash('sha256').update(input.audio).digest('hex');
+    async function verifyReady() {
+      const ready = await getArtifact(config.nats, artifactId, context);
+      if (ready.artifactId.toLowerCase() !== artifactId.toLowerCase() || ready.ownerId !== context.ownerId
+        || ready.status !== 'ready' || ready.mimeType !== 'audio/ogg' || ready.sizeBytes !== input.audio.byteLength
+        || ready.sha256?.toLowerCase() !== hash) fail('DEPENDENCY_UNAVAILABLE');
+      assertActive(context);
+      return { artifactId: ready.artifactId };
+    }
+    if (artifact.status === 'ready') return verifyReady();
+    if (artifact.status !== 'pending') fail('DEPENDENCY_UNAVAILABLE');
     let url: URL;
     try { url = new URL(prepared.uploadUrl); } catch { fail('DEPENDENCY_UNAVAILABLE'); }
     if (url.origin !== uploadBase.origin || url.username || url.password || url.search || url.hash
@@ -375,20 +388,19 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
     try {
       response = await fetch(url, { method: 'PUT', redirect: 'manual', signal: AbortSignal.any([context.signal, deadline]),
         headers: { 'content-type': 'audio/ogg' }, body: Buffer.from(input.audio) });
-    } catch { fail(cancellationCode(context) ?? (deadline.aborted ? 'DEADLINE_EXCEEDED' : 'DEPENDENCY_UNAVAILABLE')); }
+    } catch {
+      assertActive(context);
+      // The server may have committed before the connection ended. Read its receipt; never resend the PUT here.
+      return verifyReady();
+    }
     try {
       assertActive(context);
-      const hash = createHash('sha256').update(input.audio).digest('hex');
+      if (response.status === 409) return await verifyReady();
       if (response.status !== 201 || response.headers.get('x-artifact-state') !== 'ready'
-        || response.headers.get('x-artifact-id')?.toLowerCase() !== artifact.artifactId.toLowerCase()
+        || response.headers.get('x-artifact-id')?.toLowerCase() !== artifactId.toLowerCase()
         || response.headers.get('x-artifact-size') !== String(input.audio.byteLength)
         || response.headers.get('x-artifact-sha256')?.toLowerCase() !== hash) fail('DEPENDENCY_UNAVAILABLE');
-      const ready = await getArtifact(config.nats, artifact.artifactId, context);
-      if (ready.artifactId.toLowerCase() !== artifact.artifactId.toLowerCase() || ready.ownerId !== context.ownerId
-        || ready.status !== 'ready' || ready.mimeType !== 'audio/ogg' || ready.sizeBytes !== input.audio.byteLength
-        || ready.sha256?.toLowerCase() !== hash) fail('DEPENDENCY_UNAVAILABLE');
-      assertActive(context);
-      return { artifactId: ready.artifactId };
+      return await verifyReady();
     } finally { await response.body?.cancel().catch(() => undefined); }
   }
 
