@@ -130,14 +130,16 @@ export function createWelcome(ports) {
   /** Обрабатывает подтверждённый приватный update. Данные владельца поступают только из Auth. */
   async handle(event){
    const settings=(await pool.query('SELECT * FROM welcome.settings WHERE singleton')).rows[0];
-   if(!settings.enabled) return answer(DISABLED,false);
+   if(!settings.enabled && event.kind!=='pending') return answer(DISABLED,false);
    if(event.kind==='file') return answer(REJECT_FILE,false);
    if(event.kind==='audio' && (!Number.isFinite(event.duration)||event.duration<=0||event.duration>600)) return answer(REJECT_AUDIO,false);
    const existing=await auth.resolve(event.telegramId);
    if(existing?.role==='guest'&&existing.status==='provisioning'){
     const application=await pool.query(`SELECT 1 FROM welcome.applications WHERE user_id=$1 AND status='approving'`,[existing.id]);
-    if(application.rowCount) return answer('Гостевой профиль ещё готовится. Напишите чуть позже.',false);
+    if(application.rowCount) return answer(settings.enabled ?
+     'Гостевой профиль ещё готовится. Напишите чуть позже.' : DISABLED,false);
    }
+   if(event.kind==='pending') return {pass:true};
    if(existing && (existing.role!=='welcome'||existing.status!=='provisioning')) return {pass:true};
    const identity=existing??await auth.register({requestId:origin(event,'register'),telegramId:event.telegramId,name:event.name});
    if(identity.role!=='welcome'||identity.status!=='provisioning') return {pass:true};

@@ -62,7 +62,7 @@ def filtered_payload(update, payload, snapshot):
     return result
 
 
-async def dispatch(update, adapter, reply):
+async def dispatch(update, adapter, reply, *, pending_guest=False):
     """Ответить через исходный Telegram bot только для личного update Welcome."""
     if not enabled():
         return False
@@ -79,9 +79,13 @@ async def dispatch(update, adapter, reply):
     raw_duration = getattr(incoming_audio, 'duration', None)
     duration = raw_duration.total_seconds() if hasattr(raw_duration, 'total_seconds') else raw_duration
     kind = 'callback' if query is not None else 'text' if text is not None else 'audio' if incoming_audio else 'file'
+    if pending_guest:
+        kind = 'pending'
     event = {'kind': kind, 'botId': str(adapter._bot.id), 'updateId': str(update.update_id),
-             'telegramId': str(user.id), 'name': str(getattr(user, 'full_name', None) or 'Посетитель')[:200],
-             'username': getattr(user, 'username', None)}
+             'telegramId': str(user.id), 'name': ''}
+    if not pending_guest:
+        event['name'] = str(getattr(user, 'full_name', None) or 'Посетитель')[:200]
+        event['username'] = getattr(user, 'username', None)
     target_thread = message_thread(chat, message)
     thread = int(target_thread) if target_thread else None
     if thread is not None:

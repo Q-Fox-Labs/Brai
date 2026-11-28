@@ -164,12 +164,14 @@ async def admit_update(update, adapter):
     resolver = _resolvers.get(id(adapter))
     mirror = getattr(resolver, 'mirror', None)
     snapshot = mirror.snapshot(f'{adapter._bot.id}:{update.update_id}') if mirror is not None else None
+    pending_guest = False
     if snapshot is not None and snapshot.get('state') in ('outside', 'forbidden'):
         return False
     if snapshot is not None:
         try:
             latest = await broker_call('ingress.resolve-known', {'telegramId': telegram}, timeout=None)
             same = isinstance(latest, dict) and latest.get('state') == snapshot.get('state')
+            pending_guest = same and latest.get('welcomePending') is True
             if same and snapshot.get('state') == 'known':
                 before, after = snapshot['profile'], latest.get('profile')
                 same = isinstance(after, dict) and all(before.get(key) == after.get(key)
@@ -194,7 +196,20 @@ async def admit_update(update, adapter):
                 except Exception:
                     pass
                 snapshot['state'] = 'binding_unknown'
+            elif private and snapshot.get('state') == 'unregistered' and welcome_enabled():
+                snapshot['state'] = 'outcome_unknown'
+                await _notice(adapter, telegram, message, 'Не удалось проверить доступ. Отправьте сообщение ещё раз.')
             return False
+    if pending_guest:
+        if private and welcome_enabled():
+            try:
+                handled = await dispatch_welcome(update, adapter, _control_reply, pending_guest=True)
+                if not handled:
+                    await _notice(adapter, telegram, message, 'Состояние доступа изменилось. Отправьте сообщение ещё раз.')
+            except Exception:
+                snapshot['state'] = 'outcome_unknown'
+                await _control_reply(adapter, telegram, message, 'Справочная временно недоступна. Попробуйте позже.')
+        return False
     raw = (getattr(message, 'text', '') or '').strip()
     link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
     if link:
@@ -1630,13 +1645,27 @@ class Resolver:
 
     async def interactive_admit(self, update):
         """Guard не отправляет callback в общий native gateway."""
-        callback=getattr(update, 'callback_query', None)
-        if getattr(callback, 'data', None)=='welcome.submit':
-            original=self.mirror.snapshot(f'{self.adapter._bot.id}:{update.update_id}') if self.mirror is not None else None
-            if original and original.get('state')=='unregistered':
-                if await dispatch_welcome(update,self.adapter,_control_reply):
-                    await self.mirror.handled(update)
-                    return False
+        if self.mirror is not None:
+            bot_id = self.adapter._bot.id
+            snapshot = self.mirror.snapshot(f'{bot_id}:{update.update_id}')
+            if snapshot.get('state') == 'unregistered':
+                callback = getattr(update, 'callback_query', None)
+                user = getattr(update, 'effective_user', None)
+                try:
+                    if welcome_enabled() and getattr(callback, 'data', None) == 'welcome.submit':
+                        latest = await broker_call('ingress.resolve-known', {'telegramId':str(user.id)}, timeout=None)
+                        if latest['state'] != 'unregistered':
+                            if self.mirror.transport is not None:
+                                await asyncio.to_thread(self.mirror.transport.transition, bot_id, update.update_id,
+                                                        'handing_off', 'blocked')
+                            snapshot['state'] = 'binding_changed'
+                            return False
+                        await dispatch_welcome(update, self.adapter, _control_reply,
+                                               pending_guest=latest.get('welcomePending') is True)
+                except Exception:
+                    snapshot['state'] = 'outcome_unknown'
+                await self.mirror.handled(update)
+                return False
         await self.interactive_binding(update)
         return True
 

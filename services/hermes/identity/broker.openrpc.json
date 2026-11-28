@@ -192,7 +192,7 @@
         {"name": "telegramId", "required": true, "schema": {"type": "string", "pattern": "^[0-9]+$"}}
       ],
       "result": {"name": "result", "schema": {"type": "object", "required": ["state"],
-        "properties": {"state": {"enum": ["known", "unregistered", "forbidden"]}, "profile": {"type": "object"}}}}
+        "properties": {"state": {"enum": ["known", "unregistered", "forbidden"]}, "welcomePending": {"type": "boolean"}, "profile": {"type": "object"}}}}
     },
     {
       "name": "identity.resolve",

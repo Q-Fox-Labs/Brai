@@ -338,6 +338,9 @@ test('Welcome: два личных MCP, тот же владелец и исто
  };
  const exactEndpoint=await fetchEndpoint();
  const decision=await operator('decision',{applicationId:application.id,decision:'approve'},headers);
+ const beforeActivation=await send(null,'pending');
+ assert.match(beforeActivation.text,/Гостевой профиль ещё готовится/);
+ assert.deepEqual(await send(null,'pending',{telegramId:'710999'}),{pass:true});
  const approved=(await request('lifecycle-claim',{workerId:'synthetic-hermes',rolePolicyVersion:1})).body.operation;
  assert.equal(approved.id,decision.operation.id);
  assert.equal((await request('lifecycle-complete',{operationId:approved.id,leaseToken:approved.leaseToken,success:true})).body.accepted,true);
@@ -348,6 +351,7 @@ test('Welcome: два личных MCP, тот же владелец и исто
  assert.equal(after.status,'active');
  assert.deepEqual(await fetchEndpoint(),exactEndpoint);
  assert.equal((await operator('applications',{},headers)).items[0].status,'approved');
+ assert.deepEqual(await send(null,'pending'),{pass:true});
  assert.deepEqual(await send('Продолжим'),{pass:true});
  const guestEndpoint=await client({...exactEndpoint,ownerId:before.id});
  const continuity=await exchange(guestEndpoint,'input',{request_id:'welcome-native-guest-input',

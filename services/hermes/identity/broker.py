@@ -362,7 +362,11 @@ class Broker:
             return {'state': 'unregistered'}
         if user['status'] != 'active':
             from .welcome_telegram import welcome_user
-            return {'state': 'unregistered' if welcome_user(user) else 'forbidden'}
+            if welcome_user(user):
+                return {'state': 'unregistered'}
+            if user.get('role') == 'guest' and user['status'] == 'provisioning':
+                return {'state': 'unregistered', 'welcomePending': True}
+            return {'state': 'forbidden'}
         matches = [(uid, profile) for uid, profile in self.profiles().items()
                    if profile['userId'] == user['id'] and profile['profileId'] == user['profileId']
                    and str(profile['telegramId']) == user['telegramId'] and profile['status'] == 'active']

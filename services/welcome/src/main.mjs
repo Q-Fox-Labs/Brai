@@ -25,7 +25,7 @@ const admin=welcomeAdmin(pool,auth,model);
 const telegram=/^[1-9][0-9]{0,19}$/u;
 
 function validEvent(body){
- return ['text','file','audio','callback'].includes(body?.kind)
+ return ['text','file','audio','callback','pending'].includes(body?.kind)
   && [body.botId,body.telegramId].every(id=>typeof id==='string'&&telegram.test(id))
   && typeof body.updateId==='string'&&/^[0-9]+$/.test(body.updateId)
   && (body.threadId===undefined||telegram.test(body.threadId))
