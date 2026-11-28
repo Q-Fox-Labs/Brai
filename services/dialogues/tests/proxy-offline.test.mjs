@@ -19,7 +19,9 @@ test('offline startup retains tools; the next call reconnects without restarting
   await client.connect(transport);
   assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['dialogues_exchange','dialogues_context_ack']);
   const down=await client.callTool({name:'dialogues_exchange',arguments:{}});
-  assert.equal(down.isError,true);assert.equal(JSON.parse(down.content[0].text).applied,false);
+  const failure=JSON.parse(down.content[0].text);
+  assert.equal(down.isError,true);assert.equal(failure.applied,false);
+  assert.match(failure.next_action,/не сообщай пользователю внутренние подробности/i);
   assert.equal((await client.listTools()).tools.length,2);
   // A genuine listener response proves recovery, even though this deliberately invalid request is rejected.
   server=await startMcp({}, {host:'127.0.0.1',port,owner:'test',hosts:[`127.0.0.1:${port}`],origins:['http://127.0.0.1'],token});

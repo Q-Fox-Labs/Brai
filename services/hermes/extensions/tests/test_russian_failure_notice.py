@@ -70,18 +70,20 @@ class FailureNoticeTest(unittest.TestCase):
                 self.assertNotIn('Исходное сообщение', text)
                 self.assertNotIn(self.notice._UNKNOWN, text)
 
-    def test_typed_interrupted_request_keeps_cause_instead_of_unknown(self):
+    def test_typed_interrupted_request_keeps_cause_in_log_not_in_reply(self):
         for code in ('stream_drop', 'timeout', 'retry_limit'):
-            text = self.render('unknown', result={'brai_failure_kind': code,
-                               'brai_original_error': 'TurnRequestBudgetExhausted: partial_emitted'})
-            self.assertIn(f'Код: `{code}`', text)
+            with self.subTest(code=code), self.assertLogs(self.log, 'WARNING') as records:
+                text = self.render('unknown', result={'brai_failure_kind': code,
+                                   'brai_original_error': 'TurnRequestBudgetExhausted: partial_emitted'})
+            self.assertIn('code=' + code, records.output[0])
+            self.assertNotIn(code, text)
             self.assertNotIn(self.notice._UNKNOWN, text)
 
-    def test_retry_exhaustion_and_unknown_offer_continue_without_claiming_cause(self):
+    def test_retry_exhaustion_and_unknown_offer_plain_next_step(self):
         text = self.render('unknown', result={'brai_failure_kind': 'retry_limit'})
-        self.assertIn('Код: `retry_limit`', text)
-        self.assertIn('Если работа не возобновилась, напишите «Продолжай»', text)
-        self.assertIn('напишите «Продолжай»', self.render('unknown'))
+        self.assertIn('Попробуйте продолжить позже', text)
+        self.assertNotIn('retry_limit', text)
+        self.assertIn('Причина пока неизвестна', self.render('unknown'))
 
     def test_native_service_messages_are_russian_and_keep_old_history(self):
         import os
@@ -182,10 +184,16 @@ class FailureNoticeTest(unittest.TestCase):
         english = yaml.safe_load((directory / 'en.yaml').read_text())['gateway']
         russian = yaml.safe_load((directory / 'ru.yaml').read_text())['gateway']
         self.assertIn('Не удалось получить ответ', russian['errors']['unexpected_silence'])
-        for value in russian['errors'].values():
+        self.assertIn('Не удалось обработать сообщение', russian['errors']['no_credentials'])
+        self.assertNotIn('сервис ИИ', russian['errors']['no_credentials'])
+        self.assertNotIn('Проверьте подключение', russian['errors']['no_credentials'])
+        for key, value in russian['errors'].items():
             if isinstance(value, str):
                 for command in ('/retry', '/model', '/new', '/compress', '/login'):
                     self.assertNotIn(command, value)
+                if key != 'empty_response_model_label':
+                    self.assertNotIn('сервис ИИ', value)
+                    self.assertNotIn('модел', value.lower())
         def check(en, ru, path='gateway'):
             for key, value in en.items():
                 self.assertIn(key, ru, f'{path}.{key}')
@@ -411,13 +419,13 @@ class FailureNoticeTest(unittest.TestCase):
         notice = scope['provider_failure_notice']('Проверка', 'job', 'rate_limit',
             backup_provider_phrase='Резервный сервис не настроен.')
         self.assertIn('Проверка', notice)
-        self.assertIn('сервис ИИ временно ограничил доступ', notice)
-        self.assertIn('по расписанию', notice)
+        self.assertIn('не выполнена', notice)
+        self.assertNotIn('сервис ИИ', notice)
         self.assertNotIn('hermes cron', notice)
         self.assertNotIn('RAW', scope['generic_failure_notice']('Проверка', 'job', 'RAW ERROR'))
-        self.assertIn('не настроен доступ к сервису ИИ', scope['blocked_config_notice'](
+        self.assertIn('не удалось получить доступ', scope['blocked_config_notice'](
             'Проверка', 'provider credential missing: test'))
-        self.assertIn('не настроен канал доставки', scope['blocked_config_notice'](
+        self.assertIn('нет возможности доставить результат', scope['blocked_config_notice'](
             'Проверка', 'delivery platform is unavailable'))
         hold_scope = {'Any': Any, 'Optional': Optional, '_window_end': lambda seconds: 'end',
                       'safe_strftime': lambda date, fmt: '10:00 UTC'}
@@ -549,36 +557,45 @@ class FailureNoticeTest(unittest.TestCase):
         prepare = scope['_prepare_gateway_status_message']
         module = types.SimpleNamespace(DiagnosticText=DiagnosticText)
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING') as logs:
-            self.assertIn('пустой ответ', prepare('telegram', 'warn', DiagnosticText('Empty response from model SECRET')))
-            self.assertIn('причина отказа не подтверждена', prepare('telegram', 'warn', DiagnosticText('Billing unverified by provider')))
-            self.assertIn('причина отказа не подтверждена', prepare('telegram', 'warn', DiagnosticText('Billing unverified; possible content filter rejection')))
+            self.assertIn('Не удалось получить ответ', prepare('telegram', 'warn', DiagnosticText('Empty response from model SECRET')))
+            self.assertIn('причина неизвестна', prepare('telegram', 'warn', DiagnosticText('Billing unverified by provider')))
+            self.assertIn('причина неизвестна', prepare('telegram', 'warn', DiagnosticText('Billing unverified; possible content filter rejection')))
             self.assertIn('$0.42', prepare('telegram', 'warn', DiagnosticText('Estimated cost of these attempts: ~$0.42')))
-            self.assertIn('Подробности сохранены в журнале', prepare('telegram', 'warn', DiagnosticText('A new unexpected diagnostic')))
-            self.assertIn('пустой ответ', prepare('telegram', 'warn', 'Empty response from model'))
-            self.assertIn('Служебное уведомление', prepare('telegram', 'lifecycle', 'A new runtime status'))
+            self.assertIn('Не удалось выполнить запрос', prepare('telegram', 'warn', DiagnosticText('A new unexpected diagnostic')))
+            self.assertIn('Не удалось получить ответ', prepare('telegram', 'warn', 'Empty response from model'))
         self.assertNotIn('SECRET', ' '.join(logs.output))
-        self.assertEqual(prepare('telegram', 'interim', 'Hello, world'), 'Hello, world')
-        self.assertEqual(prepare('api_server', 'warn', DiagnosticText('Original diagnostic')), 'Original diagnostic')
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}):
-            self.assertEqual(prepare('telegram', 'warn', DiagnosticText('Ошибка сервиса OpenAI API')), 'Ошибка сервиса OpenAI API')
+            self.assertEqual(prepare('telegram', 'interim', 'Hello, world'), 'Hello, world')
+            with self.assertLogs('notice-test', 'WARNING'):
+                self.assertNotIn('Original diagnostic', prepare('api_server', 'warn', DiagnosticText('Original diagnostic')))
+        with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING') as diagnostic:
+            self.assertEqual(prepare('telegram', 'warn', DiagnosticText('Ошибка сервиса OpenAI API')), '⚠️ Возникла неполадка.')
+            self.assertIsNone(prepare('telegram', 'lifecycle', DiagnosticText('Служебный запуск OpenAI API')))
+        self.assertIn('OpenAI API', ' '.join(diagnostic.output))
         with patch.dict('sys.modules', {'gateway.warning_notifications': module}), self.assertLogs('notice-test', 'WARNING'):
             mixed = '⚠ Compression aborted: Бюджет повторов исчерпан. No messages were dropped.'
             localized = prepare('telegram', 'warn', DiagnosticText(mixed))
-            self.assertIn('сокращении истории', localized)
-            self.assertNotIn('Compression', localized)
-            self.assertNotIn('No messages', localized)
+            self.assertIsNone(localized)
+        formatter = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                         and node.name == '_gateway_provider_error_reply')
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[formatter], type_ignores=[])), '<candidate>', 'exec'), scope)
+        scope['_looks_like_gateway_provider_error'] = lambda text: True
+        with self.assertLogs('notice-test', 'WARNING') as diagnostic:
+            text = prepare('telegram', 'warn', DiagnosticText('Provider authentication failed: SECRET API key'))
+        self.assertEqual(text, '⚠️ Не удалось завершить запрос.')
+        self.assertNotIn('SECRET', ' '.join(diagnostic.output))
+        self.assertIn('Provider authentication failed', ' '.join(diagnostic.output))
 
-    def test_error_messages_keep_visible_formatting(self):
+    def test_error_messages_explain_incomplete_work_without_internal_details(self):
         for code in self.notice._COPY:
             with self.subTest(code=code):
                 text = self.render(code, result={'brai_connection_kind':'external'})
                 self.assertTrue(text.startswith(self.notice._TITLES[code] + '\n\n'))
-                self.assertIn('⚠️ **Работа не завершена.**', text)
-                self.assertIn('\n\nКод: `' + code + '`', text)
-                self.assertNotIn('Данные для проверки', text)
-        self.assertTrue(self.render('unknown').startswith('⚠️ **Не удалось завершить запрос**'))
+                self.assertIn('Работа не завершена', text)
+                for detail in ('Код:', code, 'HTTP', 'номер в журнале', 'сторонний сервис', 'локальное подключение'):
+                    self.assertNotIn(detail.lower(), text.lower())
         text = self.render('overloaded', result={'brai_connection_kind':'external'}, partial=True)
-        self.assertIn('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.', text)
+        self.assertIn('Некоторые действия могли уже выполниться', text)
 
     def test_connection_origin_requires_evidence(self):
         kind = self.notice.connection_kind
@@ -595,24 +612,17 @@ class FailureNoticeTest(unittest.TestCase):
             self.assertEqual(kind('anthropic', 'https://api.anthropic.com/v1'), 'external')
             self.assertEqual(kind('anthropic', 'https://private.example/v1'), 'unknown')
 
-    def test_external_local_and_unknown_errors_are_distinct(self):
+    def test_connection_origin_is_not_shown_to_user(self):
         for code in self.notice._MODEL_CODES:
             with self.subTest(code=code):
-                external = self.render(code, result={'brai_connection_kind':'external'})
-                local = self.render(code, result={'brai_connection_kind':'local'})
-                unknown = self.render(code, result={'brai_connection_kind':'unknown'})
-                self.assertIn('сторонн', external.lower())
-                self.assertIn('локальное подключение', local)
-                self.assertIn('неизвестно, на чьей стороне', unknown)
-                self.assertNotIn('chatgpt', external.lower())
-                self.assertNotIn('codex', external.lower())
-                self.assertNotIn('hermes', external.lower())
-        for code in ('overloaded', 'server_error', 'rate_limit', 'auth', 'billing', 'invalid_response'):
-            self.assertNotIn('администратор', self.render(code, result={'brai_connection_kind':'external'}))
-        self.assertIn('стороннего сервиса ИИ', self.render('timeout', result={'brai_connection_kind':'external'}))
-        self.assertIn('или в соединении', self.render('timeout', result={'brai_connection_kind':'external'}))
+                outputs = [self.render(code, result={'brai_connection_kind':kind})
+                           for kind in ('external', 'local', 'unknown')]
+                self.assertEqual(outputs[0], outputs[1])
+                self.assertEqual(outputs[1], outputs[2])
+                for detail in ('сторонний', 'локальное подключение', 'на чьей стороне', 'ChatGPT', 'Codex'):
+                    self.assertNotIn(detail.lower(), outputs[0].lower())
 
-    def test_composed_formatter_keeps_typed_stream_failure(self):
+    def test_composed_formatter_hides_typed_stream_failure_details(self):
         import os
         candidate = os.environ.get('HERMES_TEST_CANDIDATE')
         if not candidate:
@@ -622,52 +632,49 @@ class FailureNoticeTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         for code in ('stream_drop', 'timeout'):
-            with self.subTest(code=code):
-                text = module.explain_failure(
-                    '', surface={'code': 'unknown', 'layer': 'streaming'}, diagnostic='',
-                    logger=self.log, redact=lambda value: value,
-                    result={'brai_failure_kind': code, 'brai_connection_kind': 'external'})
-                self.assertIn(f'Код: `{code}`', text)
-                self.assertIn('продолжай', text)
-                self.assertNotIn('/retry', text)
-                self.assertNotIn(module._UNKNOWN, text)
+            with self.subTest(code=code), self.assertLogs(self.log, 'WARNING') as records:
+                text = module.explain_failure('', surface={'code':'unknown','layer':'streaming'}, diagnostic='',
+                    logger=self.log, redact=lambda value:value,
+                    result={'brai_failure_kind':code,'brai_connection_kind':'external'})
+            self.assertNotIn(code, text)
+            self.assertIn('code=' + code, records.output[0])
+            self.assertIn('Попробуйте', text)
 
     def test_error_meaning_and_unverified_billing(self):
-        self.assertIn('Сервер, который обрабатывает запросы к модели', self.render('overloaded'))
-        self.assertIn('отклонил данные для подключения', self.render('auth'))
-        self.assertIn('точная причина не подтверждена', self.render('billing', billing_unverified=True))
-        self.assertIn('причину ошибки', self.render('unknown').lower())
-        self.assertIn('защита перед сервером', self.render('upstream_blocked').lower())
-        self.assertIn('неизвестное действие', self.render('truncated', result={'brai_failure_kind':'invalid_tool_call'}))
-        self.assertIn('это действие не выполнено', self.render('truncated', result={'brai_failure_kind':'truncated_tool_call'}))
+        self.assertIn('не удалось обработать запрос', self.render('overloaded'))
+        self.assertIn('не удалось получить доступ', self.render('auth').lower())
+        text = self.render('billing', billing_unverified=True)
+        self.assertIn('Причина пока неизвестна', text)
+        self.assertNotIn('подписк', text.lower())
+        self.assertIn('Причина пока неизвестна', self.render('unknown'))
+        self.assertIn('Изображение слишком большое', self.render('image_too_large'))
+        self.assertIn('Не удалось прочитать изображение', self.render('image_corrupt'))
 
     def test_reset_and_partial_are_preserved(self):
-        text = self.notice.explain_failure('english', surface={'code':'rate_limit', 'resets_at':1121},
+        text = self.notice.explain_failure('english', surface={'code':'rate_limit','resets_at':1121},
             diagnostic='', logger=self.log, redact=str, partial=True, now=1000,
             delivered_partial='Начатый ответ.')
         self.assertTrue(text.startswith('Начатый ответ.'))
         self.assertIn('примерно 3 мин.', text)
         self.assertIn('Некоторые действия могли уже выполниться', text)
-        text = self.render('context_overflow', result={'brai_session_reset': True})
-        self.assertIn('начат новый разговор', text)
+        text = self.render('context_overflow', result={'brai_session_reset':True})
+        self.assertIn('начат новый', text)
+        self.assertIn('Предыдущий разговор сохранён', text)
         self.assertNotIn('/compress', text)
 
     def test_subscription_limit_is_distinct_from_generic_throttling(self):
-        text = self.render('rate_limit', result={'brai_subscription_limit': True,
-            'brai_connection_kind': 'external', 'failure_resets_at': 1121}, now=1000, partial=True)
-        self.assertIn('Исчерпан лимит подписки на ИИ-размышления', text)
+        text = self.render('rate_limit', result={'brai_subscription_limit':True,
+            'brai_connection_kind':'external','failure_resets_at':1121}, now=1000, partial=True)
+        self.assertIn('предел подписки', text)
         self.assertIn('примерно 3 мин.', text)
-        self.assertIn('напишите «продолжай»', text)
         self.assertIn('Некоторые действия могли уже выполниться', text)
         self.assertNotIn('ChatGPT', text)
         self.assertNotIn('/retry', text)
-        later = self.render('rate_limit', result={'brai_subscription_limit': True,
-            'failure_resets_at': 9160}, now=1000)
+        later = self.render('rate_limit', result={'brai_subscription_limit':True,
+            'failure_resets_at':9160}, now=1000)
         self.assertIn('примерно 2 ч 16 мин.', later)
-        self.assertIn('Исчерпан лимит подписки', self.render('billing', result={'brai_subscription_limit': True}))
-        generic = self.render('rate_limit', result={'brai_connection_kind': 'external'})
-        self.assertNotIn('лимит подписки', generic.lower())
-        self.assertIn('напишите «продолжай»', generic)
+        self.assertIn('предел подписки', self.render('billing', result={'brai_subscription_limit':True}))
+        self.assertNotIn('подписк', self.render('rate_limit').lower())
 
     def test_no_failure_copy_suggests_commands(self):
         for code in [*self.notice._COPY, 'unknown']:
@@ -711,19 +718,17 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertNotIn('Личная часть ответа', record)
         self.assertNotIn('openai-codex', text)
         self.assertNotIn('Provider details', text)
-        self.assertIn('Ответ сервера: `HTTP 503`', text)
-        self.assertIn('Номер в журнале:', text)
+        self.assertNotIn('HTTP 503', text)
+        self.assertNotIn('Номер в журнале:', text)
 
-    def test_context_rejection_does_not_recommend_compression(self):
-        result = {'brai_failure_kind':'server_context_rejection', 'brai_connection_kind':'local',
-                  'brai_request_tokens':24000, 'brai_context_window':80000}
+    def test_context_rejection_hides_diagnostic_sizes(self):
+        result = {'brai_failure_kind':'server_context_rejection','brai_connection_kind':'local',
+                  'brai_request_tokens':24000,'brai_context_window':80000}
         text = self.render('server_error', result=result)
-        self.assertIn('Сокращение разговора в этом случае не поможет', text)
-        self.assertIn('24,000 токенов', text)
-        self.assertIn('80,000 токенов', text)
-        self.assertNotIn('/compress', text)
-        text = self.render('context_overflow', result={'compaction_disabled':True, 'failure_retryable':False})
-        self.assertIn('автоматическое сокращение отключено', text)
+        for detail in ('24,000', '80,000', 'токен', 'локальное подключение', '/compress'):
+            self.assertNotIn(detail, text)
+        text = self.render('context_overflow', result={'compaction_disabled':True,'failure_retryable':False})
+        self.assertIn('Разговор стал слишком длинным', text)
         self.assertNotIn('/compress', text)
 
     def test_terminal_error_keeps_status_and_attempts_for_diagnostics(self):
@@ -812,8 +817,7 @@ class FailureNoticeTest(unittest.TestCase):
         result = scope['_recover_context_length'](state, None, 'output cap')
         self.assertEqual(result['brai_failure_kind'], 'output_cap_exceeded')
         text = self.render('context_overflow', result=result)
-        self.assertIn('запрошенная длина ответа превышает допустимый предел', text)
-        self.assertIn('Сокращение разговора не решит', text)
+        self.assertIn('попросить более короткий ответ', text)
         self.assertNotIn('/compress', text)
         scope['is_output_cap_error'] = lambda value:False
         scope['_adopt_provider_context_limit'] = lambda *args:None
@@ -868,6 +872,22 @@ class FailureNoticeTest(unittest.TestCase):
         self.assertEqual(result['brai_original_error'], 'original diagnostic')
         self.assertEqual(result['brai_delivered_partial'], 'Личная часть ответа')
         self.assertNotIn('Личная часть ответа', result['brai_original_error'])
+        scope.update({'_print_nonretryable_auth_guidance': lambda *a, **kw: None,
+                      'CONTENT_POLICY_NEXT_STEPS': 'попробуйте изменить запрос',
+                      'content_policy_copy': lambda **kw: 'ошибка',})
+        modules['agent.conversation_loop'] = types.SimpleNamespace(
+            _billing_failure_result=lambda **kw: {'failed': True, 'final_response': 'ошибка'},
+            _content_policy_blocked_result=lambda *a, **kw: {'failed': True, 'final_response': 'ошибка'})
+        for reason in (reasons.content_policy_blocked, reasons.billing):
+            with patch.dict('sys.modules', modules):
+                blocked = scope['nonretryable_client_error_result'](agent, Exception('error'),
+                    types.SimpleNamespace(reason=reason, is_auth=False, retryable=False),
+                    status_code=400, api_kwargs=None, api_messages=[], messages=[], conversation_history=[],
+                    api_call_count=1, approx_tokens=0, provider='test', base_url='test', model='test',
+                    delivered='Личная часть ответа')
+            self.assertEqual(blocked['brai_delivered_partial'], 'Личная часть ответа')
+            self.assertTrue(blocked['final_response'].startswith('Личная часть ответа'))
+            self.assertTrue(blocked['brai_partial_in_final'])
 
     def test_tool_validation_distinguishes_incomplete_and_unknown_actions(self):
         import os
@@ -924,7 +944,7 @@ class FailureNoticeTest(unittest.TestCase):
         with patch.dict(sys.modules, modules):
             result = scope['_run_conversation_with_approval'](runner, agent, [], None, None, None)
         self.assertEqual(result['brai_connection_kind'], 'external')
-        self.assertIn('Сторонний сервис ИИ', self.render('server_error', result=result))
+        self.assertNotIn('Сторонний сервис ИИ', self.render('server_error', result=result))
 
     def test_runner_preserves_error_facts_for_gateway(self):
         import os
@@ -937,6 +957,7 @@ class FailureNoticeTest(unittest.TestCase):
                       and isinstance(node.value, ast.Dict)
                       and any(isinstance(key, ast.Constant) and key.value == 'failure_reason' for key in node.value.keys if key))
         result = {'failed':True, 'failure_reason':'rate_limit', 'error':'error', 'brai_connection_kind':'external', 'brai_subscription_limit':True,
+                  'brai_partial_already_delivered': True,
                   'brai_delivered_partial':'partial answer', 'brai_failure_kind':'truncated_tool_call',
                   'failure_resets_at':1121, 'billing_unverified':True, 'billing_block':{},
                   'free_tier':{'kind':'rate_limited'}, 'api_key':'secret', 'brai_original_error':'diagnostic',
@@ -947,7 +968,7 @@ class FailureNoticeTest(unittest.TestCase):
                  'history_offset':0, 'compacted_in_place':False, 'effective_session_id':'s', 'usage':{}}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[common], type_ignores=[])), '<candidate>', 'exec'), scope)
         output = scope['common']
-        for key in ('brai_connection_kind', 'brai_subscription_limit', 'brai_delivered_partial', 'brai_failure_kind',
+        for key in ('brai_connection_kind', 'brai_subscription_limit', 'brai_delivered_partial', 'brai_partial_already_delivered', 'brai_failure_kind',
                     'failure_resets_at', 'billing_unverified', 'billing_block', 'free_tier', 'brai_original_error',
                     'brai_http_status', 'brai_attempts', 'brai_error_provider', 'brai_error_model',
                     'brai_request_tokens', 'brai_context_window', 'compaction_disabled', 'failure_retryable'):
@@ -956,7 +977,7 @@ class FailureNoticeTest(unittest.TestCase):
         text = self.notice.explain_failure('english', surface={'code':'rate_limit'}, diagnostic='',
             logger=self.log, redact=str, now=1000, result={key:value for key,value in output.items() if key not in {'brai_failure_kind', 'compaction_disabled'}},
             delivered_partial=output['brai_delivered_partial'])
-        self.assertIn('Исчерпан лимит подписки на ИИ-размышления', text)
+        self.assertIn('Достигнут предел подписки', text)
         self.assertIn('примерно 3 мин.', text)
         self.assertTrue(text.startswith('partial answer'))
 
@@ -991,10 +1012,64 @@ class FailureNoticeTest(unittest.TestCase):
                 text = func('ChatGPT hermes fallback add', types.SimpleNamespace(platform='telegram'),
                             result=result, failure_notice=lambda value: 'partial')
             self.assertTrue(text.startswith('Уже полученная часть ответа.'))
-            self.assertIn('Сторонний сервис ИИ', text)
+            self.assertNotIn('Сторонний сервис ИИ', text)
             self.assertIn('Некоторые действия могли уже выполниться', text)
             self.assertNotIn('ChatGPT', text)
-            self.assertEqual(func('original', types.SimpleNamespace(platform='other'), result=result), 'original')
+            with self.assertLogs(self.log, 'WARNING'):
+                other = func('original', types.SimpleNamespace(platform='other'), result=result)
+            self.assertIn('Не удалось', other)
+            self.assertNotIn('сервис ИИ', other)
+            with self.assertLogs(self.log, 'WARNING'):
+                api = func('original', types.SimpleNamespace(platform='api_server'), result=result)
+            self.assertIn('Не удалось', api)
+            with self.assertLogs(self.log, 'WARNING'):
+                already = func('original', types.SimpleNamespace(platform='telegram'),
+                               result={**result, 'brai_partial_already_delivered': True})
+            self.assertNotIn('Уже полученная часть ответа.', already)
+
+    def test_truncated_answer_is_preserved_without_diagnostic_notice(self):
+        import os
+        import sys
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for truncation integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_truncation.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_continue_text')
+        fn.returns = None
+        for arg in fn.args.args + fn.args.kwonlyargs:
+            arg.annotation = None
+        scope = {'Any': object, '_WINDOW_FILLED': 'Внутренняя диагностика {prompt} {ctx}',
+                 '_CEILING_NO_TEXT': 'Внутренняя диагностика', 'collapse_continuation_trail': lambda *a, **kw: 'Часть ответа'}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        module = types.SimpleNamespace(_get_continuation_prompt=lambda *a: '', _join_truncated_parts=lambda *a: '')
+        for filled in (None, (123, 456)):
+            state = types.SimpleNamespace(length_continue_retries=3, agent=types.SimpleNamespace(_vprint=lambda *a, **kw: None, log_prefix=''),
+                messages=[], is_stub=False, finish_reason='length', truncated_response_parts=[], window_filled=filled,
+                current_turn_user_idx=0, end_turn=lambda response, error: types.SimpleNamespace(result={'final_response': response, 'partial': True, 'error': error}))
+            with patch.dict(sys.modules, {'agent.conversation_loop': module}):
+                verdict = scope['_continue_text'](state, object(), types.SimpleNamespace(content=None))
+            self.assertEqual(verdict.result['brai_delivered_partial'], 'Часть ответа')
+            text = self.render('truncated', result=verdict.result, delivered_partial=verdict.result['brai_delivered_partial'])
+            self.assertTrue(text.startswith('Часть ответа'))
+            self.assertNotIn('Внутренняя диагностика', text)
+
+    def test_cli_does_not_repeat_confirmed_partial_answer(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for CLI integration')
+        tree = ast.parse((Path(candidate) / 'hermes_cli/cli_chat_turn_mixin.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == '_brai_unstreamed_error_response')
+        scope = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        render = scope['_brai_unstreamed_error_response']
+        result = {'brai_partial_in_final': True, 'brai_delivered_partial': 'Часть ответа'}
+        response = 'Часть ответа\n\n⚠️ Не удалось завершить запрос.'
+        self.assertEqual(render(response, result, 'Часть ответа'), '⚠️ Не удалось завершить запрос.')
+        self.assertEqual(render(response, result, ''), response)
+        self.assertEqual(render(response, result, 'Часть'), response)
+        self.assertEqual(render(response, {}, 'Часть ответа'), response)
 
 class DeliveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_recovered_reply_is_russian_at_delivery_boundary(self):
@@ -1104,9 +1179,17 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                                         'agent.error_surface':classifier}), self.assertLogs('notice-test', 'WARNING'):
             reply = await scope['_hmwa_deliver_turn_response'](runner, object(), types.SimpleNamespace(platform='telegram'),
                 types.SimpleNamespace(session_id='x'), 's', 1, result, [], 'ChatGPT hermes setup', '', False)
-        self.assertIn('отклонил данные для подключения', reply)
+        self.assertIn('Не удалось получить доступ', reply)
         self.assertNotIn('ChatGPT', reply)
         runner._send_voice_reply.assert_awaited_once_with(unittest.mock.ANY, reply)
+        runner._send_voice_reply.reset_mock()
+        with patch.dict('sys.modules', {'gateway.run':fake_run, 'gateway.russian_failure_notice':module,
+                                        'agent.error_surface':classifier}):
+            duplicate = await scope['_hmwa_deliver_turn_response'](runner, object(), types.SimpleNamespace(platform='telegram'),
+                types.SimpleNamespace(session_id='x'), 's', 1, {**result, '_brai_failure_notice_delivered': True},
+                [], 'previously delivered', '', False)
+        self.assertIsNone(duplicate)
+        runner._send_voice_reply.assert_not_awaited()
 
 
 if __name__ == '__main__':

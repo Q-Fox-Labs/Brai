@@ -1465,7 +1465,7 @@ index e9819bc..800c70d 100644
 +        # AIDEV-NOTE: Очередь тоже должна показывать незавершённый ответ с ошибкой.
 +        _first_failed = (_delivery_result.get("failed") or
 +                         (_delivery_result.get("partial") and _delivery_result.get("error")))
-+        if str(getattr(turn_ctx.source.platform, "value", turn_ctx.source.platform)) == "telegram" and _first_failed:
++        if _first_failed:
 +            _failure_result = dict(_delivery_result)
 +            _partial = _failure_result.get("brai_delivered_partial")
 +            _partial_delivered = _already_streamed
@@ -1522,13 +1522,6 @@ index e9819bc..800c70d 100644
      if getattr(agent, "verbose_logging", False):
          _vlines(
 
---- a/gateway/russian_failure_notice.py
-+++ b/gateway/russian_failure_notice.py
-@@ -169,2 +169,4 @@
- def _message_for_connection(code, kind):
-+    if kind == 'local' and code in {'auth', 'auth_permanent'}:
-+        return 'Запрос направлен через локальное подключение и отклонён при проверке доступа. Причина отказа пока не подтверждена; состояние работы сохранено.'
-     message = _COPY.get(code, _UNKNOWN)
 --- a/hermes_constants.py
 +++ b/hermes_constants.py
 @@ -878,2 +878,6 @@
@@ -2795,3 +2788,14 @@ diff --git a/plugins/image_gen/openai-codex/__init__.py b/plugins/image_gen/open
      try:
          from agent.auxiliary_client import _resolve_codex_credential_and_base
  
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3893,6 +3893,8 @@
+                 # fallback just delivered — the #81052 duplicate. A REFUSED send reports False, and
+                 # the completion send stays the fallback so the user is not left with nothing.
+                 if _text_delivered and isinstance(result, dict):
++                    if _first_failed:
++                        result["_brai_failure_notice_delivered"] = True
+                     result["already_sent"] = True
+                     # The queued lane already uploaded this response's MEDIA: attachments; without
+                     # this the completion path's already_sent rescan uploads every file twice.

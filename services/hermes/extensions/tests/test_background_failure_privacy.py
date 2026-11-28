@@ -67,7 +67,7 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
             def _redacted_output_tail(self, item, limit):
                 return item.output_buffer.replace('SECRET', '[redacted]')
             def _build_process_completion_event(self, watcher, item, session_id):
-                return {'session_id': session_id, 'command': 'run /private/path SECRET', 'output': item.output_buffer,
+                return {'session_id': session_id, 'command': 'run /private/path [redacted]', 'output': item.output_buffer.replace('SECRET', '[redacted]'),
                         'parent_session_id': watcher.get('parent_session_id', '')}
             async def _enqueue_process_completion_notification(self, text, event):
                 self.agent.append((text, event))
@@ -83,14 +83,15 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
                     runner = Runner('concise', busy=True)
                     await runner._run_process_watcher({**watcher, 'notify_on_complete': notify})
                     self.assertEqual(len(runner.direct), 1)
-                    self.assertIn('abcdef123456', runner.direct[0])
+                    self.assertNotIn('abcdef123456', runner.direct[0])
                     for private in ('Traceback', '/private/path', 'SECRET'):
                         self.assertNotIn(private, runner.direct[0])
                     if notify:
-                        for private in ('Traceback', '/private/path', 'SECRET'):
-                            self.assertNotIn(private, str(runner.agent[0]))
-                        self.assertIn('abcdef123456', runner.agent[0][0])
+                        self.assertIn('Traceback', str(runner.agent[0]))
+                        self.assertNotIn('SECRET', str(runner.agent[0]))
+                        self.assertNotIn('abcdef123456', runner.agent[0][0])
                 self.assertIn('reference=abcdef123456', stream.getvalue())
+                self.assertIn('Traceback /private/path [redacted]', stream.getvalue())
                 self.assertNotIn('SECRET', stream.getvalue())
                 log.disabled = True
                 self.assertNotIn('abcdef123456', runner._format_process_final_message('proc_abcdef123456', session, 'error'))
@@ -99,9 +100,12 @@ class BackgroundWatcherTest(unittest.IsolatedAsyncioTestCase):
                 session.exit_code = None
                 runner = Runner('concise', busy=True)
                 await runner._run_process_watcher({**watcher, 'notify_on_complete': True})
-                self.assertNotIn('/private/path', str(runner.agent[0]))
+                self.assertNotIn('SECRET', str(runner.agent[0]))
                 self.assertNotIn('abcdef123456', runner.direct[0])
                 session.exit_code, session.output_buffer = 0, 'готовый результат'
+                runner = Runner('result', busy=False)
+                await runner._run_process_watcher({**watcher, 'notify_on_complete': False})
+                self.assertEqual(runner.direct, ['готовый результат'])
                 runner = Runner('result', busy=False)
                 await runner._run_process_watcher({**watcher, 'notify_on_complete': False, 'parent_session_id': 'new-session'})
                 self.assertIn('готовый результат', runner.agent[0][0])

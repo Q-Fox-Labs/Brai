@@ -7,19 +7,17 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
  """Agent-turn execution for GatewayRunner: _handle_message_with_agent, _run_agent*, proxy path,
  background tasks, MCP reload. Bound onto ``GatewayRunner`` via the MRO; ``gateway.run`` internals
  are imported lazily inside method bodies (import cycle) so ``patch("gateway.run.X")`` still works.
-@@ -87,6 +89,37 @@
+@@ -87,6 +89,35 @@
  def _unexpected_silence_reply() -> str:
      """Reply when the model returned only a silence marker for a message that needed an answer."""
      return t("gateway.errors.unexpected_silence")
 +
 +
 +def _telegram_failure_explanation(response, source, *, result=None, exception=None, partial=False, failure_notice=None):
-+    """Подготовить понятное сообщение о сбое для Telegram."""
++    """Подготовить понятное сообщение о сбое для пользовательского канала."""
 +    delivered = ""
 +    try:
 +        from gateway.run import _gateway_platform_value, _redact_gateway_user_facing_secrets, _sanitize_gateway_final_response
-+        if _gateway_platform_value(source.platform) != "telegram":
-+            return response
 +        from agent.error_surface import build_error_surface_from_result, build_error_surface_from_exception
 +        from gateway.russian_failure_notice import explain_failure
 +        result = result if isinstance(result, dict) else None
@@ -29,7 +27,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
 +                      else result.get("error", "") if result is not None else "")
 +        if failure_notice is not None:
 +            partial = failure_notice(result) == PARTIAL_FAILED_TURN_NOTICE
-+        candidate = result.get("brai_delivered_partial", "") if result else ""
++        candidate = result.get("brai_delivered_partial", "") if result and not result.get("brai_partial_already_delivered") else ""
 +        if candidate:
 +            delivered = _sanitize_gateway_final_response(source.platform, candidate)
 +        return explain_failure(response, surface=surface, diagnostic=diagnostic, logger=logger,
@@ -53,15 +51,14 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
                  # Re-point the Telegram topic binding at the fresh session, or the binding-heal walk
                  # switches the next message back onto the bloated child and re-triggers exhaustion
                  # forever. No-op on non-topic lanes.
-@@ -1927,6 +1961,15 @@
+@@ -1927,6 +1961,14 @@
              response = ""
 
          adapter = self._delivery_adapter_for(source)
 +        # AIDEV-NOTE: обработать ошибку до озвучивания и финальной доставки.
 +        from gateway.run import _gateway_platform_value
-+        telegram_failure = (_gateway_platform_value(source.platform) == "telegram" and
-+                            (agent_result.get("failed") or
-+                             (agent_result.get("partial") and agent_result.get("error"))))
++        telegram_failure = (agent_result.get("failed") or
++                            (agent_result.get("partial") and agent_result.get("error")))
 +        if telegram_failure:
 +            response = _telegram_failure_explanation(
 +                response, source, result=agent_result, failure_notice=self._hmwa_failed_turn_notice,
@@ -124,7 +121,7 @@ diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
              "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
              **usage,
 +            **{key: result[key] for key in (
-+                "brai_connection_kind", "brai_delivered_partial", "brai_failure_kind", "brai_subscription_limit",
++                "brai_connection_kind", "brai_delivered_partial", "brai_partial_already_delivered", "brai_failure_kind", "brai_subscription_limit",
 +                "failure_resets_at", "billing_unverified", "billing_block", "free_tier",
 +                "brai_http_status", "brai_attempts", "brai_error_provider", "brai_error_model",
 +                "brai_original_error", "brai_request_tokens", "brai_context_window", "compaction_disabled", "failure_retryable",
@@ -136,7 +133,7 @@ diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.
 new file mode 100644
 --- /dev/null
 +++ b/gateway/russian_failure_notice.py
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,207 @@
 +# ABOUTME: Готовит русские сообщения о сбоях для Telegram.
 +# ABOUTME: Использует классификацию движка и сохраняет безопасные данные для проверки.
 +"""Пояснения для Telegram не управляют повторами и сессиями."""
@@ -154,120 +151,67 @@ new file mode 100644
 +
 +
 +_COPY = {
-+    'overloaded': 'Сервер, который обрабатывает запросы к модели, временно перегружен или недоступен. Подождите немного и напишите «продолжай».',
-+    'server_error': 'При обращении к серверу модели получен ответ об ошибке. Попробуйте позже: напишите «продолжай».',
-+    'timeout': 'Ответ от сервера модели не пришёл вовремя. Причина может быть в сервере или соединении. Если работа не возобновилась, напишите «продолжай».',
-+    'retry_limit': 'Повторные попытки запроса к модели исчерпаны. Если работа не возобновилась, напишите «Продолжай».',
-+    'stream_drop': 'Соединение с сервером модели прервалось во время ответа. Если работа не возобновилась, напишите «продолжай». Если ошибка повторяется, попросите выполнить работу небольшими частями.',
-+    'rate_limit': 'Доступ к ИИ временно ограничен. Дождитесь снятия ограничения и напишите «продолжай».',
-+    'upstream_rate_limit': 'Сервис, через который доступна модель, сообщил об ограничении на стороне поставщика модели. Дождитесь снятия ограничения и напишите «продолжай».',
-+    'auth': 'Сервис модели отклонил данные для подключения. Проверьте авторизацию или ключ в настройках подключения к модели. Если доступ настраивал администратор, обратитесь к нему.',
-+    'auth_permanent': 'Сервис модели отклонил данные для подключения, и восстановить доступ автоматически не удалось. Проверьте авторизацию или ключ в настройках подключения к модели. Если доступ настраивал администратор, обратитесь к нему.',
-+    'billing': 'Сервис модели сообщил об ограничении оплаты, баланса или тарифа. Проверьте условия и лимиты подключения к модели или выберите другую модель.',
-+    'billing_unverified': 'Сервис модели отклонил запрос. Это может быть связано с оплатой или ограничением содержимого, но точная причина не подтверждена. Проверьте подключение к модели; не пополняйте баланс только на основании этого сообщения.',
-+    'upstream_blocked': 'Защита перед сервером модели заблокировала запрос до его обработки. Проверьте подключение с администратором или выберите другую модель.',
-+    'ssl_cert_verification': 'Не удалось проверить сертификат сервера модели, поэтому соединение не установлено. Обратитесь к администратору для проверки сертификата и соединения.',
-+    'context_overflow': 'Разговор вместе с запросом слишком длинный для выбранной модели. Не удалось обработать сообщение; если проблема повторится, обратитесь к администратору.',
-+    'payload_too_large': 'Запрос вместе с вложениями слишком большой для сервера модели. Уменьшите сообщение или вложения и попробуйте снова.',
-+    'image_too_large': 'Сервер модели не принял изображение из-за его размера. Уменьшите изображение и отправьте снова.',
-+    'image_corrupt': 'Сервер модели не смог прочитать изображение. Проверьте файл или отправьте другое изображение.',
-+    'model_not_found': 'Сервис модели не нашёл выбранную модель или она недоступна. Выберите другую модель.',
-+    'model_entitlement': 'У подключённого аккаунта нет доступа к выбранной модели. Выберите другую модель или проверьте права доступа к ней.',
-+    'provider_policy_blocked': 'Настройки или ограничения аккаунта сервиса модели не позволяют обработать запрос. Проверьте настройки аккаунта или выберите другую модель.',
-+    'content_policy_blocked': 'Сервис модели отклонил содержимое запроса по своим правилам. Переформулируйте сообщение или измените вложения и попробуйте снова.',
-+    'format_error': 'Сервер модели отклонил запрос из-за его формата. Попробуйте выбрать другую модель. Если ошибка повторится, обратитесь к администратору.',
-+    'role_alternation': 'Сервер модели отклонил порядок сообщений в разговоре. Если проблема повторится, обратитесь к администратору.',
-+    'invalid_encrypted_content': 'Сервер модели отклонил сохранённые данные предыдущего ответа. Если проблема повторится, обратитесь к администратору.',
-+    'multimodal_tool_content_unsupported': 'Сервер модели не поддерживает формат данных, переданных в результате действия. Попробуйте выбрать другую модель; если ошибка повторится, обратитесь к администратору.',
-+    'reasoning_mandatory': 'Сервер модели отклонил настройки обработки запроса. Выберите другую модель или обратитесь к администратору.',
-+    'thinking_signature': 'Сервер модели отклонил сохранённые данные предыдущего ответа. Если проблема повторится, обратитесь к администратору.',
-+    'long_context_tier': 'Текущий тариф подключения к модели не позволяет обработать такой длинный разговор. Попросите сократить контекст или выберите другую модель.',
-+    'oauth_long_context_beta_forbidden': 'Подключённому аккаунту недоступен расширенный контекст выбранной модели. Попросите сократить контекст или выберите другую модель.',
-+    'llama_cpp_grammar_pattern': 'Сервер модели не поддерживает формат описания действия. Выберите другую модель или обратитесь к администратору.',
-+    'incomplete_response': 'Модель не завершила ответ. Попробуйте написать «продолжай» или выберите другую модель.',
-+    'invalid_tool_call': 'Модель несколько раз запросила неизвестное действие, поэтому работа остановлена. Попробуйте повторить запрос или выберите другую модель.',
-+    'truncated_tool_call': 'Модель не закончила подготовку действия, поэтому это действие не выполнено. Попробуйте повторить запрос или попросите выполнить работу небольшими частями.',
-+    'truncated': 'Ответ модели оборвался до завершения. Попробуйте написать «продолжай» или попросите выполнить работу небольшими частями.',
-+    'invalid_response': 'Сервер модели вернул непонятный или повреждённый ответ. Попробуйте позже и напишите «продолжай»; если ошибка повторится, выберите другую модель.',
-+    'empty_response': 'Модель не сформировала ответ. Попробуйте позже и напишите «продолжай».',
-+    'loop_error': 'Во время обработки запроса произошла ошибка, и работа остановлена. Попробуйте продолжить разговор. Если ошибка повторится, обратитесь к администратору.',
-+    'session_busy': 'В этом разговоре ещё выполняется предыдущий запрос. Дождитесь его завершения и попробуйте снова.',
-+    'interpreter_shutdown': 'Работа прервалась из-за остановки программы. После её запуска вернитесь в разговор и отправьте запрос снова.',
-+    'disk_full': 'Недостаточно места в хранилище для сохранения разговора. Обратитесь к администратору, чтобы освободить место.',
-+    'context_reset': 'Разговор стал слишком длинным для модели. Сократить контекст не удалось, поэтому начат новый разговор. Предыдущий разговор сохранён в истории. Отправьте запрос снова.',
-+    'compression_deferred': 'Сокращение контекста временно отложено или уже выполняется. Подождите немного и повторите запрос; можно также попросить сократить контекст.',
-+    'compression_disabled': 'Разговор слишком длинный для модели, а автоматическое сокращение отключено. Обратитесь к администратору.',
-+    'output_cap_exceeded': 'Сервис модели отклонил запрос: запрошенная длина ответа превышает допустимый предел, но его значение не сообщено. Сокращение разговора не решит эту проблему. Выберите другую модель или проверьте настройки модели.',
-+    'server_context_rejection': 'Сервер отклонил запрос как слишком большой, хотя по доступной оценке он должен помещаться. Сокращение разговора в этом случае не поможет. Попробуйте позже и напишите «продолжай»; если ошибка повторится, проверьте настройки сервера модели.',
-+    'free_tier_rate_limited': 'Бесплатный доступ к модели временно ограничен по числу запросов. Дождитесь снятия ограничения или выберите другую модель.',
-+    'free_tier_at_capacity': 'Бесплатный доступ к модели временно перегружен. Попробуйте позже или выберите другую модель.',
-+    'free_tier_outage': 'Бесплатное подключение к модели временно не отвечает. Попробуйте позже или выберите другую модель.',
-+    'free_tier_model_not_free': 'Выбранная модель или возможность недоступна через бесплатное подключение. Выберите другую модель или проверьте условия подключения.',
-+    'free_tier_disabled': 'Бесплатное подключение к модели отключено. Выберите другое подключение или модель.',
-+    'free_tier_route': 'Бесплатное подключение к модели отклонило запрос. Проверьте настройки подключения или выберите другую модель.',
-+    'free_tier_refused': 'Бесплатное подключение к модели отклонило запрос. Проверьте условия доступа или выберите другую модель.',
++    'overloaded': 'Сейчас не удалось обработать запрос. Попробуйте позже.',
++    'server_error': 'Не удалось завершить запрос. Попробуйте позже.',
++    'timeout': 'Не удалось вовремя получить ответ. Попробуйте позже.',
++    'retry_limit': 'Не удалось завершить запрос. Попробуйте продолжить позже.',
++    'stream_drop': 'Ответ прервался. Попробуйте продолжить позже.',
++    'rate_limit': 'Сейчас слишком много запросов. Попробуйте позже.',
++    'upstream_rate_limit': 'Сейчас слишком много запросов. Попробуйте позже.',
++    'auth': 'Не удалось получить доступ для выполнения запроса. Обратитесь к администратору.',
++    'auth_permanent': 'Не удалось получить доступ для выполнения запроса. Обратитесь к администратору.',
++    'billing': 'Не удалось выполнить запрос из-за ограничений подписки. Проверьте её условия.',
++    'billing_unverified': 'Не удалось выполнить запрос. Причина пока неизвестна.',
++    'upstream_blocked': 'Не удалось завершить запрос. Попробуйте позже.',
++    'ssl_cert_verification': 'Не удалось завершить запрос. Попробуйте позже.',
++    'context_overflow': 'Разговор стал слишком длинным. Попробуйте начать новый разговор.',
++    'payload_too_large': 'Сообщение с вложениями слишком большое. Уменьшите его и попробуйте снова.',
++    'image_too_large': 'Изображение слишком большое. Уменьшите его и отправьте снова.',
++    'image_corrupt': 'Не удалось прочитать изображение. Проверьте файл или отправьте другое изображение.',
++    'model_not_found': 'Не удалось завершить запрос. Попробуйте позже.',
++    'model_entitlement': 'Не удалось получить доступ для выполнения запроса.',
++    'provider_policy_blocked': 'Не удалось завершить запрос. Попробуйте позже.',
++    'content_policy_blocked': 'Не удалось выполнить запрос. Попробуйте изменить формулировку или вложения.',
++    'format_error': 'Не удалось завершить запрос. Попробуйте позже.',
++    'role_alternation': 'Не удалось завершить запрос. Попробуйте позже.',
++    'invalid_encrypted_content': 'Не удалось завершить запрос. Попробуйте позже.',
++    'multimodal_tool_content_unsupported': 'Не удалось завершить запрос. Попробуйте позже.',
++    'reasoning_mandatory': 'Не удалось завершить запрос. Попробуйте позже.',
++    'thinking_signature': 'Не удалось завершить запрос. Попробуйте позже.',
++    'long_context_tier': 'Разговор стал слишком длинным. Попробуйте начать новый разговор.',
++    'oauth_long_context_beta_forbidden': 'Разговор стал слишком длинным. Попробуйте начать новый разговор.',
++    'llama_cpp_grammar_pattern': 'Не удалось завершить запрос. Попробуйте позже.',
++    'incomplete_response': 'Не удалось закончить ответ. Попробуйте продолжить.',
++    'invalid_tool_call': 'Не удалось завершить запрос. Попробуйте позже.',
++    'truncated_tool_call': 'Не удалось закончить работу. Попробуйте продолжить.',
++    'truncated': 'Ответ прервался. Попробуйте продолжить.',
++    'invalid_response': 'Не удалось завершить запрос. Попробуйте позже.',
++    'empty_response': 'Не удалось получить ответ. Попробуйте позже.',
++    'loop_error': 'Не удалось завершить работу. Попробуйте позже.',
++    'session_busy': 'Предыдущее сообщение ещё обрабатывается. Пожалуйста, подождите.',
++    'interpreter_shutdown': 'Работа прервалась. Попробуйте продолжить позже.',
++    'disk_full': 'Не удалось сохранить разговор: закончилось место. Обратитесь к администратору.',
++    'context_reset': 'Не удалось продолжить этот разговор, поэтому начат новый. Предыдущий разговор сохранён.',
++    'compression_deferred': 'Не удалось продолжить разговор прямо сейчас. Попробуйте позже.',
++    'compression_disabled': 'Разговор стал слишком длинным. Попробуйте начать новый разговор.',
++    'output_cap_exceeded': 'Не удалось подготовить ответ нужной длины. Попробуйте попросить более короткий ответ.',
++    'server_context_rejection': 'Не удалось завершить запрос. Попробуйте позже.',
++    'free_tier_rate_limited': 'Сейчас слишком много запросов. Попробуйте позже.',
++    'free_tier_at_capacity': 'Сейчас не удалось обработать запрос. Попробуйте позже.',
++    'free_tier_outage': 'Сейчас не удалось обработать запрос. Попробуйте позже.',
++    'free_tier_model_not_free': 'Не удалось завершить запрос. Попробуйте позже.',
++    'free_tier_disabled': 'Не удалось завершить запрос. Попробуйте позже.',
++    'free_tier_route': 'Не удалось завершить запрос. Попробуйте позже.',
++    'free_tier_refused': 'Не удалось завершить запрос. Попробуйте позже.',
 +}
-+_UNKNOWN = 'Не удалось завершить запрос. Причину ошибки не удалось определить. Если работа не возобновилась, напишите «Продолжай»; если ошибка повторится, обратитесь к администратору.'
++_UNKNOWN = 'Не удалось завершить запрос. Причина пока неизвестна. Попробуйте позже.'
 +
-+# AIDEV-NOTE: заголовки описывают событие, не утверждая, где возникла причина.
-+_TITLE_GROUPS = {
-+    '⏳ **Модель временно недоступна**': ('overloaded', 'free_tier_at_capacity', 'free_tier_outage'),
-+    '⚠️ **Ошибка при обращении к модели**': ('server_error', 'retry_limit'),
-+    '⏳ **Ответ не получен вовремя**': ('timeout',),
-+    '🔌 **Соединение прервалось**': ('stream_drop',),
-+    '⏳ **Достигнут лимит запросов**': ('rate_limit', 'upstream_rate_limit', 'free_tier_rate_limited'),
-+    '🔑 **Подключение отклонено**': ('auth', 'auth_permanent'),
-+    '💳 **Ограничение оплаты или тарифа**': ('billing',),
-+    '⚠️ **Причина отказа не подтверждена**': ('billing_unverified',),
-+    '🚧 **Запрос заблокирован**': ('upstream_blocked', 'provider_policy_blocked', 'content_policy_blocked', 'free_tier_route', 'free_tier_refused'),
-+    '🔒 **Не удалось проверить сертификат**': ('ssl_cert_verification',),
-+    '📜 **Разговор слишком длинный**': ('context_overflow', 'long_context_tier', 'oauth_long_context_beta_forbidden', 'compression_disabled'),
-+    '⚠️ **Сервер отклонил размер запроса**': ('server_context_rejection', 'output_cap_exceeded'),
-+    '📎 **Запрос слишком большой**': ('payload_too_large',),
-+    '🖼 **Изображение слишком большое**': ('image_too_large',),
-+    '🖼 **Не удалось прочитать изображение**': ('image_corrupt',),
-+    '⚠️ **Модель недоступна**': ('model_not_found', 'free_tier_disabled'),
-+    '🔑 **Нет доступа к модели**': ('model_entitlement', 'free_tier_model_not_free'),
-+    '⚠️ **Запрос отклонён**': ('format_error', 'role_alternation', 'invalid_encrypted_content', 'thinking_signature', 'reasoning_mandatory'),
-+    '⚠️ **Не поддерживается формат действия**': ('multimodal_tool_content_unsupported', 'llama_cpp_grammar_pattern'),
-+    '⚠️ **Ответ не завершён**': ('incomplete_response', 'truncated', 'truncated_tool_call'),
-+    '⚠️ **Неизвестное действие**': ('invalid_tool_call',),
-+    '⚠️ **Не удалось прочитать ответ**': ('invalid_response',),
-+    '⚠️ **Модель не ответила**': ('empty_response',),
-+    '⚠️ **Ошибка обработки запроса**': ('loop_error',),
-+    '⏳ **Предыдущий запрос ещё выполняется**': ('session_busy',),
-+    '⏸ **Работа прервана**': ('interpreter_shutdown',),
-+    '💾 **Недостаточно места**': ('disk_full',),
-+    '💾 **Не удалось сохранить разговор**': ('session_persistence_failed',),
-+    '📜 **Начат новый разговор**': ('context_reset',),
-+    '⏳ **Сокращение контекста отложено**': ('compression_deferred',),
-+}
-+_TITLES = {code: title for title, codes in _TITLE_GROUPS.items() for code in codes}
++# Классификация остаётся в диагностике; пользователю нужны последствия.
++_TITLES = {code: '⚠️ **Не удалось завершить запрос**' for code in _COPY}
 +_DEFAULT_TITLE = '⚠️ **Не удалось завершить запрос**'
-+
-+# AIDEV-NOTE: код ошибки сам по себе не показывает, где работает модель.
 +_MODEL_CODES = frozenset(_COPY) - {
 +    'loop_error', 'interpreter_shutdown', 'session_busy', 'disk_full',
 +    'compression_deferred', 'context_reset',
-+}
-+_EXTERNAL_COPY = {
-+    'overloaded': 'Сторонний сервис ИИ, к которому подключён агент, сообщил, что сейчас перегружен или временно недоступен. Подождите немного и напишите «продолжай».',
-+    'server_error': 'Сторонний сервис ИИ, к которому подключён агент, вернул ошибку. Попробуйте позже: напишите «продолжай».',
-+    'timeout': 'Агент не получил вовремя ответ от стороннего сервиса ИИ. Причина может быть на стороне этого сервиса или в соединении с ним. Если работа не возобновилась, напишите «продолжай».',
-+    'stream_drop': 'Соединение со сторонним сервисом ИИ прервалось во время ответа. Причина может быть на стороне этого сервиса или в соединении с ним. Если работа не возобновилась, напишите «продолжай»; если ошибка повторяется, попросите выполнить работу небольшими частями.',
-+    'rate_limit': 'Сторонний сервис ИИ временно ограничил доступ. Дождитесь снятия ограничения и напишите «продолжай».',
-+    'upstream_rate_limit': 'Сторонний сервис ИИ сообщил, что доступ к модели ограничен на стороне другого сервиса, который её предоставляет. Дождитесь снятия ограничения и напишите «продолжай».',
-+    'auth': 'Сторонний сервис ИИ отклонил данные для входа, которые использует агент. Проверьте подключение к этому сервису или выберите другую модель.',
-+    'auth_permanent': 'Сторонний сервис ИИ отклонил данные для входа, которые использует агент. Автоматически восстановить подключение не удалось. Проверьте подключение к этому сервису или выберите другую модель.',
-+    'billing': 'Сторонний сервис ИИ сообщил об ограничении оплаты, баланса или тарифа. Проверьте условия и лимиты аккаунта этого сервиса или выберите другую модель.',
-+    'billing_unverified': 'Сторонний сервис ИИ отклонил запрос. Это может быть связано с оплатой или ограничением содержимого, но точная причина не подтверждена. Проверьте аккаунт этого сервиса; не пополняйте баланс только на основании этого сообщения.',
-+    'upstream_blocked': 'Защита на пути к стороннему сервису ИИ заблокировала запрос до обработки. Пока неизвестно, на чьей стороне возникла блокировка. Попробуйте другую модель.',
-+    'ssl_cert_verification': 'Не удалось проверить сертификат при подключении к стороннему сервису ИИ, поэтому соединение не установлено. Причина может быть в сертификате, настройках соединения или промежуточном сервере. Выберите другую модель или попросите администратора проверить подключение.',
-+    'format_error': 'Сторонний сервис ИИ отклонил формат запроса. Причина может быть в запросе агента или требованиях этого сервиса. Попробуйте другую модель.',
-+    'multimodal_tool_content_unsupported': 'Сторонний сервис ИИ не принял формат данных, полученных после действия. Попробуйте выбрать другую модель.',
-+    'reasoning_mandatory': 'Сторонний сервис ИИ отклонил настройки запроса. Попробуйте выбрать другую модель.',
-+    'llama_cpp_grammar_pattern': 'Сторонний сервис ИИ не поддерживает формат описания действия. Попробуйте выбрать другую модель.',
-+    'invalid_response': 'Сторонний сервис ИИ вернул непонятный или повреждённый ответ. Попробуйте позже и напишите «продолжай»; если ошибка повторится, выберите другую модель.',
 +}
 +
 +
@@ -307,16 +251,8 @@ new file mode 100644
 +
 +
 +def _message_for_connection(code, kind):
-+    message = _COPY.get(code, _UNKNOWN)
-+    if code not in _MODEL_CODES:
-+        return message
-+    if kind == 'external':
-+        if code in _EXTERNAL_COPY:
-+            return _EXTERNAL_COPY[code]
-+        return 'Запрос направлен в сторонний сервис ИИ, к которому подключён агент. ' + message
-+    if kind == 'local':
-+        return 'Запрос направлен через локальное подключение. Где именно возникла проблема, пока неизвестно. ' + message
-+    return 'Запрос направлен к подключённой модели. Пока неизвестно, на чьей стороне находится её сервис. ' + message
++    """Назвать последствия без сведений о внутреннем подключении."""
++    return _COPY.get(code, _UNKNOWN)
 +
 +
 +def explain_failure(original, *, surface, diagnostic, logger, redact, partial=False,
@@ -349,9 +285,9 @@ new file mode 100644
 +    elif code == 'billing' and billing_unverified:
 +        code = 'billing_unverified'
 +    if code == 'subscription_limit':
-+        message = 'Исчерпан лимит подписки на ИИ-размышления. Дождитесь его обновления и напишите «продолжай».'
++        message = 'Достигнут предел подписки. Попробуйте позже.'
 +    elif code == 'session_persistence_failed':
-+        message = 'Не удалось сохранить состояние разговора, поэтому работа остановлена. Обратитесь к администратору для проверки хранилища.'
++        message = 'Не удалось сохранить разговор, поэтому работа остановлена. Обратитесь к администратору.'
 +    else:
 +        kind = result.get('brai_connection_kind')
 +        if kind not in {'local', 'external', 'unknown'}:
@@ -359,10 +295,6 @@ new file mode 100644
 +        message = _message_for_connection(code, kind)
 +    title = '⏳ **Лимит подписки**' if code == 'subscription_limit' else _TITLES.get(code, _DEFAULT_TITLE)
 +    lines = [title, message]
-+    if code == 'server_context_rejection':
-+        size, window = result.get('brai_request_tokens'), result.get('brai_context_window')
-+        if type(size) is int and type(window) is int and 0 < size < window <= 10**9:
-+            lines.append(f'Оценка размера запроса с резервом на ответ — {size:,} токенов; ожидаемая вместимость — {window:,} токенов.')
 +    resets_at = surface.get('resets_at', result.get('failure_resets_at'))
 +    clock = time.time() if now is None else now
 +    if (code in {'rate_limit', 'upstream_rate_limit', 'free_tier_rate_limited', 'subscription_limit'}
@@ -375,13 +307,10 @@ new file mode 100644
 +    lines.append('⚠️ **Работа не завершена.**')
 +    if partial:
 +        lines.append('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.')
-+    details = [f'Код: `{code}`']
 +    status = status_code if type(status_code) is int else result.get('brai_http_status')
 +    http = status if type(status) is int and 400 <= status <= 599 else None
-+    if http is not None:
-+        details.append(f'Ответ сервера: `HTTP {http}`')
 +    original_error = result.get('brai_original_error')
-+    if (diagnostic or original_error) and logger.isEnabledFor(logging.WARNING):
++    if logger.isEnabledFor(logging.WARNING):
 +        try:
 +            reference = secrets.token_hex(8)
 +            metadata = {}
@@ -407,14 +336,11 @@ new file mode 100644
 +                      'truncated': len(safe_diagnostic) > 8192 or len(safe_original) > 8192, **metadata}
 +            logger.warning('TELEGRAM_FAILURE reference=%s layer=%s code=%s http=%s data=%s',
 +                           reference, layer, code, http or '-', json.dumps(record, ensure_ascii=False))
-+            details.append(f'Номер в журнале: `{reference}`')
 +        except Exception:
 +            pass
-+    lines.append('\n'.join(details))
 +    if delivered_partial:
 +        lines.insert(0, delivered_partial)
 +    return '\n\n'.join(lines)
-
 diff --git a/gateway/delivery_ledger.py b/gateway/delivery_ledger.py
 --- a/gateway/delivery_ledger.py
 +++ b/gateway/delivery_ledger.py
@@ -795,33 +721,33 @@ diff --git a/gateway/run.py b/gateway/run.py
 +        logger.warning("Gateway diagnostic: %s", text)
 +        lowered = text.lower()
 +        if "empty" in lowered and ("response" in lowered or "content" in lowered):
-+            return "⚠️ Модель вернула пустой ответ. Продолжение работы не гарантировано."
++            return "⚠️ Не удалось получить ответ. Попробуйте ещё раз."
 +        if "authentication" in lowered or "not entitled" in lowered:
-+            return "⚠️ Не удалось получить доступ к модели. Проверьте подключение."
++            return "⚠️ Не удалось получить ответ. Попробуйте ещё раз позже."
 +        if "unverified" in lowered:
-+            return "⚠️ Сервис модели отклонил запрос; причина отказа не подтверждена."
++            return "⚠️ Запрос не выполнен; причина неизвестна."
 +        if "safety" in lowered or "content filter" in lowered:
-+            return "⚠️ Сервис модели отклонил запрос по своим правилам."
++            return "⚠️ Запрос не выполнен из-за ограничений на содержимое."
 +        if "rate limit" in lowered or "rate limited" in lowered:
-+            return "⏳ Сервис модели временно ограничил запросы."
++            return "⏳ Сейчас слишком много запросов. Попробуйте позже."
 +        if "billing" in lowered or "credits exhausted" in lowered:
-+            return "⚠️ Сервис модели сообщил об ограничении оплаты или баланса."
++            return "⚠️ Не удалось выполнить запрос из-за ограничения оплаты или баланса."
 +        if "estimated cost" in lowered:
 +            amount = re.search(r"\$[0-9]+(?:\.[0-9]+)?", text)
 +            return (f"ℹ️ Примерная стоимость попыток без ответа: {amount.group(0)}."
 +                    if amount else "ℹ️ Попытки без ответа могли потребовать оплаты.")
 +        if "fallback" in lowered:
-+            return "⚠️ При обращении к модели использовалось резервное подключение или была попытка переключиться на него."
++            return None
 +        if "compression" in lowered or "compressed" in lowered or "compacting" in lowered:
-+            return "⚠️ Возникла проблема при сокращении истории разговора. Подробности сохранены в журнале."
++            return None
 +        if "no response" in lowered or "no events" in lowered or "without activity" in lowered:
-+            return "⚠️ Не удалось вовремя получить ответ модели. Подробности сохранены в журнале."
-+        return "ℹ️ Служебное уведомление о работе модели. Подробности сохранены в журнале."
++            return "⚠️ Не удалось вовремя получить ответ. Попробуйте ещё раз."
++        return "⚠️ Не удалось выполнить запрос. Попробуйте ещё раз."
 +    # AIDEV-NOTE: внутренние маркеры сжатия остаются на английском для классификатора.
 +    if event_type == "compacted":
-+        return "✓ История разговора сокращена. Продолжаю работу."
++        return "Продолжаю работу."
 +    if _COMPRESSION_PROGRESS_STATUS_RE.search(text):
-+        return "🗜️ Сокращаю историю разговора, чтобы продолжить работу."
++        return "Продолжаю работу."
      return text
 diff --git a/locales/ru.yaml b/locales/ru.yaml
 --- a/locales/ru.yaml
@@ -877,7 +803,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
 -    no_credentials: "⚠️ Мне не удалось подключиться к сервису ИИ-модели, поэтому сообщение не было обработано. Используйте /login, чтобы войти заново, или /model, чтобы выбрать другую модель. Если ошибка повторяется, выполните `hermes doctor` на хосте."
 +    generic_failed_with_hint: "⚠️ Не удалось завершить ответ.{hint}\nПопробуйте позже и напишите «продолжай»."
 +    history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
-+    no_credentials: "⚠️ Не удалось подключиться к сервису ИИ, поэтому сообщение не было обработано. Проверьте подключение или обратитесь к администратору."
++    no_credentials: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
    skills:
      disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
      not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"
@@ -2738,7 +2664,7 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
  }
 
 
-@@ -1067,64 +991,48 @@
+@@ -1067,64 +991,58 @@
              agent, classified, status_code=status_code, provider=provider, base_url=base_url, model=model
          )
      elif classified.reason == FailoverReason.model_not_found:
@@ -2802,6 +2728,11 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
              error_detail=_nonretryable_summary,
          )
 +        result["brai_original_error"] = result.get("final_response", "")
++        if delivered:
++            result["brai_delivered_partial"] = delivered.strip()
++            result["final_response"] = delivered.strip() + "\n\n⚠️ Не удалось завершить запрос."
++            result["brai_partial_in_final"] = True
++            result["partial"] = True
 +        return result
      # Billing walls get the same structured recovery descriptor as the max-retries path
      # so every surface renders one consistent signal.
@@ -2812,6 +2743,11 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
              api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
          )
 +        result["brai_original_error"] = result.get("final_response", "")
++        if delivered:
++            result["brai_delivered_partial"] = delivered.strip()
++            result["final_response"] = delivered.strip() + "\n\n⚠️ Не удалось завершить запрос."
++            result["brai_partial_in_final"] = True
++            result["partial"] = True
 +        return result
      if _welcome_hint:
          # A free-tier refusal is fully explained by its own sentence; the raw provider summary
@@ -3930,7 +3866,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"Run log: `hermes cron runs {job_id}`."
 -    )
 +        action = _PROVIDER_FAILURE_ACTION.get(reason, _DEFAULT_FAILURE_ACTION)
-+    return f"⚠️ Задача «{job_name}» не выполнена: {cause}. {action}"
++    return f"⚠️ Задача «{job_name}» не выполнена."
 
 
  def generic_failure_notice(job_name: str, job_id: str, cleaned_error: str) -> str:
@@ -3941,7 +3877,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"{cron_output_dir_display(job_id)}); run it again with `hermes cron run {job_id}`, "
 -        f"edit it with `hermes cron edit {job_id}`, or pause it with `hermes cron pause {job_id}`."
 -    )
-+    return f"⚠️ Задача «{job_name}» завершилась с ошибкой. Подробности сохранены в журнале выполнения."
++    return f"⚠️ Задача «{job_name}» не выполнена."
 
 
  def script_timeout_notice(job_name: str, job_id: str) -> str:
@@ -3950,7 +3886,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"Check the script's output under {cron_output_dir_display(job_id)} or `hermes cron runs {job_id}`, "
 -        f"then run it again with `hermes cron run {job_id}`."
 -    )
-+    return f"⚠️ Задача «{job_name}» не выполнена: скрипт не завершился вовремя. Модель не запускалась. Проверьте журнал выполнения."
++    return f"⚠️ Задача «{job_name}» не завершилась вовремя."
 
 
  def inactivity_notice(job_name: str, job_id: str) -> str:
@@ -3960,7 +3896,7 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -        f"{cron_output_dir_display(job_id)} (`hermes cron runs {job_id}`), then run it again with "
 -        f"`hermes cron run {job_id}`."
 -    )
-+    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности. Проверьте журнал выполнения."
++    return f"⚠️ Задача «{job_name}» остановлена из-за длительного отсутствия активности."
 
 
  def blocked_config_notice(job_name: str, reason: str) -> str:
@@ -3975,13 +3911,13 @@ diff --git a/cron/scheduler_failure_copy.py b/cron/scheduler_failure_copy.py
 -    )
 +    text = str(reason or "").lower()
 +    if "provider credential" in text:
-+        detail = "не настроен доступ к сервису ИИ"
++        detail = "не удалось получить доступ для выполнения задачи"
 +    elif "mcp server" in text:
-+        detail = "не удалось подключить необходимые инструменты"
++        detail = "недоступно действие, необходимое для выполнения задачи"
 +    elif "delivery platform" in text:
-+        detail = "не настроен канал доставки результата"
++        detail = "нет возможности доставить результат"
 +    elif "attached skill" in text:
-+        detail = "не готов необходимый навык"
++        detail = "недоступно действие, необходимое для выполнения задачи"
 +    else:
 +        detail = "обнаружена ошибка настроек"
 +    return f"⛔ Задача «{job_name}» не запущена: {detail}. Оплата не взималась. Повторю запуск по расписанию."
@@ -6161,7 +6097,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
      last_output: ". Последний вывод:\n```\n{tail}\n```"
      rerun_hint: "\nПопросите меня перезапустить её или показать полный журнал."
 -    no_credentials: "❌ Фоновая задача не запустилась: не настроен вход ни в одну модель ИИ. Используйте /login или выполните `hermes setup` на хосте."
-+    no_credentials: "❌ Не удалось запустить фоновую задачу: подключение к модели ИИ не настроено. Проверьте настройки подключения."
++    no_credentials: "❌ Не удалось запустить задачу. Обратитесь к администратору."
      complete_header: "✅ Фоновая задача выполнена\nПромпт: \"{preview}\"\n\n"
      no_response: "(Ответ не сгенерирован)"
      failed: "❌ Ваша фоновая задача \"{preview}\" завершилась с ошибкой, не дойдя до конца. Отправьте /bg ещё раз, чтобы повторить, или /agents, чтобы увидеть, что ещё выполняется."
@@ -6716,7 +6652,7 @@ diff --git a/locales/ru.yaml b/locales/ru.yaml
      none_value: "нет"
 @@ -689,12 +689,12 @@
      history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
-     no_credentials: "⚠️ Не удалось подключиться к сервису ИИ, поэтому сообщение не было обработано. Проверьте подключение или обратитесь к администратору."
+     no_credentials: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
    skills:
 -    disabled: "Навык **{name}** установлен, но выключен.\nВключите его командой: `hermes skills config`"
 -    not_installed: "Навык **{name}** доступен, но не установлен.\nУстановите его командой: `hermes skills install {install_name}`"
@@ -9341,8 +9277,14 @@ diff --git a/agent/i18n.py b/agent/i18n.py
 diff --git a/gateway/run.py b/gateway/run.py
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -746,2 +746,6 @@
+@@ -746,2 +746,12 @@
      from gateway.warning_notifications import DiagnosticText
++    if ((isinstance(message, DiagnosticText) or event_type in {"warn", "lifecycle"})
++            and re.search(r"[А-Яа-яЁё]", text)
++            and not re.search(r"[a-z]{3,}\s+[a-z]{3,}|[\u3400-\u9fff]", text)):
++        # Текст служебного события не является ответом собеседнику.
++        logger.warning("Gateway diagnostic: %s", text)
++        return None if event_type == "lifecycle" else "⚠️ Возникла неполадка."
 +    if ((isinstance(message, DiagnosticText) or event_type in {"warn", "lifecycle"})
 +            and re.search(r"(?<![\w/])/[^\W\d_][\w-]*\b|\b(?:hermes|sudo|systemctl|docker|pip|python3?)\s+\S+|`continue`", text, re.IGNORECASE)):
 +        from agent.i18n import _russian_gateway_error
@@ -9487,8 +9429,8 @@ diff --git a/gateway/run.py b/gateway/run.py
 +        lowered = text.lower()
 +        if any(word in lowered for word in ("compression", "compressed", "compacting", "сокращен", "сокращён")):
 +            if "no messages were dropped" in lowered or "сообщения сохранены" in lowered:
-+                return "⚠️ Не удалось сократить историю разговора. Сообщения сохранены."
-+            return "⚠️ Возникла проблема при сокращении истории разговора. Подробности сохранены в журнале."
++                return None
++            return None
          from agent.i18n import _russian_gateway_error
 diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 --- a/gateway/run_notifications.py
@@ -9502,7 +9444,7 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
          future = asyncio.get_running_loop().create_future()
          self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
          if key not in self._completion_notification_batch_tasks:
-@@ -1992,26 +1992,12 @@
+@@ -1992,26 +1992,15 @@
          }
  
      def _format_process_final_message(self, session_id: str, session, notify_mode: str) -> str:
@@ -9519,8 +9461,11 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
 -                                                        duration_seconds=_dur)
 -        header = _format_concise_process_notification(session_id, command, session.exit_code, "", duration_seconds=_dur)
 -        return t("gateway.background.final_output", header=header, output=new_output.strip()) if new_output.strip() else header
-+        if session.exit_code and logger.isEnabledFor(logging.WARNING):
-+            return f"{t('gateway.background.task_failed')} · Номер в журнале: {session_id.removeprefix('proc_')}"
++        if session.exit_code:
++            return t("gateway.background.task_failed")
++        if session.exit_code == 0 and notify_mode in {"all", "result"}:
++            output = self._redacted_output_tail(session, 1000).strip()
++            return output or t("gateway.background.task_finished")
 +        return t("gateway.background.task_finished") if session.exit_code == 0 else "⚠️ Ошибка задачи или результат неизвестен."
  
      def _format_process_running_message(self, session) -> str:
@@ -9533,24 +9478,24 @@ diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
  
      def arm_process_watcher(self, watcher: dict) -> bool:
          """Start ``_run_process_watcher`` for a watcher registered mid-turn, from the agent's
-@@ -2055,6 +2041,9 @@
+@@ -2055,6 +2041,10 @@
              session = process_registry.get(session_id)
              if session is None:
                  break
 +            if session.exited and session.exit_code and logger.isEnabledFor(logging.WARNING):
 +                async with self._completion_event_scope(watcher):
-+                    logger.warning("BACKGROUND_FAILURE reference=%s exit=%s", session_id.removeprefix("proc_"), session.exit_code)
++                    logger.warning("BACKGROUND_FAILURE reference=%s exit=%s output=%s",
++                                   session_id.removeprefix("proc_"), session.exit_code, self._redacted_output_tail(session, 2000))
              if silent:
                  # Still wait for the process to exit so we can log it, but don't push any messages.
                  if session.exited:
-@@ -2066,8 +2055,9 @@
+@@ -2066,8 +2055,8 @@
              if session.exited:
                  # Agent-notify: inject a synthetic message unless the agent already consumed the result via
                  # wait/log (poll() is read-only and deliberately does NOT mark consumed).
 -                if agent_notify and not process_registry.is_completion_consumed(session_id):
 +                if (agent_notify or (session.exit_code == 0 and notify_mode != "error" and (watcher.get("parent_session_id") or getattr(session, "parent_session_id", "")))) and not process_registry.is_completion_consumed(session_id):
                      completion_evt = self._build_process_completion_event(watcher, session, session_id)
-+                    if session.exit_code != 0: completion_evt.update(command="", output=self._format_process_final_message(session_id, session, notify_mode))
                      synth_text = format_process_notification(completion_evt)
                      if not synth_text:
                          break
@@ -9696,3 +9641,181 @@ diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
 -                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:file://)?/[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:file://)?/[^\n)]*(?:\)|\Z))', masked):
 +                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:artifact:|(?:file://)?/)[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:artifact:|(?:file://)?/)[^\n)]*(?:\)|\Z))', masked):
              spans.extend([(match.start(), match.start("label")), (match.end("label"), match.end())])
+diff --git a/agent/turn_truncation.py b/agent/turn_truncation.py
+--- a/agent/turn_truncation.py
++++ b/agent/turn_truncation.py
+@@ -358,14 +358,19 @@
+     )
+     if filled is not None:
+         notice = _WINDOW_FILLED.format(prompt=filled[0], ctx=filled[1])
+-        return st.end_turn(
++        verdict = st.end_turn(
+             f"{partial_response}\n\n{notice}" if partial_response else notice,
+             f"Prompt used {filled[0]} of {filled[1]} context tokens; no room to answer",
+         )
+-    return st.end_turn(
+-        partial_response or _CEILING_NO_TEXT,
+-        "Response remained truncated after 4 continuation attempts",
+-    )
++    else:
++        verdict = st.end_turn(
++            partial_response or _CEILING_NO_TEXT,
++            "Response remained truncated after 4 continuation attempts",
++        )
++    # The gateway must retain the actual answer without exposing the diagnostic notice.
++    if partial_response and isinstance(verdict.result, dict):
++        verdict.result["brai_delivered_partial"] = partial_response
++    return verdict
+-
++
+-
++
+ def _model_output_limit(agent: Any) -> Optional[int]:
+diff --git a/gateway/run.py b/gateway/run.py
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -732,5 +732,6 @@
+         return None
+-    if _gateway_surface_passes_raw_text(platform):
++    from gateway.warning_notifications import DiagnosticText
++    if _gateway_surface_passes_raw_text(platform) and event_type not in {"warn", "lifecycle"} and not isinstance(message, DiagnosticText):
+         return text
+-
++
+     text = _redact_gateway_user_facing_secrets(text)
+diff --git a/gateway/run.py b/gateway/run.py
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -658,10 +658,8 @@
+-
++
+ def _gateway_provider_error_reply(text: str) -> str:
+-    """Map raw provider/API errors to a short user-safe Telegram reply."""
+-    for pattern, reply_key in _PROVIDER_ERROR_REPLIES:
+-        if pattern.search(text):
+-            return _rate_limit_reply(text) if pattern is _GATEWAY_RATE_LIMIT_RE else t(reply_key)
+-    return t("gateway.errors.provider_kept_failing")
++    """Сохранить диагностику и объяснить сбой без внутреннего устройства."""
++    logger.warning("Gateway provider failure: %s", _redact_gateway_user_facing_secrets(text))
++    return "⚠️ Не удалось завершить запрос."
+-
++
+-
++
+ # Provider/API failure envelope preambles (not ordinary assistant prose), anchored at line start.
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -4156,7 +4156,15 @@
+         payload: a mismatch (False, incl. payload-less split delivery) never suppresses; None (no
+         record) keeps legacy trust."""
+         _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
+-        if not isinstance(response, dict) or response.get("failed"):
++        if not isinstance(response, dict):
++            return
++        _partial = response.get("brai_delivered_partial")
++        _has_delivered = getattr(_sc, "has_durably_delivered_text", None)
++        if _partial and callable(_has_delivered):
++            with suppress(Exception):
++                if _has_delivered(_partial):
++                    response["brai_partial_already_delivered"] = True
++        if response.get("failed"):
+             return
+         _final = response.get("final_response") or ""
+         _is_empty_sentinel = not _final or _final == "(empty)"
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -1985,6 +1985,8 @@
+             logger.info("Suppressing intentional silence marker for session %s", session_entry.session_id)
+             response = ""
+-
++
++        if agent_result.get("_brai_failure_notice_delivered"):
++            return None
+         adapter = self._delivery_adapter_for(source)
+         # AIDEV-NOTE: обработать ошибку до озвучивания и финальной доставки.
+         from gateway.run import _gateway_platform_value
+diff --git a/hermes_cli/cli_chat_turn_mixin.py b/hermes_cli/cli_chat_turn_mixin.py
+--- a/hermes_cli/cli_chat_turn_mixin.py
++++ b/hermes_cli/cli_chat_turn_mixin.py
+@@ -21,6 +21,15 @@
+ from agent.i18n import t
+-
++
+ from hermes_cli.cli_agent_setup_mixin import _retire_agent
++
++
++def _brai_unstreamed_error_response(response, result, streamed):
++    """Не повторять фрагмент, который уже выведен в этом ходе."""
++    if isinstance(response, str) and isinstance(result, dict) and result.get("brai_partial_in_final"):
++        partial = result.get("brai_delivered_partial")
++        if isinstance(partial, str) and partial and response.startswith(partial) and partial in (streamed or ""):
++            return response[len(partial):].lstrip()
++    return response
+-
++
+-
++
+ class CLIChatTurnMixin:
+@@ -690,6 +699,7 @@
+             ChatConsole, _ACCENT, _RST, _cprint, _maybe_remap_for_light_mode, _post_stream_transform_output,
+             _render_final_assistant_content,
+         )
++        response = _brai_unstreamed_error_response(response, turn.result, getattr(self, "_streamed_text_this_turn", ""))
+         if response and not (turn.result and turn.result.get("response_previewed", False)):
+             try:
+                 from hermes_cli.skin_engine import get_active_skin
+diff --git a/locales/ru.yaml b/locales/ru.yaml
+--- a/locales/ru.yaml
++++ b/locales/ru.yaml
+@@ -666,17 +666,17 @@
+     native_stream_placeholder: "💬 Жду вашего выбора..."
+     skip_hint: 'Ответьте «Пропустить», если не хотите отвечать на этот вопрос.'
+   errors:
+-    rate_limited: "⏱️ Сервис ИИ временно ограничил запросы. Подождите немного и напишите «продолжай»."
+-    auth_failed: "⚠️ Не удалось войти в сервис ИИ. Проверьте подключение или обратитесь к администратору."
+-    bad_request: "⚠️ Сервис ИИ отклонил запрос. Попробуйте переформулировать сообщение или выбрать другую модель."
+-    connection_interrupted: "⚠️ Соединение с сервисом ИИ прервалось. Попробуйте позже и напишите «продолжай»."
+-    unreachable: "⚠️ Сервис ИИ сейчас недоступен. Попробуйте позже и напишите «продолжай»; если ошибка повторится, обратитесь к администратору."
+-    connection_unknown: "⚠️ Не удалось связаться с сервисом ИИ; причина неизвестна. Попробуйте позже и напишите «продолжай»."
+-    context_overflow: "⚠️ Разговор слишком длинный для выбранной модели. Не удалось обработать сообщение; если проблема повторится, обратитесь к администратору."
+-    usage_limit_resets: "⏱️ Достигнут лимит использования сервиса ИИ; он обновится через {window}. После этого напишите «продолжай»."
+-    provider_kept_failing: "⚠️ Сервис ИИ несколько раз ответил с ошибкой. Попробуйте позже и напишите «продолжай»."
+-    session_storage_unavailable_disk: "⚠️ Хранилище сеансов было временно недоступно, поэтому этот ход остановлен, чтобы защитить историю разговора. Проверьте свободное место на диске, затем отправьте сообщение ещё раз."
+-    session_storage_unavailable: "⚠️ Хранилище сеансов было временно недоступно, поэтому этот ход остановлен, чтобы защитить историю разговора. Ваше сообщение уже должно быть сохранено — отправьте его ещё раз чуть позже."
++    rate_limited: "⏱️ Сейчас слишком много запросов. Попробуйте позже."
++    auth_failed: "⚠️ Не удалось получить доступ. Обратитесь к администратору."
++    bad_request: "⚠️ Не удалось обработать запрос. Попробуйте изменить формулировку."
++    connection_interrupted: "⚠️ Ответ прервался. Попробуйте продолжить позже."
++    unreachable: "⚠️ Не удалось получить ответ. Попробуйте позже."
++    connection_unknown: "⚠️ Не удалось получить ответ; причина неизвестна."
++    context_overflow: "⚠️ Разговор стал слишком длинным. Попробуйте начать новый разговор."
++    usage_limit_resets: "⏱️ Достигнут лимит использования. Он обновится через {window}."
++    provider_kept_failing: "⚠️ Не удалось завершить запрос. Попробуйте позже."
++    session_storage_unavailable_disk: "⚠️ Не удалось сохранить разговор, поэтому работа остановлена. Обратитесь к администратору."
++    session_storage_unavailable: "⚠️ Не удалось сохранить разговор, поэтому работа остановлена. Попробуйте позже."
+     generic_failed: "⚠️ Не удалось завершить ответ. Попробуйте позже и напишите «продолжай»."
+     interrupted_before_start: "⚠️ Ваше сообщение было прервано до начала обработки. Если оно ещё актуально, отправьте его снова."
+     processing_incomplete: "обработка не завершена"
+@@ -685,15 +685,15 @@
+     previous_turn_cleanup: "⚠️ Ваше сообщение не было обработано (предыдущий ход ещё завершался). Отправьте его ещё раз."
+     unexpected_silence: "⚠️ Не удалось получить ответ. Попробуйте ещё раз или переформулируйте сообщение."
+     empty_response_model_label: "Модель"
+-    hint_auth: " Не удалось войти в сервис ИИ. Проверьте подключение или обратитесь к администратору."
+-    hint_quota: " Сервис ИИ сообщил об ограничении баланса или тарифа. Проверьте условия подключения."
+-    hint_overloaded: " Сервис ИИ временно перегружен. Подождите немного и напишите «продолжай»."
++    hint_auth: " Не удалось получить доступ. Обратитесь к администратору."
++    hint_quota: " Достигнуто ограничение оплаты или тарифа."
++    hint_overloaded: " Сейчас слишком много запросов. Попробуйте позже."
+     hint_rate_limited: " Частота ваших запросов ограничена. Подождите немного и попробуйте снова."
+     hint_usage_limit_resets: " Достигнут лимит использования вашего тарифа. Он сбросится примерно через {hours} ч."
+     hint_usage_limit: " Достигнут лимит использования вашего тарифа. Дождитесь его сброса."
+-    hint_rejected: " Сервис ИИ-модели отклонил запрос."
++    hint_rejected: " Не удалось обработать запрос."
+     generic_failed_with_hint: "⚠️ Не удалось завершить ответ.{hint}\nПопробуйте позже и напишите «продолжай»."
+-    history_unavailable: "⚠️ История разговора временно недоступна, поэтому сообщение не было обработано. Обратитесь к администратору и отправьте сообщение после восстановления."
++    history_unavailable: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
+     no_credentials: "⚠️ Не удалось обработать сообщение. Обратитесь к администратору."
+   skills:
+     disabled: "Навык «{name}» установлен, но выключен. Для включения обратитесь к администратору."

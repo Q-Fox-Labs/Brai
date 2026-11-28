@@ -4,6 +4,7 @@ import ast
 import asyncio
 from contextlib import suppress
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -61,6 +62,23 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.notification, self.send = adapter_methods()
 
+    async def test_partial_is_marked_delivered_only_with_a_matching_receipt(self):
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required')
+        tree = ast.parse((Path(candidate) / 'gateway/run_turn.py').read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == '_run_agent_mark_streamed_delivery')
+        future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+        scope = {'suppress': suppress}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        for confirmed in (True, False, None):
+            response = {'failed': True, 'brai_delivered_partial': 'Часть ответа'}
+            consumer = None if confirmed is None else SimpleNamespace(has_durably_delivered_text=lambda text: confirmed)
+            ctx = SimpleNamespace(stream_consumer_holder=[consumer], source=None, session_key='s')
+            await scope['_run_agent_mark_streamed_delivery'](None, response, ctx)
+            self.assertEqual(response.get('brai_partial_already_delivered', False), confirmed is True)
+
     async def test_queued_partial_gets_explanation_without_repeating_delivered_text(self):
         marker = '--- a/gateway/run_turn.py\n+++ b/gateway/run_turn.py\n'
         candidates = (IDENTITY / 'native.patch').read_text().split(marker)[1:]
@@ -71,6 +89,10 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
             target.parent.mkdir(parents=True)
             target.write_text((IDENTITY / 'tests/fixtures/ordinary_release/gateway/run_turn.py').read_text())
             subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=block, text=True,
+                           stdout=subprocess.DEVNULL, check=True)
+            receipt_block = marker + next(part.split('--- a/', 1)[0] for part in candidates
+                                          if '_brai_failure_notice_delivered' in part)
+            subprocess.run(['patch', '-p1', '--batch'], cwd=root, input=receipt_block, text=True,
                            stdout=subprocess.DEVNULL, check=True)
             tree = ast.parse(target.read_text())
         method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
@@ -96,6 +118,14 @@ class InterimNotificationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sender.await_args.args[0], 'Сохранённая часть\n⚠️ Работа не завершена.')
         self.assertFalse(sender.await_args.kwargs['deliver_media'])
         self.assertTrue(result['already_sent'])
+        self.assertTrue(result['_brai_failure_notice_delivered'])
+
+        # Очередь других каналов должна обрабатывать сбой так же.
+        ctx.source.platform = 'api_server'
+        sender.reset_mock()
+        await deliver(runner, ctx, None, result, result, None)
+        self.assertEqual(sender.await_args.args[0], 'Сохранённая часть\n⚠️ Работа не завершена.')
+        ctx.source.platform = 'telegram'
 
         # Если часть уже пришла потоковой доставкой, повторяем только предупреждение.
         runner._run_agent_stream_confirmed_final_delivery = lambda *_a, **_kw: True

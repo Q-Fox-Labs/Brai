@@ -28,6 +28,7 @@ _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _conversation_source = ContextVar('brai_file_conversation_source', default=None)
 _reply_mode_candidate = ContextVar('brai_reply_mode_candidate', default=None)
+_attachment_outcome = ContextVar('brai_attachment_outcome', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inbound_attachments = ContextVar('brai_file_inbound_attachments', default=())
 _VOICE_RETRY_ADMISSION = object()
@@ -39,9 +40,14 @@ _VIDEO_NOTE_MARKER = re.compile(r'\[\[audio_as_video_note\]\]')
 _REPLY_MODE = re.compile(r'\[\[brai_reply_mode:(voice|video_note|off)\]\]')
 _REPLY_ONCE = re.compile(r'\[\[brai_reply_once:(voice|video_note)\]\]')
 _VOICE_BLOCK = re.compile(r'\[\[audio_as_voice\]\][ \t]*\n(?P<files>(?:[ \t]*MEDIA:[^\n]+(?:\n|$))+)')
+_VOICE_MARKER = re.compile(r'\[\[audio_as_voice\]\]')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
-_ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы. Номер в журнале: '
+_ATTACHMENT_FAILURE_NOTE = 'Не удалось приложить файлы.'
+
+class _AttachmentFailureText(str):
+    """Тип сохраняет признак отказа при прямом вызове без области хода."""
+
 _MUTATION_FOOTER = re.compile(
     r'(?m)^⚠️?\s*(?:Проверка изменений файлов:|File-mutation verifier:)[^\n]*'
     r'(?:\n[ \t]+•[^\n]*)*\s*\Z'
@@ -973,6 +979,10 @@ def conversation(agent, user_message, task_id=None):
             db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
         raise
     token = _operation.set(operation)
+    previous_attachment = getattr(agent, '_brai_attachment_outcome', None)
+    attachment = {'previous': previous_attachment, 'failed': False}
+    agent._brai_attachment_outcome = attachment
+    attachment_token = _attachment_outcome.set(attachment)
     previous_candidate = _reply_mode_candidate.get()
     if previous_candidate is not getattr(agent, '_brai_reply_mode_candidate', None):
         previous_candidate = None
@@ -1056,6 +1066,12 @@ def conversation(agent, user_message, task_id=None):
         if filtered_interim is not None and getattr(agent, 'interim_assistant_callback', None) is filtered_interim:
             agent.interim_assistant_callback = interim
         _reply_mode_candidate.reset(mode_token)
+        _attachment_outcome.reset(attachment_token)
+        if not completed and getattr(agent, '_brai_attachment_outcome', None) is attachment:
+            if previous_attachment is None:
+                del agent._brai_attachment_outcome
+            else:
+                agent._brai_attachment_outcome = previous_attachment
         if not completed and candidate is not None and getattr(agent, '_brai_reply_mode_candidate', None) is candidate:
             if candidate['previous'] is None:
                 del agent._brai_reply_mode_candidate
@@ -1304,7 +1320,19 @@ def _public_response_text(text):
     return text
 
 
-def final_text(text, operation):
+def _public_partial_text(text):
+    """Убрать из прерванного ответа файловые директивы и внутренние пути."""
+    text = _public_response_text(text)
+    for pattern in (re.compile(r'(?m)^BRAI_FILES:.*$'), _VIDEO_NOTE, _VIDEO_NOTE_MARKER,
+                    _VOICE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
+        text = active_sub(pattern, lambda match: '', text)
+    text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
+        match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
+    internal_path = re.compile(r'(?<![\w./])/(?:tmp|home|srv|var|opt|usr|etc)/[^\s<>()]+')
+    return active_sub(internal_path, lambda match: '', text).strip()
+
+
+def final_text(text, operation, *, final_output=False):
     """Подготовить весь набор, сохранив ответ при ошибке вложения."""
     if not isinstance(text, str):
         return text
@@ -1337,16 +1365,24 @@ def final_text(text, operation):
                 return ''.join('[[audio_as_video_note]]\n' + line
                                for line in match.group('files').splitlines(keepends=True))
             text = active_sub(_VOICE_BLOCK, as_video_notes, text)
-        return _stage_final_text(text, operation)
+        staged = _stage_final_text(text, operation)
+        outcome = _attachment_outcome.get()
+        if final_output and outcome is not None:
+            outcome['failed'] = False
+        return staged
     except (FileError, FileNotFoundError, json.JSONDecodeError) as error:
         reference = uuid.uuid4().hex[:16]
         logging.getLogger(__name__).warning('BRAI_ATTACHMENT_PREPARATION_FAILED reference=%s kind=%s',
                                             reference, type(error).__name__)
-        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
+        for pattern in (_SET, _VIDEO_NOTE, _VIDEO_NOTE_MARKER, _VOICE_MARKER, _REPLY_MODE, _REPLY_ONCE, _MEDIA):
             text = active_sub(pattern, lambda match: '', text)
         text = active_sub(_DESCRIPTOR, lambda match: match.group('label') if (
             match.group('angle') or match.group('plain')).startswith(('/', 'artifact:')) else match.group(0), text)
-        return text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}{reference}'
+        failed_text = _AttachmentFailureText(text.rstrip() + f'\n\n{_ATTACHMENT_FAILURE_NOTE}')
+        outcome = _attachment_outcome.get()
+        if final_output and outcome is not None:
+            outcome['failed'] = True
+        return failed_text
 
 
 def _stage_final_text(text, operation):
@@ -2105,6 +2141,14 @@ def validate_telegram(items):
 
 def result_envelope(result, agent=None):
     """CLI/API и дочерний агент получают стабильные IDs и состав, а не один временный path."""
+    outcome = getattr(agent, '_brai_attachment_outcome', None)
+    if outcome is not None:
+        if outcome['previous'] is None:
+            del agent._brai_attachment_outcome
+        else:
+            agent._brai_attachment_outcome = outcome['previous']
+    response = result.get('final_response', '') if isinstance(result, dict) else ''
+    attachment_failed = isinstance(response, _AttachmentFailureText) or bool(outcome and outcome['failed'])
     candidate = getattr(agent, '_brai_reply_mode_candidate', None)
     if candidate is not None:
         if candidate['previous'] is None:
@@ -2114,7 +2158,7 @@ def result_envelope(result, agent=None):
         guardrail = result.get('guardrail') if isinstance(result, dict) else None
         if (candidate['mode'] is not None and isinstance(result, dict)
                 and isinstance(result.get('final_response'), str) and result['final_response'].strip()
-                and not re.search(r'(?m)^' + re.escape(_ATTACHMENT_FAILURE_NOTE) + r'[0-9a-f]{16}$', result['final_response'])
+                and not attachment_failed
                 and not any(result.get(name) for name in ('failed', 'partial', 'error', 'interrupted'))
                 and result.get('completed') is not False
                 and not (isinstance(guardrail, dict) and guardrail.get('code') == 'brai_review_unavailable')):
@@ -2124,6 +2168,13 @@ def result_envelope(result, agent=None):
                 store().set_reply_mode(candidate['source'], candidate['mode'])
     if not isinstance(result, dict):
         return result
+    if isinstance(result.get('brai_delivered_partial'), str):
+        original_partial = result['brai_delivered_partial']
+        safe_partial = _public_partial_text(original_partial)
+        result = {**result, 'brai_delivered_partial': safe_partial}
+        if (result.get('brai_partial_in_final') and isinstance(result.get('final_response'), str)
+                and result['final_response'].startswith(original_partial)):
+            result['final_response'] = safe_partial + result['final_response'][len(original_partial):]
     response = result.get('final_response', '')
     if not isinstance(response, str):
         return result
@@ -2132,7 +2183,7 @@ def result_envelope(result, agent=None):
     if cleaned != response:
         response = cleaned
         result = {**result, 'final_response': response}
-    if re.search(r"(?m)^" + re.escape(_ATTACHMENT_FAILURE_NOTE) + r"[0-9a-f]{16}$", response):
+    if attachment_failed:
         return {**result, 'brai_attachment_preparation_failed': True}
     paths = []
     def found(match):

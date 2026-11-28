@@ -86,6 +86,6 @@ class NativeModelContextTests(unittest.TestCase):
     def test_local_auth_failure_does_not_blame_provider_credentials(self):
         for code in ('auth', 'auth_permanent'):
             text = self.notice._message_for_connection(code, 'local')
-            self.assertIn('Причина отказа пока не подтверждена', text)
+            self.assertIn('Не удалось получить доступ', text)
             self.assertNotIn('авторизацию или ключ', text)
             self.assertNotIn('Сервис модели отклонил', text)

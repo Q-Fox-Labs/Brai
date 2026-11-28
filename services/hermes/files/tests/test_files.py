@@ -234,10 +234,31 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(native, 'commit_inbound'), native.inbound_handoff(source, '1'):
             with native.conversation(agent, 'Кружочками'):
                 with patch('files.video_note.render_video_notes', side_effect=FileError('failed')):
-                    output = native.final_text(f'[[brai_reply_mode:video_note]]\n[[audio_as_video_note]]\nMEDIA:{audio}', 'turn')
-            result = native.result_envelope({'final_response': output}, agent)
+                    output = native.final_text(f'[[brai_reply_mode:video_note]]\n[[audio_as_video_note]]\nMEDIA:{audio}', 'turn', final_output=True)
+            result = native.result_envelope({'final_response': str(output) + '\n\nОтвет прервался.'}, agent)
         self.assertTrue(result['brai_attachment_preparation_failed'])
         self.assertEqual(self.store.reply_mode(route), 'voice')
+
+    def test_plain_failure_words_do_not_hide_a_valid_attachment(self):
+        path = self.input / 'answer.txt'
+        path.write_text('готово')
+        answer = native.final_text(f'Не удалось приложить файлы.\nMEDIA:{path}', 'turn')
+        result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+        self.assertNotIn('brai_attachment_preparation_failed', result)
+        self.assertEqual(len(result['fileSets'][0]['items']), 1)
+
+    def test_partial_answer_removes_file_controls_and_internal_paths(self):
+        partial = 'Часть ответа\n[[brai_reply_mode:voice]]\n[[audio_as_voice]]\nMEDIA:/tmp/private.ogg\nФайл: /srv/private/result.txt'
+        result = native.result_envelope({'final_response': 'Ответ прервался.', 'brai_delivered_partial': partial})
+        self.assertIn('Часть ответа', result['brai_delivered_partial'])
+        for detail in ('[[brai_', '[[audio_', 'MEDIA:', '/tmp/', '/srv/'):
+            self.assertNotIn(detail, result['brai_delivered_partial'])
+        result = native.result_envelope({'final_response': partial + '\n\n⚠️ Не удалось завершить запрос.',
+                                         'brai_delivered_partial': partial, 'brai_partial_in_final': True})
+        self.assertIn('Часть ответа', result['final_response'])
+        self.assertIn('Не удалось завершить запрос', result['final_response'])
+        self.assertNotIn('/srv/', result['final_response'])
+        self.assertNotIn('MEDIA:', result['final_response'])
 
     def test_saved_video_mode_converts_native_voice_tags_and_switches_back(self):
         source = SimpleNamespace(platform='telegram', profile='dev', chat_id='42', thread_id='7', user_id='11')
@@ -1184,9 +1205,9 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(answer.startswith('Готово.'))
         self.assertNotIn(str(missing), answer)
         self.assertNotIn('MEDIA:', answer)
-        reference = answer.rsplit(' ', 1)[-1]
-        self.assertRegex(reference, r'^[a-f0-9]{16}$')
-        self.assertIn(reference, log.output[0])
+        self.assertIn('Не удалось приложить файлы.', answer)
+        self.assertNotIn('Номер в журнале', answer)
+        self.assertRegex(log.output[0], r'reference=[a-f0-9]{16}')
 
     async def test_unavailable_artifact_keeps_text_for_both_outgoing_formats(self):
         aid = str(uuid.uuid4())
@@ -1202,7 +1223,8 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                 answer = native.final_text('Готово.\n' + marker, 'turn')
                 self.assertTrue(answer.startswith('Готово.'))
                 self.assertNotIn(marker, answer)
-                self.assertIn(answer.rsplit(' ', 1)[-1], log.output[-1])
+                self.assertNotIn('Номер в журнале', answer)
+                self.assertRegex(log.output[-1], r'reference=[a-f0-9]{16}')
                 result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
                 self.assertTrue(result['brai_attachment_preparation_failed'])
 
