@@ -1470,6 +1470,42 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         finally:
             native._reply_mode_candidate.reset(context)
 
+    def test_experiment_keeps_an_ordinary_attachment_when_audio_becomes_unavailable(self):
+        audio = self.input / 'speech.ogg'
+        audio.write_bytes(b'OggS sample')
+        aid = self.store.publish(audio, 'test-speech')['artifactId']
+        document = self.input / 'notes.txt'
+        document.write_text('Полный документ')
+        backend_call = self.backend.call
+
+        for mode in ('voice', 'video_note'):
+            with self.subTest(mode=mode):
+                audio_reads = 0
+
+                def read_once(method, args, **kwargs):
+                    nonlocal audio_reads
+                    if method == 'files.fetch' and args['artifactId'] == aid:
+                        audio_reads += 1
+                        if audio_reads > 1:
+                            raise RuntimeError('owner/not-ready/unavailable')
+                    return backend_call(method, args, **kwargs)
+
+                token = native._reply_mode_candidate.set({'source': {}, 'mode': None, 'current': mode})
+                try:
+                    with patch.object(self.backend, 'call', side_effect=read_once), patch.dict(os.environ, {
+                            'BRAI_IDENTITY_MODE': 'worker', 'BRAI_VOICE_REPLY_EXPERIMENT': '1'}):
+                        answer = native.final_text(
+                            f'Текст.\n[[audio_as_voice]]\nMEDIA:artifact:{aid}\nMEDIA:{document}', 'turn-' + mode)
+                finally:
+                    native._reply_mode_candidate.reset(token)
+                result = native.result_envelope({'final_response': answer}, SimpleNamespace(platform='telegram'))
+                self.assertIn('Текст.', answer)
+                self.assertTrue(result['brai_attachment_preparation_failed'])
+                self.assertEqual(audio_reads, 2)
+                self.assertEqual([row['file']['filename'] for row in result['fileSets'][0]['items']], ['notes.txt'])
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0], 0)
+
     def test_long_video_note_preserves_every_audio_sample(self):
         from files.video_note import render_video_notes
         audio = self.input / 'long.wav'

@@ -22,6 +22,14 @@ class FileError(Exception):
     """Безопасный код ошибки файловой операции без содержимого и адресов."""
 
 
+class FileMaterializationError(FileError):
+    """Ошибка чтения конкретного артефакта в закреплённом наборе."""
+
+    def __init__(self, artifact_id, code):
+        super().__init__(code)
+        self.artifact_id = artifact_id
+
+
 def canonical(value):
     """Сериализовать identity одинаково после перезапуска."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -477,11 +485,17 @@ class FileStore:
                 for aid in set(aids):
                     db.execute("INSERT OR IGNORE INTO leases VALUES (?,?,?,?)", (token, aid, os.getpid(), process_start(os.getpid())))
             try:
-                files = [self.fetch(aid) for aid in aids]
-                for ref, file in zip(refs, files):
-                    if any(ref.get(field) is not None and ref[field] != file[field]
-                           for field in ("artifactId", "filename", "sizeBytes", "sha256", "mimeType")):
-                        raise FileError("FILE_REFERENCE_MISMATCH")
+                for aid, ref in zip(aids, refs):
+                    try:
+                        file = self.fetch(aid)
+                        if any(ref.get(field) is not None and ref[field] != file[field]
+                               for field in ("artifactId", "filename", "sizeBytes", "sha256", "mimeType")):
+                            raise FileError("FILE_REFERENCE_MISMATCH")
+                    except FileError as error:
+                        raise FileMaterializationError(aid, str(error)) from error
+                    except (FileNotFoundError, json.JSONDecodeError) as error:
+                        raise FileMaterializationError(aid, "FILE_UNAVAILABLE") from error
+                    files.append(file)
             except Exception:
                 with self.db() as db:
                     db.execute("DELETE FROM leases WHERE operation=?", (token,))

@@ -18,7 +18,7 @@ import uuid
 import time
 import tempfile
 from urllib.parse import unquote, urlparse
-from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
+from .store import FileStore, FileError, FileMaterializationError, canonical, key, deliver, workspace_in_use
 
 _store = None
 _telegram_observer = None
@@ -1490,8 +1490,13 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
                 if limit_speech:
                     raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
                 raise
-        videos = (render_video_notes(files, audio, operation, single=True) if limit_speech
-                  else render_video_notes(files, audio, operation))
+        try:
+            videos = (render_video_notes(files, audio, operation, single=True) if limit_speech
+                      else render_video_notes(files, audio, operation))
+        except FileMaterializationError as error:
+            if limit_speech:
+                raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+            raise
         indexes = []
         for video in videos:
             indexes.append(len(items))
@@ -1535,7 +1540,14 @@ def _stage_final_text(text, operation, *, limit_speech=False, fallback=()):
     if workspace.resolve() != workspace:
         raise FileError('UNSAFE_DELIVERY_WORKSPACE')
     paths = []
-    with files.materialize([item['file'] for item in items], scope) as values:
+    with ExitStack() as leases:
+        try:
+            values = leases.enter_context(files.materialize([item['file'] for item in items], scope))
+        except FileMaterializationError as error:
+            if any(item['file']['artifactId'] == error.artifact_id and old_index in spoken_items
+                   for item, old_index in zip(items, order)):
+                raise FileError('REPLY_AUDIO_UNAVAILABLE') from error
+            raise
         for index, (item, value) in enumerate(zip(items, values)):
             if order[index] in spoken_items and item['presentation'] == 'voice':
                 from identity.audio_parts import audio_info
