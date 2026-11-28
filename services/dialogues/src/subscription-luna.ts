@@ -1,6 +1,7 @@
 // ABOUTME: Запускает отдельный Codex для Luna с существующей подписочной авторизацией.
 // ABOUTME: Получает access через закрытый RPC, не копирует OAuth state и не вызывает Hermes.
 import {createConnection} from 'node:net';
+import {lstatSync} from 'node:fs';
 import {spawn,type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {StringDecoder} from 'node:string_decoder';
 import {EventEmitter} from 'node:events';
@@ -71,4 +72,18 @@ export function createSubscriptionLuna(cfg:SubscriptionConfig, selection?:{model
   const args=['app-server','--listen','stdio://'];for(const [key,item]of Object.entries(settings))args.push('-c',key+'='+toml(item));
   return new NativeSocket(cfg.binary,args,cfg.home,cfg.cwd,cfg.node?cfg.node.slice(0,cfg.node.lastIndexOf('/'))+':/usr/bin:/bin':'/usr/bin:/bin');
  },selection);
+}
+
+
+/** Запускает свою подписочную сессию с закрытым HOME и без пользовательских настроек Codex. */
+export function createLocalSubscriptionLuna(cfg:{binary:string;home:string;cwd:string;node?:string},
+ selection?:{model:string;reasoning:string}){
+ for(const key of ['binary','home','cwd'] as const)
+  if(typeof cfg[key]!=='string'||!cfg[key].startsWith('/'))throw Error('INVALID_SUBSCRIPTION_CONFIG');
+ if(cfg.cwd!==cfg.home)throw Error('INVALID_SUBSCRIPTION_HOME');
+ if(lstatSync(cfg.home+'/.codex/config.toml',{throwIfNoEntry:false}))throw Error('INVALID_SUBSCRIPTION_CONFIG');
+ const args=['app-server','--listen','stdio://','-c','cli_auth_credentials_store="file"',
+  '-c','check_for_update_on_startup=false'];
+ const path=cfg.node?cfg.node.slice(0,cfg.node.lastIndexOf('/'))+':/usr/bin:/bin':'/usr/bin:/bin';
+ return createLuna('',cfg.cwd,async()=>new NativeSocket(cfg.binary,args,cfg.home,cfg.cwd,path),selection);
 }
