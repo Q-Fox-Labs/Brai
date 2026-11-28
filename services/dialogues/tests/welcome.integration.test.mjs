@@ -295,15 +295,19 @@ test('Welcome: два личных MCP, тот же владелец и исто
     user:decodeURIComponent(broker.username),password:decodeURIComponent(broker.password),inbox:'_INBOX.welcome_fixture'}
   }),{mode:0o600});
   const child=spawn(process.execPath,[new URL('../../welcome/src/main.mjs',import.meta.url).pathname],
-   {env:{...process.env,WELCOME_CONFIG:configPath},stdio:'ignore'});
+   {env:{...process.env,WELCOME_CONFIG:configPath},stdio:['ignore','ignore','pipe']});
+  let diagnostic='';
+  child.stderr.setEncoding('utf8').on('data', chunk=>{diagnostic=(diagnostic+chunk).slice(-4096);});
   const exit=once(child,'exit');
   listeners.push({async close(){child.kill();await exit;}});
   let healthy=false;
-  for(let attempt=0;attempt<20&&!healthy&&child.exitCode===null;attempt++){
-   healthy=await fetch(originHTTP+'/health').then(response=>response.ok,()=>false);
+  const readyBy=performance.now()+30_000;
+  while(!healthy&&child.exitCode===null&&child.signalCode===null&&performance.now()<readyBy){
+   healthy=await fetch(originHTTP+'/health',{signal:AbortSignal.timeout(2000)})
+    .then(response=>response.ok,()=>false);
    if(!healthy)await delay(100);
   }
-  assert.equal(healthy,true,'Welcome HTTP process must start');
+  assert.equal(healthy,true,'Welcome HTTP process must start. '+diagnostic);
   const body=JSON.stringify({...ingress,kind:'text',text:'/start',updateId:String(++update)});
   const post=authorization=>fetch(originHTTP+'/telegram',{method:'POST',headers:{authorization,'content-type':'application/json'},body});
   assert.equal((await post('Bearer incorrect')).status,401);
